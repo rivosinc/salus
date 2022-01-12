@@ -24,10 +24,12 @@
 
 pub mod page;
 pub mod page_table;
+mod sequential_pages;
 pub mod sv48x4;
 
 pub use page::{Page, Page4k, PageAddr, PageAddr4k, Pfn, PhysAddr};
 pub use page_table::PlatformPageTable;
+pub use sequential_pages::SequentialPages;
 pub use sv48x4::Sv48x4;
 
 pub mod pte;

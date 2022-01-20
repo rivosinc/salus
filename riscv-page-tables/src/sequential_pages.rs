@@ -16,20 +16,36 @@ pub struct SequentialPages<S: PageSize> {
 }
 
 impl<S: PageSize> SequentialPages<S> {
+    /// Creates a `SequentialPages` with no pages.
+    fn empty() -> Self {
+        SequentialPages {
+            addr: 0,
+            count: 0,
+            phantom: PhantomData,
+        }
+    }
+
     /// Creates a `SequentialPages` form the passed iterator.
     ///
     /// If the passed pages are not consecutive, an Error will be returned holding an iterator to
     /// the passed in pages so they don't leak.
-    /// If passed an empty iterator Err(None) will be returned.
-    pub fn from_pages<T>(
-        pages: T,
-    ) -> core::result::Result<Self, Option<impl Iterator<Item = Page<S>>>>
+    pub fn from_pages<T>(pages: T) -> core::result::Result<Self, impl Iterator<Item = Page<S>>>
     where
         T: IntoIterator<Item = Page<S>>,
     {
         let mut page_iter = pages.into_iter();
 
-        let first_page = page_iter.next().ok_or(None)?;
+        let first_page = match page_iter.next() {
+            Some(p) => p,
+            None => {
+                // This is a complicated way of returning an empty iterator that matches the type
+                // signature of the other `return Err(...)` statements.
+                return Err(Self::empty()
+                    .into_iter()
+                    .chain(create_dummy_page_once_iter())
+                    .chain(page_iter));
+            }
+        };
 
         let addr = first_page.addr().bits();
 
@@ -44,19 +60,17 @@ impl<S: PageSize> SequentialPages<S> {
             let next_addr = match last_addr.checked_add(S::SIZE_BYTES) {
                 Some(a) => a,
                 None => {
-                    return Err(Some(
-                        seq.into_iter()
-                            .chain(core::iter::once(page))
-                            .chain(page_iter),
-                    ))
+                    return Err(seq
+                        .into_iter()
+                        .chain(core::iter::once(page))
+                        .chain(page_iter))
                 }
             };
             if this_addr != next_addr {
-                return Err(Some(
-                    seq.into_iter()
-                        .chain(core::iter::once(page))
-                        .chain(page_iter),
-                ));
+                return Err(seq
+                    .into_iter()
+                    .chain(core::iter::once(page))
+                    .chain(page_iter));
             }
             last_addr = this_addr;
             seq.count += 1;
@@ -130,6 +144,14 @@ impl<S: PageSize> IntoIterator for SequentialPages<S> {
     }
 }
 
+// Helper function that returns a `Once` iterator that actually yields `None`.
+fn create_dummy_page_once_iter<S: PageSize>() -> core::iter::Once<Page<S>> {
+    let dummy_page = unsafe { Page::new(PageAddr::new(PhysAddr::new(0)).unwrap()) };
+    let mut dummy_iter = core::iter::once(dummy_page);
+    core::mem::forget(dummy_iter.next());
+    dummy_iter
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,8 +187,7 @@ mod tests {
         let result = SequentialPages::from_pages(pages);
         match result {
             Ok(_) => panic!("didn't fail with non-sequential pages"),
-            Err(None) => panic!("didn't return any failed pages"),
-            Err(Some(returned_pages)) => {
+            Err(returned_pages) => {
                 assert_eq!(returned_pages.count(), 4);
             }
         }
@@ -178,8 +199,7 @@ mod tests {
         let result = SequentialPages::from_pages(pages);
         match result {
             Ok(_) => panic!("didn't fail with empty pages"),
-            Err(None) => (),
-            Err(Some(_)) => panic!("didn't return any failed pages"),
+            Err(mut returned_pages) => assert!(returned_pages.next().is_none()),
         }
     }
 

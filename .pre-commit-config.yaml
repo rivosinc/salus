@@ -1,0 +1,44 @@
+repos:
+  # pull mirror from: https://github.com/pre-commit/pre-commit-hooks
+  - repo: https://gitlab.ba.rivosinc.com/pub/it/pre-commit-hooks.git
+    rev: v4.1.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-executables-have-shebangs
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-xml
+      - id: check-yaml
+      - id: detect-private-key
+      - id: forbid-new-submodules
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+# FIXME(kbroch): Once we figure out the licensing
+# pull mirror from: https://github.com/Lucas-C/pre-commit-hooks
+  # - repo: https://gitlab.ba.rivosinc.com/pub/it/lucas-c-pre-commit-hooks.git
+  #   rev: 6a776792f4e02734ca75aaaac20311b431b3b8c3
+  #   hooks:
+  #     - id: insert-license
+  #       files: \.(core|py)$
+  #       args:
+  #         - --license-filepath
+  #         - LICENSE_HDR.txt
+  #     - id: insert-license
+  #       files: \.(c|h|cc|cpp|S|svh|sv|svp)$
+  #       args:
+  #         - --license-filepath
+  #         - LICENSE_HDR.txt
+  #         - --comment-style
+  #         - //
+
+# FIXME(kbroch): Once Cargo.toml defined
+  # - repo: https://gitlab.ba.rivosinc.com/pub/it/rivos-pre-commit-hooks
+  #   rev: c85480efd69f56e17e29568d64d2a461cc3b5e9f
+  #   hooks:
+  #     - id: cargo-fmt
+  #     - id: cargo-check

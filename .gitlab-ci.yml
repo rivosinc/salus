@@ -1,0 +1,11 @@
+include:
+  # NOTE: the "remote" examples here:
+  # https://docs.gitlab.com/ee/ci/yaml/includes.html DONT WORK
+
+  # https://gitlab.ba.rivosinc.com/rv/group_gitlab_config/raw/rivos/main/ci_includes/pre-commit-lint.yml
+  - project: 'rv/group_gitlab_config'
+    ref: rivos/main
+    file: '/ci_includes/pre-commit-lint.yml'
+
+stages:
+  - prebuild

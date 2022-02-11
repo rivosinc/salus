@@ -12,7 +12,7 @@ Crate that handles riscv page table setup.
 4. host - The primary guest running in VS mode.
 5. hypervisor - The HS mode code that uses `riscv-page-tables` to configure memory.
 
-## Pages 
+## Pages
 
 ### Page ownership
 

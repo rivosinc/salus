@@ -184,8 +184,8 @@ pub enum UnmappedPage {
 impl UnmappedPage {
     /// Returns the wrapped 4k Page if that's the type, otherwise, panic.
     pub fn unwrap_4k(self) -> Page<PageSize4k> {
-        if let UnmappedPage::Page(addr) = self {
-            addr
+        if let UnmappedPage::Page(p) = self {
+            p
         } else {
             panic!("Tried to unwrap as 4k addr");
         }
@@ -202,8 +202,8 @@ impl UnmappedPage {
 
     /// Returns the wrapped 2MB Page if that's the type, otherwise, panic.
     pub fn unwrap_2mb(self) -> Page<PageSize2MB> {
-        if let UnmappedPage::Mega(addr) = self {
-            addr
+        if let UnmappedPage::Mega(p) = self {
+            p
         } else {
             panic!("Tried to unwrap as 2MB addr");
         }

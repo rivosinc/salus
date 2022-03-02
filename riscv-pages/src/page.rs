@@ -261,6 +261,29 @@ impl<S: PageSize> Page<S> {
     pub fn addr(&self) -> PageAddr<S> {
         PageAddr::<S>::new(self.addr.addr).unwrap()
     }
+
+    /// Returns the u64 at the given index in the page.
+    pub fn get_u64(&self, index: usize) -> Option<u64> {
+        if index > S::SIZE_BYTES as usize / core::mem::size_of::<u64>() {
+            None
+        } else {
+            let offset = index * core::mem::size_of::<u64>();
+            let address = self.addr.bits() + offset as u64;
+            unsafe {
+                // Safe because Page guarantees all contained memory is uniquely owned and
+                // valid.
+                Some(core::ptr::read_volatile(address as *const u64))
+            }
+        }
+    }
+
+    /// Returns an iterator across all u64 values contained in the page.
+    pub fn u64_iter(&self) -> U64Iter<S> {
+        U64Iter {
+            page: self,
+            index: 0,
+        }
+    }
 }
 
 impl<S: PageSize> PhysPage for Page<S> {
@@ -291,6 +314,21 @@ impl From<UnmappedPage> for CleanPage {
             core::ptr::write_bytes(addr as *mut u8, 0, size as usize);
         }
         CleanPage(p)
+    }
+}
+
+pub struct U64Iter<'a, S: PageSize> {
+    page: &'a Page<S>,
+    index: usize,
+}
+
+impl<'a, S: PageSize> Iterator for U64Iter<'a, S> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.page.get_u64(self.index);
+        self.index += 1;
+        item
     }
 }
 

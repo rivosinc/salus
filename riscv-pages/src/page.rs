@@ -237,6 +237,31 @@ impl<S: PageSize> PhysPage for Page<S> {
     }
 }
 
+/// A page that was unmapped from the guest and cleared of all guest data.
+pub struct CleanPage(UnmappedPage);
+
+impl From<CleanPage> for UnmappedPage {
+    fn from(cp: CleanPage) -> UnmappedPage {
+        cp.0
+    }
+}
+
+impl From<UnmappedPage> for CleanPage {
+    fn from(p: UnmappedPage) -> CleanPage {
+        let (addr, size) = match p {
+            UnmappedPage::Page(ref p) => (p.addr.bits(), PageSize4k::SIZE_BYTES),
+            UnmappedPage::Mega(ref p) => (p.addr.bits(), PageSize2MB::SIZE_BYTES),
+            UnmappedPage::Giga(ref p) => (p.addr.bits(), PageSize1GB::SIZE_BYTES),
+            UnmappedPage::Tera(ref p) => (p.addr.bits(), PageSize512GB::SIZE_BYTES),
+        };
+        unsafe {
+            // Safe because page owns all the memory at its address.
+            core::ptr::write_bytes(addr as *mut u8, 0, size as usize);
+        }
+        CleanPage(p)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

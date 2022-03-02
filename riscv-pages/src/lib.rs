@@ -11,7 +11,7 @@ mod page;
 mod sequential_pages;
 
 pub use page::{
-    Page, Page4k, PageAddr, PageAddr4k, PageSize, PageSize1GB, PageSize2MB, PageSize4k,
+    CleanPage, Page, Page4k, PageAddr, PageAddr4k, PageSize, PageSize1GB, PageSize2MB, PageSize4k,
     PageSize512GB, Pfn, PhysAddr, PhysPage, UnmappedPage,
 };
 pub use sequential_pages::SequentialPages;

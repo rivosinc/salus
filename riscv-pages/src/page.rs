@@ -5,6 +5,8 @@
 /// Represents pages of memory.
 use core::marker::PhantomData;
 
+const RAM_BASE: u64 = 0x8000_0000;
+
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
 const PFN_SHIFT: u64 = 12;
@@ -12,7 +14,7 @@ const PFN_BITS: u64 = 44;
 const PFN_MASK: u64 = (1 << PFN_BITS) - 1;
 
 /// Implementors of `PageSize` are valid sizes for leaf pages.
-pub trait PageSize {
+pub trait PageSize: Copy + Clone + PartialEq + core::fmt::Debug {
     const SIZE_BYTES: u64;
 
     /// Checks if the given physical address is aligned to this page size.
@@ -22,31 +24,35 @@ pub trait PageSize {
 }
 
 /// Standard 4k pages - leaf nodes of L1 tables.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum PageSize4k {}
 impl PageSize for PageSize4k {
     const SIZE_BYTES: u64 = 4096;
 }
 
 /// 2MB pages - leaf nodes of L2 tables.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum PageSize2MB {}
 impl PageSize for PageSize2MB {
     const SIZE_BYTES: u64 = PageSize4k::SIZE_BYTES * 512;
 }
 
 /// 1GB pages - leaf nodes of L3 tables.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum PageSize1GB {}
 impl PageSize for PageSize1GB {
     const SIZE_BYTES: u64 = PageSize2MB::SIZE_BYTES * 512;
 }
 
 /// 512GB pages - leaf nodes of L4 tables.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum PageSize512GB {}
 impl PageSize for PageSize512GB {
     const SIZE_BYTES: u64 = PageSize1GB::SIZE_BYTES * 512;
 }
 
 /// A valid address to physical memory.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct PhysAddr(u64);
 
 impl PhysAddr {
@@ -59,6 +65,12 @@ impl PhysAddr {
     pub fn bits(&self) -> u64 {
         self.0
     }
+
+    /// Returns the address incremented by the given number of bytes.
+    /// Returns None if the result would overlfow.
+    pub fn checked_increment(&self, increment: u64) -> Option<Self> {
+        self.0.checked_add(increment).map(PhysAddr)
+    }
 }
 
 impl<S: PageSize> From<PageAddr<S>> for PhysAddr {
@@ -68,7 +80,7 @@ impl<S: PageSize> From<PageAddr<S>> for PhysAddr {
 }
 
 /// An address of a Page of physical memory. It is guaranteed to be aligned to a page boundary.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct PageAddr<S: PageSize> {
     addr: PhysAddr,
     phantom: PhantomData<S>,
@@ -91,6 +103,13 @@ impl<S: PageSize> PageAddr<S> {
         }
     }
 
+    /// Returns the first 4k page address. This is OK because all page sizes must be a multiple of
+    /// 4k.
+    pub fn get_4k_addr(&self) -> PageAddr<PageSize4k> {
+        // Unwrap is OK as all pages are 4k aligned.
+        PageAddr::new(self.addr).unwrap()
+    }
+
     /// Gets the raw bits of the page address.
     pub fn bits(&self) -> u64 {
         self.addr.0
@@ -99,6 +118,18 @@ impl<S: PageSize> PageAddr<S> {
     /// Gets the pfn of the page address.
     pub fn pfn(&self) -> Pfn {
         Pfn::from_bits((self.addr.0 >> PFN_SHIFT) & PFN_MASK)
+    }
+
+    /// Adds n pages to the current address.
+    pub fn checked_add_pages(&self, n: u64) -> Option<Self> {
+        n.checked_mul(S::SIZE_BYTES)
+            .and_then(|inc| self.addr.checked_increment(inc))
+            .and_then(Self::new)
+    }
+
+    /// Gets the index of the page in the system (the linear page count from the base of ram).
+    pub fn index(&self) -> usize {
+        (self.pfn().bits() - (RAM_BASE >> PFN_SHIFT)) as usize
     }
 }
 
@@ -125,6 +156,15 @@ impl UnmappedPage {
             addr
         } else {
             panic!("Tried to unwrap as 4k addr");
+        }
+    }
+
+    /// Returns either Ok(4kpage) or the provided error
+    pub fn ok4k_or<E>(self, err: E) -> core::result::Result<Page<PageSize4k>, E> {
+        if let UnmappedPage::Page(p) = self {
+            Ok(p)
+        } else {
+            Err(err)
         }
     }
 
@@ -185,7 +225,7 @@ impl<S: PageSize> Page<S> {
         Self { addr }
     }
 
-    /// Returns the address of this page.
+    /// Returns the starting address of this page.
     pub fn addr(&self) -> PageAddr<S> {
         PageAddr::<S>::new(self.addr.addr).unwrap()
     }

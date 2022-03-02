@@ -166,8 +166,9 @@ pub trait PhysPage {
 }
 
 /// Base type representing a page, generic for different sizes.
-// TODO - hold a reference to the memory, not the address. This will allow loaning it out from a
-// page table while tracking the lifetime.
+/// `Page` is a key abstraction; it owns all memory of the backing page.
+/// This guarantee allows the memory within pages to be assigned to virtual machines, and the taken
+/// back to be uniquely owned by a `Page` here in the hypervisor.
 pub struct Page<S: PageSize> {
     addr: PageAddr<S>,
 }
@@ -176,8 +177,10 @@ pub struct Page<S: PageSize> {
 pub type Page4k = Page<PageSize4k>;
 
 impl<S: PageSize> Page<S> {
-    /// Safety: Must guarantee that memory from `addr` to `addr`+PageSize if uniquely owned.
-    /// `new` is intended to be used _only_ by page allocators.
+    /// # Safety
+    /// The caller must guarantee that memory from `addr` to `addr`+PageSize if uniquely owned.
+    /// `new` is intended to be used _only_ when the backing memory region is unmapped from all
+    /// virutal machines and can be uniquely owned by the resulting `Page`.
     pub unsafe fn new(addr: PageAddr<S>) -> Self {
         Self { addr }
     }

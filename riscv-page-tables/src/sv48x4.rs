@@ -4,7 +4,8 @@
 
 use core::slice;
 
-use crate::page::*;
+use riscv_pages::*;
+
 use crate::page_table::*;
 use crate::pte::{Pte, PteLeafPerms};
 

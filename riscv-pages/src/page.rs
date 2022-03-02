@@ -115,6 +115,11 @@ impl<S: PageSize> PageAddr<S> {
         self.addr.0
     }
 
+    /// Moves to the next page address.
+    pub fn iter_from(&self) -> PageAddrIter<S> {
+        PageAddrIter::new(*self)
+    }
+
     /// Gets the pfn of the page address.
     pub fn pfn(&self) -> Pfn {
         Pfn::from_bits((self.addr.0 >> PFN_SHIFT) & PFN_MASK)
@@ -138,6 +143,33 @@ impl<S: PageSize> TryFrom<Pfn> for PageAddr<S> {
     fn try_from(pfn: Pfn) -> core::result::Result<Self, Self::Error> {
         let phys_addr = PhysAddr(pfn.0 << PFN_SHIFT);
         Self::new(phys_addr).ok_or(())
+    }
+}
+
+/// Generate page addresses for the given size. 4096, 8192, 12288, ... until the end of u64's range
+pub struct PageAddrIter<S: PageSize> {
+    next: Option<u64>,
+    phantom: PhantomData<S>,
+}
+
+impl<S: PageSize> PageAddrIter<S> {
+    pub fn new(start: PageAddr<S>) -> Self {
+        Self {
+            next: Some(start.addr.0),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<S: PageSize> Iterator for PageAddrIter<S> {
+    type Item = PageAddr<S>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.next;
+        if let Some(n) = self.next {
+            self.next = n.checked_add(S::SIZE_BYTES);
+        }
+        next.and_then(|a| PageAddr::new(PhysAddr::new(a)))
     }
 }
 
@@ -277,5 +309,47 @@ mod tests {
         assert!(PageAddr::<PageSize1GB>::new(PhysAddr::new(0x4000_0000)).is_some());
         assert!(PageAddr::<PageSize512GB>::new(PhysAddr::new(0x4000_0000)).is_none());
         assert!(PageAddr::<PageSize512GB>::new(PhysAddr::new(0x80_0000_0000)).is_some());
+    }
+
+    #[test]
+    fn page_iter_start() {
+        let addr4k: PageAddr<PageSize4k> = PageAddr::new(PhysAddr::new(0)).unwrap();
+        let mut addrs = addr4k.iter_from();
+        assert_eq!(addrs.next(), Some(addr4k));
+        assert_eq!(
+            addrs.next(),
+            Some(PageAddr::new(PhysAddr::new(4096)).unwrap())
+        );
+        assert_eq!(
+            addrs.next(),
+            Some(PageAddr::new(PhysAddr::new(8192)).unwrap())
+        );
+        assert_eq!(
+            addrs.next(),
+            Some(PageAddr::new(PhysAddr::new(12288)).unwrap())
+        );
+
+        let addr_m: PageAddr<PageSize2MB> = PageAddr::new(PhysAddr::new(0)).unwrap();
+        let mut addrs = addr_m.iter_from();
+        assert_eq!(addrs.next(), Some(addr_m));
+        assert_eq!(
+            addrs.next(),
+            Some(PageAddr::new(PhysAddr::new(1024 * 1024 * 2)).unwrap())
+        );
+    }
+
+    #[test]
+    fn page_iter_end_addr_space() {
+        let addr4k: PageAddr<PageSize4k> =
+            PageAddr::new(PhysAddr::new(0_u64.wrapping_sub(4096))).unwrap();
+        let mut addrs = addr4k.iter_from();
+        assert_eq!(addrs.next(), Some(addr4k));
+        assert_eq!(addrs.next(), None);
+
+        let addr_m: PageAddr<PageSize2MB> =
+            PageAddr::new(PhysAddr::new(0_u64.wrapping_sub(1024 * 1024 * 2))).unwrap();
+        let mut addrs = addr_m.iter_from();
+        assert_eq!(addrs.next(), Some(addr_m));
+        assert_eq!(addrs.next(), None);
     }
 }

@@ -5,10 +5,10 @@
 use core::marker::PhantomData;
 use core::slice;
 
-use crate::page::{
+use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
+use riscv_pages::{
     Page, Page4k, PageAddr, PageAddr4k, PageSize, PageSize2MB, PageSize4k, UnmappedPage,
 };
-use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 
 pub(crate) const ENTRIES_PER_PAGE: usize = 4096 / 8;
 

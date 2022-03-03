@@ -5,7 +5,8 @@
 //! # Page table management for HS mode on Risc-V.
 //! ## Overview
 //!
-//! - `Page` is the basic building block, representing pages of host supervisor memory.
+//! - `Page` is the basic building block, representing pages of host supervisor memory. Provided by
+//!   the `riscv-pages` crate.
 //! - `Sv48x4`, `Sv48` etc are top level page table structures used to manipulate address translation
 //! and protection.
 //! - `PageTable` provides a generic implementation of a single level of multi-level translation.
@@ -22,14 +23,10 @@
 //! access to the pages.
 #![no_std]
 
-pub mod page;
-pub mod page_table;
-mod sequential_pages;
+mod page_table;
 pub mod sv48x4;
 
-pub use page::{Page, Page4k, PageAddr, PageAddr4k, Pfn, PhysAddr, PageSize4k};
 pub use page_table::PlatformPageTable;
-pub use sequential_pages::SequentialPages;
 pub use sv48x4::Sv48x4;
 
 pub mod pte;
@@ -40,7 +37,8 @@ extern crate std;
 
 #[cfg(test)]
 mod tests {
-    use super::page::*;
+    use riscv_pages::*;
+
     use super::page_table::*;
     use super::sv48x4::Sv48x4;
 

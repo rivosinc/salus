@@ -9,6 +9,7 @@ use crate::page::{Page, PageAddr, PageSize, PhysAddr};
 /// `SequentialPages` holds a range of consecutive pages. Each page's address is one page after the
 /// previous. This forms a contiguous area of memory suitable for holding an array or other linear
 /// data.
+#[derive(Debug)]
 pub struct SequentialPages<S: PageSize> {
     addr: u64,
     count: u64,
@@ -16,36 +17,20 @@ pub struct SequentialPages<S: PageSize> {
 }
 
 impl<S: PageSize> SequentialPages<S> {
-    /// Creates a `SequentialPages` with no pages.
-    fn empty() -> Self {
-        SequentialPages {
-            addr: 0,
-            count: 0,
-            phantom: PhantomData,
-        }
-    }
-
     /// Creates a `SequentialPages` form the passed iterator.
     ///
     /// If the passed pages are not consecutive, an Error will be returned holding an iterator to
     /// the passed in pages so they don't leak.
-    pub fn from_pages<T>(pages: T) -> core::result::Result<Self, impl Iterator<Item = Page<S>>>
+    /// If passed an empty iterator Err(None) will be returned.
+    pub fn from_pages<T>(
+        pages: T,
+    ) -> core::result::Result<Self, Option<impl Iterator<Item = Page<S>>>>
     where
         T: IntoIterator<Item = Page<S>>,
     {
         let mut page_iter = pages.into_iter();
 
-        let first_page = match page_iter.next() {
-            Some(p) => p,
-            None => {
-                // This is a complicated way of returning an empty iterator that matches the type
-                // signature of the other `return Err(...)` statements.
-                return Err(Self::empty()
-                    .into_iter()
-                    .chain(create_dummy_page_once_iter())
-                    .chain(page_iter));
-            }
-        };
+        let first_page = page_iter.next().ok_or(None)?;
 
         let addr = first_page.addr().bits();
 
@@ -60,17 +45,19 @@ impl<S: PageSize> SequentialPages<S> {
             let next_addr = match last_addr.checked_add(S::SIZE_BYTES) {
                 Some(a) => a,
                 None => {
-                    return Err(seq
-                        .into_iter()
-                        .chain(core::iter::once(page))
-                        .chain(page_iter))
+                    return Err(Some(
+                        seq.into_iter()
+                            .chain(core::iter::once(page))
+                            .chain(page_iter),
+                    ))
                 }
             };
             if this_addr != next_addr {
-                return Err(seq
-                    .into_iter()
-                    .chain(core::iter::once(page))
-                    .chain(page_iter));
+                return Err(Some(
+                    seq.into_iter()
+                        .chain(core::iter::once(page))
+                        .chain(page_iter),
+                ));
             }
             last_addr = this_addr;
             seq.count += 1;
@@ -81,8 +68,25 @@ impl<S: PageSize> SequentialPages<S> {
 
     /// Returns the address of the first page in the sequence(the start of the contiguous memory
     /// region).
+    pub fn start_page_addr(&self) -> PageAddr<S> {
+        // unwrap can't fail because `self.addr` is guaranteed to be page aligned at construction.
+        PageAddr::new(PhysAddr::new(self.addr)).unwrap()
+    }
+
+    /// Returns the address of the first page in the sequence(the start of the contiguous memory
+    /// region).
     pub fn base(&self) -> u64 {
         self.addr
+    }
+
+    /// Returns the number of sequential pages contained in this structure.
+    pub fn len(&self) -> u64 {
+        self.count
+    }
+
+    /// Returns true if there are no pages in self.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
     }
 
     /// Returns the length of the contiguous memory region formed by the owned pages.
@@ -144,14 +148,6 @@ impl<S: PageSize> IntoIterator for SequentialPages<S> {
     }
 }
 
-// Helper function that returns a `Once` iterator that actually yields `None`.
-fn create_dummy_page_once_iter<S: PageSize>() -> core::iter::Once<Page<S>> {
-    let dummy_page = unsafe { Page::new(PageAddr::new(PhysAddr::new(0)).unwrap()) };
-    let mut dummy_iter = core::iter::once(dummy_page);
-    core::mem::forget(dummy_iter.next());
-    dummy_iter
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +183,8 @@ mod tests {
         let result = SequentialPages::from_pages(pages);
         match result {
             Ok(_) => panic!("didn't fail with non-sequential pages"),
-            Err(returned_pages) => {
+            Err(None) => panic!("didn't return any failed pages"),
+            Err(Some(returned_pages)) => {
                 assert_eq!(returned_pages.count(), 4);
             }
         }
@@ -199,7 +196,8 @@ mod tests {
         let result = SequentialPages::from_pages(pages);
         match result {
             Ok(_) => panic!("didn't fail with empty pages"),
-            Err(mut returned_pages) => assert!(returned_pages.next().is_none()),
+            Err(None) => (),
+            Err(Some(_)) => panic!("didn't return any failed pages"),
         }
     }
 

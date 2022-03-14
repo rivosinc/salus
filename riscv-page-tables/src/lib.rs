@@ -24,6 +24,7 @@
 #![no_std]
 
 mod hw_mem_map;
+pub mod page_range;
 mod page_table;
 pub mod sv48x4;
 

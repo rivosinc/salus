@@ -7,7 +7,7 @@ use core::fmt::{self, Display};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
-use riscv_page_tables::page::{Page4k, PageAddr4k, PageSize, PageSize4k, PhysAddr};
+use riscv_pages::{Page4k, PageAddr4k, PageSize, PageSize4k, PhysAddr};
 
 /// A PageBox is a Box-like container that holds a backing page filled with the given type.
 /// Because Salus borrows pages from the host for data it is necessary to track the backing pages
@@ -32,7 +32,7 @@ use riscv_page_tables::page::{Page4k, PageAddr4k, PageSize, PageSize4k, PhysAddr
 ///
 /// ```rust
 /// use page_collections::page_box::PageBox;
-/// use riscv_page_tables::page::{Page4k, PageSize4k};
+/// use riscv_pages::{Page4k, PageSize4k};
 ///
 /// struct TestData {
 ///     a: u64,

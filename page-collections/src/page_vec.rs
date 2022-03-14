@@ -8,8 +8,7 @@ use core::mem::{self, ManuallyDrop};
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
 
-use riscv_page_tables::page::{Page4k, PageAddr, PageSize, PageSize4k, PhysAddr};
-use riscv_page_tables::SequentialPages;
+use riscv_pages::{Page4k, PageAddr, PageSize, PageSize4k, PhysAddr, SequentialPages};
 
 const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 
@@ -25,8 +24,7 @@ const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 ///
 /// ```rust
 /// use page_collections::page_vec::{PageVec, VecPages};
-/// use riscv_page_tables::page::{Page4k, PageSize, PageSize4k};
-/// use riscv_page_tables::SequentialPages;
+/// use riscv_pages::{SequentialPages, Page4k, PageSize, PageSize4k};
 /// use core::result::Result;
 ///
 /// fn sum_in_page<I>(vals: I, pages: SequentialPages<PageSize4k>)
@@ -152,7 +150,7 @@ impl<T, I: SliceIndex<[T]>> IndexMut<I> for PageVec<T> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use riscv_page_tables::page::PageAddr4k;
+    use riscv_pages::PageAddr4k;
 
     #[test]
     fn basic() {

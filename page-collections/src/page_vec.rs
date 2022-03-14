@@ -8,8 +8,7 @@ use core::mem::{self, ManuallyDrop};
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
 
-use riscv_page_tables::page::{Page4k, PageAddr, PageSize, PageSize4k, PhysAddr};
-use riscv_page_tables::SequentialPages;
+use riscv_pages::{Page4k, PageAddr, PageSize, PageSize4k, PhysAddr, SequentialPages};
 
 const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 
@@ -25,8 +24,7 @@ const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 ///
 /// ```rust
 /// use page_collections::page_vec::{PageVec, VecPages};
-/// use riscv_page_tables::page::{Page4k, PageSize, PageSize4k};
-/// use riscv_page_tables::SequentialPages;
+/// use riscv_pages::{SequentialPages, Page4k, PageSize, PageSize4k};
 /// use core::result::Result;
 ///
 /// fn sum_in_page<I>(vals: I, pages: SequentialPages<PageSize4k>)
@@ -95,6 +93,13 @@ impl<T> PageVec<T> {
         self.0.push(item)
     }
 
+    pub fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.0.retain(f)
+    }
+
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
     }
@@ -105,6 +110,13 @@ impl<T> PageVec<T> {
 
     pub fn capacity(&self) -> usize {
         self.0.capacity()
+    }
+
+    pub fn get_mut<I>(&mut self, index: I) -> Option<&mut <I as SliceIndex<[T]>>::Output>
+    where
+        I: SliceIndex<[T]>,
+    {
+        self.0.get_mut(index)
     }
 }
 
@@ -152,7 +164,7 @@ impl<T, I: SliceIndex<[T]>> IndexMut<I> for PageVec<T> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use riscv_page_tables::page::PageAddr4k;
+    use riscv_pages::PageAddr4k;
 
     #[test]
     fn basic() {

@@ -7,7 +7,7 @@ use core::fmt::{self, Display};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
-use riscv_page_tables::page::{Page4k, PageAddr4k, PageSize, PageSize4k, PhysAddr};
+use riscv_pages::{Page4k, PageAddr4k, PageSize, PageSize4k, PhysAddr};
 
 /// A PageBox is a Box-like container that holds a backing page filled with the given type.
 /// Because Salus borrows pages from the host for data it is necessary to track the backing pages
@@ -32,7 +32,7 @@ use riscv_page_tables::page::{Page4k, PageAddr4k, PageSize, PageSize4k, PhysAddr
 ///
 /// ```rust
 /// use page_collections::page_box::PageBox;
-/// use riscv_page_tables::page::{Page4k, PageSize4k};
+/// use riscv_pages::{Page4k, PageSize4k};
 ///
 /// struct TestData {
 ///     a: u64,
@@ -84,6 +84,14 @@ impl<T> PageBox<T> {
             let page = Page4k::new(PageAddr4k::new(PhysAddr::new(self.0.as_ptr() as u64)).unwrap());
             (core::ptr::read(self.0.as_ptr()), page)
         }
+    }
+
+    /// Leaks the backing page for the box and returns a static reference to the contained data.
+    /// Useful for objects that live for the rest of the program.
+    pub fn leak(b: Self) -> &'static mut T {
+        // Safe because self owns all this memory and by using 'ManuallyDrop', it will never be
+        // freed for reuse.
+        unsafe { &mut *core::mem::ManuallyDrop::new(b).0.as_ptr() }
     }
 }
 

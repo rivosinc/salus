@@ -8,10 +8,12 @@
 #![no_std]
 
 mod page;
+mod page_owner_id;
 mod sequential_pages;
 
 pub use page::{
     CleanPage, Page, Page4k, PageAddr, PageAddr4k, PageSize, PageSize1GB, PageSize2MB, PageSize4k,
     PageSize512GB, Pfn, PhysAddr, PhysPage, UnmappedPage,
 };
+pub use page_owner_id::PageOwnerId;
 pub use sequential_pages::SequentialPages;

@@ -5,8 +5,6 @@
 /// Represents pages of memory.
 use core::marker::PhantomData;
 
-const RAM_BASE: u64 = 0x8000_0000;
-
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
 const PFN_SHIFT: u64 = 12;
@@ -132,9 +130,9 @@ impl<S: PageSize> PageAddr<S> {
             .and_then(Self::new)
     }
 
-    /// Gets the index of the page in the system (the linear page count from the base of ram).
+    /// Gets the index of the page in the system (the linear page count from address 0).
     pub fn index(&self) -> usize {
-        (self.pfn().bits() - (RAM_BASE >> PFN_SHIFT)) as usize
+        self.pfn().bits() as usize
     }
 }
 
@@ -257,6 +255,25 @@ impl<S: PageSize> Page<S> {
         Self { addr }
     }
 
+    /// Test-only function that creates a page by allocating extra memory for alignement, then
+    /// leaking all the memory. While technically "safe" it does leak all that memory so use with
+    /// caution.
+    #[cfg(test)]
+    pub fn new_in_test() -> Self {
+        let mem = vec![0u8; 8192];
+        let ptr = mem.as_ptr();
+        let aligned_ptr = unsafe {
+            // Safe because it's only a test and the above allocation guarantees that the result is
+            // still a valid pointer.
+            ptr.add(ptr.align_offset(4096))
+        };
+        let page = Self {
+            addr: PageAddr::new(PhysAddr::new(aligned_ptr as u64)).unwrap(),
+        };
+        std::mem::forget(mem);
+        page
+    }
+
     /// Returns the starting address of this page.
     pub fn addr(&self) -> PageAddr<S> {
         PageAddr::<S>::new(self.addr.addr).unwrap()
@@ -264,14 +281,15 @@ impl<S: PageSize> Page<S> {
 
     /// Returns the u64 at the given index in the page.
     pub fn get_u64(&self, index: usize) -> Option<u64> {
-        if index > S::SIZE_BYTES as usize / core::mem::size_of::<u64>() {
+        let offset = index * core::mem::size_of::<u64>();
+        if offset >= S::SIZE_BYTES as usize {
             None
         } else {
-            let offset = index * core::mem::size_of::<u64>();
             let address = self.addr.bits() + offset as u64;
             unsafe {
                 // Safe because Page guarantees all contained memory is uniquely owned and
-                // valid.
+                // valid and the address must be in the owned page because of the above index range
+                // check.
                 Some(core::ptr::read_volatile(address as *const u64))
             }
         }
@@ -389,5 +407,30 @@ mod tests {
         let mut addrs = addr_m.iter_from();
         assert_eq!(addrs.next(), Some(addr_m));
         assert_eq!(addrs.next(), None);
+    }
+
+    #[test]
+    fn u64_index_range_4k() {
+        let p: Page<PageSize4k> = Page::new_in_test();
+        assert!(p.get_u64(0).is_some());
+        assert!(p.get_u64(1).is_some());
+        assert!(p.get_u64(511).is_some());
+        assert!(p.get_u64(512).is_none());
+    }
+
+    #[test]
+    fn u64_iter() {
+        let p: Page<PageSize4k> = Page::new_in_test();
+        assert_eq!(p.u64_iter().count(), 512);
+
+        unsafe {
+            // Just a test!
+            let ptr = p.addr().bits() as *mut u64;
+            for i in 0..512 {
+                *ptr.add(i) = i as u64;
+            }
+        }
+
+        assert!(p.u64_iter().enumerate().all(|(i, v)| i as u64 == v));
     }
 }

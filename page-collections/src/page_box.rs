@@ -85,6 +85,14 @@ impl<T> PageBox<T> {
             (core::ptr::read(self.0.as_ptr()), page)
         }
     }
+
+    /// Leaks the backing page for the box and returns a static reference to the contained data.
+    /// Useful for objects that live for the rest of the program.
+    pub fn leak(b: Self) -> &'static mut T {
+        // Safe because self owns all this memory and by using 'ManuallyDrop', it will never be
+        // freed for reuse.
+        unsafe { &mut *core::mem::ManuallyDrop::new(b).0.as_ptr() }
+    }
 }
 
 impl<T> Drop for PageBox<T> {

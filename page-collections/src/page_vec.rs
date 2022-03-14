@@ -93,6 +93,13 @@ impl<T> PageVec<T> {
         self.0.push(item)
     }
 
+    pub fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.0.retain(f)
+    }
+
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
     }
@@ -103,6 +110,13 @@ impl<T> PageVec<T> {
 
     pub fn capacity(&self) -> usize {
         self.0.capacity()
+    }
+
+    pub fn get_mut<I>(&mut self, index: I) -> Option<&mut <I as SliceIndex<[T]>>::Output>
+    where
+        I: SliceIndex<[T]>,
+    {
+        self.0.get_mut(index)
     }
 }
 

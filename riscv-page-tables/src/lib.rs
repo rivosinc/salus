@@ -23,6 +23,7 @@
 //! access to the pages.
 #![no_std]
 
+mod hw_mem_map;
 mod page_table;
 pub mod sv48x4;
 

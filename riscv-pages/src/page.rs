@@ -5,8 +5,6 @@
 /// Represents pages of memory.
 use core::marker::PhantomData;
 
-const RAM_BASE: u64 = 0x8000_0000;
-
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
 const PFN_SHIFT: u64 = 12;
@@ -132,9 +130,9 @@ impl<S: PageSize> PageAddr<S> {
             .and_then(Self::new)
     }
 
-    /// Gets the index of the page in the system (the linear page count from the base of ram).
+    /// Gets the index of the page in the system (the linear page count from address 0).
     pub fn index(&self) -> usize {
-        (self.pfn().bits() - (RAM_BASE >> PFN_SHIFT)) as usize
+        self.pfn().bits() as usize
     }
 }
 

@@ -5,12 +5,25 @@
 use core::marker::PhantomData;
 use core::slice;
 
-use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 use riscv_pages::{
-    Page, Page4k, PageAddr, PageAddr4k, PageSize, PageSize2MB, PageSize4k, UnmappedPage,
+    CleanPage, Page, Page4k, PageAddr, PageAddr4k, PageOwnerId, PageSize, PageSize2MB, PageSize4k,
+    SequentialPages, UnmappedPage,
 };
 
+use crate::page_tracking::PageState;
+use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
+
 pub(crate) const ENTRIES_PER_PAGE: usize = 4096 / 8;
+
+#[derive(Debug)]
+pub enum Error {
+    InsufficientPages(SequentialPages<PageSize4k>),
+    InsufficientPtePages,
+    LeafEntryNotTable,
+    MisalignedPages(SequentialPages<PageSize4k>),
+    SettingOwner(crate::page_tracking::Error),
+}
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// Represents a level in a multi-level page table.
 /// `LeafPageSize`: Page size pointed to by leaf entries at this page level.
@@ -36,24 +49,12 @@ pub(crate) enum TableEntryMut<'a, L: PageTableLevel> {
 }
 
 impl<'a, L: PageTableLevel> TableEntryMut<'a, L> {
-    /// Create a `TableEntryMut` by inspecting the passed `pte` and determinign its type.
+    /// Creates a `TableEntryMut` by inspecting the passed `pte` and determining its type.
     pub fn from_pte(pte: &'a mut Pte) -> Self {
         if !pte.valid() {
-            return TableEntryMut::Invalid(pte);
+            TableEntryMut::Invalid(pte)
         } else {
             TableEntryMut::Valid(ValidTableEntryMut::from_pte(pte))
-        }
-    }
-
-    /// Like `unwrap`, but instead of immediate panic, call the provided function which must put a
-    /// valid entry in the PTE or it will cause a panic.
-    pub fn unwrap_or<F: FnMut(&mut Pte)>(self, mut f: F) -> ValidTableEntryMut<'a, L> {
-        match self {
-            TableEntryMut::Valid(e) => e,
-            TableEntryMut::Invalid(pte) => {
-                f(pte);
-                ValidTableEntryMut::from_pte(pte)
-            }
         }
     }
 }
@@ -107,6 +108,22 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
                 Page::new(PageAddr::try_from(pte.pfn()).ok()?)
             };
             pte.clear();
+            Some(page)
+        } else {
+            None
+        }
+    }
+
+    /// Mark the page invalid in the page table that owns it and return it.
+    /// Returns the page if a valid leaf, otherwise, None.
+    pub fn invalidate_page(self) -> Option<Page<L::LeafPageSize>> {
+        if let ValidTableEntryMut::Leaf(pte) = self {
+            let page = unsafe {
+                // Safe because the page table owns this page and is giving up ownership by
+                // returning it.
+                Page::new(PageAddr::try_from(pte.pfn()).ok()?)
+            };
+            pte.invalidate();
             Some(page)
         } else {
             None
@@ -182,19 +199,26 @@ where
 
     /// Returns the next page table level for the given address to translate.
     /// If the next level isn't yet filled, consumes a `free_page` and uses it to map those entries.
-    pub(crate) fn next_level_or_fill<I>(
+    pub(crate) fn next_level_or_fill_fn<F>(
         &mut self,
         guest_phys_addr: u64,
-        free_page: &mut I,
-    ) -> core::result::Result<PageTable<LEVEL::NextLevel>, ()>
+        get_pte_page: &mut F,
+    ) -> Result<PageTable<LEVEL::NextLevel>>
     where
         LEVEL: PageTableLevel + UpperLevel,
-        I: Iterator<Item = Page4k>,
+        F: FnMut() -> Option<Page4k>,
     {
-        self.entry_for_addr_mut(guest_phys_addr)
-            .unwrap_or(|pte| pte.set(free_page.next().unwrap(), &PteFieldBits::non_leaf_user()))
-            .table()
-            .ok_or(())
+        let v = match self.entry_for_addr_mut(guest_phys_addr) {
+            TableEntryMut::Valid(v) => v,
+            TableEntryMut::Invalid(pte) => {
+                pte.set(
+                    get_pte_page().ok_or(Error::InsufficientPtePages)?,
+                    &PteFieldBits::non_leaf(),
+                );
+                ValidTableEntryMut::from_pte(pte)
+            }
+        };
+        v.table().ok_or(Error::LeafEntryNotTable)
     }
 }
 
@@ -202,8 +226,7 @@ where
 pub trait PteIndex {
     /// Returns the offset in bytes of the index
     fn offset(&self) -> u64 {
-        const PTE_BYTES: u64 = 8;
-        u64::from(self.index()) * PTE_BYTES
+        self.index() * core::mem::size_of::<u64>() as u64
     }
 
     /// get the underlying index
@@ -246,37 +269,149 @@ impl<LEVEL: PageTableLevel> PteIndex for PageTableIndex<LEVEL> {
 }
 
 /// A page table for a given addressing type.
+/// `HGATP_VALUE` must be set to the paging mode stored in register hgatp.
 pub trait PlatformPageTable {
     type TLD: PageTableLevel;
+    const HGATP_VALUE: u64;
+    /// The alignement requirement of the top level page table.
+    const TOP_LEVEL_ALIGN: u64;
 
-    // TODO - page permissions
-    // TODO - generic enough to work with satp in addition to hgatp
-    /// Map a 4k page for translation with address `addr`.
-    fn map_page_4k<I>(
-        &mut self,
-        addr: u64,
-        page_to_map: Page4k,
-        free_pages: &mut I,
-    ) -> core::result::Result<(), ()>
+    /// Creates a new page table from the provided `pages` that provide the 4 pages for the top level
+    /// page table directory.
+    fn new(
+        pages: SequentialPages<PageSize4k>,
+        owner: PageOwnerId,
+        phys_pages: PageState,
+    ) -> Result<Self>
     where
-        I: Iterator<Item = Page4k>;
+        Self: Sized;
+
+    /// Returns an ref to the systems physical pages map.
+    fn phys_pages(&self) -> PageState;
+
+    /// Returns the owner Id for this page table.
+    fn page_owner_id(&self) -> PageOwnerId;
 
     // TODO - page permissions
     // TODO - generic enough to work with satp in addition to hgatp
-    /// Map a 2MB page for translation with address `addr`.
-    fn map_page_2mb<I>(
+    /// Maps a 4k page for translation with address `guest_phys_addr`.
+    fn map_page_4k<F>(
+        &mut self,
+        guest_phys_addr: u64,
+        page_to_map: Page4k,
+        get_pte_page: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut() -> Option<Page4k>;
+
+    // TODO - page permissions
+    // TODO - generic enough to work with satp in addition to hgatp
+    /// Maps a 2MB page for translation with address `addr`.
+    fn map_page_2mb<F>(
         &mut self,
         addr: u64,
         page_to_map: Page<PageSize2MB>,
-        free_pages: &mut I,
-    ) -> core::result::Result<(), ()>
+        get_pte_page: &mut F,
+    ) -> Result<()>
     where
-        I: Iterator<Item = Page4k>;
+        F: FnMut() -> Option<Page4k>;
 
-    /// Unmaps and returns the host page of the given guest address if that address is mapped.
+    /// Unmaps, wipes clean, and returns the host page of the given guest address if that address is
+    /// mapped.
     fn unmap_page(&mut self, guest_phys_addr: u64) -> Option<UnmappedPage>;
+
+    /// Like `unmap_page` but leaves the entry in the PTE, marking it as invalid.
+    fn invalidate_page(&mut self, guest_phys_addr: u64) -> Option<UnmappedPage>;
+
+    /// Returns an iterator to unmapped pages for the given range.
+    /// Guarantees that the full range of pages can be unmapped.
+    fn unmap_range<S: PageSize>(
+        &mut self,
+        addr: PageAddr<S>,
+        num_pages: u64,
+    ) -> Option<UnmapIter<Self>>
+    where
+        Self: Sized;
+
+    /// Returns an iterator to unmapped pages for the given range.
+    /// Guarantees that the full range of pages can be unmapped.
+    fn invalidate_range<S: PageSize>(
+        &mut self,
+        addr: PageAddr<S>,
+        num_pages: u64,
+    ) -> Option<InvalidateIter<Self>>
+    where
+        Self: Sized;
 
     /// Returns the address of the top level page table.
     /// This is the value that should be written to satp/hgatp to start using the page tables.
     fn get_root_address(&self) -> PageAddr4k;
+
+    /// Calculates the number of PTE pages that are needed to map all pages for `num_pages` maped
+    /// pages.
+    fn max_pte_pages(num_pages: u64) -> u64;
+}
+
+pub struct UnmapIter<'a, T: PlatformPageTable> {
+    owner: &'a mut T,
+    curr: u64,
+    end: u64,
+    page_size: u64,
+}
+
+impl<'a, T: PlatformPageTable> UnmapIter<'a, T> {
+    pub fn new(owner: &'a mut T, curr: u64, count: u64, page_size: u64) -> Self {
+        Self {
+            owner,
+            curr,
+            end: curr + page_size * count,
+            page_size,
+        }
+    }
+}
+
+impl<'a, T: PlatformPageTable> Iterator for UnmapIter<'a, T> {
+    type Item = CleanPage;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr == self.end {
+            return None;
+        }
+
+        let this_page = self.curr;
+        self.curr += self.page_size;
+        self.owner.unmap_page(this_page).map(CleanPage::from)
+    }
+}
+
+pub struct InvalidateIter<'a, T: PlatformPageTable> {
+    owner: &'a mut T,
+    curr: u64,
+    end: u64,
+    page_size: u64,
+}
+
+impl<'a, T: PlatformPageTable> InvalidateIter<'a, T> {
+    pub fn new(owner: &'a mut T, curr: u64, count: u64, page_size: u64) -> Self {
+        Self {
+            owner,
+            curr,
+            end: curr + page_size * count,
+            page_size,
+        }
+    }
+}
+
+impl<'a, T: PlatformPageTable> Iterator for InvalidateIter<'a, T> {
+    type Item = UnmappedPage;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr == self.end {
+            return None;
+        }
+
+        let this_page = self.curr;
+        self.curr += self.page_size;
+        self.owner.invalidate_page(this_page)
+    }
 }

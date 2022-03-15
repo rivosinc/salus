@@ -46,6 +46,9 @@ mod page_table;
 pub mod page_tracking;
 pub mod sv48x4;
 
+pub use hw_mem_map::HwMemMap;
+pub use page_range::PageRange;
+pub use page_table::Error as PageTableError;
 pub use page_table::PlatformPageTable;
 pub use page_tracking::{Error, Result};
 pub use page_tracking::{HypMemoryPages, PageState};

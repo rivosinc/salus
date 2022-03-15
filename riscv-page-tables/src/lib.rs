@@ -3,13 +3,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Page table management for HS mode on Risc-V.
-//! ## Overview
+//!
+//! ## Key types
 //!
 //! - `Page` is the basic building block, representing pages of host supervisor memory. Provided by
 //!   the `riscv-pages` crate.
-//! - `Sv48x4`, `Sv48` etc are top level page table structures used to manipulate address translation
-//! and protection.
+//! - `Sv48x4`, `Sv48` etc are top level page table structures used to manipulate address
+//! translation and protection.
 //! - `PageTable` provides a generic implementation of a single level of multi-level translation.
+//! - `PageState` - Contains information about active VMs (page owners), manages allocation of
+//! unique owner IDs, and per-page state such as current and previous owner. This is system-wide
+//! state updated whenever a page owner changes or a VM starts or stops.
+//! - `Pages` - Per-page state (tracks the owner).
+//! - `HypMemoryPages` - Initial manager of physical memory. The hypervisor allocates pages from
+//! here to store local state. It's turned in to a `PageState` and a pool of ram for the host VM.
+//! - `PageRange` - Provides an iterator of `Page`s. Used to pass chunks of memory to the various
+//! stages of system initialization.
+//! - `HwMemMap` - Map of system memory, used to determine address ranges to create `Page`s from.
+//!
+//! ## Initialization
+//!
+//! `HwMemMap` -> `HypMemoryPages` ---> `PageState`
+//!                                 \
+//!                                  -------> `PageRange`
 //!
 //! ## Safety
 //!
@@ -19,16 +35,20 @@
 //!
 //! Note that leaf pages mapped into the table are assumed to never be safe to "own", they are
 //! implicitly shared with the user of the page table (the entity on the other end of that stage of
-//! address translation). Don't make a slice out of guest memory after the guest is started with
-//! access to the pages.
+//! address translation). Interacting directly with memory currently mapped to a VM will lead to
+//! pain so the interfaces don't support that.
 #![no_std]
 
 mod hw_mem_map;
+mod page_info;
 pub mod page_range;
 mod page_table;
+pub mod page_tracking;
 pub mod sv48x4;
 
 pub use page_table::PlatformPageTable;
+pub use page_tracking::{Error, Result};
+pub use page_tracking::{HypMemoryPages, PageState};
 pub use sv48x4::Sv48x4;
 
 pub mod pte;

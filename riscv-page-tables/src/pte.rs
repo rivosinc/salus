@@ -78,6 +78,11 @@ impl Pte {
         self.0 &= !PteFieldBit::Valid.mask();
     }
 
+    /// Marks the entry as valid
+    pub fn mark_valid(&mut self) {
+        self.0 |= PteFieldBit::Valid.mask();
+    }
+
     /// Clears everything including valid bit.
     pub fn clear(&mut self) {
         self.0 = 0;

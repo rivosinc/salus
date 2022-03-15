@@ -350,6 +350,13 @@ pub trait PlatformPageTable {
     /// Calculates the number of PTE pages that are needed to map all pages for `num_pages` maped
     /// pages.
     fn max_pte_pages(num_pages: u64) -> u64;
+
+    /// Handles a fault from the guest that owns this page table. Until page permissions are added,
+    /// this will only happen when a page has been loaned to another guest. That is valid if the
+    /// guest has exited, in which case this fixed the PTE entry and returns true. False will be
+    /// returned if the page is still owned by the guest it was loaned to, or if the entry is
+    /// invalid.
+    fn do_guest_fault(&mut self, guest_phys_addr: u64) -> bool;
 }
 
 pub struct UnmapIter<'a, T: PlatformPageTable> {

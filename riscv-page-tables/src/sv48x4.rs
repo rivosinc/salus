@@ -108,6 +108,30 @@ impl Sv48x4 {
             _ => None,
         }
     }
+
+    fn handle_fault_at<S: PageSize>(
+        pte: &mut Pte,
+        phys_pages: &mut PageState,
+        owner: &PageOwnerId,
+    ) -> bool {
+        if pte.valid() {
+            // TODO     check permissions and type
+            return false;
+        } else if pte.leaf() {
+            let addr = PageAddr4k::try_from(pte.pfn()).unwrap();
+            if phys_pages.owner(addr) == *owner {
+                // Zero the page before mapping it back to this VM.
+                unsafe {
+                    // Safe because this table uniquely owns the page and it isn't mapped to a
+                    // guest.
+                    core::ptr::write_bytes(addr.bits() as *mut u8, 0, S::SIZE_BYTES as usize);
+                }
+                pte.mark_valid();
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl PlatformPageTable for Sv48x4 {
@@ -270,5 +294,47 @@ impl PlatformPageTable for Sv48x4 {
 
     fn get_root_address(&self) -> PageAddr4k {
         self.root.start_page_addr()
+    }
+
+    fn do_guest_fault(&mut self, guest_phys_addr: u64) -> bool {
+        use TableEntryMut::*;
+        use ValidTableEntryMut::*;
+
+        // avoid double self borrow, by cloning the pages, each layer borrows self, so the borrow
+        // checked can't tell that phys_pages is only borrowed once.
+        let mut phys_pages = self.phys_pages.clone();
+        let owner = self.owner;
+        let mut l4 = self.top_level_directory();
+        let mut l3 = match l4.entry_for_addr_mut(guest_phys_addr) {
+            Invalid(pte) => {
+                return Self::handle_fault_at::<PageSize512GB>(pte, &mut phys_pages, &owner);
+            }
+            Valid(Table(t)) => t,
+            Valid(Leaf(_)) => {
+                return false;
+            }
+        };
+        let mut l2 = match l3.entry_for_addr_mut(guest_phys_addr) {
+            Invalid(pte) => {
+                return Self::handle_fault_at::<PageSize1GB>(pte, &mut phys_pages, &owner);
+            }
+            Valid(Table(t)) => t,
+            Valid(Leaf(_)) => {
+                return false;
+            }
+        };
+        let mut l1 = match l2.entry_for_addr_mut(guest_phys_addr) {
+            Invalid(pte) => {
+                return Self::handle_fault_at::<PageSize2MB>(pte, &mut phys_pages, &owner);
+            }
+            Valid(Table(t)) => t,
+            Valid(Leaf(_)) => {
+                return false;
+            }
+        };
+        match l1.entry_for_addr_mut(guest_phys_addr) {
+            Invalid(pte) => Self::handle_fault_at::<PageSize4k>(pte, &mut phys_pages, &owner),
+            _ => false,
+        }
     }
 }

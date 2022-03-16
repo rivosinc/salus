@@ -4,6 +4,7 @@
 
 /// S-mode register definitions
 use crate::exit::*;
+use crate::inst;
 
 /// Wrapper of the reason for a trap.
 #[derive(Default)]
@@ -21,11 +22,13 @@ impl SCause {
             // exception
             use SupervisorExceptionCause::*;
             // TODO handle the rest of the causes.
-            match self.0 {
-                10 => Ok(GuestExit::Exception(EcallVsMode)),
-                21 => Ok(GuestExit::Exception(GuestLoadPageFault)),
-                23 => Ok(GuestExit::Exception(GuestStoreAmoPageFault)),
-                cause => Err(cause),
+            match self.0 as u8 {
+                inst::CAUSE_VIRTUAL_SUPERVISOR_ECALL => Ok(GuestExit::Exception(EcallVsMode)),
+                inst::CAUSE_LOAD_GUEST_PAGE_FAULT => Ok(GuestExit::Exception(GuestLoadPageFault)),
+                inst::CAUSE_STORE_GUEST_PAGE_FAULT => {
+                    Ok(GuestExit::Exception(GuestStoreAmoPageFault))
+                }
+                cause => Err(cause as u64),
             }
         }
     }

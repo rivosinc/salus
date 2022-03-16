@@ -50,16 +50,16 @@ classDiagram
     class Pages {
       base_page_index: usize
     }
-    PhysicalPages "1" *-- "1" Pages
-    class PhysicalPages {
+    PageState "1" *-- "1" Pages
+    class PageState {
         active_guests: Vec of PageOwnerId
         pages: Pages
     }
-    Sv48x4 "N" o-- "1" PhysicalPages
+    Sv48x4 "N" o-- "1" PageState
     class Sv48x4 {
     	root: Top Level entries
 	owner: PageOwnerId
-        pages: PhysicalPages
+        pages: PageState
     }
     VmPages "N" *-- "1" Sv48x4
     class VmPages {
@@ -98,13 +98,13 @@ layer of nesting without forced address space walks on guest exit).
 The type [`Pages`]() is a thin wrapper around a Vec of `PageInfo`s, one per
 page in the system. It allows indexing the pages by a page address.
 
-[`PhysicalPages`]() is a system-side singleton that contains `Pages` and a list
+[`PageState`]() is a system-side singleton that contains `Pages` and a list
 of active page owners (VM guests).
 
 A [`Sv48x4`]() is created for each running VM. This tracks the page table for
 the VM (with the 4, 16k-aligned pages for hgatp referenced by `root`). This is
 the entity that is assigned a unique `PageOwnerId` for the VM and it maintains
-a reference to `PhysicalPages` for checking which pages are assigned to it and
+a reference to `PageState` for checking which pages are assigned to it and
 for sharing pages with child VMs it starts.
 
 [`VmPages`]() is a per-VM structure that has an `Sv48x4` and the measurement of

@@ -73,6 +73,16 @@ impl Pte {
         PteFieldBit::Valid.is_set(self.bits())
     }
 
+    /// Marks the entry as invalid
+    pub fn invalidate(&mut self) {
+        self.0 &= !PteFieldBit::Valid.mask();
+    }
+
+    /// Marks the entry as valid
+    pub fn mark_valid(&mut self) {
+        self.0 |= PteFieldBit::Valid.mask();
+    }
+
     /// Clears everything including valid bit.
     pub fn clear(&mut self) {
         self.0 = 0;
@@ -118,11 +128,9 @@ impl PteFieldBits {
         ret
     }
 
-    /// Creates a new status for a non-leaf user entry.
-    /// Used for intermeidate levels of user page tables.
-    pub fn non_leaf_user() -> Self {
-        let mut ret = Self::default();
-        ret.set_bit(PteFieldBit::User);
-        ret
+    /// Creates a new status for a non-leaf entry.
+    /// Used for intermeidate levels of page tables.
+    pub fn non_leaf() -> Self {
+        Self::default()
     }
 }

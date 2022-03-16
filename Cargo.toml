@@ -1,0 +1,18 @@
+[package]
+name = "salus"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = "debuginfo"
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+page_collections = { path = "./page-collections" }
+riscv_page_tables = { path = "./riscv-page-tables" }
+riscv_pages = { path = "./riscv-pages" }
+riscv_regs = { path = "./riscv-regs" }
+sbi = { path = "./sbi" }

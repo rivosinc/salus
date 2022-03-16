@@ -1,3 +1,12 @@
 [build]
 target = "riscv64gc-unknown-none-elf"
 rustflags = ['-Clink-arg=-Tlds/qemu.lds']
+
+[target.riscv64gc-unknown-none-elf]
+runner = """qemu-system-riscv64 \
+    -machine virt \
+    -smp 1 \
+    -m 4096 \
+    -nographic \
+    -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
+    -kernel """

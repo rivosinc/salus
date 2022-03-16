@@ -5,13 +5,16 @@
 #![no_std]
 
 //! Crate for handling RV64 registers.
+//! inst - auto-generated register definitions
 //! regs - RV64 General Purpose Registers (GPRs), 0-31.
 //! sregs - (H)S-mode CSRs
 
 mod exit;
+mod inst;
 mod regs;
 mod sregs;
 
 pub use exit::*;
+pub use inst::*;
 pub use regs::*;
 pub use sregs::*;

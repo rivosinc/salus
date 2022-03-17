@@ -9,4 +9,9 @@ runner = """qemu-system-riscv64 \
     -m 4096 \
     -nographic \
     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
+    -device loader,file=../linux/arch/riscv/boot/Image,addr=0xc0200000 \
+    -append console=ttyS0 \
+    -append earlycon=sbi \
+    -append keep_bootcon \
+    -append bootmem_debug \
     -kernel """

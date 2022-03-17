@@ -8,7 +8,7 @@ use riscv_page_tables::PlatformPageTable;
 use riscv_pages::{PageAddr4k, PageOwnerId, PageSize4k, Pfn, PhysAddr, SequentialPages};
 use riscv_regs::{GeneralPurposeRegisters, GprIndex, GuestExit, SCause, SupervisorExceptionCause};
 use sbi::Error as SbiError;
-use sbi::{self, ResetFunction, SbiMessage, SbiReturn};
+use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 
 use crate::data_measure::DataMeasure;
 use crate::print_util::*;
@@ -253,30 +253,30 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         // determine the call from a7, a6, and a2-5, put error code in a0 and return value in a1.
         // a0 and a1 aren't set by legacy extensions so the block below yields an `Option` that is
         // written when set to `Some(val)`.
-        let result: core::result::Result<Option<SbiReturn>, sbi::Error> =
-            SbiMessage::from_regs(&self.info.gprs).and_then(|msg| {
-                match msg {
-                    SbiMessage::PutChar(c) => {
-                        // put char - legacy command
-                        print!("{}", c as u8 as char);
-                        Ok(None)
-                    }
-                    SbiMessage::Reset(r) => {
-                        match r {
-                            ResetFunction::Reset {
-                                reset_type: _,
-                                reason: _,
-                            } => {
-                                // TODO do shutdown of VM or system if from primary host VM
-                                println!("Vm shutdown/reboot request");
-                                crate::poweroff();
-                            }
+        let result = SbiMessage::from_regs(&self.info.gprs).and_then(|msg| {
+            match msg {
+                SbiMessage::PutChar(c) => {
+                    // put char - legacy command
+                    print!("{}", c as u8 as char);
+                    Ok(None)
+                }
+                SbiMessage::Reset(r) => {
+                    match r {
+                        ResetFunction::Reset {
+                            reset_type: _,
+                            reason: _,
+                        } => {
+                            // TODO do shutdown of VM or system if from primary host VM
+                            println!("Vm shutdown/reboot request");
+                            crate::poweroff();
                         }
                     }
-                    SbiMessage::Base(_) => Err(SbiError::NotSupported), // TODO
-                    SbiMessage::HartState(_) => Err(SbiError::NotSupported), // TODO
                 }
-            });
+                SbiMessage::Base(_) => Err(SbiError::NotSupported), // TODO
+                SbiMessage::HartState(_) => Err(SbiError::NotSupported), // TODO
+                SbiMessage::Tee(tee_func) => Ok(Some(self.handle_tee_msg(tee_func))),
+            }
+        });
 
         match result {
             Ok(Some(sbi_ret)) => {
@@ -295,6 +295,46 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
                     .gprs
                     .set_reg(GprIndex::A0, SbiReturn::from(error_code).error_code as u64);
             }
+        }
+    }
+
+    fn handle_tee_msg(&mut self, tee_func: TeeFunction) -> SbiReturn {
+        use TeeFunction::*;
+        match tee_func {
+            TvmCreate(state_page) => self.add_guest(state_page).into(),
+            TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
+            AddPageTablePages {
+                guest_id,
+                page_addr,
+                num_pages,
+            } => self
+                .guest_add_page_table_pages(guest_id, page_addr, num_pages)
+                .into(),
+            AddPages {
+                guest_id,
+                page_addr,
+                page_type,
+                num_pages,
+                gpa,
+                measure_preserve,
+            } => self
+                .guest_add_pages(
+                    guest_id,
+                    page_addr,
+                    page_type,
+                    num_pages,
+                    gpa,
+                    measure_preserve,
+                )
+                .into(),
+            Finalize { guest_id } => self.guest_finalize(guest_id).into(),
+            Run { guest_id } => self.guest_run(guest_id).into(),
+            RemovePages {
+                guest_id,
+                gpa,
+                remap_addr: _, // TODO - remove
+                num_pages,
+            } => self.guest_rm_pages(guest_id, gpa, num_pages).into(),
         }
     }
 

@@ -10,6 +10,14 @@ strip = "debuginfo"
 codegen-units = 1
 panic = "abort"
 
+[[bin]]
+name = "salus"
+path = "src/main.rs"
+
+[[bin]]
+name = "tellus"
+path = "src/tellus.rs"
+
 [dependencies]
 fdt = { path = "./fdt" }
 page_collections = { path = "./page-collections" }

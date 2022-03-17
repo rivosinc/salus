@@ -6,3 +6,4 @@ target/
 !/Cargo.lock
 lcov.info
 .vscode
+tellus_raw

@@ -14,6 +14,7 @@ mod abort;
 mod asm;
 mod data_measure;
 mod print_util;
+mod test_measure;
 mod vm;
 mod vm_pages;
 

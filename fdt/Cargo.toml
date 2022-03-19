@@ -6,10 +6,9 @@ edition = "2021"
 [lib]
 path = "src/fdt.rs"
 
-[dependencies]
-
-# use the fdt-rs crate without default features to allow nostd
 # TODO - vendor fdt-rs or find a better solution with fewer dependencies.
+# use the fdt-rs crate without default features to allow nostd
 [dependencies.fdt-rs]
-version = "0.4.3"
+git = "ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/fdt-rs.git"
+branch = "rivos/main"
 default-features = false

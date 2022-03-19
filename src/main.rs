@@ -95,11 +95,9 @@ unsafe fn pass_device_tree(hw_fdt_addr: u64, host_dt_addr: u64, host_ram_size: u
 
     let host_slice = slice::from_raw_parts_mut(host_dt_addr as *mut u8, dt_size);
 
-    // Start with the host DT equal to the hardware DT.
-    host_slice.copy_from_slice(hw_dt_slice);
-
     // Update memory size - TODO - other modifications
-    set_fdt_host_ram_size(host_slice, host_ram_size);
+    set_fdt_host_ram_size(hw_dt_slice, host_slice, host_ram_size);
+    assert!(host_ram_size == system_ram_size(host_dt_addr).unwrap());
 
     dt_size as u64
 }

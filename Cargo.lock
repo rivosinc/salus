@@ -30,8 +30,7 @@ dependencies = [
 [[package]]
 name = "fdt-rs"
 version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99a40cabc11c8258822a593f5c51f2d9f4923e715ca9e2a0630cf77ae15f390b"
+source = "git+ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/fdt-rs.git?branch=rivos/main#9326111c8f8e902dc45713dcd9fc5b20c832484d"
 dependencies = [
  "endian-type-rs",
  "fallible-iterator",
@@ -99,9 +98,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.15"
+version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "864d3e96a899863136fc6e99f3d7cae289dafe43bf2c5ac19b70df7210c0a145"
+checksum = "632d02bff7f874a36f33ea8bb416cd484b90cc66c1194b1a1110d067a7013f58"
 dependencies = [
  "proc-macro2",
 ]
@@ -137,7 +136,6 @@ name = "salus"
 version = "0.1.0"
 dependencies = [
  "fdt",
- "fdt-rs",
  "page_collections",
  "riscv_page_tables",
  "riscv_pages",
@@ -190,9 +188,9 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "syn"
-version = "1.0.89"
+version = "1.0.90"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea297be220d52398dcc07ce15a209fce436d361735ac1db700cab3b6cdfb9f54"
+checksum = "704df27628939572cd88d33f171cd6f896f4eaca85252c6e0a72d8d8287ee86f"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -25,9 +25,3 @@ riscv_page_tables = { path = "./riscv-page-tables" }
 riscv_pages = { path = "./riscv-pages" }
 riscv_regs = { path = "./riscv-regs" }
 sbi = { path = "./sbi" }
-
-# use the fdt-rs crate without default features to allow nostd
-# TODO - vendor fdt-rs or find a better solution with fewer dependencies.
-[dependencies.fdt-rs]
-version = "0.4.3"
-default-features = false

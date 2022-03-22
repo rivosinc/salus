@@ -77,15 +77,12 @@ pub fn get_ram_size(fdt: &[u8]) -> u64 {
 
     while let Ok(Some(prop)) = props.next() {
         if prop.name().unwrap_or("noname") == "reg" {
-            // wild ass hack here to tell the host about the amount of memory it's allotted.
-            // TODO - Add a reasonable way to update a device tree.
-            let prop_slice = &prop.raw()[8..];
-            let ram_size_bytes: [u8; 8] = prop_slice.try_into().unwrap();
-            let ram_size = u64::from_be_bytes(ram_size_bytes);
-            return ram_size;
+            // u64(1) is used because the host ram size is at index 1 in
+            // the property buffer. We know this because #address-cells is 2
+            return prop.u64(1).unwrap();
         }
     }
-    
+
     0
 }
 

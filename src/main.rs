@@ -20,7 +20,7 @@ mod vm;
 mod vm_pages;
 
 use abort::abort;
-use fdt::{get_dt_len, get_ram_size, set_fdt_host_ram_size};
+use fdt::*;
 use print_util::*;
 use riscv_page_tables::page_tracking::HypMemoryPages;
 use riscv_page_tables::*;
@@ -31,8 +31,9 @@ use vm_pages::HostRootBuilder;
 
 const RAM_BASE: u64 = 0x8000_0000;
 
-// Stick local data _after_ the stack. TODO - just a guess for now
-const CORE_RAM_SIZE: u64 = 0x300_0000;
+extern "C" {
+    static _stack_end: u8;
+}
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -107,21 +108,23 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
     // put the host DT somewhere the host can read it.
     const HOST_DT_OFFSET: u64 = 0x220_0000;
 
-    let first_4k_addr = PageAddr4k::new(PhysAddr::new(RAM_BASE)).unwrap();
-
-    let ram_size = unsafe {
-        // Safe because we trust that the firmware passed a valid FDT.
-        // and the host hasn't started so it's safe to write to its memory.
-        system_ram_size(fdt_addr).unwrap()
-    };
-
-    let ram_start_page = PageAddr::new(PhysAddr::new(RAM_BASE)).unwrap();
-    let usable_ram_start = RAM_BASE
-        .checked_add(CORE_RAM_SIZE)
-        .map(PhysAddr::new)
-        .and_then(PageAddr::new)
+    // Safe because we trust that the firmware passed a valid FDT.
+    // and the host hasn't started so it's safe to write to its memory.
+    let hyp_fdt_len = unsafe { get_dt_len(fdt_addr) };
+    let hyp_fdt_end = fdt_addr
+        .checked_add(hyp_fdt_len.try_into().unwrap())
         .unwrap();
-    let hw_map = unsafe { HwMemMap::new(ram_start_page, ram_size, usable_ram_start) };
+    let (ram_base, ram_size) = unsafe { get_mem_info(fdt_addr) };
+
+    // Safe because we trust the linker placed _stack_end correctly.
+    let hyp_stack_end = unsafe { core::ptr::addr_of!(_stack_end) as u64 };
+
+    // We assume that the FDT is placed after the hypervisor image and that everything up until
+    // the end of the FDT is unusable
+    assert!(hyp_stack_end <= fdt_addr);
+    let ram_start_page = PageAddr4k::new(PhysAddr::new(ram_base)).unwrap();
+    let usable_start_page = PageAddr4k::with_round_up(PhysAddr::new(hyp_fdt_end));
+    let hw_map = unsafe { HwMemMap::new(ram_start_page, ram_size, usable_start_page) };
     let mut hyp_mem = HypMemoryPages::new(hw_map);
 
     let host_guests_pages =
@@ -150,11 +153,11 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
     };
 
     let data_page_count = (HOST_DT_OFFSET + dt_len) / PageSize4k::SIZE_BYTES + 1;
-    let first_zero_addr = first_4k_addr.checked_add_pages(data_page_count).unwrap();
+    let first_zero_addr = ram_start_page.checked_add_pages(data_page_count).unwrap();
 
     let host_root_pages = host_root_builder
         .add_4k_data_pages(
-            first_4k_addr,
+            ram_start_page,
             host_pages.by_ref().take(data_page_count as usize),
         )
         .add_4k_pages(first_zero_addr, host_pages)

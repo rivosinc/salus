@@ -101,6 +101,23 @@ impl<S: PageSize> PageAddr<S> {
         }
     }
 
+    /// Creates a `PageAddr` from a `PhysAddr`, rounding up to the nearest multiple of the page
+    /// size.
+    pub fn with_round_up(addr: PhysAddr) -> Self {
+        Self {
+            addr: PhysAddr::new((addr.bits() + S::SIZE_BYTES - 1) & !(S::SIZE_BYTES - 1)),
+            phantom: PhantomData,
+        }
+    }
+
+    /// Same as above, but rounding down to the nearest multiple of the page size.
+    pub fn with_round_down(addr: PhysAddr) -> Self {
+        Self {
+            addr: PhysAddr::new(addr.bits() & !(S::SIZE_BYTES - 1)),
+            phantom: PhantomData,
+        }
+    }
+
     /// Returns the first 4k page address. This is OK because all page sizes must be a multiple of
     /// 4k.
     pub fn get_4k_addr(&self) -> PageAddr<PageSize4k> {
@@ -365,6 +382,17 @@ mod tests {
         assert!(PageAddr::<PageSize1GB>::new(PhysAddr::new(0x4000_0000)).is_some());
         assert!(PageAddr::<PageSize512GB>::new(PhysAddr::new(0x4000_0000)).is_none());
         assert!(PageAddr::<PageSize512GB>::new(PhysAddr::new(0x80_0000_0000)).is_some());
+    }
+
+    #[test]
+    fn round_phys() {
+        assert!(
+            PageAddr::<PageSize4k>::with_round_up(PhysAddr::new(0x12_2345)).bits() == 0x12_3000
+        );
+        assert!(
+            PageAddr::<PageSize4k>::with_round_down(PhysAddr::new(0x4567_9521)).bits()
+                == 0x4567_9500
+        );
     }
 
     #[test]

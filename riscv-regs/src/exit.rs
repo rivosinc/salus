@@ -8,7 +8,7 @@ pub enum SupervisorInterruptCause {
     SupervisorSoftware,
     VirtualSupervisorSoftware,
     SupervisorExternal,
-    VirtualSupervisoeExternal,
+    VirtualSupervisorExternal,
     SupervisorGuestExternal,
 }
 

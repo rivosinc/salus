@@ -17,6 +17,7 @@ mod print_sbi;
 use sbi::SbiMessage;
 
 use ecall::ecall_send;
+use device_tree::Fdt;
 use print_sbi::*;
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -64,7 +65,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     console_write_str("Tellus: Booting the test VM\n");
 
     // Safe becasue we trust the host to boot with a valid fdt_addr pass in register a1.
-    let (mem_base, mem_size) = unsafe { fdt::get_mem_info(fdt_addr) };
+    let fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {
+	Ok(f) => f,
+	Err(e) => panic!("Bad FDT from hypervisor: {}", e),
+    };
+    let (mem_base, mem_size) = fdt.get_mem_info();
     println!("Tellus - Mem base: {:x} size: {:x}", mem_base, mem_size);
 
     // Try to create a TEE

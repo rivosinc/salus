@@ -9,6 +9,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d468802bab17cbc0cc575e9b053f41e72aa36bfa6b7f55e3529ffa43161b97fa"
 
 [[package]]
+name = "device_tree"
+version = "0.1.0"
+dependencies = [
+ "fdt-rs",
+]
+
+[[package]]
 name = "endian-type-rs"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21,16 +28,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
 
 [[package]]
-name = "fdt"
-version = "0.1.0"
-dependencies = [
- "fdt-rs",
-]
-
-[[package]]
 name = "fdt-rs"
 version = "0.4.3"
-source = "git+ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/fdt-rs.git?branch=rivos/main#9326111c8f8e902dc45713dcd9fc5b20c832484d"
+source = "git+ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/fdt-rs.git?branch=rivos/main#9e491e40f04e517f8396a3f1af253ff149368e35"
 dependencies = [
  "endian-type-rs",
  "fallible-iterator",
@@ -135,7 +135,7 @@ dependencies = [
 name = "salus"
 version = "0.1.0"
 dependencies = [
- "fdt",
+ "device_tree",
  "page_collections",
  "riscv_page_tables",
  "riscv_pages",

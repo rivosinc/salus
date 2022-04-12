@@ -19,7 +19,7 @@ name = "tellus"
 path = "src/tellus.rs"
 
 [dependencies]
-fdt = { path = "./fdt" }
+device_tree = { path = "./device-tree" }
 page_collections = { path = "./page-collections" }
 riscv_page_tables = { path = "./riscv-page-tables" }
 riscv_pages = { path = "./riscv-pages" }

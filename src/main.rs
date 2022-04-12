@@ -20,7 +20,7 @@ mod vm;
 mod vm_pages;
 
 use abort::abort;
-use fdt::*;
+use device_tree::Fdt;
 use print_util::*;
 use riscv_page_tables::page_tracking::HypMemoryPages;
 use riscv_page_tables::*;
@@ -66,39 +66,27 @@ pub fn poweroff() -> ! {
     abort()
 }
 
-/// Gets memory info from the passed device tree.
-/// Returns the size of RAM available to the system.
-/// # Safety:
-///     `hw_fdt_addr` must point to the DT passed from firmware and have no mutable references held.
-unsafe fn system_ram_size(hw_fdt_addr: u64) -> Option<u64> {
-    // Create a slice of the fdt passed from firmware
-    let dt_size = get_dt_len(hw_fdt_addr);
-    // Safe if hw_fdt_addr was pointing to a valid FDT
-    let hw_dt_slice = slice::from_raw_parts(hw_fdt_addr as *const u8, dt_size);
-
-    let ram_size = get_ram_size(hw_dt_slice);
-
-    Some(ram_size)
-}
-
 /// Adds a device tree to host memory at the host offset given.
 /// Returns the size of the host's device tree.
 /// # Safety:
-///     `hw_fdt_addr` must point to the DT passed from firmware and have no mutable references held.
 ///     All memory past the end of hypervisor memory must be unused and available for writing. (this
 ///     will all be assigned to the host).
 ///     `host_dt_addr` must poing to memory that is safe for writing `host_ram_size` bytes to.
-unsafe fn pass_device_tree(hw_fdt_addr: u64, host_dt_addr: u64, host_ram_size: u64) -> u64 {
+unsafe fn pass_device_tree(hyp_fdt: &Fdt, host_dt_addr: u64, host_ram_size: u64) -> u64 {
     // Create a slice of the fdt passed from firmware
-    let dt_size = get_dt_len(hw_fdt_addr);
-    // Safe if hw_fdt_addr was pointing to a valid FDT
-    let hw_dt_slice = slice::from_raw_parts(hw_fdt_addr as *const u8, dt_size);
-
-    let host_slice = slice::from_raw_parts_mut(host_dt_addr as *mut u8, dt_size);
+    let dt_size = hyp_fdt.size();
 
     // Update memory size - TODO - other modifications
-    set_fdt_host_ram_size(hw_dt_slice, host_slice, host_ram_size);
-    assert!(host_ram_size == system_ram_size(host_dt_addr).unwrap());
+    let host_slice = slice::from_raw_parts_mut(host_dt_addr as *mut u8, dt_size);
+    hyp_fdt.write_with_updated_memory_size(host_slice, host_ram_size);
+
+    // Make sure the new FDT parses and the memory was updated as expected.
+    let host_fdt = match Fdt::new_from_raw_pointer(host_dt_addr as *const u8) {
+	Ok(fdt) => fdt,
+	Err(e) => panic!("Failed to parse host FDT: {}", e),
+    };
+    let (_, host_fdt_ram_size) = host_fdt.get_mem_info();
+    assert!(host_ram_size == host_fdt_ram_size);
 
     dt_size as u64
 }
@@ -109,12 +97,12 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
     const HOST_DT_OFFSET: u64 = 0x220_0000;
 
     // Safe because we trust that the firmware passed a valid FDT.
-    // and the host hasn't started so it's safe to write to its memory.
-    let hyp_fdt_len = unsafe { get_dt_len(fdt_addr) };
-    let hyp_fdt_end = fdt_addr
-        .checked_add(hyp_fdt_len.try_into().unwrap())
-        .unwrap();
-    let (ram_base, ram_size) = unsafe { get_mem_info(fdt_addr) };
+    let hyp_fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {
+	Ok(fdt) => fdt,
+	Err(e) => panic!("Failed to read FDT: {}", e),
+    };
+    let hyp_fdt_end = fdt_addr.checked_add(hyp_fdt.size().try_into().unwrap()).unwrap();
+    let (ram_base, ram_size) = hyp_fdt.get_mem_info();
 
     // Safe because we trust the linker placed _stack_end correctly.
     let hyp_stack_end = unsafe { core::ptr::addr_of!(_stack_end) as u64 };
@@ -149,7 +137,7 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
         // zero out the data from qemu now that it's been copied to the destination pages.
         core::ptr::write_bytes(kern_addr as *mut u8, 0, kern_size);
 
-        pass_device_tree(fdt_addr, host_base + HOST_DT_OFFSET, host_size)
+        pass_device_tree(&hyp_fdt, host_base + HOST_DT_OFFSET, host_size)
     };
 
     let data_page_count = (HOST_DT_OFFSET + dt_len) / PageSize4k::SIZE_BYTES + 1;

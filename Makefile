@@ -22,7 +22,7 @@ run_tellus_gdb: tellus_bin salus_debug
 		     -nographic \
 		     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
 		     -kernel target/riscv64gc-unknown-none-elf/debug/salus \
-		     -device loader,file=tellus_raw,addr=0xc0200000
+		     -device guest-loader,kernel=tellus_raw,addr=0xc0200000
 
 run_tellus: tellus_bin salus
 	     qemu-system-riscv64 \
@@ -31,7 +31,7 @@ run_tellus: tellus_bin salus
 		     -nographic \
 		     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
 		     -kernel target/riscv64gc-unknown-none-elf/release/salus \
-		     -device loader,file=tellus_raw,addr=0xc0200000
+		     -device guest-loader,kernel=tellus_raw,addr=0xc0200000
 
 run_linux: salus
 	     qemu-system-riscv64 \
@@ -40,5 +40,5 @@ run_linux: salus
 		     -nographic \
 		     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
 		     -kernel target/riscv64gc-unknown-none-elf/release/salus \
-		     -device loader,file=../linux/arch/riscv/boot/Image,addr=0xc0200000 \
+		     -device guest-loader,kernel=../linux/arch/riscv/boot/Image,addr=0xc0200000 \
 		     -append "console=ttyS0 earlycon=sbi keep_bootcon bootmem_debug"

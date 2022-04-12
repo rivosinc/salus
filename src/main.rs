@@ -108,6 +108,11 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
     let hw_map = unsafe { HwMemMap::new(ram_start_page, mem_range.size(), usable_start_page) };
     let mut hyp_mem = HypMemoryPages::new(hw_map);
 
+    // Find where QEMU loaded the host kernel image.
+    let host_kernel = hyp_fdt.host_kernel_region().expect("No kernel image in FDT");
+    println!("Host VM kernel at 0x{:x}-0x{:x}", host_kernel.base(),
+	     host_kernel.base() + host_kernel.size() - 1);
+
     let host_guests_pages =
         match SequentialPages::<PageSize4k>::from_pages(hyp_mem.by_ref().take(2)) {
             Ok(s) => s,
@@ -119,16 +124,18 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
     let host_base = host_pages.next_addr().bits();
     let host_size = host_pages.remaining_size();
 
-    // This is not safe, assumes that the host kernel is loaded at 0xc020_0000 by qemu, that it
-    // doesn't overlap with hypervisor memory, and that it is less than 0x200_0000 long.
-    // TODO - find a better way to locate the host payload
+    // Not safe! Although we trust the FDT correctly specified where the host VM kernel is,
+    // there's no guarantee that it doesn't overlap with hypervisor memory and that we haven't
+    // already trampled over it.
+    //
+    // TODO: Sanity-check the kernel region and reserve it from hypervisor use from the start.
     let dt_len = unsafe {
-        // Not safe!
-        let kern_addr = 0xc020_0000 as *mut u8;
-        let kern_size = 0x200_0000;
-        core::ptr::copy(kern_addr, (host_base + 0x20_0000) as *mut u8, kern_size);
+        core::ptr::copy(host_kernel.base() as *const u8,
+			(host_base + 0x20_0000) as *mut u8,
+			host_kernel.size().try_into().unwrap());
         // zero out the data from qemu now that it's been copied to the destination pages.
-        core::ptr::write_bytes(kern_addr as *mut u8, 0, kern_size);
+        core::ptr::write_bytes(host_kernel.base() as *mut u8, 0,
+			       host_kernel.size().try_into().unwrap());
 
         pass_device_tree(&hyp_fdt, host_base + HOST_DT_OFFSET, host_size)
     };

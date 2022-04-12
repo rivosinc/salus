@@ -69,11 +69,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 	Ok(f) => f,
 	Err(e) => panic!("Bad FDT from hypervisor: {}", e),
     };
-    let (mem_base, mem_size) = fdt.get_mem_info();
-    println!("Tellus - Mem base: {:x} size: {:x}", mem_base, mem_size);
+    let mem_range = fdt.memory_regions().next().unwrap();
+    println!("Tellus - Mem base: {:x} size: {:x}", mem_range.base(), mem_range.size());
 
     // Try to create a TEE
-    let mut next_page = (mem_base + mem_size / 2) & !0x3fff;
+    let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCreate(next_page));
     let vmid = ecall_send(&msg).expect("Tellus - TvmCreate returned error");
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");

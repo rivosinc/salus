@@ -80,14 +80,6 @@ unsafe fn pass_device_tree(hyp_fdt: &Fdt, host_dt_addr: u64, host_ram_size: u64)
     let host_slice = slice::from_raw_parts_mut(host_dt_addr as *mut u8, dt_size);
     hyp_fdt.write_with_updated_memory_size(host_slice, host_ram_size);
 
-    // Make sure the new FDT parses and the memory was updated as expected.
-    let host_fdt = match Fdt::new_from_raw_pointer(host_dt_addr as *const u8) {
-	Ok(fdt) => fdt,
-	Err(e) => panic!("Failed to parse host FDT: {}", e),
-    };
-    let (_, host_fdt_ram_size) = host_fdt.get_mem_info();
-    assert!(host_ram_size == host_fdt_ram_size);
-
     dt_size as u64
 }
 
@@ -102,7 +94,8 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
 	Err(e) => panic!("Failed to read FDT: {}", e),
     };
     let hyp_fdt_end = fdt_addr.checked_add(hyp_fdt.size().try_into().unwrap()).unwrap();
-    let (ram_base, ram_size) = hyp_fdt.get_mem_info();
+    // TODO: Handle discontiguous memory and reserved ranges.
+    let mem_range = hyp_fdt.memory_regions().next().unwrap();
 
     // Safe because we trust the linker placed _stack_end correctly.
     let hyp_stack_end = unsafe { core::ptr::addr_of!(_stack_end) as u64 };
@@ -110,9 +103,9 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
     // We assume that the FDT is placed after the hypervisor image and that everything up until
     // the end of the FDT is unusable
     assert!(hyp_stack_end <= fdt_addr);
-    let ram_start_page = PageAddr4k::new(PhysAddr::new(ram_base)).unwrap();
+    let ram_start_page = PageAddr4k::new(PhysAddr::new(mem_range.base())).unwrap();
     let usable_start_page = PageAddr4k::with_round_up(PhysAddr::new(hyp_fdt_end));
-    let hw_map = unsafe { HwMemMap::new(ram_start_page, ram_size, usable_start_page) };
+    let hw_map = unsafe { HwMemMap::new(ram_start_page, mem_range.size(), usable_start_page) };
     let mut hyp_mem = HypMemoryPages::new(hw_map);
 
     let host_guests_pages =

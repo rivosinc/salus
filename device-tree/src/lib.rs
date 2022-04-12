@@ -7,4 +7,4 @@
 
 mod fdt;
 
-pub use fdt::{Fdt, Error, Result};
+pub use fdt::{Fdt, FdtMemoryRegion, Error, Result};

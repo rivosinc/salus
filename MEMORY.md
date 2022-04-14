@@ -8,25 +8,25 @@ below:
 classDiagram
     class HwMemMap {
     }
-    class HypMemoryPages {
+    class HypPageAlloc {
     }
-    class HostMemoryPages {
+    class HostRootBuilder {
     }
     class VmPages {
     }
     class HostVm {
     }
-    HwMemMap --> HypMemoryPages : creates
-    HypMemoryPages --> HostMemoryPages : creates
-    HostMemoryPages --> VmPages : creates
+    HwMemMap --> HypPageAlloc : creates
+    HypPageAlloc --> HostRootBuilder : creates
+    HostRootBuilder --> VmPages : creates
     HostVm *-- VmPages
 ```
 
 `HwMemMap` holds the memory configuration of the system. It is created using
-the device tree as input. It is then converted in to a `HypMemoryPages` struct
+the device tree as input. It is then converted in to a `HypPageAlloc` struct
 that is used to allocate the pages needed for the hypervisor. After the
-hypervisor has taken it's pages, the remaining pages in `HypMemoryPages` are
-moved in to `HostMemoryPages`, which is used to build the host Vm and its
+hypervisor has taken it's pages, the remaining pages in `HypPageAlloc` are
+moved in to `HostRootBuilder`, which is used to build the host Vm and its
 `VmPages` structure.
 
 # Memory ownership

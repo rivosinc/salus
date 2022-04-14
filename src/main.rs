@@ -23,7 +23,6 @@ use abort::abort;
 use data_measure::DataMeasure;
 use device_tree::Fdt;
 use print_util::*;
-use riscv_page_tables::page_tracking::HypMemoryPages;
 use riscv_page_tables::*;
 use riscv_pages::*;
 use test_measure::TestMeasure;
@@ -187,7 +186,7 @@ fn test_boot_vm<T: PlatformPageTable, D: DataMeasure>(hart_id: u64, fdt_addr: u6
     // Where the host VM's physical address space starts.
     let host_start_page = mem_map.regions().nth(0).unwrap().base();
 
-    let mut hyp_mem = HypMemoryPages::new(mem_map);
+    let mut hyp_mem = HypPageAlloc::new(mem_map);
     let host_guests_pages =
         match SequentialPages::<PageSize4k>::from_pages(hyp_mem.by_ref().take(2)) {
             Ok(s) => s,

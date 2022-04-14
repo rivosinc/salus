@@ -15,7 +15,7 @@
 //! unique owner IDs, and per-page state such as current and previous owner. This is system-wide
 //! state updated whenever a page owner changes or a VM starts or stops.
 //! - `PageMap` - Per-page state (tracks the owner).
-//! - `HypMemoryPages` - Initial manager of physical memory. The hypervisor allocates pages from
+//! - `HypPageAlloc` - Initial manager of physical memory. The hypervisor allocates pages from
 //! here to store local state. It's turned in to a `PageState` and a pool of ram for the host VM.
 //! - `PageRange` - Provides an iterator of `Page`s. Used to pass chunks of memory to the various
 //! stages of system initialization.
@@ -23,7 +23,7 @@
 //!
 //! ## Initialization
 //!
-//! `HwMemMap` -> `HypMemoryPages` ---> `PageState`
+//! `HwMemMap` -> `HypPageAlloc` ---> `PageState`
 //!                                 \
 //!                                  -------> `PageRange`
 //!
@@ -55,7 +55,7 @@ pub use page_table::PlatformPageTable;
 pub use page_table::Result as PageTableResult;
 pub use page_tracking::Error as PageTrackingError;
 pub use page_tracking::Result as PageTrackingResult;
-pub use page_tracking::{HypMemoryPages, PageState};
+pub use page_tracking::{HypPageAlloc, PageState};
 pub use sv48x4::Sv48x4;
 
 pub mod pte;
@@ -91,7 +91,7 @@ mod tests {
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypMemoryPages::new(hw_map);
+        let hyp_mem = HypPageAlloc::new(hw_map);
         let (phys_pages, host_mem) = PageState::from(hyp_mem);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);

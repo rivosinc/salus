@@ -91,7 +91,7 @@ impl PageState {
     /// Creates a new PageState representing all pages in the system and returns all pages that are
     /// available for the primary host to use. The pages for the host will begin at the next 2MB
     /// boundary.
-    pub fn from(mut hyp_mem: HypMemoryPages) -> (Self, PageRange) {
+    pub fn from(mut hyp_mem: HypPageAlloc) -> (Self, PageRange) {
         let active_guests = Self::make_active_guest_vec(&mut hyp_mem);
 
         let state_storage_page = hyp_mem.next_page();
@@ -119,7 +119,7 @@ impl PageState {
     }
 
     // Creates the PageVec for holding all active guests
-    fn make_active_guest_vec(hyp_mem: &mut HypMemoryPages) -> PageVec<PageOwnerId> {
+    fn make_active_guest_vec(hyp_mem: &mut HypPageAlloc) -> PageVec<PageOwnerId> {
         // TODO - hard coded to two pages worth of guests. - really dumb if page size is 1G
         let pages = [hyp_mem.next_page(), hyp_mem.next_page()];
         let seq_pages = match SequentialPages::from_pages(pages) {
@@ -173,17 +173,17 @@ impl PageState {
     }
 }
 
-/// `HypMemoryPages` is created with reserved memory and memory for all struct pages assigned. It is
-/// used to allocate pages for the hypervisor to use for other local data.
-/// Once the hypervisor has taken the pages it needs, `HypMemoryPages` should be converted to
-/// `PageRange` for the host to allocate from.
-pub struct HypMemoryPages {
+/// `HypPageAlloc` is created from the hardware memory map and builds the array of PageInfo
+/// structs for all pages in the system. It is used to allocate pages for the hypervisor to use
+/// for other local data. Once the hypervisor has taken the pages it needs, `HypPageAlloc`
+/// should be converted to `PageRange` for the host to allocate from.
+pub struct HypPageAlloc {
     next_page: AlignedPageAddr<PageSize4k>,
     pages: PageMap,
 }
 
-impl HypMemoryPages {
-    /// Creates a new `HypMemoryPages`. The memory map passed in contains information about what
+impl HypPageAlloc {
+    /// Creates a new `HypPageAlloc`. The memory map passed in contains information about what
     /// physical memory can be used by the machine.
     pub fn new(mmap: HwMemMap) -> Self {
         // TODO: Support non-contiguous free memory regions.
@@ -315,7 +315,7 @@ impl HypMemoryPages {
     }
 }
 
-impl Iterator for HypMemoryPages {
+impl Iterator for HypPageAlloc {
     type Item = Page<PageSize4k>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -329,7 +329,7 @@ mod tests {
     use super::*;
     use crate::HwMemMapBuilder;
 
-    fn stub_hyp_mem() -> HypMemoryPages {
+    fn stub_hyp_mem() -> HypPageAlloc {
         const ONE_MEG: usize = 1024 * 1024;
         const MEM_ALIGN: usize = 2 * ONE_MEG;
         const MEM_SIZE: usize = 256 * ONE_MEG;
@@ -348,7 +348,7 @@ mod tests {
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypMemoryPages::new(hw_map);
+        let hyp_mem = HypPageAlloc::new(hw_map);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
         hyp_mem

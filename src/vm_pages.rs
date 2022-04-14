@@ -4,7 +4,7 @@
 
 use core::marker::PhantomData;
 
-use riscv_page_tables::{HypMemoryPages, PageRange, PageState, PlatformPageTable};
+use riscv_page_tables::{HypPageAlloc, PageRange, PageState, PlatformPageTable};
 use riscv_pages::{
     AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize4k, SequentialPages, UnmappedPage,
 };
@@ -215,7 +215,7 @@ pub struct HostRootBuilder<T: PlatformPageTable, D: DataMeasure, S: HostRootStat
 
 impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateEmpty> {
     /// To be used to create the initial `HostRootPages` for the host VM.
-    pub fn from_hyp_mem(mut hyp_mem: HypMemoryPages) -> (PageRange, Self) {
+    pub fn from_hyp_mem(mut hyp_mem: HypPageAlloc) -> (PageRange, Self) {
         hyp_mem.discard_to_align(T::TOP_LEVEL_ALIGN as usize);
         let root_table_pages = match SequentialPages::from_pages(hyp_mem.by_ref().take(4)) {
             Err(_) => unreachable!(),

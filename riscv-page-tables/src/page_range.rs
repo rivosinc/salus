@@ -2,12 +2,12 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use riscv_pages::{Page, PageAddr, PageSize4k};
+use riscv_pages::{Page, AlignedPageAddr, PageSize4k};
 
 /// A range of pages with the owner set that can be consumed as an iterator.
 pub struct PageRange {
-    next_page: PageAddr<PageSize4k>,
-    end_page: PageAddr<PageSize4k>,
+    next_page: AlignedPageAddr<PageSize4k>,
+    end_page: AlignedPageAddr<PageSize4k>,
 }
 
 impl PageRange {
@@ -15,7 +15,7 @@ impl PageRange {
     /// # Safety
     /// The caller must guarantee that the memory in the range is uniquely owned. Passing a range of
     /// pages to `PageRange::new` assigns ownership of all memory in that range.
-    pub(crate) unsafe fn new(start: PageAddr<PageSize4k>, end: PageAddr<PageSize4k>) -> Self {
+    pub(crate) unsafe fn new(start: AlignedPageAddr<PageSize4k>, end: AlignedPageAddr<PageSize4k>) -> Self {
         Self {
             next_page: start,
             end_page: end,
@@ -23,7 +23,7 @@ impl PageRange {
     }
 
     /// Get the next 4k page available to the host.
-    pub fn next_addr(&self) -> PageAddr<PageSize4k> {
+    pub fn next_addr(&self) -> AlignedPageAddr<PageSize4k> {
         self.next_page
     }
 

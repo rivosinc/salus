@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use core::slice;
 
 use riscv_pages::{
-    CleanPage, Page, Page4k, PageAddr, PageAddr4k, PageOwnerId, PageSize, PageSize2MB, PageSize4k,
+    CleanPage, Page, Page4k, AlignedPageAddr, AlignedPageAddr4k, PageOwnerId, PageSize, PageSize2MB, PageSize4k,
     SequentialPages, UnmappedPage,
 };
 
@@ -79,7 +79,7 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             // to a 4 kilobyte page of PTES for the next level.
             let ptes: &'a mut [Pte] = unsafe {
                 slice::from_raw_parts_mut(
-                    PageAddr::<PageSize4k>::try_from(pte.pfn()).unwrap().bits() as *mut Pte,
+                    AlignedPageAddr::<PageSize4k>::try_from(pte.pfn()).unwrap().bits() as *mut Pte,
                     L::NextLevel::TABLE_PAGES * 4096,
                 )
             };
@@ -105,7 +105,7 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             let page = unsafe {
                 // Safe because the page table ownes this page and is giving up ownership by
                 // returning it.
-                Page::new(PageAddr::try_from(pte.pfn()).ok()?)
+                Page::new(AlignedPageAddr::try_from(pte.pfn()).ok()?)
             };
             pte.clear();
             Some(page)
@@ -121,7 +121,7 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             let page = unsafe {
                 // Safe because the page table owns this page and is giving up ownership by
                 // returning it.
-                Page::new(PageAddr::try_from(pte.pfn()).ok()?)
+                Page::new(AlignedPageAddr::try_from(pte.pfn()).ok()?)
             };
             pte.invalidate();
             Some(page)
@@ -327,7 +327,7 @@ pub trait PlatformPageTable {
     /// Guarantees that the full range of pages can be unmapped.
     fn unmap_range<S: PageSize>(
         &mut self,
-        addr: PageAddr<S>,
+        addr: AlignedPageAddr<S>,
         num_pages: u64,
     ) -> Option<UnmapIter<Self>>
     where
@@ -337,7 +337,7 @@ pub trait PlatformPageTable {
     /// Guarantees that the full range of pages can be unmapped.
     fn invalidate_range<S: PageSize>(
         &mut self,
-        addr: PageAddr<S>,
+        addr: AlignedPageAddr<S>,
         num_pages: u64,
     ) -> Option<InvalidateIter<Self>>
     where
@@ -345,7 +345,7 @@ pub trait PlatformPageTable {
 
     /// Returns the address of the top level page table.
     /// This is the value that should be written to satp/hgatp to start using the page tables.
-    fn get_root_address(&self) -> PageAddr4k;
+    fn get_root_address(&self) -> AlignedPageAddr4k;
 
     /// Calculates the number of PTE pages that are needed to map all pages for `num_pages` maped
     /// pages.

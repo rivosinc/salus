@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use page_collections::page_vec::PageVec;
-use riscv_pages::{PageAddr, PageOwnerId, PageSize4k};
+use riscv_pages::{AlignedPageAddr, PageOwnerId, PageSize4k};
 
 use crate::{Error, Result};
 
@@ -95,19 +95,19 @@ impl Pages {
     }
 
     /// Returns a reference to the `PageInfo` struct for the 4k page at `addr`.
-    pub fn get(&self, addr: PageAddr<PageSize4k>) -> Option<&PageInfo> {
+    pub fn get(&self, addr: AlignedPageAddr<PageSize4k>) -> Option<&PageInfo> {
         let index = addr.index().checked_sub(self.base_page_index)?;
         self.pages.get(index)
     }
 
     /// Returns a mutable reference to the `PageInfo` struct for the 4k page at `addr`.
-    pub fn get_mut(&mut self, addr: PageAddr<PageSize4k>) -> Option<&mut PageInfo> {
+    pub fn get_mut(&mut self, addr: AlignedPageAddr<PageSize4k>) -> Option<&mut PageInfo> {
         let index = addr.index().checked_sub(self.base_page_index)?;
         self.pages.get_mut(index)
     }
 
     /// Returns the number of pages after the page at `addr`
-    pub fn num_after(&self, addr: PageAddr<PageSize4k>) -> Option<usize> {
+    pub fn num_after(&self, addr: AlignedPageAddr<PageSize4k>) -> Option<usize> {
         let offset = addr.index().checked_sub(self.base_page_index)?;
         self.pages.len().checked_sub(offset)
     }
@@ -127,8 +127,8 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(4096))
         };
-        let addr: PageAddr<PageSize4k> =
-            PageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
+        let addr: AlignedPageAddr<PageSize4k> =
+            AlignedPageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
         let page = unsafe {
             // Test-only: safe because the backing memory is leaked so the memory used for this page
             // will live until the test exits.
@@ -147,10 +147,10 @@ mod tests {
         let first_index = 1000u64;
         let pages = Pages::new(pages, first_index as usize);
 
-        let before_addr: PageAddr<PageSize4k> =
-            PageAddr::new(PhysAddr::new((first_index - 1) * 4096)).unwrap();
-        let first_addr: PageAddr<PageSize4k> =
-            PageAddr::new(PhysAddr::new(first_index * 4096)).unwrap();
+        let before_addr: AlignedPageAddr<PageSize4k> =
+            AlignedPageAddr::new(PhysAddr::new((first_index - 1) * 4096)).unwrap();
+        let first_addr: AlignedPageAddr<PageSize4k> =
+            AlignedPageAddr::new(PhysAddr::new(first_index * 4096)).unwrap();
         let last_addr = first_addr.checked_add_pages(num_pages - 1).unwrap();
         let after_addr = last_addr.checked_add_pages(1).unwrap();
 

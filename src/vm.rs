@@ -5,7 +5,7 @@
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::PlatformPageTable;
-use riscv_pages::{PageAddr4k, PageOwnerId, PageSize4k, Pfn, PhysAddr, SequentialPages};
+use riscv_pages::{AlignedPageAddr4k, PageOwnerId, PageSize4k, Pfn, PhysAddr, SequentialPages};
 use riscv_regs::{GeneralPurposeRegisters, GprIndex, GuestExit, SCause, SupervisorExceptionCause};
 use sbi::Error as SbiError;
 use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
@@ -375,7 +375,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         }
 
         let from_page_addr =
-            PageAddr4k::new(PhysAddr::new(donor_pages_addr)).ok_or(SbiError::InvalidAddress)?;
+            AlignedPageAddr4k::new(PhysAddr::new(donor_pages_addr)).ok_or(SbiError::InvalidAddress)?;
 
         let (guest_builder, state_page) = self
             .vm_pages
@@ -434,7 +434,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         num_pages: u64,
     ) -> sbi::Result<u64> {
         let from_page_addr =
-            PageAddr4k::new(PhysAddr::new(from_addr)).ok_or(SbiError::InvalidAddress)?;
+            AlignedPageAddr4k::new(PhysAddr::new(from_addr)).ok_or(SbiError::InvalidAddress)?;
 
         self.guests
             .as_mut()
@@ -454,7 +454,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
 
     fn guest_rm_pages(&mut self, guest_id: u64, gpa: u64, num_pages: u64) -> sbi::Result<u64> {
         println!("Salus - Rm pages {guest_id:x} gpa:{gpa:x} num_pages:{num_pages}",);
-        let from_page_addr = PageAddr4k::new(PhysAddr::new(gpa)).ok_or(SbiError::InvalidAddress)?;
+        let from_page_addr = AlignedPageAddr4k::new(PhysAddr::new(gpa)).ok_or(SbiError::InvalidAddress)?;
 
         self.guests
             .as_mut()
@@ -489,9 +489,9 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         }
 
         let from_page_addr =
-            PageAddr4k::new(PhysAddr::new(from_addr)).ok_or(SbiError::InvalidAddress)?;
+            AlignedPageAddr4k::new(PhysAddr::new(from_addr)).ok_or(SbiError::InvalidAddress)?;
         let to_page_addr =
-            PageAddr4k::new(PhysAddr::new(to_addr)).ok_or(SbiError::InvalidAddress)?;
+            AlignedPageAddr4k::new(PhysAddr::new(to_addr)).ok_or(SbiError::InvalidAddress)?;
 
         self.guests
             .as_mut()

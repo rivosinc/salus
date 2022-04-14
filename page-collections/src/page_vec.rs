@@ -8,7 +8,7 @@ use core::mem::{self, ManuallyDrop};
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
 
-use riscv_pages::{Page4k, PageAddr, PageSize, PageSize4k, PhysAddr, SequentialPages};
+use riscv_pages::{Page4k, AlignedPageAddr, PageSize, PageSize4k, PhysAddr, SequentialPages};
 
 const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 
@@ -74,7 +74,7 @@ impl<T> PageVec<T> {
             // Safe to create `SequentialPages` from the contained vec as the constructor of PageVec
             // guarantees the owned pages originated from `SequentialPages` so must be valid.
             SequentialPages::from_mem_range(
-                PageAddr::new(PhysAddr::new(self.0.as_ptr() as u64)).unwrap(),
+                AlignedPageAddr::new(PhysAddr::new(self.0.as_ptr() as u64)).unwrap(),
                 vec_page_count as u64,
             )
         }
@@ -164,7 +164,7 @@ impl<T, I: SliceIndex<[T]>> IndexMut<I> for PageVec<T> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use riscv_pages::PageAddr4k;
+    use riscv_pages::AlignedPageAddr4k;
 
     #[test]
     fn basic() {
@@ -174,7 +174,7 @@ mod tests {
         // This is not safe, but it's only for a test and mem isn't touched until backing_page is
         // dropped.
         let backing_page =
-            unsafe { Page4k::new(PageAddr4k::new(PhysAddr::new(aligned_addr)).unwrap()) };
+            unsafe { Page4k::new(AlignedPageAddr4k::new(PhysAddr::new(aligned_addr)).unwrap()) };
 
         let seq_pages = match SequentialPages::from_pages([backing_page]) {
             Ok(p) => p,

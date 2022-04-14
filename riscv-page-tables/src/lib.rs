@@ -79,7 +79,7 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_page = PageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
+        let start_page = AlignedPageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
         let hw_map = unsafe {
             // not safe, but this is only a test...
             HwMemMap::new(start_page, MEM_SIZE as u64, start_page)

@@ -83,7 +83,7 @@ impl Sv48x4 {
         self.phys_pages.owner(addr) == self.owner
     }
 
-    fn host_4k_addr(&mut self, guest_phys_addr: u64) -> Option<PageAddr4k> {
+    fn host_4k_addr(&mut self, guest_phys_addr: u64) -> Option<AlignedPageAddr4k> {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
 
@@ -91,20 +91,20 @@ impl Sv48x4 {
         let mut l3 = match l4.entry_for_addr_mut(guest_phys_addr) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
-            Valid(Leaf(pte)) => return Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
+            Valid(Leaf(pte)) => return Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
         };
         let mut l2 = match l3.entry_for_addr_mut(guest_phys_addr) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
-            Valid(Leaf(pte)) => return Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
+            Valid(Leaf(pte)) => return Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
         };
         let mut l1 = match l2.entry_for_addr_mut(guest_phys_addr) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
-            Valid(Leaf(pte)) => return Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
+            Valid(Leaf(pte)) => return Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
         };
         match l1.entry_for_addr_mut(guest_phys_addr) {
-            Valid(Leaf(pte)) => Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
+            Valid(Leaf(pte)) => Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
             _ => None,
         }
     }
@@ -118,7 +118,7 @@ impl Sv48x4 {
             // TODO     check permissions and type
             return false;
         } else if pte.leaf() {
-            let addr = PageAddr4k::try_from(pte.pfn()).unwrap();
+            let addr = AlignedPageAddr4k::try_from(pte.pfn()).unwrap();
             if phys_pages.owner(addr) == *owner {
                 // Zero the page before mapping it back to this VM.
                 unsafe {
@@ -257,7 +257,7 @@ impl PlatformPageTable for Sv48x4 {
 
     fn unmap_range<S: PageSize>(
         &mut self,
-        addr: PageAddr<S>,
+        addr: AlignedPageAddr<S>,
         num_pages: u64,
     ) -> Option<UnmapIter<Self>> {
         if addr
@@ -273,7 +273,7 @@ impl PlatformPageTable for Sv48x4 {
 
     fn invalidate_range<S: PageSize>(
         &mut self,
-        addr: PageAddr<S>,
+        addr: AlignedPageAddr<S>,
         num_pages: u64,
     ) -> Option<InvalidateIter<Self>> {
         if addr
@@ -292,7 +292,7 @@ impl PlatformPageTable for Sv48x4 {
         }
     }
 
-    fn get_root_address(&self) -> PageAddr4k {
+    fn get_root_address(&self) -> AlignedPageAddr4k {
         self.root.start_page_addr()
     }
 

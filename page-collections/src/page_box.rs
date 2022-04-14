@@ -7,7 +7,7 @@ use core::fmt::{self, Display};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
-use riscv_pages::{Page4k, PageAddr4k, PageSize, PageSize4k, PhysAddr};
+use riscv_pages::{Page4k, AlignedPageAddr4k, PageSize, PageSize4k, PhysAddr};
 
 /// A PageBox is a Box-like container that holds a backing page filled with the given type.
 /// Because Salus borrows pages from the host for data it is necessary to track the backing pages
@@ -72,7 +72,7 @@ impl<T> PageBox<T> {
         // data is aligned and owned so can be dropped.
         unsafe {
             core::ptr::drop_in_place(self.0.as_ptr());
-            Page4k::new(PageAddr4k::new(PhysAddr::new(self.0.as_ptr() as u64)).unwrap())
+            Page4k::new(AlignedPageAddr4k::new(PhysAddr::new(self.0.as_ptr() as u64)).unwrap())
         }
     }
 
@@ -81,7 +81,7 @@ impl<T> PageBox<T> {
         unsafe {
             // Safe because self must have ownership of the page it was built with and the contained
             // data is aligned and owned so can be read with ptr::read.
-            let page = Page4k::new(PageAddr4k::new(PhysAddr::new(self.0.as_ptr() as u64)).unwrap());
+            let page = Page4k::new(AlignedPageAddr4k::new(PhysAddr::new(self.0.as_ptr() as u64)).unwrap());
             (core::ptr::read(self.0.as_ptr()), page)
         }
     }
@@ -174,7 +174,7 @@ mod tests {
         // This is not safe, but it's only for a test and mem isn't touched until backing_page is
         // dropped.
         let backing_page =
-            unsafe { Page4k::new(PageAddr4k::new(PhysAddr::new(aligned_addr)).unwrap()) };
+            unsafe { Page4k::new(AlignedPageAddr4k::new(PhysAddr::new(aligned_addr)).unwrap()) };
 
         let pb = PageBox::new_with([5u8; 128], backing_page);
 

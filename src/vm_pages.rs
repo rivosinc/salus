@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 
 use riscv_page_tables::{HypMemoryPages, PageRange, PageState, PlatformPageTable};
 use riscv_pages::{
-    CleanPage, Page4k, PageAddr4k, PageOwnerId, PageSize4k, SequentialPages, UnmappedPage,
+    CleanPage, Page4k, AlignedPageAddr4k, PageOwnerId, PageSize4k, SequentialPages, UnmappedPage,
 };
 
 use page_collections::page_vec::PageVec;
@@ -23,8 +23,8 @@ pub enum Error {
     PageFaultHandling, // TODO - individual errors from sv48x4
     SettingOwner(riscv_page_tables::page_tracking::Error),
     // Vm pages must be aligned to 16k to be used for sv48x4 mappings
-    UnalignedVmPages(PageAddr4k),
-    UnownedPage(PageAddr4k),
+    UnalignedVmPages(AlignedPageAddr4k),
+    UnownedPage(AlignedPageAddr4k),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -55,7 +55,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
     /// The `GuestRootBuilder` is used to build a guest VM owned by `self`'s root.page_owner_id().
     pub fn create_guest_root_builder(
         &mut self,
-        from_addr: PageAddr4k,
+        from_addr: AlignedPageAddr4k,
     ) -> Result<(GuestRootBuilder<T, D>, Page4k)> {
         if (from_addr.bits() as *const u64).align_offset(16 * 1024) != 0 {
             return Err(Error::UnalignedVmPages(from_addr));
@@ -89,7 +89,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
     /// Adds pages to be used for building page table entries
     pub fn add_pte_pages_builder<DF: DataMeasure>(
         &mut self,
-        from_addr: PageAddr4k,
+        from_addr: AlignedPageAddr4k,
         count: u64,
         to: &mut GuestRootBuilder<T, DF>,
     ) -> Result<()> {
@@ -115,10 +115,10 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
     // TODO add other page sizes
     pub fn add_4k_pages_builder<DF: DataMeasure>(
         &mut self,
-        from_addr: PageAddr4k,
+        from_addr: AlignedPageAddr4k,
         count: u64,
         to: &mut GuestRootBuilder<T, DF>,
-        to_addr: PageAddr4k,
+        to_addr: AlignedPageAddr4k,
         measure_preserve: bool,
     ) -> Result<u64> {
         let owner_id = self.root.page_owner_id();
@@ -142,7 +142,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
     }
 
     /// Remove pages owned and return them to the previous owner.
-    pub fn remove_4k_pages(&mut self, from_addr: PageAddr4k, count: u64) -> Result<u64> {
+    pub fn remove_4k_pages(&mut self, from_addr: AlignedPageAddr4k, count: u64) -> Result<u64> {
         let owner_id = self.root.page_owner_id();
         let mut pp_clone = self.root.phys_pages();
         let clean_pages = self
@@ -163,7 +163,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
 
     /// Returns the address of the top level page table.
     /// This is the value that should be written to satp/hgatp to start using the page tables.
-    pub fn get_root_address(&self) -> PageAddr4k {
+    pub fn get_root_address(&self) -> AlignedPageAddr4k {
         self.root.get_root_address()
     }
 
@@ -246,7 +246,7 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateEm
     /// Returns a builder that is ready to have uninitialized memory added.
     pub fn add_4k_data_pages<I>(
         self,
-        to_addr: PageAddr4k,
+        to_addr: AlignedPageAddr4k,
         pages: I,
     ) -> HostRootBuilder<T, D, HostRootStateDataAdded>
     where
@@ -274,7 +274,7 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateDa
     /// Add zeroed pages to the host page tables
     pub fn add_4k_pages<I>(
         self,
-        to_addr: PageAddr4k,
+        to_addr: AlignedPageAddr4k,
         pages: I,
     ) -> HostRootBuilder<T, D, HostRootStatePageAddComplete>
     where

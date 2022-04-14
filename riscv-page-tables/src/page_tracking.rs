@@ -8,7 +8,7 @@ use spin::Mutex;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_pages::{
-    Page, PageAddr, PageAddr4k, PageOwnerId, PageSize, PageSize4k, PhysAddr, SequentialPages,
+    Page, AlignedPageAddr, AlignedPageAddr4k, PageOwnerId, PageSize, PageSize4k, PhysAddr, SequentialPages,
 };
 
 use crate::page_info::{PageInfo, Pages};
@@ -22,7 +22,7 @@ pub enum Error {
     /// Too many guests per system(u64 overflow).
     IdOverflow,
     /// The given page isn't physically present.
-    InvalidPage(PageAddr4k),
+    InvalidPage(AlignedPageAddr4k),
     /// Reserved RAM amount given isn't aligned to a page boundary or overflows end of ram.
     InvalidReservedSize(u64),
     /// The ownership chain is too long to add another owner.
@@ -46,21 +46,21 @@ impl PageStateInner {
     // pops any owners that have exited.
     // Remove owners of the page that have since terminated. This is done lazily as needed to
     // prevent a long running operation on guest exit.
-    fn pop_exited_owners(&mut self, addr: PageAddr4k) {
+    fn pop_exited_owners(&mut self, addr: AlignedPageAddr4k) {
         if let Some(info) = self.pages.get_mut(addr) {
             info.pop_owners_while(|id| !self.active_guests.contains(id));
         }
     }
 
     // Pop the current owner returning the page to the previous owner. Returns the removed owner ID.
-    fn pop_owner_internal(&mut self, addr: PageAddr4k) -> PageOwnerId {
+    fn pop_owner_internal(&mut self, addr: AlignedPageAddr4k) -> PageOwnerId {
         let page_info = self.pages.get_mut(addr).unwrap();
 
         page_info.pop_owner()
     }
 
     // Sets the owner of the page at `addr` to `owner`
-    fn set_page_owner(&mut self, addr: PageAddr4k, owner: PageOwnerId) -> Result<()> {
+    fn set_page_owner(&mut self, addr: AlignedPageAddr4k, owner: PageOwnerId) -> Result<()> {
         self.pop_exited_owners(addr);
 
         let page_info = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
@@ -68,7 +68,7 @@ impl PageStateInner {
     }
 
     // Returns the current owner of the the page ad `addr`.
-    fn owner(&self, addr: PageAddr4k) -> PageOwnerId {
+    fn owner(&self, addr: AlignedPageAddr4k) -> PageOwnerId {
         if let Some(info) = self.pages.get(addr) {
             info.find_owner(|id| self.active_guests.contains(id))
         } else {
@@ -154,19 +154,19 @@ impl PageState {
     }
 
     /// Sets the owner of the page at the given `addr` to `owner`.
-    pub fn set_page_owner(&mut self, addr: PageAddr4k, owner: PageOwnerId) -> Result<()> {
+    pub fn set_page_owner(&mut self, addr: AlignedPageAddr4k, owner: PageOwnerId) -> Result<()> {
         let mut phys_pages = self.inner.lock();
         phys_pages.set_page_owner(addr, owner)
     }
 
     /// Removes the current owner of the page at `addr` and returns it.
-    pub fn pop_owner(&mut self, addr: PageAddr4k) -> PageOwnerId {
+    pub fn pop_owner(&mut self, addr: AlignedPageAddr4k) -> PageOwnerId {
         let mut phys_pages = self.inner.lock();
         phys_pages.pop_owner_internal(addr)
     }
 
     /// Returns the current owner of the page. Pages without an owner set are owned by the host.
-    pub fn owner(&self, addr: PageAddr4k) -> PageOwnerId {
+    pub fn owner(&self, addr: AlignedPageAddr4k) -> PageOwnerId {
         let phys_pages = self.inner.lock();
         phys_pages.owner(addr)
     }
@@ -177,7 +177,7 @@ impl PageState {
 /// Once the hypervisor has taken the pages it needs, `HypMemoryPages` should be converted to
 /// `PageRange` for the host to allocate from.
 pub struct HypMemoryPages {
-    next_page: PageAddr<PageSize4k>,
+    next_page: AlignedPageAddr<PageSize4k>,
     pages: Pages,
 }
 
@@ -197,7 +197,7 @@ impl HypMemoryPages {
         };
 
         // track the next available page for hypervisor use.
-        let first_avail_page: PageAddr<PageSize4k> = PageAddr::new(PhysAddr::new(
+        let first_avail_page: AlignedPageAddr<PageSize4k> = AlignedPageAddr::new(PhysAddr::new(
             mmap.usable_ram_base().bits() + pages_for_structs * PageSize4k::SIZE_BYTES,
         ))
         .unwrap();
@@ -335,7 +335,7 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_page = PageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
+        let start_page = AlignedPageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
         let hw_map = unsafe {
             // not safe, but this is only a test...
             HwMemMap::new(start_page, MEM_SIZE as u64, start_page)

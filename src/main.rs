@@ -103,8 +103,8 @@ fn test_boot_vm(hart_id: u64, fdt_addr: u64) {
     // We assume that the FDT is placed after the hypervisor image and that everything up until
     // the end of the FDT is unusable
     assert!(hyp_stack_end <= fdt_addr);
-    let ram_start_page = PageAddr4k::new(PhysAddr::new(mem_range.base())).unwrap();
-    let usable_start_page = PageAddr4k::with_round_up(PhysAddr::new(hyp_fdt_end));
+    let ram_start_page = AlignedPageAddr4k::new(PhysAddr::new(mem_range.base())).unwrap();
+    let usable_start_page = AlignedPageAddr4k::with_round_up(PhysAddr::new(hyp_fdt_end));
     let hw_map = unsafe { HwMemMap::new(ram_start_page, mem_range.size(), usable_start_page) };
     let mut hyp_mem = HypMemoryPages::new(hw_map);
 

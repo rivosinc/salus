@@ -13,7 +13,7 @@ use riscv_pages::{
 };
 
 use crate::page_info::{PageInfo, PageMap};
-use crate::{HwMemMap, PageRange};
+use crate::{HwMemMap, HwMemType, PageRange};
 
 /// Errors related to managing physical page information.
 #[derive(Debug)]
@@ -186,22 +186,25 @@ impl HypMemoryPages {
     /// Creates a new `HypMemoryPages`. The memory map passed in contains information about what
     /// physical memory can be used by the machine.
     pub fn new(mmap: HwMemMap) -> Self {
-        let structs_per_page = PageSize4k::SIZE_BYTES / core::mem::size_of::<PageInfo>() as u64;
-        let total_pages = mmap.ram_size() / PageSize4k::SIZE_BYTES;
-        let pages_for_structs = total_pages / structs_per_page;
-        let base_page_index = mmap.ram_base().index() as usize;
+        // TODO: Support non-contiguous free memory regions.
+        let mem_region = mmap
+            .regions()
+            .find(|r| r.mem_type() == HwMemType::Available)
+            .unwrap();
+        let total_pages = mem_region.size() / PageSize4k::SIZE_BYTES;
+        let page_map_size =
+            PageSize4k::round_up(total_pages * core::mem::size_of::<PageInfo>() as u64);
+        let page_map_pages = page_map_size / PageSize4k::SIZE_BYTES;
+        let base_page_index = mem_region.base().index() as usize;
 
         // Safe to create pages from this memory as `HwMemMap` guarantees all ranges are valid and
         // free to use.
         let seq_pages = unsafe {
-            SequentialPages::<PageSize4k>::from_mem_range(mmap.usable_ram_base(), pages_for_structs)
+            SequentialPages::<PageSize4k>::from_mem_range(mem_region.base(), page_map_pages)
         };
 
         // track the next available page for hypervisor use.
-        let first_avail_page: AlignedPageAddr<PageSize4k> = AlignedPageAddr::new(PhysAddr::new(
-            mmap.usable_ram_base().bits() + pages_for_structs * PageSize4k::SIZE_BYTES,
-        ))
-        .unwrap();
+        let first_avail_page = mem_region.base().checked_add_pages(page_map_pages).unwrap();
 
         let mut struct_pages = PageVec::from(seq_pages);
 
@@ -212,8 +215,8 @@ impl HypMemoryPages {
         }
 
         // Mark all reserved memory as used by hypervisor and inaccessible from VMs.
-        for page_addr in mmap
-            .ram_base()
+        for page_addr in mem_region
+            .base()
             .iter_from()
             .take_while(|&a| a != first_avail_page)
         {
@@ -324,6 +327,7 @@ impl Iterator for HypMemoryPages {
 mod tests {
 
     use super::*;
+    use crate::HwMemMapBuilder;
 
     fn stub_hyp_mem() -> HypMemoryPages {
         const ONE_MEG: usize = 1024 * 1024;
@@ -336,10 +340,13 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_page = AlignedPageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
+        let start_pa = PhysAddr::new(aligned_pointer as u64);
         let hw_map = unsafe {
-            // not safe, but this is only a test...
-            HwMemMap::new(start_page, MEM_SIZE as u64, start_page)
+            // Not safe - just a test
+            HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
+                .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
+                .unwrap()
+                .build()
         };
         let hyp_mem = HypMemoryPages::new(hw_map);
         // Leak the backing ram so it doesn't get freed

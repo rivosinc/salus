@@ -16,9 +16,19 @@ const PFN_MASK: u64 = (1 << PFN_BITS) - 1;
 pub trait PageSize: Copy + Clone + PartialEq + core::fmt::Debug {
     const SIZE_BYTES: u64;
 
-    /// Checks if the given physical address is aligned to this page size.
-    fn is_aligned(addr: &PhysAddr) -> bool {
-        (addr.bits() & (Self::SIZE_BYTES - 1)) == 0
+    /// Checks if the given quantity is aligned to this page size.
+    fn is_aligned(val: u64) -> bool {
+        (val & (Self::SIZE_BYTES - 1)) == 0
+    }
+
+    /// Rounds up the quantity to the nearest multiple of this page size.
+    fn round_up(val: u64) -> u64 {
+        (val + Self::SIZE_BYTES - 1) & !(Self::SIZE_BYTES - 1)
+    }
+
+    /// Rounds down the quantity to the nearest multiple of this page size.
+    fn round_down(val: u64) -> u64 {
+        val & !(Self::SIZE_BYTES - 1)
     }
 }
 
@@ -51,7 +61,7 @@ impl PageSize for PageSize512GB {
 }
 
 /// A valid address to physical memory.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
 pub struct PhysAddr(u64);
 
 impl PhysAddr {
@@ -92,7 +102,7 @@ impl<S: PageSize> AlignedPageAddr<S> {
     /// Creates a `AlignedPageAddr` from a `PhysAddr`, returns `None` if the address isn't aligned to the
     /// required page size.
     pub fn new(addr: PhysAddr) -> Option<Self> {
-        if S::is_aligned(&addr) {
+        if S::is_aligned(addr.bits()) {
             Some(AlignedPageAddr {
                 addr,
                 phantom: PhantomData,
@@ -106,7 +116,7 @@ impl<S: PageSize> AlignedPageAddr<S> {
     /// size.
     pub fn with_round_up(addr: PhysAddr) -> Self {
         Self {
-            addr: PhysAddr::new((addr.bits() + S::SIZE_BYTES - 1) & !(S::SIZE_BYTES - 1)),
+            addr: PhysAddr::new(S::round_up(addr.bits())),
             phantom: PhantomData,
         }
     }
@@ -114,7 +124,7 @@ impl<S: PageSize> AlignedPageAddr<S> {
     /// Same as above, but rounding down to the nearest multiple of the page size.
     pub fn with_round_down(addr: PhysAddr) -> Self {
         Self {
-            addr: PhysAddr::new(addr.bits() & !(S::SIZE_BYTES - 1)),
+            addr: PhysAddr::new(S::round_down(addr.bits())),
             phantom: PhantomData,
         }
     }
@@ -159,6 +169,12 @@ impl<S: PageSize> TryFrom<Pfn> for AlignedPageAddr<S> {
     fn try_from(pfn: Pfn) -> core::result::Result<Self, Self::Error> {
         let phys_addr = PhysAddr(pfn.0 << PFN_SHIFT);
         Self::new(phys_addr).ok_or(())
+    }
+}
+
+impl<S: PageSize> PartialOrd for AlignedPageAddr<S> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.addr.partial_cmp(&other.addr)
     }
 }
 

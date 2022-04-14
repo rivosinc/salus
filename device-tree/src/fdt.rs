@@ -34,6 +34,11 @@ impl<'a> Fdt<'a> {
         Ok(Self { inner })
     }
 
+    /// Returns the base address of the FDT as a raw pointer.
+    pub fn base_addr(&self) -> *const u8 {
+        self.inner.buf().as_ptr()
+    }
+
     /// Returns the total size of the FDT.
     pub fn size(&self) -> usize {
         self.inner.totalsize()

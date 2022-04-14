@@ -46,7 +46,9 @@ mod page_table;
 pub mod page_tracking;
 pub mod sv48x4;
 
-pub use hw_mem_map::HwMemMap;
+pub use hw_mem_map::Error as MemMapError;
+pub use hw_mem_map::Result as MemMapResult;
+pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemType, HwReservedMemType};
 pub use page_range::PageRange;
 pub use page_table::Error as PageTableError;
 pub use page_table::PlatformPageTable;
@@ -81,10 +83,13 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_page = AlignedPageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
+        let start_pa = PhysAddr::new(aligned_pointer as u64);
         let hw_map = unsafe {
-            // not safe, but this is only a test...
-            HwMemMap::new(start_page, MEM_SIZE as u64, start_page)
+            // Not safe - just a test
+            HwMemMapBuilder::new(Sv48x4::TOP_LEVEL_ALIGN)
+                .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
+                .unwrap()
+                .build()
         };
         let hyp_mem = HypMemoryPages::new(hw_map);
         let (phys_pages, host_mem) = PageState::from(hyp_mem);

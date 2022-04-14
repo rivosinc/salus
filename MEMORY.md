@@ -46,14 +46,14 @@ classDiagram
     class PageInfo {
       owners: List of PageOwnerId
     }
-    Pages "1" o-- "1..*" PageInfo
-    class Pages {
+    PageMap "1" o-- "1..*" PageInfo
+    class PageMap {
       base_page_index: usize
     }
-    PageState "1" *-- "1" Pages
+    PageState "1" *-- "1" PageMap
     class PageState {
         active_guests: Vec of PageOwnerId
-        pages: Pages
+        pages: PageMap
     }
     Sv48x4 "N" o-- "1" PageState
     class Sv48x4 {
@@ -95,7 +95,7 @@ the pages as well as a record of the owners that loaned the page if it wasn't
 the host. Initially, the list of owners will be only two deep (this allows one
 layer of nesting without forced address space walks on guest exit).
 
-The type [`Pages`]() is a thin wrapper around a Vec of `PageInfo`s, one per
+The type [`PageMap`]() is a thin wrapper around a Vec of `PageInfo`s, one per
 page in the system. It allows indexing the pages by a page address.
 
 [`PageState`]() is a system-side singleton that contains `Pages` and a list

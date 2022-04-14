@@ -12,7 +12,7 @@ use riscv_pages::{
     SequentialPages,
 };
 
-use crate::page_info::{PageInfo, Pages};
+use crate::page_info::{PageInfo, PageMap};
 use crate::{HwMemMap, PageRange};
 
 /// Errors related to managing physical page information.
@@ -40,7 +40,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 struct PageStateInner {
     next_owner_id: u64,
     active_guests: PageVec<PageOwnerId>,
-    pages: Pages,
+    pages: PageMap,
 }
 
 impl PageStateInner {
@@ -179,7 +179,7 @@ impl PageState {
 /// `PageRange` for the host to allocate from.
 pub struct HypMemoryPages {
     next_page: AlignedPageAddr<PageSize4k>,
-    pages: Pages,
+    pages: PageMap,
 }
 
 impl HypMemoryPages {
@@ -225,13 +225,13 @@ impl HypMemoryPages {
 
         Self {
             next_page: first_avail_page,
-            pages: Pages::new(struct_pages, base_page_index),
+            pages: PageMap::new(struct_pages, base_page_index),
         }
     }
 
     /// Takes the rest of the pages contained in `self` and converts them to a `PageRange` with all
     /// the page's owners set to the host. It also returns the global page info structs as `Pages`.
-    pub fn split_host_range(self) -> (PageRange, Pages) {
+    pub fn split_host_range(self) -> (PageRange, PageMap) {
         let pages_remaining = self.pages_remaining();
         let range = unsafe {
             // Safe to create a range of pages as the range was previously owned by `self` and

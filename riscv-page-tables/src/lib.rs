@@ -14,7 +14,7 @@
 //! - `PageState` - Contains information about active VMs (page owners), manages allocation of
 //! unique owner IDs, and per-page state such as current and previous owner. This is system-wide
 //! state updated whenever a page owner changes or a VM starts or stops.
-//! - `Pages` - Per-page state (tracks the owner).
+//! - `PageMap` - Per-page state (tracks the owner).
 //! - `HypMemoryPages` - Initial manager of physical memory. The hypervisor allocates pages from
 //! here to store local state. It's turned in to a `PageState` and a pool of ram for the host VM.
 //! - `PageRange` - Provides an iterator of `Page`s. Used to pass chunks of memory to the various

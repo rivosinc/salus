@@ -77,13 +77,13 @@ impl PageInfo {
 }
 
 /// Keeps information for all physical pages in the system.
-pub struct Pages {
+pub struct PageMap {
     pages: PageVec<PageInfo>,
     base_page_index: usize,
 }
 
-impl Pages {
-    /// Creates a new `Pages`. It will track the information for each page.
+impl PageMap {
+    /// Creates a new `PageMap`. It will track the information for each page.
     /// `pages`: A vec of `PageInfo` for each page in the system.
     /// `base_page_index`: The index from 0 of the first physical page in the system. Base address
     /// divided by the page size.
@@ -145,7 +145,7 @@ mod tests {
             pages.push(PageInfo::new_host_owned());
         }
         let first_index = 1000u64;
-        let pages = Pages::new(pages, first_index as usize);
+        let pages = PageMap::new(pages, first_index as usize);
 
         let before_addr: AlignedPageAddr<PageSize4k> =
             AlignedPageAddr::new(PhysAddr::new((first_index - 1) * 4096)).unwrap();

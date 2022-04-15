@@ -21,7 +21,7 @@ pub enum Error {
     InsufficientPtePages,
     LeafEntryNotTable,
     MisalignedPages(SequentialPages<PageSize4k>),
-    SettingOwner(crate::page_tracking::Error),
+    SettingOwner(crate::PageTrackingError),
 }
 pub type Result<T> = core::result::Result<T, Error>;
 

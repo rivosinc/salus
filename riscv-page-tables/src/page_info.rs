@@ -5,7 +5,7 @@
 use page_collections::page_vec::PageVec;
 use riscv_pages::{AlignedPageAddr, PageOwnerId, PageSize4k};
 
-use crate::{Error, Result};
+use crate::{PageTrackingError, PageTrackingResult};
 
 /// `PageInfo` holds the owner and previous owner of the referenced page.
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +60,7 @@ impl PageInfo {
 
     /// Sets the current owner of the page while maintaining a "chain of custody" so the previous
     /// owner is known when the new owner abandons the page.
-    pub fn push_owner(&mut self, owner: PageOwnerId) -> Result<()> {
+    pub fn push_owner(&mut self, owner: PageOwnerId) -> PageTrackingResult<()> {
         if self.owner.is_host() {
             self.owner = owner;
             return Ok(());
@@ -72,7 +72,7 @@ impl PageInfo {
             return Ok(());
         }
 
-        Err(Error::OwnerTooDeep)
+        Err(PageTrackingError::OwnerTooDeep)
     }
 }
 

@@ -15,13 +15,13 @@ use crate::data_measure::DataMeasure;
 
 #[derive(Debug)]
 pub enum Error {
-    GuestId(riscv_page_tables::Error),
+    GuestId(riscv_page_tables::PageTrackingError),
     InvalidRange,
     InsufficientPtePageStorage,
     Mapping4kPage(riscv_page_tables::PageTableError),
     Non4kPteEntry,
     PageFaultHandling, // TODO - individual errors from sv48x4
-    SettingOwner(riscv_page_tables::page_tracking::Error),
+    SettingOwner(riscv_page_tables::PageTrackingError),
     // Vm pages must be aligned to 16k to be used for sv48x4 mappings
     UnalignedVmPages(AlignedPageAddr4k),
     UnownedPage(AlignedPageAddr4k),

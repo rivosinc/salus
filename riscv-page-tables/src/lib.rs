@@ -50,7 +50,9 @@ pub use hw_mem_map::HwMemMap;
 pub use page_range::PageRange;
 pub use page_table::Error as PageTableError;
 pub use page_table::PlatformPageTable;
-pub use page_tracking::{Error, Result};
+pub use page_table::Result as PageTableResult;
+pub use page_tracking::Error as PageTrackingError;
+pub use page_tracking::Result as PageTrackingResult;
 pub use page_tracking::{HypMemoryPages, PageState};
 pub use sv48x4::Sv48x4;
 

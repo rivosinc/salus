@@ -2,11 +2,10 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use core::marker::PhantomData;
-
 use riscv_page_tables::{HypPageAlloc, PageRange, PageState, PlatformPageTable};
 use riscv_pages::{
-    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize4k, SequentialPages, UnmappedPage,
+    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize, PageSize4k, SequentialPages,
+    UnmappedPage,
 };
 
 use page_collections::page_vec::PageVec;
@@ -93,7 +92,6 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
         count: u64,
         to: &mut GuestRootBuilder<T, DF>,
     ) -> Result<()> {
-        let owner_id = self.root.page_owner_id();
         let mut phys_pages = self.root.phys_pages();
         let clean_pages = self
             .root
@@ -104,7 +102,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
             let unmapped_page: UnmappedPage = clean_page.into();
             let page = unmapped_page.ok4k_or(Error::Non4kPteEntry)?;
             phys_pages
-                .set_page_owner(page.addr(), owner_id)
+                .set_page_owner(page.addr(), to.page_owner_id())
                 .map_err(Error::SettingOwner)?;
             to.add_pte_page(page)?;
         }
@@ -121,7 +119,6 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
         to_addr: AlignedPageAddr4k,
         measure_preserve: bool,
     ) -> Result<u64> {
-        let owner_id = self.root.page_owner_id();
         let mut phys_pages = self.root.phys_pages();
         let unmapped_pages = self
             .root
@@ -130,7 +127,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
         for (unmapped_page, guest_addr) in unmapped_pages.zip(to_addr.iter_from()) {
             let page = unmapped_page.ok4k_or(Error::Non4kPteEntry)?;
             phys_pages
-                .set_page_owner(page.addr(), owner_id)
+                .set_page_owner(page.addr(), to.page_owner_id())
                 .map_err(Error::SettingOwner)?;
             if measure_preserve {
                 to.add_data_page(guest_addr.bits(), page)?;
@@ -153,7 +150,9 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
         for clean_page in clean_pages {
             let unmapped_page: UnmappedPage = clean_page.into();
             let page = unmapped_page.ok4k_or(Error::Non4kPteEntry)?;
-            let owner = pp_clone.pop_owner(page.addr());
+            let owner = pp_clone
+                .pop_owner(page.addr())
+                .map_err(|_| Error::UnownedPage(page.addr()))?;
             if owner != owner_id {
                 return Err(Error::UnownedPage(page.addr()));
             }
@@ -196,39 +195,32 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootPages<T, D> {
     }
 }
 
-// Initialization states for host pages.
-pub trait HostRootState {}
-pub enum HostRootStateEmpty {}
-impl HostRootState for HostRootStateEmpty {}
-pub enum HostRootStateDataAdded {}
-impl HostRootState for HostRootStateDataAdded {}
-pub enum HostRootStatePageAddComplete {}
-impl HostRootState for HostRootStatePageAddComplete {}
-
 /// Builder used to construct the page management structure for the host.
-pub struct HostRootBuilder<T: PlatformPageTable, D: DataMeasure, S: HostRootState> {
+///
+/// Note that HostRootBuilder enforces that the GPA -> HPA mappings that are created always map
+/// a T::TOP_LEVEL_ALIGN-aligned chunk.
+pub struct HostRootBuilder<T: PlatformPageTable, D: DataMeasure> {
     root: T,
     pte_pages: PageRange,
     measurement: D,
-    phantom_state: PhantomData<S>,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateEmpty> {
+impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
     /// To be used to create the initial `HostRootPages` for the host VM.
-    pub fn from_hyp_mem(mut hyp_mem: HypPageAlloc) -> (PageRange, Self) {
-        hyp_mem.discard_to_align(T::TOP_LEVEL_ALIGN as usize);
-        let root_table_pages = match SequentialPages::from_pages(hyp_mem.by_ref().take(4)) {
-            Err(_) => unreachable!(),
-            Ok(r) => r,
+    pub fn from_hyp_mem(
+        mut hyp_mem: HypPageAlloc,
+        host_gpa_size: u64,
+    ) -> (PageVec<PageRange>, Self) {
+        let root_table_pages = match SequentialPages::from_pages(
+            hyp_mem.take_pages_with_alignment(4, T::TOP_LEVEL_ALIGN),
+        ) {
+            Ok(sp) => sp,
+            _ => unreachable!(),
         };
-
-        let num_pte_pages = T::max_pte_pages(hyp_mem.pages_remaining());
-
-        hyp_mem.discard_to_align(16 * 1024);
-
+        let num_pte_pages = T::max_pte_pages(host_gpa_size / PageSize4k::SIZE_BYTES);
         let pte_pages = hyp_mem.take_pages(num_pte_pages as usize);
 
-        let (phys_pages, host_pages) = PageState::from(hyp_mem);
+        let (phys_pages, host_pages) = PageState::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root = T::new(root_table_pages, PageOwnerId::host(), phys_pages).unwrap();
 
         (
@@ -237,18 +229,12 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateEm
                 root,
                 pte_pages,
                 measurement: D::default(),
-                phantom_state: PhantomData,
             },
         )
     }
 
     /// Adds data pages that are measured and mapped to the page tables for the host.
-    /// Returns a builder that is ready to have uninitialized memory added.
-    pub fn add_4k_data_pages<I>(
-        self,
-        to_addr: AlignedPageAddr4k,
-        pages: I,
-    ) -> HostRootBuilder<T, D, HostRootStateDataAdded>
+    pub fn add_4k_data_pages<I>(self, to_addr: AlignedPageAddr4k, pages: I) -> Self
     where
         I: Iterator<Item = Page4k>,
     {
@@ -257,6 +243,13 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateEm
         let mut pte_pages = self.pte_pages;
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             measurement.add_page(vm_addr.bits(), &page);
+            assert_eq!(
+                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
+                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+            );
+            root.phys_pages()
+                .set_page_owner(page.addr(), root.page_owner_id())
+                .unwrap();
             root.map_page_4k(vm_addr.bits(), page, &mut || pte_pages.next())
                 .unwrap();
         }
@@ -265,18 +258,11 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateEm
             root,
             pte_pages,
             measurement,
-            phantom_state: PhantomData,
         }
     }
-}
 
-impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateDataAdded> {
     /// Add zeroed pages to the host page tables
-    pub fn add_4k_pages<I>(
-        self,
-        to_addr: AlignedPageAddr4k,
-        pages: I,
-    ) -> HostRootBuilder<T, D, HostRootStatePageAddComplete>
+    pub fn add_4k_pages<I>(self, to_addr: AlignedPageAddr4k, pages: I) -> Self
     where
         I: Iterator<Item = Page4k>,
     {
@@ -284,6 +270,13 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateDa
         let mut pte_pages = self.pte_pages;
         let measurement = self.measurement;
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
+            assert_eq!(
+                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
+                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+            );
+            root.phys_pages()
+                .set_page_owner(page.addr(), root.page_owner_id())
+                .unwrap();
             root.map_page_4k(vm_addr.bits(), page, &mut || pte_pages.next())
                 .unwrap();
         }
@@ -292,12 +285,9 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStateDa
             root,
             pte_pages,
             measurement,
-            phantom_state: PhantomData,
         }
     }
-}
 
-impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D, HostRootStatePageAddComplete> {
     /// Returns the host root pages as configured with data and zero pages.
     pub fn create_host(self) -> HostRootPages<T, D> {
         HostRootPages {

@@ -69,6 +69,9 @@ pub enum HwReservedMemType {
     /// for anything else.
     HypervisorImage,
 
+    /// The system page map.
+    PageMap,
+
     /// The host VM's kernel and initramfs images as loaded by firmware into (otherwise usable)
     /// memory. The hypervisor should take care not to overwrite these.
     HostKernelImage,
@@ -270,6 +273,7 @@ impl fmt::Display for HwReservedMemType {
         match &self {
             HwReservedMemType::FirmwareReserved => write!(f, "firmware"),
             HwReservedMemType::HypervisorImage => write!(f, "hypervisor image"),
+            HwReservedMemType::PageMap => write!(f, "page map"),
             HwReservedMemType::HostKernelImage => write!(f, "host kernel"),
             HwReservedMemType::HostInitramfsImage => write!(f, "host initramfs"),
         }

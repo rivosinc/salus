@@ -21,7 +21,7 @@ pub enum Error {
     InsufficientPtePages,
     LeafEntryNotTable,
     MisalignedPages(SequentialPages<PageSize4k>),
-    SettingOwner(crate::PageTrackingError),
+    PageNotOwned,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -213,6 +213,7 @@ where
         let v = match self.entry_for_addr_mut(guest_phys_addr) {
             TableEntryMut::Valid(v) => v,
             TableEntryMut::Invalid(pte) => {
+                // TODO: Verify ownership of PTE pages.
                 pte.set(
                     get_pte_page().ok_or(Error::InsufficientPtePages)?,
                     &PteFieldBits::non_leaf(),

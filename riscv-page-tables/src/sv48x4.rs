@@ -80,7 +80,9 @@ impl Sv48x4 {
             None => return false,
             Some(a) => a,
         };
-        self.phys_pages.owner(addr) == self.owner
+        // Unwrap here since if we have a GPA mapping to an unowned page then our invariants
+        // around page ownership have been violated.
+        self.phys_pages.owner(addr).unwrap() == self.owner
     }
 
     fn host_4k_addr(&mut self, guest_phys_addr: u64) -> Option<AlignedPageAddr4k> {
@@ -119,7 +121,7 @@ impl Sv48x4 {
             return false;
         } else if pte.leaf() {
             let addr = AlignedPageAddr4k::try_from(pte.pfn()).unwrap();
-            if phys_pages.owner(addr) == *owner {
+            if phys_pages.owner(addr) == Some(*owner) {
                 // Zero the page before mapping it back to this VM.
                 unsafe {
                     // Safe because this table uniquely owns the page and it isn't mapped to a
@@ -157,6 +159,7 @@ impl PlatformPageTable for Sv48x4 {
         owner: PageOwnerId,
         phys_pages: PageState,
     ) -> Result<Self> {
+        // TODO: Verify ownership of root PT pages.
         Ok(Self {
             root,
             owner,
@@ -178,14 +181,18 @@ impl PlatformPageTable for Sv48x4 {
         F: FnMut() -> Option<Page4k>,
     {
         let page_addr = page_to_map.addr();
+        let owner = self
+            .phys_pages
+            .owner(page_addr)
+            .ok_or(Error::PageNotOwned)?;
+        if owner != self.owner {
+            return Err(Error::PageNotOwned);
+        }
         let mut l4 = self.top_level_directory();
         let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l2 = l3.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l1 = l2.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let _entry = l1.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
-        self.phys_pages
-            .set_page_owner(page_addr, self.owner)
-            .map_err(Error::SettingOwner)?;
         Ok(())
     }
 
@@ -198,6 +205,7 @@ impl PlatformPageTable for Sv48x4 {
     where
         F: FnMut() -> Option<Page4k>,
     {
+        // TODO: Ownership on hugepages?
         let mut l4 = self.top_level_directory();
         let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l2 = l3.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;

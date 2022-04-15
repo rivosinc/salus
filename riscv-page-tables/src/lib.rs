@@ -66,13 +66,14 @@ extern crate std;
 
 #[cfg(test)]
 mod tests {
+    use page_collections::page_vec::*;
     use riscv_pages::*;
 
     use super::page_table::*;
     use super::sv48x4::Sv48x4;
     use super::*;
 
-    fn stub_sys_memory() -> (PageState, crate::PageRange) {
+    fn stub_sys_memory() -> (PageState, PageVec<PageRange>) {
         const ONE_MEG: usize = 1024 * 1024;
         const MEM_ALIGN: usize = 2 * ONE_MEG;
         const MEM_SIZE: usize = 256 * ONE_MEG;
@@ -92,7 +93,7 @@ mod tests {
                 .build()
         };
         let hyp_mem = HypPageAlloc::new(hw_map);
-        let (phys_pages, host_mem) = PageState::from(hyp_mem);
+        let (phys_pages, host_mem) = PageState::from(hyp_mem, Sv48x4::TOP_LEVEL_ALIGN);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
         (phys_pages, host_mem)
@@ -100,19 +101,24 @@ mod tests {
 
     #[test]
     fn map_one_4k() {
-        let (phys_pages, mut host_mem) = stub_sys_memory();
+        let (mut phys_pages, mut host_mem) = stub_sys_memory();
 
-        let seq_pages = match SequentialPages::from_pages(host_mem.by_ref().take(4)) {
+        let host_range = &mut host_mem[0];
+        let seq_pages = match SequentialPages::from_pages(host_range.by_ref().take(4)) {
             Ok(s) => s,
             Err(_) => panic!("setting up seq pages"),
         };
-        let mut guest_page_table = Sv48x4::new(seq_pages, PageOwnerId::new(2).unwrap(), phys_pages)
-            .expect("creating sv48x4");
+        let id = phys_pages.add_active_guest().unwrap();
+        let mut guest_page_table =
+            Sv48x4::new(seq_pages, id, phys_pages.clone()).expect("creating sv48x4");
 
-        let guest_page = host_mem.next().unwrap();
+        let guest_page = host_range.next().unwrap();
         let guest_page_addr = guest_page.addr();
-        let mut free_pages = host_mem.by_ref().take(3);
+        let mut free_pages = host_range.by_ref().take(3);
         let guest_addr = 0x8000_0000;
+        assert!(phys_pages
+            .set_page_owner(guest_page.addr(), guest_page_table.page_owner_id())
+            .is_ok());
         assert!(guest_page_table
             .map_page_4k(guest_addr, guest_page, &mut || free_pages.next())
             .is_ok());

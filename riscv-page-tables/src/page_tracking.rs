@@ -7,13 +7,10 @@ use spin::Mutex;
 
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{
-    AlignedPageAddr, AlignedPageAddr4k, Page, PageOwnerId, PageSize, PageSize4k, PhysAddr,
-    SequentialPages,
-};
+use riscv_pages::{AlignedPageAddr4k, Page, PageOwnerId, PageSize, PageSize4k, SequentialPages};
 
-use crate::page_info::{PageInfo, PageMap};
-use crate::{HwMemMap, HwMemType, PageRange};
+use crate::page_info::PageMap;
+use crate::{HwMemMap, PageRange};
 
 /// Errors related to managing physical page information.
 #[derive(Debug)]
@@ -24,14 +21,14 @@ pub enum Error {
     IdOverflow,
     /// The given page isn't physically present.
     InvalidPage(AlignedPageAddr4k),
-    /// Reserved RAM amount given isn't aligned to a page boundary or overflows end of ram.
-    InvalidReservedSize(u64),
     /// The ownership chain is too long to add another owner.
-    OwnerTooDeep,
-    /// Ram size and base don't fit in the address space.
-    RamRangeInvalid,
-    /// Address given for memory start isn't aligned to a page boundary.
-    UnalignedMemory(u64),
+    OwnerOverflow,
+    /// The page would become unowned as a result of popping its current owner.
+    OwnerUnderflow,
+    /// Attempt to pop the owner of an unowned page.
+    UnownedPage,
+    /// Attempt to modify the owner of a reserved page.
+    ReservedPage,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -54,9 +51,8 @@ impl PageStateInner {
     }
 
     // Pop the current owner returning the page to the previous owner. Returns the removed owner ID.
-    fn pop_owner_internal(&mut self, addr: AlignedPageAddr4k) -> PageOwnerId {
+    fn pop_owner_internal(&mut self, addr: AlignedPageAddr4k) -> Result<PageOwnerId> {
         let page_info = self.pages.get_mut(addr).unwrap();
-
         page_info.pop_owner()
     }
 
@@ -69,13 +65,9 @@ impl PageStateInner {
     }
 
     // Returns the current owner of the the page ad `addr`.
-    fn owner(&self, addr: AlignedPageAddr4k) -> PageOwnerId {
-        if let Some(info) = self.pages.get(addr) {
-            info.find_owner(|id| self.active_guests.contains(id))
-        } else {
-            // Default owner of all pages is the host.
-            PageOwnerId::host()
-        }
+    fn owner(&self, addr: AlignedPageAddr4k) -> Option<PageOwnerId> {
+        let info = self.pages.get(addr)?;
+        info.find_owner(|id| self.active_guests.contains(id))
     }
 }
 
@@ -89,17 +81,26 @@ pub struct PageState {
 
 impl PageState {
     /// Creates a new PageState representing all pages in the system and returns all pages that are
-    /// available for the primary host to use. The pages for the host will begin at the next 2MB
-    /// boundary.
-    pub fn from(mut hyp_mem: HypPageAlloc) -> (Self, PageRange) {
+    /// available for the primary host to use, starting at the next `host_alignment`-aligned chunk.
+    pub fn from(mut hyp_mem: HypPageAlloc, host_alignment: u64) -> (Self, PageVec<PageRange>) {
         let active_guests = Self::make_active_guest_vec(&mut hyp_mem);
-
         let state_storage_page = hyp_mem.next_page();
+        let ranges_page = match SequentialPages::from_pages([hyp_mem.next_page()]) {
+            Ok(sp) => sp,
+            _ => unreachable!(),
+        };
 
-        // 2MB align the host's pages
-        hyp_mem.discard_to_align(2 * 1024 * 1024);
+        // Discard a host_alignment sized chunk to align ourselves.
+        let _ = hyp_mem.take_pages_with_alignment(
+            (host_alignment / PageSize4k::SIZE_BYTES)
+                .try_into()
+                .unwrap(),
+            host_alignment,
+        );
 
-        let (host_pages, pages) = hyp_mem.split_host_range();
+        let mut host_pages = PageVec::from(ranges_page);
+        let pages = hyp_mem.drain_to(&mut host_pages);
+
         let mutex_box = PageBox::new_with(
             Mutex::new(PageStateInner {
                 // Start at two for owners as host and hypervisor reserve 0 and 1.
@@ -126,7 +127,9 @@ impl PageState {
             Err(_) => unreachable!(),
             Ok(sp) => sp,
         };
-        PageVec::from(seq_pages)
+        let mut active_guests = PageVec::from(seq_pages);
+        active_guests.push(PageOwnerId::host());
+        active_guests
     }
 
     /// Adds a new guest to the system, giving it the next ID.
@@ -161,93 +164,88 @@ impl PageState {
     }
 
     /// Removes the current owner of the page at `addr` and returns it.
-    pub fn pop_owner(&mut self, addr: AlignedPageAddr4k) -> PageOwnerId {
+    pub fn pop_owner(&mut self, addr: AlignedPageAddr4k) -> Result<PageOwnerId> {
         let mut phys_pages = self.inner.lock();
         phys_pages.pop_owner_internal(addr)
     }
 
-    /// Returns the current owner of the page. Pages without an owner set are owned by the host.
-    pub fn owner(&self, addr: AlignedPageAddr4k) -> PageOwnerId {
+    /// Returns the current owner of the page.
+    pub fn owner(&self, addr: AlignedPageAddr4k) -> Option<PageOwnerId> {
         let phys_pages = self.inner.lock();
         phys_pages.owner(addr)
     }
 }
 
 /// `HypPageAlloc` is created from the hardware memory map and builds the array of PageInfo
-/// structs for all pages in the system. It is used to allocate pages for the hypervisor to use
-/// for other local data. Once the hypervisor has taken the pages it needs, `HypPageAlloc`
-/// should be converted to `PageRange` for the host to allocate from.
+/// structs for all pages in the system. It is used to allocate pages for the hypervisor at
+/// startup for building the host VM and other local data. Once the hypervisor has taken the
+/// pages it needs, `HypPageAlloc` should be converted to the list of remaining free memory
+/// regions to be mapped into the host with `drain()`.
 pub struct HypPageAlloc {
-    next_page: AlignedPageAddr<PageSize4k>,
+    next_page: AlignedPageAddr4k,
     pages: PageMap,
 }
 
 impl HypPageAlloc {
     /// Creates a new `HypPageAlloc`. The memory map passed in contains information about what
     /// physical memory can be used by the machine.
-    pub fn new(mmap: HwMemMap) -> Self {
-        // TODO: Support non-contiguous free memory regions.
-        let mem_region = mmap
-            .regions()
-            .find(|r| r.mem_type() == HwMemType::Available)
-            .unwrap();
-        let total_pages = mem_region.size() / PageSize4k::SIZE_BYTES;
-        let page_map_size =
-            PageSize4k::round_up(total_pages * core::mem::size_of::<PageInfo>() as u64);
-        let page_map_pages = page_map_size / PageSize4k::SIZE_BYTES;
-        let base_page_index = mem_region.base().index() as usize;
-
-        // Safe to create pages from this memory as `HwMemMap` guarantees all ranges are valid and
-        // free to use.
-        let seq_pages = unsafe {
-            SequentialPages::<PageSize4k>::from_mem_range(mem_region.base(), page_map_pages)
-        };
-
-        // track the next available page for hypervisor use.
-        let first_avail_page = mem_region.base().checked_add_pages(page_map_pages).unwrap();
-
-        let mut struct_pages = PageVec::from(seq_pages);
-
-        // Mark all pages used as owned by the host, the hypervisor will steal some before starting the
-        // host.
-        for _i in 0..total_pages {
-            struct_pages.push(PageInfo::new_host_owned());
-        }
-
-        // Mark all reserved memory as used by hypervisor and inaccessible from VMs.
-        for page_addr in mem_region
-            .base()
+    pub fn new(mem_map: HwMemMap) -> Self {
+        // Unwrap here (and below) since we can't continue if there isn't any free memory.
+        let first_page = mem_map.regions().next().unwrap().base();
+        let page_map = PageMap::build_from(mem_map);
+        let first_avail_page = first_page
             .iter_from()
-            .take_while(|&a| a != first_avail_page)
-        {
-            // OK to unwrap as this struct is new and must have space for one owner.
-            struct_pages[page_addr.index() - base_page_index]
-                .push_owner(PageOwnerId::hypervisor())
+            .find(|&a| page_map.get(a).unwrap().is_free())
+            .unwrap();
+        Self {
+            next_page: first_avail_page,
+            pages: page_map,
+        }
+    }
+
+    /// Takes ownership of the remaining free pages in the system page map and adds them to 'ranges'.
+    /// It also returns the global page info structs as `PageMap`.
+    pub fn drain_to(mut self, ranges: &mut PageVec<PageRange>) -> PageMap {
+        while self.pages.get(self.next_page).is_some() {
+            // Find the last page in this contiguous range.
+            let last_page = self
+                .next_page
+                .iter_from()
+                .find(|&a| match self.pages.get(a) {
+                    Some(p) => !p.is_free(),
+                    _ => true,
+                })
+                .unwrap();
+
+            // Now take ownership.
+            for page in self.next_page.iter_from().take_while(|&a| a != last_page) {
+                self.pages
+                    .get_mut(page)
+                    .unwrap()
+                    .push_owner(PageOwnerId::hypervisor())
+                    .unwrap();
+            }
+
+            // Safe to create this range as they were previously free and we just took
+            // ownership.
+            let range = unsafe { PageRange::new(self.next_page, last_page) };
+            ranges.push(range);
+
+            // Skip until the next free page or we reach the end of memory.
+            self.next_page = last_page
+                .iter_from()
+                .find(|&a| match self.pages.get(a) {
+                    Some(p) => p.is_free(),
+                    _ => true,
+                })
                 .unwrap();
         }
 
-        Self {
-            next_page: first_avail_page,
-            pages: PageMap::new(struct_pages, base_page_index),
-        }
+        self.pages
     }
 
-    /// Takes the rest of the pages contained in `self` and converts them to a `PageRange` with all
-    /// the page's owners set to the host. It also returns the global page info structs as `Pages`.
-    pub fn split_host_range(self) -> (PageRange, PageMap) {
-        let pages_remaining = self.pages_remaining();
-        let range = unsafe {
-            // Safe to create a range of pages as the range was previously owned by `self` and
-            // that memory ownership is being moved to the new `PageRange`.
-            PageRange::new(
-                self.next_page,
-                self.next_page.checked_add_pages(pages_remaining).unwrap(),
-            )
-        };
-        (range, self.pages)
-    }
-
-    /// Returns the number of pages remaining in the system.
+    /// Returns the number of pages remaining in the system. Note that this may include reserved
+    /// pages.
     pub fn pages_remaining(&self) -> u64 {
         // Ok to unwrap because next page must be in range.
         self.pages.num_after(self.next_page).unwrap() as u64
@@ -258,17 +256,11 @@ impl HypPageAlloc {
     /// no point in continuing.
     fn next_page(&mut self) -> Page<PageSize4k> {
         // OK to unwrap as next_page is guaranteed to be in range.
-        match self
-            .pages
+        self.pages
             .get_mut(self.next_page)
             .unwrap()
             .push_owner(PageOwnerId::hypervisor())
-        {
-            Ok(_) => (),
-            Err(_) => {
-                panic!("already owned");
-            }
-        }
+            .expect("Failed to take ownership");
 
         let page = unsafe {
             // Safe to create a page here as all memory from next_page to end of ram is owned by
@@ -278,40 +270,63 @@ impl HypPageAlloc {
         };
         // unwrap here because if physical memory runs out before setting up basic hypervisor
         // structures, the system can't continue.
-        self.next_page = self.next_page.checked_add_pages(1).unwrap();
+        self.next_page = self
+            .next_page
+            .iter_from()
+            .find(|&a| self.pages.get(a).unwrap().is_free())
+            .unwrap();
         page
     }
 
-    /// Takes `count` Pages from the system map after setting their owner in the global list.
-    /// Allows passing ranges of pages around without a mutable reference to the global owners list.
-    /// Panics if there are not `count` pages available.
-    pub fn take_pages(&mut self, count: usize) -> PageRange {
-        // mark them all as owned by the hypervisor, then return an iterator across the pages.
-        let first_page = self.next_page;
-        // Move self's next page past these taken pages.
-        self.next_page = self.next_page.checked_add_pages(count as u64).unwrap();
+    /// Takes `count` contiguous Pages with the requested alignment from the system map. Sets
+    /// the hypervisor as the owner of the pages, and any pages consumed up until that point,
+    /// in the system page map. Allows passing ranges of pages around without a mutable
+    /// reference to the global owners list. Panics if there are not `count` pages available.
+    pub fn take_pages_with_alignment(&mut self, count: usize, align: u64) -> PageRange {
+        // Helper to test whether a contiguous range of `count` pages is free and aligned.
+        let range_is_free_and_aligned = |start: AlignedPageAddr4k| {
+            let end = start.checked_add_pages(count as u64).unwrap();
+            if start.bits() & (align - 1) != 0 {
+                return false;
+            }
+            start
+                .iter_from()
+                .take_while(|&a| a != end)
+                .all(|a| self.pages.get(a).unwrap().is_free())
+        };
 
-        for page in first_page.iter_from().take(count) {
+        // Find the free page rage and mark it, and any free pages we skipped in between,
+        // as hypervisor-owned.
+        let first_page = self
+            .next_page
+            .iter_from()
+            .find(|&a| range_is_free_and_aligned(a))
+            .unwrap();
+        let last_page = first_page.checked_add_pages(count as u64).unwrap();
+        for page in self.next_page.iter_from().take_while(|&a| a != last_page) {
             // OK to unwrap as this struct is new and must have space for one owner.
-            self.pages
-                .get_mut(page)
-                .unwrap()
-                .push_owner(PageOwnerId::hypervisor())
-                .unwrap();
+            let page_info = self.pages.get_mut(page).unwrap();
+            if page_info.is_free() {
+                page_info.push_owner(PageOwnerId::hypervisor()).unwrap();
+            }
         }
+
+        // Move self's next page past these taken pages.
+        self.next_page = last_page
+            .iter_from()
+            .find(|&a| self.pages.get(a).unwrap().is_free())
+            .unwrap();
 
         unsafe {
             // It's safe to create a page range of the memory that `self` forfeited ownership of
             // above and the new `PageRange` is now the unique owner.
-            PageRange::new(first_page, self.next_page)
+            PageRange::new(first_page, last_page)
         }
     }
 
-    /// Skips over pages until the alignment requirement is met
-    pub fn discard_to_align(&mut self, align: usize) {
-        while (self.next_page.bits() as *const u64).align_offset(align) != 0 {
-            let _ = self.next_page();
-        }
+    /// Same as above, but without any alignment requirements.
+    pub fn take_pages(&mut self, count: usize) -> PageRange {
+        self.take_pages_with_alignment(count, PageSize4k::SIZE_BYTES)
     }
 }
 
@@ -328,6 +343,7 @@ mod tests {
 
     use super::*;
     use crate::HwMemMapBuilder;
+    use riscv_pages::PhysAddr;
 
     fn stub_hyp_mem() -> HypPageAlloc {
         const ONE_MEG: usize = 1024 * 1024;
@@ -354,9 +370,9 @@ mod tests {
         hyp_mem
     }
 
-    fn stub_phys_pages() -> (PageState, crate::PageRange) {
+    fn stub_phys_pages() -> (PageState, PageVec<PageRange>) {
         let hyp_mem = stub_hyp_mem();
-        let (phys_pages, host_mem) = PageState::from(hyp_mem);
+        let (phys_pages, host_mem) = PageState::from(hyp_mem, PageSize4k::SIZE_BYTES);
         (phys_pages, host_mem)
     }
 
@@ -403,16 +419,40 @@ mod tests {
     }
 
     #[test]
+    fn hyp_mem_take_aligned() {
+        let mut hyp_mem = stub_hyp_mem();
+        let range = hyp_mem.take_pages_with_alignment(4, 16 * 1024);
+        assert_eq!(range.next_addr().bits() & (16 * 1024 - 1), 0);
+    }
+
+    #[test]
+    fn hyp_mem_drain() {
+        let mut hyp_mem = stub_hyp_mem();
+        let ranges_page = match SequentialPages::from_pages([hyp_mem.next_page()]) {
+            Ok(sp) => sp,
+            _ => unreachable!(),
+        };
+        let mut host_pages = PageVec::from(ranges_page);
+        let remaining = hyp_mem.pages_remaining();
+        let _ = hyp_mem.drain_to(&mut host_pages);
+        assert_eq!(host_pages.len(), 1);
+        assert_eq!(
+            host_pages[0].remaining_size(),
+            remaining * PageSize4k::SIZE_BYTES
+        );
+    }
+
+    #[test]
     fn drop_one_phys_pages_ref() {
         let (mut phys_pages, _host_mem) = stub_phys_pages();
         let new_id = {
             let mut c = phys_pages.clone();
             c.add_active_guest().unwrap()
         };
-        assert_eq!(phys_pages.inner.lock().active_guests.len(), 1);
+        assert_eq!(phys_pages.inner.lock().active_guests.len(), 2);
 
         phys_pages.rm_active_guest(new_id);
 
-        assert_eq!(phys_pages.inner.lock().active_guests.len(), 0);
+        assert_eq!(phys_pages.inner.lock().active_guests.len(), 1);
     }
 }

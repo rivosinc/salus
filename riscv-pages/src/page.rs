@@ -4,6 +4,7 @@
 
 /// Represents pages of memory.
 use core::marker::PhantomData;
+use core::slice;
 
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
@@ -319,6 +320,16 @@ impl<S: PageSize> Page<S> {
             index: 0,
         }
     }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        let base_ptr = self.addr.bits() as *const u8;
+        // Safe because the borrow cannot outlive the lifetime
+        // of the underlying page, and the upper bound is
+        // guaranteed to be within the size of the page
+        unsafe {
+            slice::from_raw_parts(base_ptr, S::SIZE_BYTES as usize)
+        }
+    }
 }
 
 impl<S: PageSize> PhysPage for Page<S> {
@@ -460,5 +471,34 @@ mod tests {
         }
 
         assert!(p.u64_iter().enumerate().all(|(i, v)| i as u64 == v));
+    }
+
+    #[test]
+    pub fn test_as_bytes() {
+        let mut mem = [0u8; 8192];
+        let ptr = mem.as_mut_ptr();
+
+        let aligned_ptr = unsafe {
+            // Safe because the above allocation guarantees that the result is
+            // still a valid pointer.
+            ptr.add(ptr.align_offset(4096))
+        };
+
+        // Safe because the above allocation guarantees that the result is
+        // still a valid pointer.
+        unsafe {
+            *aligned_ptr.add(4095) = 0xAA;
+        };
+
+        let addr: AlignedPageAddr<PageSize4k> =
+        AlignedPageAddr::new(PhysAddr::new(aligned_ptr as u64)).unwrap();
+
+        // Safe the above allocation guarantees that the result is
+        // still a valid pointer.
+        let page =  unsafe {
+            Page::new(addr)
+        };
+
+        assert!(page.as_bytes().last().unwrap() == &0xAA);
     }
 }

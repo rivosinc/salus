@@ -3,20 +3,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use riscv_pages::{Page, PageSize};
-
 use crate::data_measure::DataMeasure;
-
+use sha2::{Digest, Sha256};
 #[derive(Default)]
 pub struct TestMeasure {
-    measurement: u64,
+    measurement: [u8; 32],
 }
 
 impl DataMeasure for TestMeasure {
-    type MeasurementResult = u64;
+    type MeasurementResult = [u8; 32];
 
     fn add_page<S: PageSize>(&mut self, gpa: u64, page: &Page<S>) {
-        self.measurement ^= gpa;
-        self.measurement ^= page.u64_iter().fold(0, |a, x| a ^ x);
+        self.measurement = Sha256::digest(page.as_bytes()).as_slice().try_into().unwrap();
     }
 
     fn get_measurement(&self) -> Self::MeasurementResult {

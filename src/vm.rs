@@ -374,8 +374,8 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
             return Err(SbiError::InvalidParam); // TODO different error
         }
 
-        let from_page_addr =
-            AlignedPageAddr4k::new(PhysAddr::new(donor_pages_addr)).ok_or(SbiError::InvalidAddress)?;
+        let from_page_addr = AlignedPageAddr4k::new(PhysAddr::new(donor_pages_addr))
+            .ok_or(SbiError::InvalidAddress)?;
 
         let (guest_builder, state_page) = self
             .vm_pages
@@ -454,7 +454,8 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
 
     fn guest_rm_pages(&mut self, guest_id: u64, gpa: u64, num_pages: u64) -> sbi::Result<u64> {
         println!("Salus - Rm pages {guest_id:x} gpa:{gpa:x} num_pages:{num_pages}",);
-        let from_page_addr = AlignedPageAddr4k::new(PhysAddr::new(gpa)).ok_or(SbiError::InvalidAddress)?;
+        let from_page_addr =
+            AlignedPageAddr4k::new(PhysAddr::new(gpa)).ok_or(SbiError::InvalidAddress)?;
 
         self.guests
             .as_mut()

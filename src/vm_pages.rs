@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 
 use riscv_page_tables::{HypMemoryPages, PageRange, PageState, PlatformPageTable};
 use riscv_pages::{
-    CleanPage, Page4k, AlignedPageAddr4k, PageOwnerId, PageSize4k, SequentialPages, UnmappedPage,
+    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize4k, SequentialPages, UnmappedPage,
 };
 
 use page_collections::page_vec::PageVec;

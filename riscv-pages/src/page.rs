@@ -326,9 +326,7 @@ impl<S: PageSize> Page<S> {
         // Safe because the borrow cannot outlive the lifetime
         // of the underlying page, and the upper bound is
         // guaranteed to be within the size of the page
-        unsafe {
-            slice::from_raw_parts(base_ptr, S::SIZE_BYTES as usize)
-        }
+        unsafe { slice::from_raw_parts(base_ptr, S::SIZE_BYTES as usize) }
     }
 }
 
@@ -398,7 +396,8 @@ mod tests {
     #[test]
     fn round_phys() {
         assert!(
-            AlignedPageAddr::<PageSize4k>::with_round_up(PhysAddr::new(0x12_2345)).bits() == 0x12_3000
+            AlignedPageAddr::<PageSize4k>::with_round_up(PhysAddr::new(0x12_2345)).bits()
+                == 0x12_3000
         );
         assert!(
             AlignedPageAddr::<PageSize4k>::with_round_down(PhysAddr::new(0x4567_9521)).bits()
@@ -491,13 +490,11 @@ mod tests {
         };
 
         let addr: AlignedPageAddr<PageSize4k> =
-        AlignedPageAddr::new(PhysAddr::new(aligned_ptr as u64)).unwrap();
+            AlignedPageAddr::new(PhysAddr::new(aligned_ptr as u64)).unwrap();
 
         // Safe the above allocation guarantees that the result is
         // still a valid pointer.
-        let page =  unsafe {
-            Page::new(addr)
-        };
+        let page = unsafe { Page::new(addr) };
 
         assert!(page.as_bytes().last().unwrap() == &0xAA);
     }

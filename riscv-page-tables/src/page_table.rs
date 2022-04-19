@@ -6,8 +6,8 @@ use core::marker::PhantomData;
 use core::slice;
 
 use riscv_pages::{
-    CleanPage, Page, Page4k, AlignedPageAddr, AlignedPageAddr4k, PageOwnerId, PageSize, PageSize2MB, PageSize4k,
-    SequentialPages, UnmappedPage,
+    AlignedPageAddr, AlignedPageAddr4k, CleanPage, Page, Page4k, PageOwnerId, PageSize,
+    PageSize2MB, PageSize4k, SequentialPages, UnmappedPage,
 };
 
 use crate::page_tracking::PageState;
@@ -79,7 +79,9 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             // to a 4 kilobyte page of PTES for the next level.
             let ptes: &'a mut [Pte] = unsafe {
                 slice::from_raw_parts_mut(
-                    AlignedPageAddr::<PageSize4k>::try_from(pte.pfn()).unwrap().bits() as *mut Pte,
+                    AlignedPageAddr::<PageSize4k>::try_from(pte.pfn())
+                        .unwrap()
+                        .bits() as *mut Pte,
                     L::NextLevel::TABLE_PAGES * 4096,
                 )
             };

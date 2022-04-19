@@ -8,7 +8,8 @@ use spin::Mutex;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_pages::{
-    Page, AlignedPageAddr, AlignedPageAddr4k, PageOwnerId, PageSize, PageSize4k, PhysAddr, SequentialPages,
+    AlignedPageAddr, AlignedPageAddr4k, Page, PageOwnerId, PageSize, PageSize4k, PhysAddr,
+    SequentialPages,
 };
 
 use crate::page_info::{PageInfo, Pages};

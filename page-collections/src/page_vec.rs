@@ -8,7 +8,7 @@ use core::mem::{self, ManuallyDrop};
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
 
-use riscv_pages::{Page4k, AlignedPageAddr, PageSize, PageSize4k, PhysAddr, SequentialPages};
+use riscv_pages::{AlignedPageAddr, Page4k, PageSize, PageSize4k, PhysAddr, SequentialPages};
 
 const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 

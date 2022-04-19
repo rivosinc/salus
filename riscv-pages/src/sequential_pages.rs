@@ -4,7 +4,7 @@
 
 use core::marker::PhantomData;
 
-use crate::page::{Page, AlignedPageAddr, PageSize, PhysAddr};
+use crate::page::{AlignedPageAddr, Page, PageSize, PhysAddr};
 
 /// `SequentialPages` holds a range of consecutive pages. Each page's address is one page after the
 /// previous. This forms a contiguous area of memory suitable for holding an array or other linear

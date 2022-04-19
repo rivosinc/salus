@@ -401,7 +401,7 @@ mod tests {
         );
         assert!(
             AlignedPageAddr::<PageSize4k>::with_round_down(PhysAddr::new(0x4567_9521)).bits()
-                == 0x4567_9500
+                == 0x4567_9000
         );
     }
 

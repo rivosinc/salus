@@ -69,6 +69,9 @@ pub enum HwReservedMemType {
     /// for anything else.
     HypervisorImage,
 
+    /// The hypervisor heap. For boot-time dynamic memory allocation.
+    HypervisorHeap,
+
     /// The system page map.
     PageMap,
 
@@ -273,6 +276,7 @@ impl fmt::Display for HwReservedMemType {
         match &self {
             HwReservedMemType::FirmwareReserved => write!(f, "firmware"),
             HwReservedMemType::HypervisorImage => write!(f, "hypervisor image"),
+            HwReservedMemType::HypervisorHeap => write!(f, "hypervisor heap"),
             HwReservedMemType::PageMap => write!(f, "page map"),
             HwReservedMemType::HostKernelImage => write!(f, "host kernel"),
             HwReservedMemType::HostInitramfsImage => write!(f, "host initramfs"),

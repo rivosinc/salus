@@ -22,6 +22,7 @@ mod vm_pages;
 use abort::abort;
 use data_measure::DataMeasure;
 use device_tree::Fdt;
+use hyp_alloc::HypAlloc;
 use page_collections::page_vec::PageVec;
 use print_util::*;
 use riscv_page_tables::*;
@@ -177,6 +178,29 @@ fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
     Ok(mem_map)
 }
 
+/// Creates a heapfrom the given `mem_map`, marking the region occupied by the heap as reserved.
+fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
+    const HEAP_SIZE: u64 = 16 * 1024 * 1024;
+
+    let heap_base = mem_map
+        .regions()
+        .find(|r| r.mem_type() == HwMemType::Available && r.size() >= HEAP_SIZE)
+        .map(|r| r.base())
+        .expect("Not enough free memory for hypervisor heap");
+    mem_map
+        .reserve_region(
+            HwReservedMemType::HypervisorHeap,
+            PhysAddr::from(heap_base),
+            HEAP_SIZE,
+        )
+        .unwrap();
+    let pages = unsafe {
+        // Safe since this region of memory was free in the memory map.
+        SequentialPages::from_mem_range(heap_base, HEAP_SIZE / PageSize4k::SIZE_BYTES)
+    };
+    HypAlloc::from_pages(pages)
+}
+
 /// Loads a host VM with the given kernel & initramfs images. Uses `hyp_pages` to allocate
 /// any other hypervisor-internal structures, consuming the rest to map into the host VM.
 ///
@@ -315,7 +339,7 @@ fn test_boot_vm<T: PlatformPageTable, D: DataMeasure>(hart_id: u64, fdt_addr: u6
     let hyp_fdt =
         unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.expect("Failed to read FDT");
 
-    let mem_map = build_memory_map::<T>(&hyp_fdt).expect("Failed to build memory map");
+    let mut mem_map = build_memory_map::<T>(&hyp_fdt).expect("Failed to build memory map");
     // Find where QEMU loaded the host kernel image.
     let host_kernel = *mem_map
         .regions()
@@ -325,6 +349,9 @@ fn test_boot_vm<T: PlatformPageTable, D: DataMeasure>(hart_id: u64, fdt_addr: u6
         .regions()
         .find(|r| r.mem_type() == HwMemType::Reserved(HwReservedMemType::HostInitramfsImage))
         .cloned();
+
+    // TODO: Can use this to allocate dynamically-sized structures.
+    let _heap = create_heap(&mut mem_map);
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.

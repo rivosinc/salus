@@ -103,6 +103,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyp_alloc"
+version = "0.1.0"
+dependencies = [
+ "riscv_pages",
+ "spin",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.124"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -203,6 +211,7 @@ name = "salus"
 version = "0.1.0"
 dependencies = [
  "device_tree",
+ "hyp_alloc",
  "page_collections",
  "riscv_page_tables",
  "riscv_pages",

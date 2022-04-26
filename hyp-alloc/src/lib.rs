@@ -12,9 +12,11 @@
 
 extern crate alloc;
 
+pub mod arena;
 pub mod hyp_alloc;
 
 pub use crate::hyp_alloc::HypAlloc;
+pub use arena::{Arena, ArenaId};
 
 #[cfg(test)]
 #[macro_use]

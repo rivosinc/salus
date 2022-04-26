@@ -236,6 +236,11 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
             .unwrap()
     }
 
+    /// Returns this node's name as a raw byte slice.
+    pub(crate) fn name_raw(&self) -> &[u8] {
+        &self.name
+    }
+
     /// Sets this node's name.
     pub fn set_name(&mut self, name: &str) -> DeviceTreeResult<()> {
         copy_string_with_null_termination(&mut self.name, name)
@@ -353,6 +358,11 @@ impl<A: Allocator + Clone> DeviceTreeProp<A> {
             .unwrap()
             .strip_suffix('\0')
             .unwrap()
+    }
+
+    /// Returns this property's name as a raw byte slice.
+    pub(crate) fn name_raw(&self) -> &[u8] {
+        &self.name
     }
 
     /// Sets this property's name.

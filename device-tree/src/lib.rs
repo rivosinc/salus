@@ -4,15 +4,17 @@
 
 //! Library for interacting wtih device-trees.
 #![no_std]
-#![feature(allocator_api, split_array)]
+#![feature(allocator_api, split_array, slice_take)]
 
 extern crate alloc;
 
 mod device_tree;
 mod error;
 mod fdt;
+mod serialize;
 
 pub use crate::device_tree::{DeviceTree, DeviceTreeIter, DeviceTreeNode};
 pub use error::Error as DeviceTreeError;
 pub use error::Result as DeviceTreeResult;
 pub use fdt::{Fdt, FdtMemoryRegion};
+pub use serialize::DeviceTreeSerializer;

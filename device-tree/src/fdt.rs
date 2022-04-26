@@ -6,9 +6,7 @@
 
 use crate::DeviceTreeResult;
 use fdt_rs::base::iters::{DevTreeNodeIter, DevTreeReserveEntryIter};
-use fdt_rs::base::parse::ParsedTok;
 use fdt_rs::base::{DevTree, DevTreeProp};
-use fdt_rs::modify::modtoken::*;
 use fdt_rs::prelude::*;
 
 /// Represents a flattened device-tree (FDT) as passed to the hypervisor by firmware. Currently
@@ -61,109 +59,8 @@ impl<'a> Fdt<'a> {
         self.get_module_node_region("multiboot,ramdisk")
     }
 
-    /// Writes out the FDT to `out_slice` with the size of memory set to `new_memory_size`.
-    ///
-    /// TODO: Handle more advanced transformations.
-    /// TODO: Handle errors.
-    pub fn write_with_updated_memory_size(&self, out_slice: &mut [u8], new_memory_size: u64) {
-        let (address_cells, size_cells) = self.get_address_size();
-        if address_cells != 2 || size_cells != 2 {
-            panic!(
-                "#address-cells and #size-cells were not 2! They were, respectively: {:} and {:}",
-                address_cells, size_cells
-            );
-        }
-
-        let mut in_memory = false;
-        let mut memory_depth = 0;
-        let mut depth = 0;
-
-        let mut test = |token: &mut ModifyParsedTok, _prop_size| {
-            match token {
-                ModifyParsedTok::BeginNode(node) => {
-                    in_memory = node.name.starts_with(b"memory");
-
-                    depth += 1;
-                    if in_memory {
-                        memory_depth = depth;
-                    }
-                }
-                ModifyParsedTok::Prop(prop, ref mut buf) => {
-                    let name = self.inner.string_at_offset(prop.name_offset).unwrap();
-                    if in_memory && name[..3].as_bytes() == b"reg" {
-                        let bytes = u64::to_be_bytes(new_memory_size);
-                        let prop_buf = &mut *buf;
-
-                        // 8..16 because the size is located at offset 8 in the propbuf
-                        // the first 8 bytes represent the address of property "reg"
-                        prop_buf[8..16].clone_from_slice(&bytes);
-                    }
-                }
-                ModifyParsedTok::EndNode => {
-                    depth -= 1;
-                    if memory_depth < depth {
-                        in_memory = false;
-                    }
-                }
-                ModifyParsedTok::Nop => {}
-            }
-
-            ModifyTokenResponse::Pass
-        };
-
-        self.inner.modify(out_slice, &mut test).unwrap();
-    }
-
     pub(crate) fn inner(&self) -> DevTree {
         self.inner
-    }
-
-    /// Returns the top-level #address-cells/#size-cells of the FDT.
-    fn get_address_size(&self) -> (u32, u32) {
-        let mut nodes = self.inner.parse_iter();
-        let mut address_cells = 0;
-        let mut size_cells = 0;
-
-        let mut depth = 0;
-
-        while let Ok(Some(token)) = nodes.next() {
-            match token {
-                ParsedTok::BeginNode(_) => {
-                    depth += 1;
-                }
-
-                ParsedTok::EndNode => {
-                    depth -= 1;
-
-                    if depth == 0 {
-                        return (address_cells, size_cells);
-                    }
-                }
-
-                ParsedTok::Prop(prop) => {
-                    if depth == 1 {
-                        // the following unwraps should not cause an error because prop_buf[0..4] encodes 4
-                        // bytes, which can be turned into a big endian u32.
-
-                        if self.inner.string_at_offset(prop.name_offset).unwrap()
-                            == "#address-cells"
-                        {
-                            address_cells =
-                                u32::from_be_bytes(prop.prop_buf[0..4].try_into().unwrap());
-                        }
-
-                        if self.inner.string_at_offset(prop.name_offset).unwrap() == "#size-cells" {
-                            size_cells =
-                                u32::from_be_bytes(prop.prop_buf[0..4].try_into().unwrap());
-                        }
-                    }
-                }
-
-                _ => {}
-            }
-        }
-
-        (0, 0)
     }
 
     /// Returns the 'reg' property of a 'multiboot,module' node with the given compatible

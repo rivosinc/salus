@@ -211,6 +211,7 @@ dependencies = [
 name = "salus"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "device_tree",
  "hyp_alloc",
  "page_collections",

@@ -19,6 +19,7 @@ name = "tellus"
 path = "src/tellus.rs"
 
 [dependencies]
+arrayvec = { version = "0.7.2", default-features = false }
 device_tree = { path = "./device-tree" }
 hyp_alloc = { path = "./hyp-alloc" }
 page_collections = { path = "./page-collections" }

@@ -4,7 +4,15 @@
 
 //! Library for interacting wtih device-trees.
 #![no_std]
+#![feature(allocator_api, split_array)]
 
+extern crate alloc;
+
+mod device_tree;
+mod error;
 mod fdt;
 
-pub use fdt::{Error, Fdt, FdtMemoryRegion, Result};
+pub use crate::device_tree::{DeviceTree, DeviceTreeIter, DeviceTreeNode};
+pub use error::Error as DeviceTreeError;
+pub use error::Result as DeviceTreeResult;
+pub use fdt::{Fdt, FdtMemoryRegion};

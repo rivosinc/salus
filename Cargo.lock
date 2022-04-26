@@ -53,6 +53,7 @@ name = "device_tree"
 version = "0.1.0"
 dependencies = [
  "fdt-rs",
+ "hyp_alloc",
 ]
 
 [[package]]

@@ -3,6 +3,9 @@ name = "device_tree"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+hyp_alloc = { path = "../hyp-alloc" }
+
 # TODO - vendor fdt-rs or find a better solution with fewer dependencies.
 # use the fdt-rs crate without default features to allow nostd
 [dependencies.fdt-rs]

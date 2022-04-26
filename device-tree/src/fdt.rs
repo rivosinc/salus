@@ -4,15 +4,12 @@
 
 //! Wrapper for basic FDT interaction.
 
+use crate::DeviceTreeResult;
 use fdt_rs::base::iters::{DevTreeNodeIter, DevTreeReserveEntryIter};
 use fdt_rs::base::parse::ParsedTok;
 use fdt_rs::base::{DevTree, DevTreeProp};
 use fdt_rs::modify::modtoken::*;
 use fdt_rs::prelude::*;
-
-// Just re-export the errors used by fdt_rs for now.
-pub use fdt_rs::error::DevTreeError as Error;
-pub use fdt_rs::error::Result;
 
 /// Represents a flattened device-tree (FDT) as passed to the hypervisor by firmware. Currently
 /// this is a lightweight wrapper on top of `fdt_rs::base::DevTree`.
@@ -29,7 +26,7 @@ impl<'a> Fdt<'a> {
     ///
     /// # Safety
     /// Must point to a 32-byte-aligned and valid FDT blob.
-    pub unsafe fn new_from_raw_pointer(fdt_addr: *const u8) -> Result<Self> {
+    pub unsafe fn new_from_raw_pointer(fdt_addr: *const u8) -> DeviceTreeResult<Self> {
         let inner = DevTree::from_raw_pointer(fdt_addr)?;
         Ok(Self { inner })
     }
@@ -115,6 +112,10 @@ impl<'a> Fdt<'a> {
         };
 
         self.inner.modify(out_slice, &mut test).unwrap();
+    }
+
+    pub(crate) fn inner(&self) -> DevTree {
+        self.inner
     }
 
     /// Returns the top-level #address-cells/#size-cells of the FDT.

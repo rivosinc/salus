@@ -238,9 +238,7 @@ impl<'a, 'dt> MemoryRegionIter<'a, 'dt> {
             .find(|n| Ok(n.name().unwrap_or("").starts_with("memory")))
             .unwrap_or(None)?;
         // We don't care what's next; silence the unused Result<> warning.
-        match self.inner.next() {
-            _ => (),
-        };
+        let _ = self.inner.next();
         node.props()
             .find(|p| Ok(p.name().unwrap_or("") == "reg"))
             .unwrap_or(None)

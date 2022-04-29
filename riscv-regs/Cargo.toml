@@ -6,3 +6,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tock-registers = { version = "0.7" }
+riscv_pages = { path = "../riscv-pages" }
+riscv_page_tables = { path = "../riscv-page-tables" }

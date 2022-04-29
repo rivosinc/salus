@@ -5,8 +5,11 @@
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::PlatformPageTable;
-use riscv_pages::{AlignedPageAddr4k, PageOwnerId, PageSize4k, Pfn, PhysAddr, SequentialPages};
-use riscv_regs::{GeneralPurposeRegisters, GprIndex, GuestExit, SCause, SupervisorExceptionCause};
+use riscv_pages::{AlignedPageAddr4k, PageOwnerId, PageSize4k, PhysAddr, SequentialPages};
+use riscv_regs::{hedeleg, hgatp, hideleg, hstatus, sie, sstatus, HgatpHelpers};
+use riscv_regs::{
+    Exception, GeneralPurposeRegisters, GprIndex, Interrupt, LocalRegisterCopy, Trap,
+};
 use sbi::Error as SbiError;
 use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 
@@ -24,32 +27,18 @@ extern "C" {
 #[repr(C)]
 #[allow(dead_code)]
 pub struct VmCsrs {
-    pub sepc: u64,
-    pub sie: u64,
-    pub scause: SCause,
-    pub stvec: u64,
+    sepc: u64,
+    sie: u64,
+    scause: u64,
+    stvec: u64,
     hgatp: u64,
-    pub hedeleg: u64,
-    pub hideleg: u64,
-    pub hstatus: u64,
-    pub hcounteren: u64,
-    pub sstatus: u64,
-    pub stval: u64,
-    pub htval: u64,
-}
-
-impl VmCsrs {
-    // hgatp gets a setter to be sure that it is set to a valid page table root address.
-    fn set_hgatp<T: PlatformPageTable, D: DataMeasure>(
-        &mut self,
-        page_root: &VmPages<T, D>,
-        vm_id: u64,
-    ) {
-        const MODE_SHIFT: u64 = 60;
-        const VMID_SHIFT: u64 = 44;
-        let pgd_pfn = Pfn::from(page_root.get_root_address());
-        self.hgatp = pgd_pfn.bits() | vm_id << VMID_SHIFT | T::HGATP_VALUE << MODE_SHIFT;
-    }
+    hedeleg: u64,
+    hideleg: u64,
+    hstatus: u64,
+    hcounteren: u64,
+    sstatus: u64,
+    stval: u64,
+    htval: u64,
 }
 
 // With the exception of hgatp, any value of guest registers is safe for the host, the guest might
@@ -162,17 +151,55 @@ pub struct Vm<T: PlatformPageTable, D: DataMeasure> {
 impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
     /// Create a new guest using the given initial page table and pool of initial pages.
     fn new(vm_pages: VmPages<T, D>) -> Self {
-        // TODO - un hard code all this.
         let mut info = VmCpuState::default();
-        info.csrs.sepc = 0x8020_0000;
-        info.csrs.sie = 0x222;
-        info.csrs.set_hgatp(&vm_pages, 1);
-        // TODO - hard-coded delegation of int/exceptions
-        info.csrs.hedeleg = 0xb109;
-        info.csrs.hideleg = 0x444;
-        info.csrs.hstatus = 0x180; // SPV | SPVP
+
+        // TODO: Several of these are not really per-VM registers and should be initialized
+        // elsewhere. We're also not saving and restoring all the registers that we need to on
+        // a VM context switch (and the ones we do don't necessarily all need to be done from asm).
+        let mut sie = LocalRegisterCopy::<u64, sie::Register>::new(0);
+        sie.modify(Interrupt::SupervisorSoft.to_sie_field().unwrap());
+        sie.modify(Interrupt::SupervisorTimer.to_sie_field().unwrap());
+        sie.modify(Interrupt::SupervisorExternal.to_sie_field().unwrap());
+        info.csrs.sie = sie.get();
+
+        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
+        hgatp.set_from(vm_pages.root(), 1);
+        info.csrs.hgatp = hgatp.get();
+
+        let mut hedeleg = LocalRegisterCopy::<u64, hedeleg::Register>::new(0);
+        hedeleg.modify(Exception::InstructionMisaligned.to_hedeleg_field().unwrap());
+        hedeleg.modify(Exception::Breakpoint.to_hedeleg_field().unwrap());
+        hedeleg.modify(Exception::UserEnvCall.to_hedeleg_field().unwrap());
+        hedeleg.modify(Exception::InstructionPageFault.to_hedeleg_field().unwrap());
+        hedeleg.modify(Exception::LoadPageFault.to_hedeleg_field().unwrap());
+        hedeleg.modify(Exception::StorePageFault.to_hedeleg_field().unwrap());
+        info.csrs.hedeleg = hedeleg.get();
+
+        let mut hideleg = LocalRegisterCopy::<u64, hideleg::Register>::new(0);
+        hideleg.modify(Interrupt::VirtualSupervisorSoft.to_hideleg_field().unwrap());
+        hideleg.modify(
+            Interrupt::VirtualSupervisorTimer
+                .to_hideleg_field()
+                .unwrap(),
+        );
+        hideleg.modify(
+            Interrupt::VirtualSupervisorExternal
+                .to_hideleg_field()
+                .unwrap(),
+        );
+        info.csrs.sie = hideleg.get();
+
+        let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(0);
+        hstatus.modify(hstatus::spv.val(1));
+        hstatus.modify(hstatus::spvp::Supervisor);
+        info.csrs.hstatus = hstatus.get();
+
         info.csrs.hcounteren = 0xffff_ffff_ffff_ffff; // enable all
-        info.csrs.sstatus = 0x120; // SPP | SPIE
+
+        let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
+        sstatus.modify(sstatus::spp::Supervisor);
+        sstatus.modify(sstatus::spie.val(1));
+        info.csrs.sstatus = sstatus.get();
 
         // set the hart ID - TODO other hart IDs when multi-threaded
         info.gprs.set_reg(GprIndex::A0, 0);
@@ -183,6 +210,10 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
             guests: None,
             has_run: false,
         }
+    }
+
+    fn set_entry_address(&mut self, entry_addr: u64) {
+        self.info.csrs.sepc = entry_addr;
     }
 
     // TODO - also pass the DT here and copy it?
@@ -199,38 +230,38 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
     }
 
     /// Run this VM until the guest exits
-    fn run_to_exit(&mut self, _hart_id: u64) -> GuestExit {
+    fn run_to_exit(&mut self, _hart_id: u64) -> Trap {
         unsafe {
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table.
             _run_guest(&mut self.info as *mut VmCpuState);
         }
-        self.info.csrs.scause.into_exit().unwrap()
+        Trap::from_scause(self.info.csrs.scause).unwrap()
     }
 
     /// Run this guest until it requests an exit or an interrupt is received for the host.
-    fn run(&mut self, hart_id: u64) -> GuestExit {
-        use SupervisorExceptionCause::*;
+    fn run(&mut self, hart_id: u64) -> Trap {
+        use Exception::*;
         self.has_run = true;
         loop {
             match self.run_to_exit(hart_id) {
-                GuestExit::Exception(EcallVsMode) => {
+                Trap::Exception(VirtualSupervisorEnvCall) => {
                     self.handle_ecall();
                     self.inc_sepc_ecall(); // must return to _after_ the ecall.
                 }
-                GuestExit::Exception(GuestInstructionPageFault) => {
+                Trap::Exception(GuestInstructionPageFault) => {
                     if self.handle_guest_fault(/*Instruction*/).is_err() {
-                        return GuestExit::Exception(GuestInstructionPageFault);
+                        return Trap::Exception(GuestInstructionPageFault);
                     }
                 }
-                GuestExit::Exception(GuestLoadPageFault) => {
+                Trap::Exception(GuestLoadPageFault) => {
                     if self.handle_guest_fault(/*Load*/).is_err() {
-                        return GuestExit::Exception(GuestLoadPageFault);
+                        return Trap::Exception(GuestLoadPageFault);
                     }
                 }
-                GuestExit::Exception(GuestStoreAmoPageFault) => {
+                Trap::Exception(GuestStorePageFault) => {
                     if self.handle_guest_fault(/*Store*/).is_err() {
-                        return GuestExit::Exception(GuestStoreAmoPageFault);
+                        return Trap::Exception(GuestStorePageFault);
                     }
                 }
                 e => return e, // TODO
@@ -539,9 +570,14 @@ impl<T: PlatformPageTable, D: DataMeasure> Host<T, D> {
         self.inner.add_device_tree(dt_addr)
     }
 
+    /// Set the address we should 'sret' to upon entering the VM.
+    pub fn set_entry_address(&mut self, entry_addr: u64) {
+        self.inner.set_entry_address(entry_addr);
+    }
+
     /// Run the host. Only returns for system shutdown
     //TODO - return value need to be host specific
-    pub fn run(&mut self, hart_id: u64) -> GuestExit {
+    pub fn run(&mut self, hart_id: u64) -> Trap {
         self.inner.run(hart_id)
     }
 }

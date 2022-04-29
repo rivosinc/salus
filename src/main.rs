@@ -369,6 +369,7 @@ where
     host_root_builder = host_root_builder.add_4k_pages(current_gpa, host_pages_iter);
     let mut host = Host::new(host_root_builder.create_host(), host_guests_pages);
     host.add_device_tree(host_ram_base + FDT_OFFSET);
+    host.set_entry_address(host_ram_base + KERNEL_OFFSET);
     host
 }
 

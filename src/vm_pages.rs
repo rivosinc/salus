@@ -160,10 +160,9 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
         Ok(count)
     }
 
-    /// Returns the address of the top level page table.
-    /// This is the value that should be written to satp/hgatp to start using the page tables.
-    pub fn get_root_address(&self) -> AlignedPageAddr4k {
-        self.root.get_root_address()
+    /// Returns the root 2nd-stage page table for this VM.
+    pub fn root(&self) -> &T {
+        &self.root
     }
 
     /// Handles a page fault for the given address.

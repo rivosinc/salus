@@ -7,9 +7,9 @@ use core::slice;
 use riscv_pages::*;
 
 use crate::page_table::Result;
-use crate::page_table::*;
 use crate::page_tracking::PageState;
 use crate::pte::{Pte, PteLeafPerms};
+use crate::{page_table::*, GuestOwnedPage};
 
 pub enum L1Table {}
 pub enum L2Table {}
@@ -343,6 +343,44 @@ impl PlatformPageTable for Sv48x4 {
         match l1.entry_for_addr_mut(guest_phys_addr) {
             Invalid(pte) => Self::handle_fault_at::<PageSize4k>(pte, &mut phys_pages, &owner),
             _ => false,
+        }
+    }
+
+    // Supports only 4K pages for now
+    fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> Result<()>
+    where
+        F: FnOnce(&mut GuestOwnedPage),
+    {
+        use TableEntryMut::*;
+        use ValidTableEntryMut::*;
+
+        let mut l4 = self.top_level_directory();
+        let mut l3 = match l4.entry_for_addr_mut(gpa) {
+            Invalid(_) => return Err(Error::PageNotOwned),
+            Valid(Table(t)) => t,
+            Valid(_) => return Err(Error::PageNotOwned),
+        };
+        let mut l2 = match l3.entry_for_addr_mut(gpa) {
+            Invalid(_) => return Err(Error::PageNotOwned),
+            Valid(Table(t)) => t,
+            Valid(_) => return Err(Error::PageNotOwned),
+        };
+        let mut l1 = match l2.entry_for_addr_mut(gpa) {
+            Invalid(_) => return Err(Error::PageNotOwned),
+            Valid(Table(t)) => t,
+            Valid(_) => return Err(Error::PageNotOwned),
+        };
+
+        if let Some(spa) = match l1.entry_for_addr_mut(gpa) {
+            Valid(Leaf(pte)) => Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
+            _ => return Err(Error::PageNotOwned),
+        } {
+            unsafe {
+                callback(&mut GuestOwnedPage::new(spa));
+            }
+            Ok(())
+        } else {
+            Err(Error::PageNotOwned)
         }
     }
 }

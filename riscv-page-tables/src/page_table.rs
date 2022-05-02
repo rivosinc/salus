@@ -12,6 +12,7 @@ use riscv_pages::{
 
 use crate::page_tracking::PageState;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
+use crate::GuestOwnedPage;
 
 pub(crate) const ENTRIES_PER_PAGE: usize = 4096 / 8;
 
@@ -360,6 +361,13 @@ pub trait PlatformPageTable {
     /// returned if the page is still owned by the guest it was loaned to, or if the entry is
     /// invalid.
     fn do_guest_fault(&mut self, guest_phys_addr: u64) -> bool;
+
+    // Executes a callback with the SPA for the GPA while holding a reference to the page table
+    // This guarantees that the callback will be executed without the possibility of flipping the
+    // SPA mapping. The function returns an error if the mapping is invalid.
+    fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> Result<()>
+    where
+        F: FnOnce(&mut GuestOwnedPage);
 }
 
 pub struct UnmapIter<'a, T: PlatformPageTable> {

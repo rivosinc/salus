@@ -154,6 +154,22 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         );
     }
 
+    let measurment_page_addr = first_guest_page + (num_remove_pages + 1) * 0x1000;
+    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
+        guest_id: vmid,
+        measurement_version: 1,
+        measurement_type: 1,
+        page_addr: measurment_page_addr,
+    });
+    let result = ecall_send(&msg);
+
+    if result.is_ok() {
+        let measurement = unsafe { core::ptr::read_volatile(measurment_page_addr as *mut u64) };
+        println!("Measurement returned {measurement:x}");
+    } else {
+        println!("Measurement error {:?}", result.err());
+    }
+
     /* TODO - need to put code in guest
     let msg = SbiMessage::Tee(sbi::TeeFunction::Run { guest_id: vmid });
     match ecall_send(&msg) {

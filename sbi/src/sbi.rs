@@ -203,19 +203,19 @@ pub enum TeeFunction {
     /// a6 = 0, a0 = address of pages to use for tracking.
     TvmCreate(u64),
     /// Message to destroy a TVM created with `TvmCreate`.
-    /// a6 = 0, a0 = guest id returned from `TvmCreate`.
+    /// a6 = 1, a0 = guest id returned from `TvmCreate`.
     TvmDestroy { guest_id: u64 },
     /// Message from the host to add page tables pages to a TVM it created with `TvmCreate`. Pages
     /// must be added to the page table before mappings for more memory can be made. These must be
     /// 4k Pages.
-    /// a6 = 1, a0 = guest_id, a1 = address of the first page, and a2 = number of pages
+    /// a6 = 2, a0 = guest_id, a1 = address of the first page, and a2 = number of pages
     AddPageTablePages {
         guest_id: u64,
         page_addr: u64,
         num_pages: u64,
     },
     /// Message from the host to add page(s) to a TVM it created with `TvmCreate`.
-    /// a6 = 2,
+    /// a6 = 3,
     /// a0 = guest_id,
     /// a1 = address of the first page,
     /// a2 = page_type: 0 => 4k, 1=> 2M, 2=> 1G, 3=512G, Others: reserved
@@ -232,15 +232,15 @@ pub enum TeeFunction {
         measure_preserve: bool,
     },
     /// Moves a VM from the initializing state to the Runnable state
-    /// a6 = 3
+    /// a6 = 4
     /// a0 = guest id
     Finalize { guest_id: u64 },
     /// Runs the given TVM.
-    /// a6 = 4
+    /// a6 = 5
     /// a0 = guest id
     Run { guest_id: u64 },
     /// Removes pages that were previously added with `AddPages`.
-    /// a6 = 5
+    /// a6 = 6
     /// a0 = guest id,
     /// a1 = guest address to unmap
     /// a2 = address to remap the pages to in the requestor
@@ -250,6 +250,19 @@ pub enum TeeFunction {
         gpa: u64,
         remap_addr: u64, // TODO should we track this locally?
         num_pages: u64,
+    },
+    /// Gets the measurement for the guest and copies it
+    ///  the previously configured data transfer page
+    /// a6 = 7
+    /// a0 = guest id
+    /// a1 = measurement version
+    /// a2 = measurement type
+    /// a3 = page_addr
+    GetGuestMeasurement {
+        guest_id: u64,
+        measurement_version: u64,
+        measurement_type: u64,
+        page_addr: u64
     },
 }
 
@@ -281,6 +294,12 @@ impl TeeFunction {
                 remap_addr: args[2],
                 num_pages: args[3],
             }),
+            7 => Ok(GetGuestMeasurement {
+                guest_id: args[0],
+                measurement_version: args[1],
+                measurement_type: args[2],
+                page_addr: args[3]
+            }),
             _ => Err(Error::InvalidParam),
         }
     }
@@ -311,6 +330,12 @@ impl TeeFunction {
                 remap_addr: _,
                 num_pages: _,
             } => 6,
+            GetGuestMeasurement {
+                guest_id: _,
+                measurement_type: _,
+                measurement_version: _,
+                page_addr: _,
+            } => 7,
         }
     }
 
@@ -340,6 +365,12 @@ impl TeeFunction {
                 remap_addr: _,
                 num_pages: _,
             } => *guest_id,
+            GetGuestMeasurement {
+                guest_id,
+                measurement_version: _,
+                measurement_type: _,
+                page_addr: _,
+            } => *guest_id,
         }
     }
 
@@ -365,6 +396,12 @@ impl TeeFunction {
                 remap_addr: _,
                 num_pages: _,
             } => *gpa,
+            GetGuestMeasurement {
+                guest_id: _,
+                measurement_version,
+                measurement_type: _,
+                page_addr:_,
+            } => *measurement_version,
             _ => 0,
         }
     }
@@ -391,6 +428,12 @@ impl TeeFunction {
                 remap_addr,
                 num_pages: _,
             } => *remap_addr,
+            GetGuestMeasurement {
+                guest_id: _,
+                measurement_version: _,
+                measurement_type,
+                page_addr:_,
+            } => *measurement_type,
             _ => 0,
         }
     }
@@ -412,6 +455,12 @@ impl TeeFunction {
                 remap_addr: _,
                 num_pages,
             } => *num_pages,
+            GetGuestMeasurement {
+                guest_id: _,
+                measurement_version: _,
+                measurement_type: _,
+                page_addr,
+            } => *page_addr,
             _ => 0,
         }
     }

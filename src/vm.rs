@@ -16,6 +16,7 @@ use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 use crate::data_measure::DataMeasure;
 use crate::print_util::*;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
+use crate::GuestOwnedPage;
 use crate::{print, println};
 
 // Defined in guest.S
@@ -366,6 +367,14 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
                 remap_addr: _, // TODO - remove
                 num_pages,
             } => self.guest_rm_pages(guest_id, gpa, num_pages).into(),
+            GetGuestMeasurement {
+                guest_id,
+                measurement_version,
+                measurement_type,
+                page_addr,
+            } => self
+                .guest_get_measurement(guest_id, measurement_version, measurement_type, page_addr)
+                .into(),
         }
     }
 
@@ -543,8 +552,41 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
 
         Ok(num_pages)
     }
-}
 
+    // TODO: Add code to return actual measurements
+    fn guest_get_measurement(
+        &mut self,
+        guest_id: u64,
+        measurement_version: u64,
+        measurement_type: u64,
+        page_addr: u64,
+    ) -> sbi::Result<u64> {
+        if (measurement_version != 1)
+            || (measurement_type != 1)
+            || AlignedPageAddr4k::new(PhysAddr::new(page_addr)).is_none()
+        {
+            return Err(SbiError::InvalidParam);
+        }
+
+        let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
+        let _ = guests.get_guest_index(guest_id)?;
+        self.execute_with_guest_owned_page(page_addr, |spa| {
+            // TODO: Replace this with actual measurement and handle potential failure
+            let measurement = 0x55AA_55AAu32.to_le_bytes();
+            let _ = spa.write(0, &measurement);
+        })
+    }
+
+    fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> sbi::Result<u64>
+    where
+        F: FnOnce(&mut GuestOwnedPage),
+    {
+        self.vm_pages
+            .execute_with_guest_owned_page(gpa, callback)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        Ok(0)
+    }
+}
 /// Represents the special VM that serves as the host for the system.
 pub struct Host<T: PlatformPageTable, D: DataMeasure> {
     inner: Vm<T, D>,

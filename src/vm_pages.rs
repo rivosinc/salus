@@ -4,9 +4,9 @@
 
 use alloc::vec::Vec;
 use core::alloc::Allocator;
-use riscv_page_tables::{HypPageAlloc, PageState, PlatformPageTable};
+use riscv_page_tables::{GuestOwnedPage, HypPageAlloc, PageState, PlatformPageTable};
 use riscv_pages::{
-    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize, PageSize4k, SeqPageIter,
+    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize, PageSize4k, PhysAddr, SeqPageIter,
     SequentialPages, SequentialPages4k, UnmappedPage,
 };
 
@@ -171,6 +171,16 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
         } else {
             Err(Error::PageFaultHandling)
         }
+    }
+
+    // Passthrough function for callbackexecution with GPA -> SPA mapping
+    pub fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> Result<()>
+    where
+        F: FnOnce(&mut GuestOwnedPage),
+    {
+        self.root
+            .execute_with_guest_owned_page(gpa, callback)
+            .map_err(|_| Error::UnownedPage(AlignedPageAddr4k::with_round_down(PhysAddr::new(gpa))))
     }
 }
 

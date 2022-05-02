@@ -14,10 +14,11 @@ impl DataMeasure for TestMeasure {
     type MeasurementResult = [u8; 32];
 
     fn add_page<S: PageSize>(&mut self, gpa: u64, page: &Page<S>) {
-        self.measurement = Sha256::digest(page.as_bytes())
-            .as_slice()
-            .try_into()
-            .unwrap();
+        let mut digest = Sha256::new();
+        digest.update(self.measurement);
+        digest.update(gpa.to_le_bytes());
+        digest.update(page.as_bytes());
+        self.measurement = digest.finalize().as_slice().try_into().unwrap();
     }
 
     fn get_measurement(&self) -> Self::MeasurementResult {

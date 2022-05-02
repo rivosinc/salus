@@ -223,10 +223,7 @@ where
     A: Allocator + Clone,
 {
     // Reserve pages for tracking the host's guests.
-    let host_guests_pages = match SequentialPages::from_pages(hyp_pages.take_pages(2)) {
-        Ok(sp) => sp,
-        _ => unreachable!(),
-    };
+    let host_guests_pages = SequentialPages::from_pages(hyp_pages.take_pages(2)).unwrap();
 
     // Reserve a contiguous chunk for the host's FDT. We assume it will be no bigger than the size
     // of the hypervisor's FDT and we align it to `T::TOP_LEVEL_ALIGN` to maintain the contiguous
@@ -236,12 +233,10 @@ where
         ((size as u64) + T::TOP_LEVEL_ALIGN - 1) & !(T::TOP_LEVEL_ALIGN - 1)
     };
     let num_fdt_pages = host_fdt_size / PageSize4k::SIZE_BYTES;
-    let host_fdt_pages = match SequentialPages::from_pages(
+    let host_fdt_pages = SequentialPages::from_pages(
         hyp_pages.take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN),
-    ) {
-        Ok(sp) => sp,
-        _ => unreachable!(),
-    };
+    )
+    .unwrap();
 
     // We use the size of our (the hypervisor's) physical address to estimate the size of the
     // host's guest phsyical address space since we build the host's address space to match the

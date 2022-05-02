@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use core::marker::PhantomData;
+use core::{fmt, marker::PhantomData};
 
 use crate::page::{AlignedPageAddr, Page, PageSize, PhysAddr};
 
@@ -16,21 +16,25 @@ pub struct SequentialPages<S: PageSize> {
     phantom: PhantomData<S>,
 }
 
+/// An error resulting from trying to convert an iterator of pages to `SequentialPages`.
+pub enum Error<S: PageSize, I: Iterator<Item = Page<S>>> {
+    Empty,
+    NonContiguous(I),
+}
+
 impl<S: PageSize> SequentialPages<S> {
     /// Creates a `SequentialPages` form the passed iterator.
     ///
     /// If the passed pages are not consecutive, an Error will be returned holding an iterator to
     /// the passed in pages so they don't leak.
     /// If passed an empty iterator Err(None) will be returned.
-    pub fn from_pages<T>(
-        pages: T,
-    ) -> core::result::Result<Self, Option<impl Iterator<Item = Page<S>>>>
+    pub fn from_pages<T>(pages: T) -> Result<Self, Error<S, impl Iterator<Item = Page<S>>>>
     where
         T: IntoIterator<Item = Page<S>>,
     {
         let mut page_iter = pages.into_iter();
 
-        let first_page = page_iter.next().ok_or(None)?;
+        let first_page = page_iter.next().ok_or(Error::Empty)?;
 
         let addr = first_page.addr().bits();
 
@@ -45,7 +49,7 @@ impl<S: PageSize> SequentialPages<S> {
             let next_addr = match last_addr.checked_add(S::SIZE_BYTES) {
                 Some(a) => a,
                 None => {
-                    return Err(Some(
+                    return Err(Error::NonContiguous(
                         seq.into_iter()
                             .chain(core::iter::once(page))
                             .chain(page_iter),
@@ -53,7 +57,7 @@ impl<S: PageSize> SequentialPages<S> {
                 }
             };
             if this_addr != next_addr {
-                return Err(Some(
+                return Err(Error::NonContiguous(
                     seq.into_iter()
                         .chain(core::iter::once(page))
                         .chain(page_iter),
@@ -148,6 +152,15 @@ impl<S: PageSize> IntoIterator for SequentialPages<S> {
     }
 }
 
+impl<S: PageSize, I: Iterator<Item = Page<S>>> fmt::Debug for Error<S, I> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            Error::Empty => f.debug_struct("Empty").finish(),
+            Error::NonContiguous(_) => f.debug_struct("NonContiguous").finish_non_exhaustive(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,8 +196,8 @@ mod tests {
         let result = SequentialPages::from_pages(pages);
         match result {
             Ok(_) => panic!("didn't fail with non-sequential pages"),
-            Err(None) => panic!("didn't return any failed pages"),
-            Err(Some(returned_pages)) => {
+            Err(Error::Empty) => panic!("didn't return any failed pages"),
+            Err(Error::NonContiguous(returned_pages)) => {
                 assert_eq!(returned_pages.count(), 4);
             }
         }
@@ -196,8 +209,8 @@ mod tests {
         let result = SequentialPages::from_pages(pages);
         match result {
             Ok(_) => panic!("didn't fail with empty pages"),
-            Err(None) => (),
-            Err(Some(_)) => panic!("didn't return any failed pages"),
+            Err(Error::Empty) => (),
+            Err(Error::NonContiguous(_)) => panic!("didn't return any failed pages"),
         }
     }
 

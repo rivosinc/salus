@@ -176,10 +176,7 @@ mod tests {
         let backing_page =
             unsafe { Page4k::new(AlignedPageAddr4k::new(PhysAddr::new(aligned_addr)).unwrap()) };
 
-        let seq_pages = match SequentialPages::from_pages([backing_page]) {
-            Ok(p) => p,
-            Err(_) => panic!("can't create pages"),
-        };
+        let seq_pages = SequentialPages::from_pages([backing_page]).unwrap();
         let mut v = PageVec::from(seq_pages);
         assert_eq!(v.len(), 0);
         assert!(v.is_empty());

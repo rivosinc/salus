@@ -85,10 +85,7 @@ impl PageState {
     pub fn from(mut hyp_mem: HypPageAlloc, host_alignment: u64) -> (Self, PageVec<PageRange>) {
         let active_guests = Self::make_active_guest_vec(&mut hyp_mem);
         let state_storage_page = hyp_mem.next_page();
-        let ranges_page = match SequentialPages::from_pages([hyp_mem.next_page()]) {
-            Ok(sp) => sp,
-            _ => unreachable!(),
-        };
+        let ranges_page = SequentialPages::from_pages([hyp_mem.next_page()]).unwrap();
 
         // Discard a host_alignment sized chunk to align ourselves.
         let _ = hyp_mem.take_pages_with_alignment(
@@ -123,10 +120,7 @@ impl PageState {
     fn make_active_guest_vec(hyp_mem: &mut HypPageAlloc) -> PageVec<PageOwnerId> {
         // TODO - hard coded to two pages worth of guests. - really dumb if page size is 1G
         let pages = [hyp_mem.next_page(), hyp_mem.next_page()];
-        let seq_pages = match SequentialPages::from_pages(pages) {
-            Err(_) => unreachable!(),
-            Ok(sp) => sp,
-        };
+        let seq_pages = SequentialPages::from_pages(pages).unwrap();
         let mut active_guests = PageVec::from(seq_pages);
         active_guests.push(PageOwnerId::host());
         active_guests
@@ -428,10 +422,7 @@ mod tests {
     #[test]
     fn hyp_mem_drain() {
         let mut hyp_mem = stub_hyp_mem();
-        let ranges_page = match SequentialPages::from_pages([hyp_mem.next_page()]) {
-            Ok(sp) => sp,
-            _ => unreachable!(),
-        };
+        let ranges_page = SequentialPages::from_pages([hyp_mem.next_page()]).unwrap();
         let mut host_pages = PageVec::from(ranges_page);
         let remaining = hyp_mem.pages_remaining();
         let _ = hyp_mem.drain_to(&mut host_pages);

@@ -74,10 +74,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
             });
 
         // Can't fail if enough aligned pages are provided(checked above).
-        let root_pages = match SequentialPages::from_pages(clean_pages.by_ref().take(4)) {
-            Ok(p) => p,
-            Err(_) => panic!("can't create sequential pages"),
-        };
+        let root_pages = SequentialPages::from_pages(clean_pages.by_ref().take(4)).unwrap();
         let root = T::new(root_pages, id, pp_clone).unwrap();
         let pte_page = clean_pages.next().unwrap();
         let state_page = clean_pages.next().unwrap();
@@ -210,12 +207,9 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
         mut hyp_mem: HypPageAlloc,
         host_gpa_size: u64,
     ) -> (PageVec<PageRange>, Self) {
-        let root_table_pages = match SequentialPages::from_pages(
-            hyp_mem.take_pages_with_alignment(4, T::TOP_LEVEL_ALIGN),
-        ) {
-            Ok(sp) => sp,
-            _ => unreachable!(),
-        };
+        let root_table_pages =
+            SequentialPages::from_pages(hyp_mem.take_pages_with_alignment(4, T::TOP_LEVEL_ALIGN))
+                .unwrap();
         let num_pte_pages = T::max_pte_pages(host_gpa_size / PageSize4k::SIZE_BYTES);
         let pte_pages = hyp_mem.take_pages(num_pte_pages as usize);
 

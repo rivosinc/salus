@@ -21,4 +21,4 @@ pub use page::{
     PageSize2MB, PageSize4k, PageSize512GB, Pfn, PhysAddr, PhysPage, UnmappedPage,
 };
 pub use page_owner_id::PageOwnerId;
-pub use sequential_pages::SequentialPages;
+pub use sequential_pages::{Error as SequentialPagesError, SequentialPages};

@@ -104,10 +104,7 @@ mod tests {
         let (mut phys_pages, mut host_mem) = stub_sys_memory();
 
         let host_range = &mut host_mem[0];
-        let seq_pages = match SequentialPages::from_pages(host_range.by_ref().take(4)) {
-            Ok(s) => s,
-            Err(_) => panic!("setting up seq pages"),
-        };
+        let seq_pages = SequentialPages::from_pages(host_range.by_ref().take(4)).unwrap();
         let id = phys_pages.add_active_guest().unwrap();
         let mut guest_page_table =
             Sv48x4::new(seq_pages, id, phys_pages.clone()).expect("creating sv48x4");

@@ -4,7 +4,7 @@
 
 use core::{fmt, marker::PhantomData};
 
-use crate::page::{AlignedPageAddr, Page, PageSize, PhysAddr};
+use crate::page::{AlignedPageAddr, Page, PageSize, PageSize4k, PhysAddr};
 
 /// `SequentialPages` holds a range of consecutive pages. Each page's address is one page after the
 /// previous. This forms a contiguous area of memory suitable for holding an array or other linear
@@ -15,6 +15,8 @@ pub struct SequentialPages<S: PageSize> {
     count: u64,
     phantom: PhantomData<S>,
 }
+
+pub type SequentialPages4k = SequentialPages<PageSize4k>;
 
 /// An error resulting from trying to convert an iterator of pages to `SequentialPages`.
 pub enum Error<S: PageSize, I: Iterator<Item = Page<S>>> {
@@ -107,6 +109,18 @@ impl<S: PageSize> SequentialPages<S> {
         Self {
             addr: start.bits(),
             count,
+            phantom: PhantomData,
+        }
+    }
+
+    /// Returns `SequentialPages` for the page range [start, end).
+    /// # Safety
+    /// The range's ownership is given to `SequentialPages`, the caller must uniquely own that
+    /// memory.
+    pub unsafe fn from_page_range(start: AlignedPageAddr<S>, end: AlignedPageAddr<S>) -> Self {
+        Self {
+            addr: start.bits(),
+            count: end.bits().checked_sub(start.bits()).unwrap() / S::SIZE_BYTES,
             phantom: PhantomData,
         }
     }

@@ -25,7 +25,6 @@ use data_measure::DataMeasure;
 use device_tree::{DeviceTree, DeviceTreeSerializer, Fdt};
 use host_dt_builder::HostDtBuilder;
 use hyp_alloc::HypAlloc;
-use page_collections::page_vec::PageVec;
 use print_util::*;
 use riscv_page_tables::*;
 use riscv_pages::*;
@@ -67,32 +66,6 @@ pub fn poweroff() -> ! {
         core::ptr::write_volatile(0x10_0000 as *mut u32, 0x5555);
     }
     abort()
-}
-
-/// A flattened Page iterator over a vector of PageRanges. Used for filling in host address space.
-struct HostPagesIter {
-    ranges: PageVec<PageRange>,
-    index: usize,
-}
-
-impl HostPagesIter {
-    fn new(ranges: PageVec<PageRange>) -> Self {
-        Self { ranges, index: 0 }
-    }
-}
-
-impl Iterator for HostPagesIter {
-    type Item = Page4k;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.ranges.len() && self.ranges[self.index].remaining_size() == 0 {
-            self.index += 1;
-        }
-        if self.index >= self.ranges.len() {
-            return None;
-        }
-        self.ranges[self.index].next()
-    }
 }
 
 /// Builds the hardware memory map from the device-tree. The kernel & initramfs image regions are
@@ -215,7 +188,7 @@ fn load_host_vm<T, D, A>(
     hyp_dt: DeviceTree<A>,
     host_kernel: HwMemRegion,
     host_initramfs: Option<HwMemRegion>,
-    mut hyp_pages: HypPageAlloc,
+    mut hyp_pages: HypPageAlloc<A>,
 ) -> Host<T, D>
 where
     T: PlatformPageTable,
@@ -223,7 +196,7 @@ where
     A: Allocator + Clone,
 {
     // Reserve pages for tracking the host's guests.
-    let host_guests_pages = SequentialPages::from_pages(hyp_pages.take_pages(2)).unwrap();
+    let host_guests_pages = hyp_pages.take_pages(2);
 
     // Reserve a contiguous chunk for the host's FDT. We assume it will be no bigger than the size
     // of the hypervisor's FDT and we align it to `T::TOP_LEVEL_ALIGN` to maintain the contiguous
@@ -233,10 +206,8 @@ where
         ((size as u64) + T::TOP_LEVEL_ALIGN - 1) & !(T::TOP_LEVEL_ALIGN - 1)
     };
     let num_fdt_pages = host_fdt_size / PageSize4k::SIZE_BYTES;
-    let host_fdt_pages = SequentialPages::from_pages(
-        hyp_pages.take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN),
-    )
-    .unwrap();
+    let host_fdt_pages =
+        hyp_pages.take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
 
     // We use the size of our (the hypervisor's) physical address to estimate the size of the
     // host's guest phsyical address space since we build the host's address space to match the
@@ -263,7 +234,7 @@ where
 
     // Now that the hypervisor is done claiming memory, determine the actual size of the host's
     // address space.
-    let host_ram_size = host_pages.iter().fold(0, |acc, r| acc + r.remaining_size())
+    let host_ram_size = host_pages.iter().fold(0, |acc, r| acc + r.length_bytes())
         + host_fdt_pages.length_bytes()
         + host_kernel.size()
         + host_initramfs.map(|r| r.size()).unwrap_or(0);
@@ -312,7 +283,7 @@ where
     // HostRootBuilder guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned
     // block, and because we built the HwMemMap with a minimum region alignment of T::TOP_LEVEL_ALIGN
     // any discontiguous ranges are also guaranteed to be aligned.
-    let mut host_pages_iter = HostPagesIter::new(host_pages);
+    let mut host_pages_iter = host_pages.into_iter().flatten();
 
     // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
     let mut current_gpa = AlignedPageAddr4k::new(PhysAddr::new(host_ram_base)).unwrap();
@@ -390,7 +361,7 @@ fn test_boot_vm<T: PlatformPageTable, D: DataMeasure>(hart_id: u64, fdt_addr: u6
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.
-    let hyp_mem = HypPageAlloc::new(mem_map);
+    let hyp_mem = HypPageAlloc::new(mem_map, &heap);
 
     // Now build the host VM's address space.
     let mut host = load_host_vm::<T, D, _>(hyp_dt, host_kernel, host_initramfs, hyp_mem);

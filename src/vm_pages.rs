@@ -2,10 +2,12 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use riscv_page_tables::{HypPageAlloc, PageRange, PageState, PlatformPageTable};
+use alloc::vec::Vec;
+use core::alloc::Allocator;
+use riscv_page_tables::{HypPageAlloc, PageState, PlatformPageTable};
 use riscv_pages::{
-    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize, PageSize4k, SequentialPages,
-    UnmappedPage,
+    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize, PageSize4k, SeqPageIter,
+    SequentialPages, SequentialPages4k, UnmappedPage,
 };
 
 use page_collections::page_vec::PageVec;
@@ -197,21 +199,19 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootPages<T, D> {
 /// a T::TOP_LEVEL_ALIGN-aligned chunk.
 pub struct HostRootBuilder<T: PlatformPageTable, D: DataMeasure> {
     root: T,
-    pte_pages: PageRange,
+    pte_pages: SeqPageIter<PageSize4k>,
     measurement: D,
 }
 
 impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
     /// To be used to create the initial `HostRootPages` for the host VM.
-    pub fn from_hyp_mem(
-        mut hyp_mem: HypPageAlloc,
+    pub fn from_hyp_mem<A: Allocator>(
+        mut hyp_mem: HypPageAlloc<A>,
         host_gpa_size: u64,
-    ) -> (PageVec<PageRange>, Self) {
-        let root_table_pages =
-            SequentialPages::from_pages(hyp_mem.take_pages_with_alignment(4, T::TOP_LEVEL_ALIGN))
-                .unwrap();
+    ) -> (Vec<SequentialPages4k, A>, Self) {
+        let root_table_pages = hyp_mem.take_pages_with_alignment(4, T::TOP_LEVEL_ALIGN);
         let num_pte_pages = T::max_pte_pages(host_gpa_size / PageSize4k::SIZE_BYTES);
-        let pte_pages = hyp_mem.take_pages(num_pte_pages as usize);
+        let pte_pages = hyp_mem.take_pages(num_pte_pages as usize).into_iter();
 
         let (phys_pages, host_pages) = PageState::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root = T::new(root_table_pages, PageOwnerId::host(), phys_pages).unwrap();

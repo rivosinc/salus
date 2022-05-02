@@ -1,11 +1,29 @@
-include:
-  # NOTE: the "remote" examples here:
-  # https://docs.gitlab.com/ee/ci/yaml/includes.html DONT WORK
+image: "rust:latest"
 
-  # https://gitlab.ba.rivosinc.com/rv/group_gitlab_config/raw/rivos/main/ci_includes/pre-commit-lint.yml
-  - project: 'rv/group_gitlab_config'
-    ref: rivos/main
-    file: '/ci_includes/pre-commit-lint.yml'
+default:
+  before_script:
+    - rustc --version
+    - cargo --version
 
 stages:
-  - prebuild
+  - test
+
+build-code:
+  stage: test
+  script:
+    - rustup target add riscv64gc-unknown-none-elf
+    - cargo build
+
+lint-code:
+  stage: test
+  script:
+    - rustup target add riscv64gc-unknown-none-elf
+    - rustup component add clippy
+    - cargo clippy -- -D warnings
+
+format-code:
+  stage: test
+  script:
+    - rustup target add riscv64gc-unknown-none-elf
+    - rustup component add rustfmt
+    - cargo fmt -- --check

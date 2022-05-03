@@ -8,7 +8,9 @@ hyp_alloc = { path = "../hyp-alloc" }
 
 # TODO - vendor fdt-rs or find a better solution with fewer dependencies.
 # use the fdt-rs crate without default features to allow nostd
+# TODO - Use fdt-rs from rivos gitlab once permissions from a CI capable of
+# building rust are figured out.
 [dependencies.fdt-rs]
-git = "ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/fdt-rs.git"
+git = "https://github.com/dgreid/fdt-rs"
 branch = "rivos/main"
 default-features = false

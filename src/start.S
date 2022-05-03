@@ -4,7 +4,7 @@
 
 .option norvc
 
-.section .text.init
+.section .text.start
 
 .global _start
 _start:

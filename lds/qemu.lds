@@ -16,6 +16,10 @@ PHDRS
 
 SECTIONS
 {
+    .start : {
+        *(.text.start)
+    } >ram AT>ram :text
+
     .text : {
         *(.text.init) *(.text .text.*)
     } >ram AT>ram :text

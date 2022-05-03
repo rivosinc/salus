@@ -4,7 +4,14 @@
 
 #![no_main]
 #![no_std]
-#![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
+#![feature(
+    panic_info_message,
+    allocator_api,
+    alloc_error_handler,
+    lang_items,
+    asm_const,
+    const_ptr_offset_from
+)]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::slice;

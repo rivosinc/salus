@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use core::arch::global_asm;
+use core::mem::size_of;
+use memoffset::offset_of;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::PlatformPageTable;
@@ -18,11 +21,6 @@ use crate::print_util::*;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
 use crate::GuestOwnedPage;
 use crate::{print, println};
-
-// Defined in guest.S
-extern "C" {
-    fn _run_guest(g: *mut VmCpuState);
-}
 
 /// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
@@ -79,13 +77,110 @@ struct TrapState {
 /// between VMs.
 #[derive(Default)]
 #[repr(C)]
-#[allow(dead_code)]
 struct VmCpuState {
     host_regs: HostCpuState,
     guest_regs: GuestCpuState,
     guest_vcpu_csrs: GuestVCpuState,
     trap_csrs: TrapState,
 }
+
+// The vCPU context switch, defined in guest.S
+extern "C" {
+    fn _run_guest(g: *mut VmCpuState);
+}
+
+#[allow(dead_code)]
+const fn host_gpr_offset(index: GprIndex) -> usize {
+    offset_of!(VmCpuState, host_regs)
+        + offset_of!(HostCpuState, gprs)
+        + (index as usize) * size_of::<u64>()
+}
+
+#[allow(dead_code)]
+const fn guest_gpr_offset(index: GprIndex) -> usize {
+    offset_of!(VmCpuState, guest_regs)
+        + offset_of!(GuestCpuState, gprs)
+        + (index as usize) * size_of::<u64>()
+}
+
+macro_rules! host_csr_offset {
+    ($reg:tt) => {
+        offset_of!(VmCpuState, host_regs) + offset_of!(HostCpuState, $reg)
+    };
+}
+
+macro_rules! guest_csr_offset {
+    ($reg:tt) => {
+        offset_of!(VmCpuState, guest_regs) + offset_of!(GuestCpuState, $reg)
+    };
+}
+
+global_asm!(
+    include_str!("guest.S"),
+    host_ra = const host_gpr_offset(GprIndex::RA),
+    host_gp = const host_gpr_offset(GprIndex::GP),
+    host_tp = const host_gpr_offset(GprIndex::TP),
+    host_s0 = const host_gpr_offset(GprIndex::S0),
+    host_s1 = const host_gpr_offset(GprIndex::S1),
+    host_a1 = const host_gpr_offset(GprIndex::A1),
+    host_a2 = const host_gpr_offset(GprIndex::A2),
+    host_a3 = const host_gpr_offset(GprIndex::A3),
+    host_a4 = const host_gpr_offset(GprIndex::A4),
+    host_a5 = const host_gpr_offset(GprIndex::A5),
+    host_a6 = const host_gpr_offset(GprIndex::A6),
+    host_a7 = const host_gpr_offset(GprIndex::A7),
+    host_s2 = const host_gpr_offset(GprIndex::S2),
+    host_s3 = const host_gpr_offset(GprIndex::S3),
+    host_s4 = const host_gpr_offset(GprIndex::S4),
+    host_s5 = const host_gpr_offset(GprIndex::S5),
+    host_s6 = const host_gpr_offset(GprIndex::S6),
+    host_s7 = const host_gpr_offset(GprIndex::S7),
+    host_s8 = const host_gpr_offset(GprIndex::S8),
+    host_s9 = const host_gpr_offset(GprIndex::S9),
+    host_s10 = const host_gpr_offset(GprIndex::S10),
+    host_s11 = const host_gpr_offset(GprIndex::S11),
+    host_sp = const host_gpr_offset(GprIndex::SP),
+    host_sstatus = const host_csr_offset!(sstatus),
+    host_hstatus = const host_csr_offset!(hstatus),
+    host_scounteren = const host_csr_offset!(scounteren),
+    host_stvec = const host_csr_offset!(stvec),
+    host_sscratch = const host_csr_offset!(sscratch),
+    guest_ra = const guest_gpr_offset(GprIndex::RA),
+    guest_gp = const guest_gpr_offset(GprIndex::GP),
+    guest_tp = const guest_gpr_offset(GprIndex::TP),
+    guest_s0 = const guest_gpr_offset(GprIndex::S0),
+    guest_s1 = const guest_gpr_offset(GprIndex::S1),
+    guest_a0 = const guest_gpr_offset(GprIndex::A0),
+    guest_a1 = const guest_gpr_offset(GprIndex::A1),
+    guest_a2 = const guest_gpr_offset(GprIndex::A2),
+    guest_a3 = const guest_gpr_offset(GprIndex::A3),
+    guest_a4 = const guest_gpr_offset(GprIndex::A4),
+    guest_a5 = const guest_gpr_offset(GprIndex::A5),
+    guest_a6 = const guest_gpr_offset(GprIndex::A6),
+    guest_a7 = const guest_gpr_offset(GprIndex::A7),
+    guest_s2 = const guest_gpr_offset(GprIndex::S2),
+    guest_s3 = const guest_gpr_offset(GprIndex::S3),
+    guest_s4 = const guest_gpr_offset(GprIndex::S4),
+    guest_s5 = const guest_gpr_offset(GprIndex::S5),
+    guest_s6 = const guest_gpr_offset(GprIndex::S6),
+    guest_s7 = const guest_gpr_offset(GprIndex::S7),
+    guest_s8 = const guest_gpr_offset(GprIndex::S8),
+    guest_s9 = const guest_gpr_offset(GprIndex::S9),
+    guest_s10 = const guest_gpr_offset(GprIndex::S10),
+    guest_s11 = const guest_gpr_offset(GprIndex::S11),
+    guest_t0 = const guest_gpr_offset(GprIndex::T0),
+    guest_t1 = const guest_gpr_offset(GprIndex::T1),
+    guest_t2 = const guest_gpr_offset(GprIndex::T2),
+    guest_t3 = const guest_gpr_offset(GprIndex::T3),
+    guest_t4 = const guest_gpr_offset(GprIndex::T4),
+    guest_t5 = const guest_gpr_offset(GprIndex::T5),
+    guest_t6 = const guest_gpr_offset(GprIndex::T6),
+    guest_sp = const guest_gpr_offset(GprIndex::SP),
+    guest_sstatus = const guest_csr_offset!(sstatus),
+    guest_hstatus = const guest_csr_offset!(hstatus),
+    guest_scounteren = const guest_csr_offset!(scounteren),
+    guest_sepc = const guest_csr_offset!(sepc),
+);
 
 struct Guests<T: PlatformPageTable, D: DataMeasure> {
     inner: PageVec<PageBox<GuestState<T, D>>>,

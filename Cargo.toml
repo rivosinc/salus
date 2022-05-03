@@ -23,11 +23,13 @@ arrayvec = { version = "0.7.2", default-features = false }
 device_tree = { path = "./device-tree" }
 hyp_alloc = { path = "./hyp-alloc" }
 memoffset = { version = ">=0.6.5", features = ["unstable_const"] }
+once_cell = { version = "1.10", default-features = false }
 page_collections = { path = "./page-collections" }
 riscv_page_tables = { path = "./riscv-page-tables" }
 riscv_pages = { path = "./riscv-pages" }
 riscv_regs = { path = "./riscv-regs" }
 sbi = { path = "./sbi" }
 sha2 = {version = "0.10", default-features = false }
+spin = { version = "*", default-features = false }
 
 [workspace]

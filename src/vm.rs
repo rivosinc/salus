@@ -16,6 +16,7 @@ use riscv_regs::{
 use sbi::Error as SbiError;
 use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 
+use crate::cpu::Cpu;
 use crate::data_measure::DataMeasure;
 use crate::print_util::*;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
@@ -60,6 +61,7 @@ struct GuestVCpuState {
     vscause: u64,
     vstval: u64,
     vsatp: u64,
+    vstimecmp: u64,
 }
 
 /// CSRs written on an exit from virtualization that are used by the host to determine the cause of
@@ -344,6 +346,9 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         CSR.vscause.set(self.info.guest_vcpu_csrs.vscause);
         CSR.vstval.set(self.info.guest_vcpu_csrs.vstval);
         CSR.vsatp.set(self.info.guest_vcpu_csrs.vsatp);
+        if Cpu::has_sstc() {
+            CSR.vstimecmp.set(self.info.guest_vcpu_csrs.vstimecmp);
+        }
 
         unsafe {
             // Safe to run the guest as it only touches memory assigned to it by being owned
@@ -368,6 +373,9 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         self.info.guest_vcpu_csrs.vscause = CSR.vscause.get();
         self.info.guest_vcpu_csrs.vstval = CSR.vstval.get();
         self.info.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
+        if Cpu::has_sstc() {
+            self.info.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
+        }
     }
 
     /// Run this guest until it requests an exit or an interrupt is received for the host.

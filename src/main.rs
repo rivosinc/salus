@@ -20,6 +20,7 @@ extern crate alloc;
 
 mod abort;
 mod asm;
+mod cpu;
 mod data_measure;
 mod host_dt_builder;
 mod print_util;
@@ -28,6 +29,7 @@ mod vm;
 mod vm_pages;
 
 use abort::abort;
+use cpu::Cpu;
 use data_measure::DataMeasure;
 use device_tree::{DeviceTree, DeviceTreeSerializer, Fdt};
 use host_dt_builder::HostDtBuilder;
@@ -35,8 +37,8 @@ use hyp_alloc::HypAlloc;
 use print_util::*;
 use riscv_page_tables::*;
 use riscv_pages::*;
-use riscv_regs::{hedeleg, hideleg, scounteren};
-use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, Writeable, CSR};
+use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
+use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
 use test_measure::TestMeasure;
 use vm::Host;
 use vm_pages::HostRootBuilder;
@@ -348,37 +350,6 @@ where
     host
 }
 
-// Basic configuration of and running the test VM.
-fn test_boot_vm<T: PlatformPageTable, D: DataMeasure>(hart_id: u64, fdt_addr: u64) {
-    // Safe because we trust that the firmware passed a valid FDT.
-    let hyp_fdt =
-        unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.expect("Failed to read FDT");
-
-    let mut mem_map = build_memory_map::<T>(&hyp_fdt).expect("Failed to build memory map");
-    // Find where QEMU loaded the host kernel image.
-    let host_kernel = *mem_map
-        .regions()
-        .find(|r| r.mem_type() == HwMemType::Reserved(HwReservedMemType::HostKernelImage))
-        .expect("No host kernel image");
-    let host_initramfs = mem_map
-        .regions()
-        .find(|r| r.mem_type() == HwMemType::Reserved(HwReservedMemType::HostInitramfsImage))
-        .cloned();
-
-    let heap = create_heap(&mut mem_map);
-    let hyp_dt = DeviceTree::from(&hyp_fdt, &heap).expect("Failed to construct device-tree");
-
-    // Create an allocator for the remaining pages. Anything that's left over will be mapped
-    // into the host VM.
-    let hyp_mem = HypPageAlloc::new(mem_map, &heap);
-
-    // Now build the host VM's address space.
-    let mut host = load_host_vm::<T, D, _>(hyp_dt, host_kernel, host_initramfs, hyp_mem);
-
-    // TODO return host and let main run it.
-    let _ = host.run(hart_id);
-}
-
 /// Initialize (H)S-level CSRs to a reasonable state.
 fn setup_csrs() {
     // Clear and disable any interupts.
@@ -411,6 +382,12 @@ fn setup_csrs() {
     );
     CSR.hideleg.set(hideleg.get());
 
+    let mut hie = LocalRegisterCopy::<u64, hie::Register>::new(0);
+    hie.modify(Interrupt::VirtualSupervisorSoft.to_hie_field().unwrap());
+    hie.modify(Interrupt::VirtualSupervisorTimer.to_hie_field().unwrap());
+    hie.modify(Interrupt::VirtualSupervisorExternal.to_hie_field().unwrap());
+    CSR.hie.set(hie.get());
+
     // Make counters available to guests.
     CSR.hcounteren.set(0xffff_ffff_ffff_ffff);
 
@@ -432,6 +409,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         abort();
     }
 
+    // Reset CSRs to a sane state.
     setup_csrs();
 
     // Safety: This is the very beginning of the kernel, there are no other users of the UART or the
@@ -439,7 +417,42 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe { UartDriver::new(0x1000_0000).use_as_console() }
     println!("Salus: Boot test VM");
 
-    test_boot_vm::<Sv48x4, TestMeasure>(hart_id, fdt_addr);
+    // Safe because we trust that the firmware passed a valid FDT.
+    let hyp_fdt =
+        unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.expect("Failed to read FDT");
+
+    let mut mem_map = build_memory_map::<Sv48x4>(&hyp_fdt).expect("Failed to build memory map");
+    // Find where QEMU loaded the host kernel image.
+    let host_kernel = *mem_map
+        .regions()
+        .find(|r| r.mem_type() == HwMemType::Reserved(HwReservedMemType::HostKernelImage))
+        .expect("No host kernel image");
+    let host_initramfs = mem_map
+        .regions()
+        .find(|r| r.mem_type() == HwMemType::Reserved(HwReservedMemType::HostInitramfsImage))
+        .cloned();
+
+    let heap = create_heap(&mut mem_map);
+    let hyp_dt = DeviceTree::from(&hyp_fdt, &heap).expect("Failed to construct device-tree");
+
+    // Discover supported CPU extensions.
+    Cpu::parse_features_from(&hyp_dt);
+    if Cpu::has_sstc() {
+        println!("Sstc support present");
+        // Only write henvcfg when Sstc is present to avoid blowing up on versions of QEMU which
+        // don't support the *envcfg registers.
+        CSR.henvcfg.modify(henvcfg::stce.val(1));
+    }
+
+    // Create an allocator for the remaining pages. Anything that's left over will be mapped
+    // into the host VM.
+    let hyp_mem = HypPageAlloc::new(mem_map, &heap);
+
+    // Now build the host VM's address space.
+    let mut host: Host<Sv48x4, TestMeasure> =
+        load_host_vm(hyp_dt, host_kernel, host_initramfs, hyp_mem);
+
+    let _ = host.run(hart_id);
 
     println!("Salus: Host exited");
 

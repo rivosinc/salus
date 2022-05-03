@@ -150,6 +150,13 @@ register_bitfields![u64,
     ]
 ];
 
+// Supervisor timer compare register.
+register_bitfields![u64,
+    pub stimecmp [
+        cmp_val OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
 // Supervisor address translation register.
 register_bitfields![u64,
     pub satp [
@@ -316,6 +323,17 @@ register_bitfields![u64,
     pub hgeip [
         // Number of implemented bits depends on GEILEN for the platform.
         interrrupts OFFSET(1) NUMBITS(63) [],
+    ]
+];
+
+// Hypervisor environment config register.
+register_bitfields![u64,
+    pub henvcfg [
+        // Fence of I/O implies memory.
+        fiom OFFSET(0) NUMBITS(1) [],
+        // Enable stimecmp in VS.
+        stce OFFSET(63) NUMBITS(1) [],
+        // TODO: Bits for other extensions we don't care about yet.
     ]
 ];
 

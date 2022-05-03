@@ -29,6 +29,7 @@ pub struct CSR {
     pub scause: ReadWriteRiscvCsr<scause::Register, CSR_SCAUSE>,
     pub stval: ReadWriteRiscvCsr<stval::Register, CSR_STVAL>,
     pub sip: ReadWriteRiscvCsr<sie::Register, CSR_SIP>,
+    pub stimecmp: ReadWriteRiscvCsr<stimecmp::Register, 0x14d>,
     pub satp: ReadWriteRiscvCsr<satp::Register, CSR_SATP>,
 
     pub hstatus: ReadWriteRiscvCsr<hstatus::Register, CSR_HSTATUS>,
@@ -42,6 +43,7 @@ pub struct CSR {
     pub hvip: ReadWriteRiscvCsr<hvip::Register, CSR_HVIP>,
     pub htinst: ReadWriteRiscvCsr<htval::Register, CSR_HTINST>,
     pub hgeip: ReadWriteRiscvCsr<hgeie::Register, CSR_HGEIP>,
+    pub henvcfg: ReadWriteRiscvCsr<henvcfg::Register, CSR_HENVCFG>,
     pub hgatp: ReadWriteRiscvCsr<hgatp::Register, CSR_HGATP>,
     pub htimedelta: ReadWriteRiscvCsr<htimedelta::Register, CSR_HTIMEDELTA>,
 
@@ -53,6 +55,7 @@ pub struct CSR {
     pub vscause: ReadWriteRiscvCsr<scause::Register, CSR_VSCAUSE>,
     pub vstval: ReadWriteRiscvCsr<stval::Register, CSR_VSTVAL>,
     pub vsip: ReadWriteRiscvCsr<sie::Register, CSR_VSIP>,
+    pub vstimecmp: ReadWriteRiscvCsr<stimecmp::Register, 0x24d>,
     pub vsatp: ReadWriteRiscvCsr<satp::Register, CSR_VSATP>,
 }
 
@@ -67,6 +70,7 @@ pub const CSR: &CSR = &CSR {
     scause: ReadWriteRiscvCsr::new(),
     stval: ReadWriteRiscvCsr::new(),
     sip: ReadWriteRiscvCsr::new(),
+    stimecmp: ReadWriteRiscvCsr::new(),
     satp: ReadWriteRiscvCsr::new(),
 
     hstatus: ReadWriteRiscvCsr::new(),
@@ -80,6 +84,7 @@ pub const CSR: &CSR = &CSR {
     hvip: ReadWriteRiscvCsr::new(),
     htinst: ReadWriteRiscvCsr::new(),
     hgeip: ReadWriteRiscvCsr::new(),
+    henvcfg: ReadWriteRiscvCsr::new(),
     hgatp: ReadWriteRiscvCsr::new(),
     htimedelta: ReadWriteRiscvCsr::new(),
 
@@ -91,5 +96,6 @@ pub const CSR: &CSR = &CSR {
     vscause: ReadWriteRiscvCsr::new(),
     vstval: ReadWriteRiscvCsr::new(),
     vsip: ReadWriteRiscvCsr::new(),
+    vstimecmp: ReadWriteRiscvCsr::new(),
     vsatp: ReadWriteRiscvCsr::new(),
 };

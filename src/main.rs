@@ -28,6 +28,8 @@ use hyp_alloc::HypAlloc;
 use print_util::*;
 use riscv_page_tables::*;
 use riscv_pages::*;
+use riscv_regs::{hedeleg, hideleg, scounteren};
+use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, Writeable, CSR};
 use test_measure::TestMeasure;
 use vm::Host;
 use vm_pages::HostRootBuilder;
@@ -370,6 +372,51 @@ fn test_boot_vm<T: PlatformPageTable, D: DataMeasure>(hart_id: u64, fdt_addr: u6
     let _ = host.run(hart_id);
 }
 
+/// Initialize (H)S-level CSRs to a reasonable state.
+fn setup_csrs() {
+    // Clear and disable any interupts.
+    CSR.sie.set(0);
+    CSR.sip.set(0);
+    // Turn FP and vector units off.
+    CSR.sstatus.set(0);
+
+    // Delegate traps to VS.
+    let mut hedeleg = LocalRegisterCopy::<u64, hedeleg::Register>::new(0);
+    hedeleg.modify(Exception::InstructionMisaligned.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::Breakpoint.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::UserEnvCall.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::InstructionPageFault.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::LoadPageFault.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::StorePageFault.to_hedeleg_field().unwrap());
+    CSR.hedeleg.set(hedeleg.get());
+
+    let mut hideleg = LocalRegisterCopy::<u64, hideleg::Register>::new(0);
+    hideleg.modify(Interrupt::VirtualSupervisorSoft.to_hideleg_field().unwrap());
+    hideleg.modify(
+        Interrupt::VirtualSupervisorTimer
+            .to_hideleg_field()
+            .unwrap(),
+    );
+    hideleg.modify(
+        Interrupt::VirtualSupervisorExternal
+            .to_hideleg_field()
+            .unwrap(),
+    );
+    CSR.hideleg.set(hideleg.get());
+
+    // Make counters available to guests.
+    CSR.hcounteren.set(0xffff_ffff_ffff_ffff);
+
+    // Make the basic counters available to any of our U-mode tasks.
+    let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);
+    scounteren.modify(scounteren::cycle.val(1));
+    scounteren.modify(scounteren::time.val(1));
+    scounteren.modify(scounteren::instret.val(1));
+    CSR.scounteren.set(scounteren.get());
+
+    // TODO: Install a trap handler.
+}
+
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
@@ -377,6 +424,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // TODO handle more than 1 cpu
         abort();
     }
+
+    setup_csrs();
 
     // Safety: This is the very beginning of the kernel, there are no other users of the UART or the
     // CONSOLE_DRIVER global.

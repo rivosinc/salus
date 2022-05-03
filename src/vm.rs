@@ -6,9 +6,9 @@ use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::PlatformPageTable;
 use riscv_pages::{AlignedPageAddr4k, PageOwnerId, PageSize4k, PhysAddr, SequentialPages};
-use riscv_regs::{hedeleg, hgatp, hideleg, hstatus, sie, sstatus, HgatpHelpers};
+use riscv_regs::{hgatp, hstatus, scounteren, sstatus, HgatpHelpers};
 use riscv_regs::{
-    Exception, GeneralPurposeRegisters, GprIndex, Interrupt, LocalRegisterCopy, Trap,
+    Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
 };
 use sbi::Error as SbiError;
 use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
@@ -24,33 +24,67 @@ extern "C" {
     fn _run_guest(g: *mut VmCpuState);
 }
 
+/// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
 #[repr(C)]
-#[allow(dead_code)]
-pub struct VmCsrs {
-    sepc: u64,
-    sie: u64,
-    scause: u64,
-    stvec: u64,
-    hgatp: u64,
-    hedeleg: u64,
-    hideleg: u64,
-    hstatus: u64,
-    hcounteren: u64,
+struct HostCpuState {
+    gprs: GeneralPurposeRegisters,
     sstatus: u64,
-    stval: u64,
-    htval: u64,
+    hstatus: u64,
+    scounteren: u64,
+    stvec: u64,
+    sscratch: u64,
 }
 
-// With the exception of hgatp, any value of guest registers is safe for the host, the guest might
-// malfunction but it can't affect host memory.
+/// Guest GPR and CSR state which must be saved/restored when exiting/entering virtualization.
+#[derive(Default)]
+#[repr(C)]
+struct GuestCpuState {
+    gprs: GeneralPurposeRegisters,
+    sstatus: u64,
+    hstatus: u64,
+    scounteren: u64,
+    sepc: u64,
+}
+
+/// The CSRs that are only in effect when virtualization is enabled (V=1) and must be saved and
+/// restored whenever we switch between VMs.
+#[derive(Default)]
+#[repr(C)]
+struct GuestVCpuState {
+    hgatp: u64,
+    htimedelta: u64,
+    vsstatus: u64,
+    vsie: u64,
+    vstvec: u64,
+    vsscratch: u64,
+    vsepc: u64,
+    vscause: u64,
+    vstval: u64,
+    vsatp: u64,
+}
+
+/// CSRs written on an exit from virtualization that are used by the host to determine the cause of
+/// the trap.
+#[derive(Default)]
+#[repr(C)]
+struct TrapState {
+    scause: u64,
+    stval: u64,
+    htval: u64,
+    htinst: u64,
+}
+
+/// (v)CPU register state that must be saved or restored when entering/exiting a VM or switching
+/// between VMs.
 #[derive(Default)]
 #[repr(C)]
 #[allow(dead_code)]
 struct VmCpuState {
-    sp: u64,
-    csrs: VmCsrs,
-    gprs: GeneralPurposeRegisters,
+    host_regs: HostCpuState,
+    guest_regs: GuestCpuState,
+    guest_vcpu_csrs: GuestVCpuState,
+    trap_csrs: TrapState,
 }
 
 struct Guests<T: PlatformPageTable, D: DataMeasure> {
@@ -154,56 +188,28 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
     fn new(vm_pages: VmPages<T, D>) -> Self {
         let mut info = VmCpuState::default();
 
-        // TODO: Several of these are not really per-VM registers and should be initialized
-        // elsewhere. We're also not saving and restoring all the registers that we need to on
-        // a VM context switch (and the ones we do don't necessarily all need to be done from asm).
-        let mut sie = LocalRegisterCopy::<u64, sie::Register>::new(0);
-        sie.modify(Interrupt::SupervisorSoft.to_sie_field().unwrap());
-        sie.modify(Interrupt::SupervisorTimer.to_sie_field().unwrap());
-        sie.modify(Interrupt::SupervisorExternal.to_sie_field().unwrap());
-        info.csrs.sie = sie.get();
-
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
         hgatp.set_from(vm_pages.root(), 1);
-        info.csrs.hgatp = hgatp.get();
-
-        let mut hedeleg = LocalRegisterCopy::<u64, hedeleg::Register>::new(0);
-        hedeleg.modify(Exception::InstructionMisaligned.to_hedeleg_field().unwrap());
-        hedeleg.modify(Exception::Breakpoint.to_hedeleg_field().unwrap());
-        hedeleg.modify(Exception::UserEnvCall.to_hedeleg_field().unwrap());
-        hedeleg.modify(Exception::InstructionPageFault.to_hedeleg_field().unwrap());
-        hedeleg.modify(Exception::LoadPageFault.to_hedeleg_field().unwrap());
-        hedeleg.modify(Exception::StorePageFault.to_hedeleg_field().unwrap());
-        info.csrs.hedeleg = hedeleg.get();
-
-        let mut hideleg = LocalRegisterCopy::<u64, hideleg::Register>::new(0);
-        hideleg.modify(Interrupt::VirtualSupervisorSoft.to_hideleg_field().unwrap());
-        hideleg.modify(
-            Interrupt::VirtualSupervisorTimer
-                .to_hideleg_field()
-                .unwrap(),
-        );
-        hideleg.modify(
-            Interrupt::VirtualSupervisorExternal
-                .to_hideleg_field()
-                .unwrap(),
-        );
-        info.csrs.sie = hideleg.get();
+        info.guest_vcpu_csrs.hgatp = hgatp.get();
 
         let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(0);
         hstatus.modify(hstatus::spv.val(1));
         hstatus.modify(hstatus::spvp::Supervisor);
-        info.csrs.hstatus = hstatus.get();
-
-        info.csrs.hcounteren = 0xffff_ffff_ffff_ffff; // enable all
+        info.guest_regs.hstatus = hstatus.get();
 
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
-        sstatus.modify(sstatus::spp::Supervisor);
         sstatus.modify(sstatus::spie.val(1));
-        info.csrs.sstatus = sstatus.get();
+        sstatus.modify(sstatus::spp::Supervisor);
+        info.guest_regs.sstatus = sstatus.get();
+
+        let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);
+        scounteren.modify(scounteren::cycle.val(1));
+        scounteren.modify(scounteren::time.val(1));
+        scounteren.modify(scounteren::instret.val(1));
+        info.guest_regs.scounteren = scounteren.get();
 
         // set the hart ID - TODO other hart IDs when multi-threaded
-        info.gprs.set_reg(GprIndex::A0, 0);
+        info.guest_regs.gprs.set_reg(GprIndex::A0, 0);
 
         Vm {
             info,
@@ -214,13 +220,13 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
     }
 
     fn set_entry_address(&mut self, entry_addr: u64) {
-        self.info.csrs.sepc = entry_addr;
+        self.info.guest_regs.sepc = entry_addr;
     }
 
     // TODO - also pass the DT here and copy it?
     fn add_device_tree(&mut self, dt_addr: u64) {
         // set the DT address to the one passed in.
-        self.info.gprs.set_reg(GprIndex::A1, dt_addr);
+        self.info.guest_regs.gprs.set_reg(GprIndex::A1, dt_addr);
     }
 
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
@@ -231,13 +237,42 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
     }
 
     /// Run this VM until the guest exits
-    fn run_to_exit(&mut self, _hart_id: u64) -> Trap {
+    fn run_to_exit(&mut self, _hart_id: u64) {
+        // Load the vCPU CSRs. Safe as these don't take effect until V=1.
+        CSR.hgatp.set(self.info.guest_vcpu_csrs.hgatp);
+        CSR.htimedelta.set(self.info.guest_vcpu_csrs.htimedelta);
+        CSR.vsstatus.set(self.info.guest_vcpu_csrs.vsstatus);
+        CSR.vsie.set(self.info.guest_vcpu_csrs.vsie);
+        CSR.vstvec.set(self.info.guest_vcpu_csrs.vstvec);
+        CSR.vsscratch.set(self.info.guest_vcpu_csrs.vsscratch);
+        CSR.vsepc.set(self.info.guest_vcpu_csrs.vsepc);
+        CSR.vscause.set(self.info.guest_vcpu_csrs.vscause);
+        CSR.vstval.set(self.info.guest_vcpu_csrs.vstval);
+        CSR.vsatp.set(self.info.guest_vcpu_csrs.vsatp);
+
         unsafe {
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table.
             _run_guest(&mut self.info as *mut VmCpuState);
         }
-        Trap::from_scause(self.info.csrs.scause).unwrap()
+
+        // Save off the trap information.
+        self.info.trap_csrs.scause = CSR.scause.get();
+        self.info.trap_csrs.stval = CSR.stval.get();
+        self.info.trap_csrs.htval = CSR.htval.get();
+        self.info.trap_csrs.htinst = CSR.htinst.get();
+
+        // Save the vCPU state.
+        self.info.guest_vcpu_csrs.hgatp = CSR.hgatp.get();
+        self.info.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
+        self.info.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
+        self.info.guest_vcpu_csrs.vsie = CSR.vsie.get();
+        self.info.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
+        self.info.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
+        self.info.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
+        self.info.guest_vcpu_csrs.vscause = CSR.vscause.get();
+        self.info.guest_vcpu_csrs.vstval = CSR.vstval.get();
+        self.info.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
     }
 
     /// Run this guest until it requests an exit or an interrupt is received for the host.
@@ -245,7 +280,8 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         use Exception::*;
         self.has_run = true;
         loop {
-            match self.run_to_exit(hart_id) {
+            self.run_to_exit(hart_id);
+            match Trap::from_scause(self.info.trap_csrs.scause).unwrap() {
                 Trap::Exception(VirtualSupervisorEnvCall) => {
                     self.handle_ecall();
                     self.inc_sepc_ecall(); // must return to _after_ the ecall.
@@ -270,14 +306,9 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         }
     }
 
-    /// Gets the CSR values for this guest.
-    fn csrs(&self) -> &VmCsrs {
-        &self.info.csrs
-    }
-
     /// Advances the sepc past the ecall instruction that caused the exit.
     fn inc_sepc_ecall(&mut self) {
-        self.info.csrs.sepc += 4;
+        self.info.guest_regs.sepc += 4;
     }
 
     /// Handles ecalls from the guest.
@@ -285,7 +316,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         // determine the call from a7, a6, and a2-5, put error code in a0 and return value in a1.
         // a0 and a1 aren't set by legacy extensions so the block below yields an `Option` that is
         // written when set to `Some(val)`.
-        let result = SbiMessage::from_regs(&self.info.gprs).and_then(|msg| {
+        let result = SbiMessage::from_regs(&self.info.guest_regs.gprs).and_then(|msg| {
             match msg {
                 SbiMessage::PutChar(c) => {
                     // put char - legacy command
@@ -313,9 +344,11 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         match result {
             Ok(Some(sbi_ret)) => {
                 self.info
+                    .guest_regs
                     .gprs
                     .set_reg(GprIndex::A0, sbi_ret.error_code as u64);
                 self.info
+                    .guest_regs
                     .gprs
                     .set_reg(GprIndex::A1, sbi_ret.return_value as u64);
             }
@@ -324,6 +357,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
             }
             Err(error_code) => {
                 self.info
+                    .guest_regs
                     .gprs
                     .set_reg(GprIndex::A0, SbiReturn::from(error_code).error_code as u64);
             }
@@ -381,12 +415,13 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
     // Handle access faults. For example, when a returned page needs to be demand-faulted back to
     // the page table.
     fn handle_guest_fault(&mut self) -> core::result::Result<(), vm_pages::Error> {
-        let csrs = self.csrs();
-
-        let fault_addr = csrs.htval << 2 | csrs.stval & 0x03;
+        let fault_addr = self.info.trap_csrs.htval << 2 | self.info.trap_csrs.stval & 0x03;
         println!(
             "got fault {:x} {:x} {:x} {:x}",
-            csrs.stval, csrs.htval, csrs.sepc, fault_addr
+            self.info.trap_csrs.stval,
+            self.info.trap_csrs.htval,
+            self.info.guest_regs.sepc,
+            fault_addr
         );
 
         self.vm_pages.handle_page_fault(fault_addr)?;

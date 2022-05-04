@@ -25,6 +25,7 @@ mod data_measure;
 mod host_dt_builder;
 mod print_util;
 mod test_measure;
+mod trap;
 mod vm;
 mod vm_pages;
 
@@ -398,7 +399,7 @@ fn setup_csrs() {
     scounteren.modify(scounteren::instret.val(1));
     CSR.scounteren.set(scounteren.get());
 
-    // TODO: Install a trap handler.
+    trap::install_trap_handler();
 }
 
 /// The entry point of the Rust part of the kernel.

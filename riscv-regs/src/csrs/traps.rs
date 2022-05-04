@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{hedeleg, hideleg, hie, hip, hvip, reason, scause, sie, sip};
+use core::{fmt, result};
 use tock_registers::fields::FieldValue;
 use tock_registers::LocalRegisterCopy;
 
@@ -16,7 +17,7 @@ pub enum Error {
     InvalidCause,
 }
 
-pub type Result<T> = core::result::Result<T, Error>;
+pub type Result<T> = result::Result<T, Error>;
 
 /// Trap causes.
 #[derive(Copy, Clone, Debug)]
@@ -210,6 +211,63 @@ impl Exception {
             Exception::LoadPageFault => Ok(hedeleg::load_page_fault.val(1)),
             Exception::StorePageFault => Ok(hedeleg::store_page_fault.val(1)),
             _ => Err(Error::InvalidCause),
+        }
+    }
+}
+
+impl fmt::Display for Trap {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Trap::Interrupt(i) => write!(f, "{} interrupt", i),
+            Trap::Exception(e) => write!(f, "{} exception", e),
+        }
+    }
+}
+
+impl fmt::Display for Interrupt {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        use Interrupt::*;
+        match self {
+            UserSoft => write!(f, "user software"),
+            SupervisorSoft => write!(f, "supervisor software"),
+            VirtualSupervisorSoft => write!(f, "virtual supervisor software"),
+            MachineSoft => write!(f, "machine software"),
+            UserTimer => write!(f, "user timer"),
+            SupervisorTimer => write!(f, "supervisor timer"),
+            VirtualSupervisorTimer => write!(f, "virtual supervisor timer"),
+            MachineTimer => write!(f, "machine timer"),
+            UserExternal => write!(f, "user external"),
+            SupervisorExternal => write!(f, "supervisor external"),
+            VirtualSupervisorExternal => write!(f, "virtual supervisor external"),
+            MachineExternal => write!(f, "machine external"),
+            SupervisorGuestExternal => write!(f, "supervisor guest external"),
+        }
+    }
+}
+
+impl fmt::Display for Exception {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        use Exception::*;
+        match self {
+            InstructionMisaligned => write!(f, "instruction address misaligned"),
+            InstructionFault => write!(f, "instruction access fault"),
+            IllegalInstruction => write!(f, "illegal instruction"),
+            Breakpoint => write!(f, "breakpoint"),
+            LoadMisaligned => write!(f, "load address misaligned"),
+            LoadFault => write!(f, "load access fault"),
+            StoreMisaligned => write!(f, "store/AMO address misaligned"),
+            StoreFault => write!(f, "store/AMO access fault"),
+            UserEnvCall => write!(f, "U-mode environment call"),
+            SupervisorEnvCall => write!(f, "S-mode environment call"),
+            VirtualSupervisorEnvCall => write!(f, "VS-mode environment call"),
+            MachineEnvCall => write!(f, "M-mode environment call"),
+            InstructionPageFault => write!(f, "instruction page fault"),
+            LoadPageFault => write!(f, "load page fault"),
+            StorePageFault => write!(f, "store/AMO page fault"),
+            GuestInstructionPageFault => write!(f, "guest instruction page fault"),
+            GuestLoadPageFault => write!(f, "guest load page fault"),
+            VirtualInstruction => write!(f, "virtual instruction"),
+            GuestStorePageFault => write!(f, "guest store/AMO page fault"),
         }
     }
 }

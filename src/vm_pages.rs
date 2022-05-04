@@ -48,6 +48,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
         self.root.page_owner_id()
     }
 
+    #[allow(dead_code)]
     pub fn get_measurement(&self) -> &D {
         &self.measurement
     }

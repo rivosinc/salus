@@ -262,7 +262,7 @@ pub enum TeeFunction {
         guest_id: u64,
         measurement_version: u64,
         measurement_type: u64,
-        page_addr: u64
+        page_addr: u64,
     },
 }
 
@@ -298,7 +298,7 @@ impl TeeFunction {
                 guest_id: args[0],
                 measurement_version: args[1],
                 measurement_type: args[2],
-                page_addr: args[3]
+                page_addr: args[3],
             }),
             _ => Err(Error::InvalidParam),
         }
@@ -400,7 +400,7 @@ impl TeeFunction {
                 guest_id: _,
                 measurement_version,
                 measurement_type: _,
-                page_addr:_,
+                page_addr: _,
             } => *measurement_version,
             _ => 0,
         }
@@ -432,7 +432,7 @@ impl TeeFunction {
                 guest_id: _,
                 measurement_version: _,
                 measurement_type,
-                page_addr:_,
+                page_addr: _,
             } => *measurement_type,
             _ => 0,
         }

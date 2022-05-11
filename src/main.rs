@@ -31,7 +31,6 @@ mod vm_pages;
 
 use abort::abort;
 use cpu::Cpu;
-use data_measure::DataMeasure;
 use device_tree::{DeviceTree, DeviceTreeSerializer, Fdt};
 use host_dt_builder::HostDtBuilder;
 use hyp_alloc::HypAlloc;
@@ -196,15 +195,14 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
 /// creation (specifically, the root of the G-stage page-table), we guarantee that each
 /// contiguous T::TOP_LEVEL_ALIGN block of the guest physical address space of the host VM maps to
 /// a contiguous T::TOP_LEVEL_ALIGN block of the host physical address space.
-fn load_host_vm<T, D, A>(
+fn load_host_vm<T, A>(
     hyp_dt: DeviceTree<A>,
     host_kernel: HwMemRegion,
     host_initramfs: Option<HwMemRegion>,
     mut hyp_pages: HypPageAlloc<A>,
-) -> Host<T, D>
+) -> Host<T>
 where
     T: PlatformPageTable,
-    D: DataMeasure,
     A: Allocator + Clone,
 {
     // Reserve pages for tracking the host's guests.
@@ -242,7 +240,7 @@ where
     };
 
     let (host_pages, mut host_root_builder) =
-        HostRootBuilder::<T, D>::from_hyp_mem(hyp_pages, phys_mem_size);
+        HostRootBuilder::<T>::from_hyp_mem(hyp_pages, phys_mem_size);
 
     // Now that the hypervisor is done claiming memory, determine the actual size of the host's
     // address space.
@@ -450,8 +448,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let hyp_mem = HypPageAlloc::new(mem_map, &heap);
 
     // Now build the host VM's address space.
-    let mut host: Host<Sv48x4, TestMeasure> =
-        load_host_vm(hyp_dt, host_kernel, host_initramfs, hyp_mem);
+    let mut host: Host<Sv48x4> = load_host_vm(hyp_dt, host_kernel, host_initramfs, hyp_mem);
 
     let _ = host.run(hart_id);
 

@@ -192,7 +192,7 @@ impl PlatformPageTable for Sv48x4 {
         let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l2 = l3.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l1 = l2.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
-        let _entry = l1.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
+        l1.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
         Ok(())
     }
 
@@ -209,7 +209,7 @@ impl PlatformPageTable for Sv48x4 {
         let mut l4 = self.top_level_directory();
         let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l2 = l3.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
-        let _entry = l2.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
+        l2.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
         Ok(())
     }
 
@@ -347,9 +347,14 @@ impl PlatformPageTable for Sv48x4 {
     }
 
     // Supports only 4K pages for now
-    fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> Result<()>
+    fn execute_with_guest_owned_page<F>(
+        &mut self,
+        gpa: u64,
+        measurement: &[u8],
+        callback: F,
+    ) -> Result<()>
     where
-        F: FnOnce(&mut GuestOwnedPage),
+        F: FnOnce(&mut GuestOwnedPage, &[u8]),
     {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
@@ -376,7 +381,7 @@ impl PlatformPageTable for Sv48x4 {
             _ => return Err(Error::PageNotOwned),
         } {
             unsafe {
-                callback(&mut GuestOwnedPage::new(spa));
+                callback(&mut GuestOwnedPage::new(spa), measurement);
             }
             Ok(())
         } else {

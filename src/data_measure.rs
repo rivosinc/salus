@@ -5,9 +5,7 @@
 use riscv_pages::{Page, PageSize};
 
 pub trait DataMeasure: Default {
-    type MeasurementResult;
-
     fn add_page<S: PageSize>(&mut self, gpa: u64, page: &Page<S>);
 
-    fn get_measurement(&self) -> Self::MeasurementResult;
+    fn get_measurement(&self) -> &[u8];
 }

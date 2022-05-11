@@ -17,7 +17,6 @@ use sbi::Error as SbiError;
 use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 
 use crate::cpu::Cpu;
-use crate::data_measure::DataMeasure;
 use crate::print_util::*;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
 use crate::GuestOwnedPage;
@@ -184,12 +183,12 @@ global_asm!(
     guest_sepc = const guest_csr_offset!(sepc),
 );
 
-struct Guests<T: PlatformPageTable, D: DataMeasure> {
-    inner: PageVec<PageBox<GuestState<T, D>>>,
+struct Guests<T: PlatformPageTable> {
+    inner: PageVec<PageBox<GuestState<T>>>,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> Guests<T, D> {
-    fn add(&mut self, guest_state: PageBox<GuestState<T, D>>) -> sbi::Result<()> {
+impl<T: PlatformPageTable> Guests<T> {
+    fn add(&mut self, guest_state: PageBox<GuestState<T>>) -> sbi::Result<()> {
         self.inner
             .try_reserve(1)
             .map_err(|_| SbiError::InvalidParam)?;
@@ -216,7 +215,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Guests<T, D> {
     }
 
     // Returns the guest for the given ID if it exists, otherwise None.
-    fn guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut PageBox<GuestState<T, D>>> {
+    fn guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut PageBox<GuestState<T>>> {
         let guest_index = self.get_guest_index(guest_id)?;
         self.inner
             .get_mut(guest_index)
@@ -224,28 +223,25 @@ impl<T: PlatformPageTable, D: DataMeasure> Guests<T, D> {
     }
 
     // returns the initializing guest if it's present and runnable, otherwise none
-    fn initializing_guest_mut(
-        &mut self,
-        guest_id: u64,
-    ) -> sbi::Result<&mut GuestRootBuilder<T, D>> {
+    fn initializing_guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut GuestRootBuilder<T>> {
         self.guest_mut(guest_id)
             .and_then(|g| g.init_mut().ok_or(SbiError::InvalidParam))
     }
 
     // Returns the runnable guest if it's present and runnable, otherwise None
-    fn running_guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut Vm<T, D>> {
+    fn running_guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut Vm<T>> {
         self.guest_mut(guest_id)
             .and_then(|g| g.vm_mut().ok_or(SbiError::InvalidParam))
     }
 }
 
-enum GuestState<T: PlatformPageTable, D: DataMeasure> {
-    Init(GuestRootBuilder<T, D>),
-    Running(Vm<T, D>),
+enum GuestState<T: PlatformPageTable> {
+    Init(GuestRootBuilder<T>),
+    Running(Vm<T>),
     Temp,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> GuestState<T, D> {
+impl<T: PlatformPageTable> GuestState<T> {
     fn page_owner_id(&self) -> PageOwnerId {
         match self {
             Self::Init(grb) => grb.page_owner_id(),
@@ -254,7 +250,7 @@ impl<T: PlatformPageTable, D: DataMeasure> GuestState<T, D> {
         }
     }
 
-    fn init_mut(&mut self) -> Option<&mut GuestRootBuilder<T, D>> {
+    fn init_mut(&mut self) -> Option<&mut GuestRootBuilder<T>> {
         match self {
             Self::Init(ref mut grb) => Some(grb),
             Self::Running(_) => None,
@@ -262,7 +258,7 @@ impl<T: PlatformPageTable, D: DataMeasure> GuestState<T, D> {
         }
     }
 
-    fn vm_mut(&mut self) -> Option<&mut Vm<T, D>> {
+    fn vm_mut(&mut self) -> Option<&mut Vm<T>> {
         match self {
             Self::Init(_) => None,
             Self::Running(ref mut v) => Some(v),
@@ -272,17 +268,17 @@ impl<T: PlatformPageTable, D: DataMeasure> GuestState<T, D> {
 }
 
 /// A Vm VM that is being run.
-pub struct Vm<T: PlatformPageTable, D: DataMeasure> {
+pub struct Vm<T: PlatformPageTable> {
     // TODO, info should be per-hart.
     info: VmCpuState,
-    vm_pages: VmPages<T, D>,
-    guests: Option<Guests<T, D>>,
+    vm_pages: VmPages<T>,
+    guests: Option<Guests<T>>,
     has_run: bool, // TODO - different Vm type for different life cycle stages.
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
+impl<T: PlatformPageTable> Vm<T> {
     /// Create a new guest using the given initial page table and pool of initial pages.
-    fn new(vm_pages: VmPages<T, D>) -> Self {
+    fn new(vm_pages: VmPages<T>) -> Self {
         let mut info = VmCpuState::default();
 
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
@@ -563,7 +559,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
         let id = guest_builder.page_owner_id();
 
         // create a boxpage for builder state and add it to the list of vms.
-        let guest_state: PageBox<GuestState<T, D>> =
+        let guest_state: PageBox<GuestState<T>> =
             PageBox::new_with(GuestState::Init(guest_builder), state_page);
         self.guests
             .as_mut()
@@ -708,16 +704,14 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
 
         let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
         let _ = guests.get_guest_index(guest_id)?;
-        self.execute_with_guest_owned_page(page_addr, |spa| {
-            // TODO: Replace this with actual measurement and handle potential failure
-            let measurement = 0x55AA_55AAu32.to_le_bytes();
-            let _ = spa.write(0, &measurement);
+        self.execute_with_guest_owned_page(page_addr, |spa, measurement| {
+            let _ = spa.write(0, measurement);
         })
     }
 
     fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> sbi::Result<u64>
     where
-        F: FnOnce(&mut GuestOwnedPage),
+        F: FnOnce(&mut GuestOwnedPage, &[u8]),
     {
         self.vm_pages
             .execute_with_guest_owned_page(gpa, callback)
@@ -726,11 +720,11 @@ impl<T: PlatformPageTable, D: DataMeasure> Vm<T, D> {
     }
 }
 /// Represents the special VM that serves as the host for the system.
-pub struct Host<T: PlatformPageTable, D: DataMeasure> {
-    inner: Vm<T, D>,
+pub struct Host<T: PlatformPageTable> {
+    inner: Vm<T>,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> Host<T, D> {
+impl<T: PlatformPageTable> Host<T> {
     /* TODO
     /// Creates from the system memory pool
     pub fn from_mem_pool(HypMemMap?) -> Self{}
@@ -739,7 +733,7 @@ impl<T: PlatformPageTable, D: DataMeasure> Host<T, D> {
     /// Creates a new `Host` using the given initial page table root.
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
     /// length zero and capacity limits the number of nested guests.
-    pub fn new(page_root: HostRootPages<T, D>, pages: SequentialPages<PageSize4k>) -> Self {
+    pub fn new(page_root: HostRootPages<T>, pages: SequentialPages<PageSize4k>) -> Self {
         let mut inner = Vm::new(page_root.into_inner());
         inner.add_guest_tracking_pages(pages);
         Self { inner }

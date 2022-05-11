@@ -13,6 +13,7 @@ use riscv_pages::{
 use page_collections::page_vec::PageVec;
 
 use crate::data_measure::DataMeasure;
+use crate::TestMeasure;
 
 #[derive(Debug)]
 pub enum Error {
@@ -37,20 +38,15 @@ pub type Result<T> = core::result::Result<T, Error>;
 ///
 /// Machines are allowed to donate pages to child machines and to share donated pages with parent
 /// machines.
-pub struct VmPages<T: PlatformPageTable, D: DataMeasure + Default> {
+pub struct VmPages<T: PlatformPageTable> {
     root: T,
-    measurement: D,
+    measurement: TestMeasure,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
+impl<T: PlatformPageTable> VmPages<T> {
     /// Returns the `PageOwnerId` associated with the pages contained in this machine.
     pub fn page_owner_id(&self) -> PageOwnerId {
         self.root.page_owner_id()
-    }
-
-    #[allow(dead_code)]
-    pub fn get_measurement(&self) -> &D {
-        &self.measurement
     }
 
     /// Creates a `GuestRootBuilder` from pages owned by `self`.
@@ -58,7 +54,7 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
     pub fn create_guest_root_builder(
         &mut self,
         from_addr: AlignedPageAddr4k,
-    ) -> Result<(GuestRootBuilder<T, D>, Page4k)> {
+    ) -> Result<(GuestRootBuilder<T>, Page4k)> {
         if (from_addr.bits() as *const u64).align_offset(16 * 1024) != 0 {
             return Err(Error::UnalignedVmPages(from_addr));
         }
@@ -86,11 +82,11 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
     }
 
     /// Adds pages to be used for building page table entries
-    pub fn add_pte_pages_builder<DF: DataMeasure>(
+    pub fn add_pte_pages_builder(
         &mut self,
         from_addr: AlignedPageAddr4k,
         count: u64,
-        to: &mut GuestRootBuilder<T, DF>,
+        to: &mut GuestRootBuilder<T>,
     ) -> Result<()> {
         let mut phys_pages = self.root.phys_pages();
         let clean_pages = self
@@ -111,11 +107,11 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
 
     /// Add data pages to the given builder
     // TODO add other page sizes
-    pub fn add_4k_pages_builder<DF: DataMeasure>(
+    pub fn add_4k_pages_builder(
         &mut self,
         from_addr: AlignedPageAddr4k,
         count: u64,
-        to: &mut GuestRootBuilder<T, DF>,
+        to: &mut GuestRootBuilder<T>,
         to_addr: AlignedPageAddr4k,
         measure_preserve: bool,
     ) -> Result<u64> {
@@ -177,15 +173,15 @@ impl<T: PlatformPageTable, D: DataMeasure> VmPages<T, D> {
     // Passthrough function for callbackexecution with GPA -> SPA mapping
     pub fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> Result<()>
     where
-        F: FnOnce(&mut GuestOwnedPage),
+        F: FnOnce(&mut GuestOwnedPage, &[u8]),
     {
         self.root
-            .execute_with_guest_owned_page(gpa, callback)
+            .execute_with_guest_owned_page(gpa, self.measurement.get_measurement(), callback)
             .map_err(|_| Error::UnownedPage(AlignedPageAddr4k::with_round_down(PhysAddr::new(gpa))))
     }
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> Drop for VmPages<T, D> {
+impl<T: PlatformPageTable> Drop for VmPages<T> {
     fn drop(&mut self) {
         self.root
             .phys_pages()
@@ -194,12 +190,12 @@ impl<T: PlatformPageTable, D: DataMeasure> Drop for VmPages<T, D> {
 }
 
 /// Keeps the state of the host's pages.
-pub struct HostRootPages<T: PlatformPageTable, D: DataMeasure> {
-    inner: VmPages<T, D>,
+pub struct HostRootPages<T: PlatformPageTable> {
+    inner: VmPages<T>,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> HostRootPages<T, D> {
-    pub fn into_inner(self) -> VmPages<T, D> {
+impl<T: PlatformPageTable> HostRootPages<T> {
+    pub fn into_inner(self) -> VmPages<T> {
         self.inner
     }
 }
@@ -208,13 +204,13 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootPages<T, D> {
 ///
 /// Note that HostRootBuilder enforces that the GPA -> HPA mappings that are created always map
 /// a T::TOP_LEVEL_ALIGN-aligned chunk.
-pub struct HostRootBuilder<T: PlatformPageTable, D: DataMeasure> {
+pub struct HostRootBuilder<T: PlatformPageTable> {
     root: T,
     pte_pages: SeqPageIter<PageSize4k>,
-    measurement: D,
+    measurement: TestMeasure,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
+impl<T: PlatformPageTable> HostRootBuilder<T> {
     /// To be used to create the initial `HostRootPages` for the host VM.
     pub fn from_hyp_mem<A: Allocator>(
         mut hyp_mem: HypPageAlloc<A>,
@@ -232,21 +228,20 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
             Self {
                 root,
                 pte_pages,
-                measurement: D::default(),
+                measurement: TestMeasure::new(),
             },
         )
     }
 
     /// Adds data pages that are measured and mapped to the page tables for the host.
-    pub fn add_4k_data_pages<I>(self, to_addr: AlignedPageAddr4k, pages: I) -> Self
+    pub fn add_4k_data_pages<I>(mut self, to_addr: AlignedPageAddr4k, pages: I) -> Self
     where
         I: Iterator<Item = Page4k>,
     {
-        let mut measurement = D::default();
-        let mut root = self.root;
-        let mut pte_pages = self.pte_pages;
+        let root = &mut self.root;
+        let pte_pages = &mut self.pte_pages;
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            measurement.add_page(vm_addr.bits(), &page);
+            self.measurement.add_page(vm_addr.bits(), &page);
             assert_eq!(
                 vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
                 page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
@@ -257,22 +252,17 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
             root.map_page_4k(vm_addr.bits(), page, &mut || pte_pages.next())
                 .unwrap();
         }
-
-        HostRootBuilder {
-            root,
-            pte_pages,
-            measurement,
-        }
+        self
     }
 
     /// Add zeroed pages to the host page tables
-    pub fn add_4k_pages<I>(self, to_addr: AlignedPageAddr4k, pages: I) -> Self
+    pub fn add_4k_pages<I>(mut self, to_addr: AlignedPageAddr4k, pages: I) -> Self
     where
         I: Iterator<Item = Page4k>,
     {
-        let mut root = self.root;
-        let mut pte_pages = self.pte_pages;
-        let measurement = self.measurement;
+        let root = &mut self.root;
+        let pte_pages = &mut self.pte_pages;
+
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(
                 vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
@@ -285,15 +275,11 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
                 .unwrap();
         }
 
-        HostRootBuilder {
-            root,
-            pte_pages,
-            measurement,
-        }
+        self
     }
 
     /// Returns the host root pages as configured with data and zero pages.
-    pub fn create_host(self) -> HostRootPages<T, D> {
+    pub fn create_host(self) -> HostRootPages<T> {
         HostRootPages {
             inner: VmPages {
                 root: self.root,
@@ -304,26 +290,26 @@ impl<T: PlatformPageTable, D: DataMeasure> HostRootBuilder<T, D> {
 }
 
 /// Builder used to configure `VmPages` for a new guest VM.
-pub struct GuestRootBuilder<T: PlatformPageTable, D: DataMeasure> {
+pub struct GuestRootBuilder<T: PlatformPageTable> {
     root: T,
-    measurement: D,
+    measurement: TestMeasure,
     pte_pages: PageVec<Page4k>,
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> GuestRootBuilder<T, D> {
+impl<T: PlatformPageTable> GuestRootBuilder<T> {
     /// Return the page owner ID these pages will be assigned to.
     pub fn page_owner_id(&self) -> PageOwnerId {
         self.root.page_owner_id()
     }
 }
 
-impl<T: PlatformPageTable, D: DataMeasure> GuestRootBuilder<T, D> {
+impl<T: PlatformPageTable> GuestRootBuilder<T> {
     /// Create a new `GuestRootBuilder` with `root` as the backing page table and `pte_page` used to
     /// hose a Vec of pte pages.
     pub fn new(root: T, pte_page: Page4k) -> Self {
         Self {
             root,
-            measurement: D::default(),
+            measurement: TestMeasure::new(),
             pte_pages: PageVec::from(SequentialPages::<PageSize4k>::from(pte_page)),
         }
     }
@@ -356,7 +342,7 @@ impl<T: PlatformPageTable, D: DataMeasure> GuestRootBuilder<T, D> {
     }
 
     /// Consumes the builder and returns the guest's VmPages struct.
-    pub fn create_pages(self) -> VmPages<T, D> {
+    pub fn create_pages(self) -> VmPages<T> {
         VmPages {
             root: self.root,
             measurement: self.measurement,

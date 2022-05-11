@@ -365,9 +365,14 @@ pub trait PlatformPageTable {
     // Executes a callback with the SPA for the GPA while holding a reference to the page table
     // This guarantees that the callback will be executed without the possibility of flipping the
     // SPA mapping. The function returns an error if the mapping is invalid.
-    fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> Result<()>
+    fn execute_with_guest_owned_page<F>(
+        &mut self,
+        gpa: u64,
+        measurement: &[u8],
+        callback: F,
+    ) -> Result<()>
     where
-        F: FnOnce(&mut GuestOwnedPage);
+        F: FnOnce(&mut GuestOwnedPage, &[u8]);
 }
 
 pub struct UnmapIter<'a, T: PlatformPageTable> {

@@ -11,8 +11,6 @@ pub struct TestMeasure {
 }
 
 impl DataMeasure for TestMeasure {
-    type MeasurementResult = [u8; 32];
-
     fn add_page<S: PageSize>(&mut self, gpa: u64, page: &Page<S>) {
         let mut digest = Sha256::new();
         digest.update(self.measurement);
@@ -21,7 +19,15 @@ impl DataMeasure for TestMeasure {
         self.measurement = digest.finalize().as_slice().try_into().unwrap();
     }
 
-    fn get_measurement(&self) -> Self::MeasurementResult {
-        self.measurement
+    fn get_measurement(&self) -> &[u8] {
+        &self.measurement
+    }
+}
+
+impl TestMeasure {
+    pub fn new() -> Self {
+        TestMeasure {
+            measurement: [0u8; 32],
+        }
     }
 }

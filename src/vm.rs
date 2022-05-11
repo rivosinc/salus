@@ -701,14 +701,32 @@ impl<T: PlatformPageTable> Vm<T> {
             return Err(SbiError::InvalidParam);
         }
 
-        let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
-        let _ = guests.get_guest_index(guest_id)?;
-        // Note that since we are borrowing measurements from vm_pages, we can't
-        // take another mutable reference to vm_pages to write to the GPA, so we have to
-        // call a helper method to retrieve the measurements and write them using the same
-        // mutable reference
-        self.vm_pages
-            .write_measurements_to_guest_owned_page(page_addr)
+        // The guest_id of 0 is a special identifier used to retrieve
+        // measurements for self. Note that since we are borrowing
+        // measurements from vm_pages, we can't take another mutable
+        // reference to vm_pages to write to the GPA, so we have to
+        // call a helper method to retrieve the measurements and write
+        // them using the same mutable reference
+        let result = if guest_id == 0 {
+            self.vm_pages
+                .write_measurements_to_guest_owned_page(page_addr)
+        } else {
+            let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
+            let _ = guests.get_guest_index(guest_id)?;
+            let measurements = if let Ok(running_guest) = guests.running_guest_mut(guest_id) {
+                running_guest.vm_pages.get_measurement()
+            } else {
+                guests
+                    .initializing_guest_mut(guest_id)
+                    .unwrap()
+                    .get_measurement()
+            };
+
+            self.vm_pages
+                .write_to_guest_owned_page(page_addr, measurements)
+        };
+
+        result
             .map(|bytes| bytes as u64)
             .map_err(|_| SbiError::InvalidAddress)
     }

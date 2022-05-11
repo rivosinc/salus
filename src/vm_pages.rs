@@ -49,6 +49,10 @@ impl<T: PlatformPageTable> VmPages<T> {
         self.root.page_owner_id()
     }
 
+    pub fn get_measurement(&self) -> &[u8] {
+        self.measurement.get_measurement()
+    }
+
     /// Creates a `GuestRootBuilder` from pages owned by `self`.
     /// The `GuestRootBuilder` is used to build a guest VM owned by `self`'s root.page_owner_id().
     pub fn create_guest_root_builder(
@@ -179,7 +183,6 @@ impl<T: PlatformPageTable> VmPages<T> {
     }
 
     // Writes to the specified GPA
-    #[allow(dead_code)]
     pub fn write_to_guest_owned_page(&mut self, gpa: u64, bytes: &[u8]) -> Result<usize> {
         self.root
             .write_guest_owned_page(gpa, 0, bytes)
@@ -354,5 +357,9 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
             root: self.root,
             measurement: self.measurement,
         }
+    }
+
+    pub fn get_measurement(&self) -> &[u8] {
+        self.measurement.get_measurement()
     }
 }

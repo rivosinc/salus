@@ -165,9 +165,24 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     if result.is_ok() {
         let measurement = unsafe { core::ptr::read_volatile(measurment_page_addr as *mut u64) };
-        println!("Measurement returned {measurement:x}");
+        println!("Measurement for guest id {vmid:x} returned {measurement:x}");
     } else {
-        println!("Measurement error {:?}", result.err());
+        println!("Measurement error {:?} for guest id {vmid:x}", result.err());
+    }
+
+    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
+        guest_id: 0,
+        measurement_version: 1,
+        measurement_type: 1,
+        page_addr: measurment_page_addr,
+    });
+    let result = ecall_send(&msg);
+
+    if result.is_ok() {
+        let measurement = unsafe { core::ptr::read_volatile(measurment_page_addr as *mut u64) };
+        println!("Measurement for self returned {measurement:x}");
+    } else {
+        println!("Measurement for self returned error {:?}", result.err());
     }
 
     /* TODO - need to put code in guest

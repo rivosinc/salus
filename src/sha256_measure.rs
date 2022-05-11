@@ -5,12 +5,13 @@
 use crate::data_measure::DataMeasure;
 use riscv_pages::{Page, PageSize};
 use sha2::{Digest, Sha256};
+
 #[derive(Default)]
-pub struct TestMeasure {
+pub struct Sha256Measure {
     measurement: [u8; 32],
 }
 
-impl DataMeasure for TestMeasure {
+impl DataMeasure for Sha256Measure {
     fn add_page<S: PageSize>(&mut self, gpa: u64, page: &Page<S>) {
         let mut digest = Sha256::new();
         digest.update(self.measurement);
@@ -24,9 +25,9 @@ impl DataMeasure for TestMeasure {
     }
 }
 
-impl TestMeasure {
+impl Sha256Measure {
     pub fn new() -> Self {
-        TestMeasure {
+        Sha256Measure {
             measurement: [0u8; 32],
         }
     }

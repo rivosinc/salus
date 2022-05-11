@@ -24,7 +24,7 @@ mod cpu;
 mod data_measure;
 mod host_dt_builder;
 mod print_util;
-mod test_measure;
+mod sha256_measure;
 mod trap;
 mod vm;
 mod vm_pages;
@@ -39,7 +39,6 @@ use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
 use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
-use test_measure::TestMeasure;
 use vm::Host;
 use vm_pages::HostRootBuilder;
 

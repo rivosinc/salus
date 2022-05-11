@@ -13,7 +13,7 @@ use riscv_pages::{
 use page_collections::page_vec::PageVec;
 
 use crate::data_measure::DataMeasure;
-use crate::TestMeasure;
+use crate::sha256_measure::Sha256Measure;
 
 #[derive(Debug)]
 pub enum Error {
@@ -40,7 +40,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// machines.
 pub struct VmPages<T: PlatformPageTable> {
     root: T,
-    measurement: TestMeasure,
+    measurement: Sha256Measure,
 }
 
 impl<T: PlatformPageTable> VmPages<T> {
@@ -217,7 +217,7 @@ impl<T: PlatformPageTable> HostRootPages<T> {
 pub struct HostRootBuilder<T: PlatformPageTable> {
     root: T,
     pte_pages: SeqPageIter<PageSize4k>,
-    measurement: TestMeasure,
+    measurement: Sha256Measure,
 }
 
 impl<T: PlatformPageTable> HostRootBuilder<T> {
@@ -238,7 +238,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
             Self {
                 root,
                 pte_pages,
-                measurement: TestMeasure::new(),
+                measurement: Sha256Measure::new(),
             },
         )
     }
@@ -302,7 +302,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
 /// Builder used to configure `VmPages` for a new guest VM.
 pub struct GuestRootBuilder<T: PlatformPageTable> {
     root: T,
-    measurement: TestMeasure,
+    measurement: Sha256Measure,
     pte_pages: PageVec<Page4k>,
 }
 
@@ -319,7 +319,7 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
     pub fn new(root: T, pte_page: Page4k) -> Self {
         Self {
             root,
-            measurement: TestMeasure::new(),
+            measurement: Sha256Measure::new(),
             pte_pages: PageVec::from(SequentialPages::<PageSize4k>::from(pte_page)),
         }
     }

@@ -10,10 +10,9 @@ use riscv_pages::{
     SequentialPages, SequentialPages4k, UnmappedPage,
 };
 
-use page_collections::page_vec::PageVec;
-
-use crate::data_measure::DataMeasure;
 use crate::sha256_measure::Sha256Measure;
+use data_measure::data_measure::DataMeasure;
+use page_collections::page_vec::PageVec;
 
 #[derive(Debug)]
 pub enum Error {
@@ -251,7 +250,6 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
         let root = &mut self.root;
         let pte_pages = &mut self.pte_pages;
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            self.measurement.add_page(vm_addr.bits(), &page);
             assert_eq!(
                 vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
                 page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
@@ -259,8 +257,13 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
             root.phys_pages()
                 .set_page_owner(page.addr(), root.page_owner_id())
                 .unwrap();
-            root.map_page_4k(vm_addr.bits(), page, &mut || pte_pages.next())
-                .unwrap();
+            root.map_page_4k(
+                vm_addr.bits(),
+                page,
+                &mut || pte_pages.next(),
+                Some(&mut self.measurement),
+            )
+            .unwrap();
         }
         self
     }
@@ -281,7 +284,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
             root.phys_pages()
                 .set_page_owner(page.addr(), root.page_owner_id())
                 .unwrap();
-            root.map_page_4k(vm_addr.bits(), page, &mut || pte_pages.next())
+            root.map_page_4k(vm_addr.bits(), page, &mut || pte_pages.next(), None)
                 .unwrap();
         }
 
@@ -337,9 +340,14 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
     /// Add a measured data page for the guest to use.
     /// Currently only supports 4k pages.
     pub fn add_data_page(&mut self, gpa: u64, page: Page4k) -> Result<()> {
-        self.measurement.add_page(gpa, &page);
+        self.measurement.add_page(gpa, page.as_bytes());
         self.root
-            .map_page_4k(gpa, page, &mut || self.pte_pages.pop())
+            .map_page_4k(
+                gpa,
+                page,
+                &mut || self.pte_pages.pop(),
+                Some(&mut self.measurement),
+            )
             .map_err(Error::Mapping4kPage)
     }
 
@@ -347,7 +355,7 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
     /// Currently only supports 4k pages.
     pub fn add_zero_page(&mut self, gpa: u64, page: Page4k) -> Result<()> {
         self.root
-            .map_page_4k(gpa, page, &mut || self.pte_pages.pop())
+            .map_page_4k(gpa, page, &mut || self.pte_pages.pop(), None)
             .map_err(Error::Mapping4kPage)
     }
 

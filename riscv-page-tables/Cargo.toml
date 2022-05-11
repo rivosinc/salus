@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+data_measure = { path = "../data-measure" }
 riscv_pages = { path = "../riscv-pages" }
 page_collections = { path = "../page-collections" }
 spin = "*"

@@ -49,6 +49,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "data_measure"
+version = "0.1.0"
+
+[[package]]
 name = "device_tree"
 version = "0.1.0"
 dependencies = [
@@ -192,6 +196,7 @@ name = "riscv_page_tables"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "data_measure",
  "page_collections",
  "riscv_pages",
  "spin",
@@ -224,6 +229,7 @@ name = "salus"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "data_measure",
  "device_tree",
  "hyp_alloc",
  "memoffset",

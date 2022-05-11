@@ -21,7 +21,6 @@ extern crate alloc;
 mod abort;
 mod asm;
 mod cpu;
-mod data_measure;
 mod host_dt_builder;
 mod print_util;
 mod sha256_measure;

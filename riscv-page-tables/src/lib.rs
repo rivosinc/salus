@@ -40,7 +40,6 @@
 
 extern crate alloc;
 
-pub mod guest_owned_page;
 mod hw_mem_map;
 mod page_info;
 mod page_table;

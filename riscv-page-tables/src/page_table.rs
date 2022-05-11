@@ -5,6 +5,7 @@
 use core::marker::PhantomData;
 use core::slice;
 
+use data_measure::data_measure::DataMeasure;
 use riscv_pages::{
     AlignedPageAddr, AlignedPageAddr4k, CleanPage, Page, Page4k, PageOwnerId, PageSize,
     PageSize2MB, PageSize4k, SequentialPages, UnmappedPage,
@@ -328,12 +329,15 @@ pub trait PlatformPageTable {
 
     // TODO - page permissions
     // TODO - generic enough to work with satp in addition to hgatp
-    /// Maps a 4k page for translation with address `guest_phys_addr`.
+    // TODO - add measurement support for > 4K pages
+    /// Maps a 4k page for translation with address `guest_phys_addr`
+    /// Optionally extends measurements
     fn map_page_4k<F>(
         &mut self,
         guest_phys_addr: u64,
         page_to_map: Page4k,
         get_pte_page: &mut F,
+        data_measure: Option<&mut dyn DataMeasure>,
     ) -> Result<()>
     where
         F: FnMut() -> Option<Page4k>;

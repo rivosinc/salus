@@ -20,6 +20,7 @@ path = "src/tellus.rs"
 
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
+data_measure = { path = "./data-measure" }
 device_tree = { path = "./device-tree" }
 hyp_alloc = { path = "./hyp-alloc" }
 memoffset = { version = ">=0.6.5", features = ["unstable_const"] }

@@ -4,6 +4,7 @@
 
 use core::slice;
 
+use data_measure::data_measure::DataMeasure;
 use riscv_pages::*;
 
 use crate::page_table::Result;
@@ -176,6 +177,7 @@ impl PlatformPageTable for Sv48x4 {
         guest_phys_addr: u64,
         page_to_map: Page4k,
         get_pte_page: &mut F,
+        data_measure: Option<&mut dyn DataMeasure>,
     ) -> Result<()>
     where
         F: FnMut() -> Option<Page4k>,
@@ -192,6 +194,9 @@ impl PlatformPageTable for Sv48x4 {
         let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l2 = l3.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
         let mut l1 = l2.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
+        if let Some(data_measure) = data_measure {
+            data_measure.add_page(guest_phys_addr, page_to_map.as_bytes());
+        }
         l1.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
         Ok(())
     }

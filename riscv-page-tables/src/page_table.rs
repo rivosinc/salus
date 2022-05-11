@@ -12,7 +12,6 @@ use riscv_pages::{
 
 use crate::page_tracking::PageState;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
-use crate::GuestOwnedPage;
 
 pub(crate) const ENTRIES_PER_PAGE: usize = 4096 / 8;
 
@@ -20,9 +19,12 @@ pub(crate) const ENTRIES_PER_PAGE: usize = 4096 / 8;
 pub enum Error {
     InsufficientPages(SequentialPages<PageSize4k>),
     InsufficientPtePages,
+    InvalidOffset,
     LeafEntryNotTable,
     MisalignedPages(SequentialPages<PageSize4k>),
+    OutOfBounds,
     PageNotOwned,
+    TableEntryNotLeaf,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -130,6 +132,34 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             Some(page)
         } else {
             None
+        }
+    }
+
+    /// Writes the given data at `offset` of the mapped page.
+    /// Uses volatile access as the VM where this page is mapped may modify it at any time.
+    pub fn write_to_page(&self, offset: u64, bytes: &[u8]) -> Result<()> {
+        if let ValidTableEntryMut::Leaf(pte) = self {
+            let last_offset = offset
+                .checked_add(bytes.len() as u64)
+                .ok_or(Error::InvalidOffset)?;
+            if last_offset <= L::LeafPageSize::SIZE_BYTES {
+                // unwrap is ok because the address at the entry must be correctly aligned.
+                let spa = AlignedPageAddr::<L::LeafPageSize>::try_from(pte.pfn())
+                    .unwrap()
+                    .bits() as *mut u8;
+                for (i, c) in bytes.iter().enumerate() {
+                    unsafe {
+                        // Safe because the page table owns this page and bounds checks were done
+                        // above.
+                        core::ptr::write_volatile(spa.offset(offset as isize + i as isize), *c);
+                    }
+                }
+                Ok(())
+            } else {
+                Err(Error::OutOfBounds)
+            }
+        } else {
+            Err(Error::TableEntryNotLeaf)
         }
     }
 }
@@ -362,17 +392,11 @@ pub trait PlatformPageTable {
     /// invalid.
     fn do_guest_fault(&mut self, guest_phys_addr: u64) -> bool;
 
-    // Executes a callback with the SPA for the GPA while holding a reference to the page table
-    // This guarantees that the callback will be executed without the possibility of flipping the
-    // SPA mapping. The function returns an error if the mapping is invalid.
-    fn execute_with_guest_owned_page<F>(
-        &mut self,
-        gpa: u64,
-        measurement: &[u8],
-        callback: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(&mut GuestOwnedPage, &[u8]);
+    // Translates the GPA -> SPA, and writes the specified bytes at the given offset
+    // The function will fail if there's no valid GPA -> SPA mapping, or if the
+    // bounds of the page would have been exceeded
+    // Presently supports only 4K pages
+    fn write_guest_owned_page(&mut self, gpa: u64, offset: u64, bytes: &[u8]) -> Result<()>;
 }
 
 pub struct UnmapIter<'a, T: PlatformPageTable> {

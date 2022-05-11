@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 use core::alloc::Allocator;
-use riscv_page_tables::{GuestOwnedPage, HypPageAlloc, PageState, PlatformPageTable};
+use riscv_page_tables::{HypPageAlloc, PageState, PlatformPageTable};
 use riscv_pages::{
     AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize, PageSize4k, PhysAddr, SeqPageIter,
     SequentialPages, SequentialPages4k, UnmappedPage,
@@ -170,13 +170,20 @@ impl<T: PlatformPageTable> VmPages<T> {
         }
     }
 
-    // Passthrough function for callbackexecution with GPA -> SPA mapping
-    pub fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> Result<()>
-    where
-        F: FnOnce(&mut GuestOwnedPage, &[u8]),
-    {
+    // Writes self measurements to the specified GPA
+    pub fn write_measurements_to_guest_owned_page(&mut self, gpa: u64) -> Result<usize> {
         self.root
-            .execute_with_guest_owned_page(gpa, self.measurement.get_measurement(), callback)
+            .write_guest_owned_page(gpa, 0, self.measurement.get_measurement())
+            .map(|_| self.measurement.get_measurement().len())
+            .map_err(|_| Error::UnownedPage(AlignedPageAddr4k::with_round_down(PhysAddr::new(gpa))))
+    }
+
+    // Writes to the specified GPA
+    #[allow(dead_code)]
+    pub fn write_to_guest_owned_page(&mut self, gpa: u64, bytes: &[u8]) -> Result<usize> {
+        self.root
+            .write_guest_owned_page(gpa, 0, bytes)
+            .map(|_| bytes.len())
             .map_err(|_| Error::UnownedPage(AlignedPageAddr4k::with_round_down(PhysAddr::new(gpa))))
     }
 }

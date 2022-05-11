@@ -7,9 +7,9 @@ use core::slice;
 use riscv_pages::*;
 
 use crate::page_table::Result;
+use crate::page_table::*;
 use crate::page_tracking::PageState;
 use crate::pte::{Pte, PteLeafPerms};
-use crate::{page_table::*, GuestOwnedPage};
 
 pub enum L1Table {}
 pub enum L2Table {}
@@ -346,16 +346,7 @@ impl PlatformPageTable for Sv48x4 {
         }
     }
 
-    // Supports only 4K pages for now
-    fn execute_with_guest_owned_page<F>(
-        &mut self,
-        gpa: u64,
-        measurement: &[u8],
-        callback: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(&mut GuestOwnedPage, &[u8]),
-    {
+    fn write_guest_owned_page(&mut self, gpa: u64, offset: u64, bytes: &[u8]) -> Result<()> {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
 
@@ -376,14 +367,8 @@ impl PlatformPageTable for Sv48x4 {
             Valid(_) => return Err(Error::PageNotOwned),
         };
 
-        if let Some(spa) = match l1.entry_for_addr_mut(gpa) {
-            Valid(Leaf(pte)) => Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
-            _ => return Err(Error::PageNotOwned),
-        } {
-            unsafe {
-                callback(&mut GuestOwnedPage::new(spa), measurement);
-            }
-            Ok(())
+        if let TableEntryMut::Valid(entry) = l1.entry_for_addr_mut(gpa) {
+            entry.write_to_page(offset, bytes)
         } else {
             Err(Error::PageNotOwned)
         }

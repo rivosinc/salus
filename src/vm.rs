@@ -19,7 +19,6 @@ use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 use crate::cpu::Cpu;
 use crate::print_util::*;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
-use crate::GuestOwnedPage;
 use crate::{print, println};
 
 /// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
@@ -704,19 +703,14 @@ impl<T: PlatformPageTable> Vm<T> {
 
         let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
         let _ = guests.get_guest_index(guest_id)?;
-        self.execute_with_guest_owned_page(page_addr, |spa, measurement| {
-            let _ = spa.write(0, measurement);
-        })
-    }
-
-    fn execute_with_guest_owned_page<F>(&mut self, gpa: u64, callback: F) -> sbi::Result<u64>
-    where
-        F: FnOnce(&mut GuestOwnedPage, &[u8]),
-    {
+        // Note that since we are borrowing measurements from vm_pages, we can't
+        // take another mutable reference to vm_pages to write to the GPA, so we have to
+        // call a helper method to retrieve the measurements and write them using the same
+        // mutable reference
         self.vm_pages
-            .execute_with_guest_owned_page(gpa, callback)
-            .map_err(|_| SbiError::InvalidAddress)?;
-        Ok(0)
+            .write_measurements_to_guest_owned_page(page_addr)
+            .map(|bytes| bytes as u64)
+            .map_err(|_| SbiError::InvalidAddress)
     }
 }
 /// Represents the special VM that serves as the host for the system.

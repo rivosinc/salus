@@ -117,7 +117,7 @@ mod tests {
             .set_page_owner(guest_page.addr(), guest_page_table.page_owner_id())
             .is_ok());
         assert!(guest_page_table
-            .map_page_4k(guest_addr, guest_page, &mut || free_pages.next())
+            .map_page_4k(guest_addr, guest_page, &mut || free_pages.next(), None)
             .is_ok());
         // check that fetching the address from 0x8000_0000 returns the mapped page.
         let returned_page = guest_page_table.unmap_page(guest_addr).unwrap().unwrap_4k();

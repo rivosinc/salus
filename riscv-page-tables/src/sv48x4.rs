@@ -138,7 +138,6 @@ impl Sv48x4 {
 }
 
 impl PlatformPageTable for Sv48x4 {
-    type TLD = L4Table;
     const HGATP_VALUE: u64 = 9;
     const TOP_LEVEL_ALIGN: u64 = 16 * 1024;
 

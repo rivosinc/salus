@@ -305,7 +305,6 @@ impl<LEVEL: PageTableLevel> PteIndex for PageTableIndex<LEVEL> {
 /// A page table for a given addressing type.
 /// `HGATP_VALUE` must be set to the paging mode stored in register hgatp.
 pub trait PlatformPageTable {
-    type TLD: PageTableLevel;
     const HGATP_VALUE: u64;
     /// The alignement requirement of the top level page table.
     const TOP_LEVEL_ALIGN: u64;

@@ -233,14 +233,13 @@ where
 
     /// Returns the next page table level for the given address to translate.
     /// If the next level isn't yet filled, consumes a `free_page` and uses it to map those entries.
-    pub(crate) fn next_level_or_fill_fn<F>(
+    pub(crate) fn next_level_or_fill_fn(
         &mut self,
         guest_phys_addr: u64,
-        get_pte_page: &mut F,
+        get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
     ) -> Result<PageTable<LEVEL::NextLevel>>
     where
         LEVEL: PageTableLevel + UpperLevel,
-        F: FnMut() -> Option<Page4k>,
     {
         let v = match self.entry_for_addr_mut(guest_phys_addr) {
             TableEntryMut::Valid(v) => v,
@@ -332,27 +331,23 @@ pub trait PlatformPageTable {
     // TODO - add measurement support for > 4K pages
     /// Maps a 4k page for translation with address `guest_phys_addr`
     /// Optionally extends measurements
-    fn map_page_4k<F>(
+    fn map_page_4k(
         &mut self,
         guest_phys_addr: u64,
         page_to_map: Page4k,
-        get_pte_page: &mut F,
+        get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
         data_measure: Option<&mut dyn DataMeasure>,
-    ) -> Result<()>
-    where
-        F: FnMut() -> Option<Page4k>;
+    ) -> Result<()>;
 
     // TODO - page permissions
     // TODO - generic enough to work with satp in addition to hgatp
     /// Maps a 2MB page for translation with address `addr`.
-    fn map_page_2mb<F>(
+    fn map_page_2mb(
         &mut self,
         addr: u64,
         page_to_map: Page<PageSize2MB>,
-        get_pte_page: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut() -> Option<Page4k>;
+        get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
+    ) -> Result<()>;
 
     /// Unmaps, wipes clean, and returns the host page of the given guest address if that address is
     /// mapped.

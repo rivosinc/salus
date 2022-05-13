@@ -172,16 +172,13 @@ impl PlatformPageTable for Sv48x4 {
         self.phys_pages.clone()
     }
 
-    fn map_page_4k<F>(
+    fn map_page_4k(
         &mut self,
         guest_phys_addr: u64,
         page_to_map: Page4k,
-        get_pte_page: &mut F,
+        get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
         data_measure: Option<&mut dyn DataMeasure>,
-    ) -> Result<()>
-    where
-        F: FnMut() -> Option<Page4k>,
-    {
+    ) -> Result<()> {
         let page_addr = page_to_map.addr();
         let owner = self
             .phys_pages
@@ -201,15 +198,12 @@ impl PlatformPageTable for Sv48x4 {
         Ok(())
     }
 
-    fn map_page_2mb<F>(
+    fn map_page_2mb(
         &mut self,
         guest_phys_addr: u64,
         page_to_map: Page<PageSize2MB>,
-        get_pte_page: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut() -> Option<Page4k>,
-    {
+        get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
+    ) -> Result<()> {
         // TODO: Ownership on hugepages?
         let mut l4 = self.top_level_directory();
         let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;

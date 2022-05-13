@@ -135,10 +135,20 @@ impl Default for PageInfo {
     }
 }
 
+const MAX_SPARSE_MAP_ENTRIES: usize = 16;
+
+/// Maps a contiguous range of memory to a subset of the `PageMap`.
+#[derive(Clone, Copy, Debug)]
+struct SparseMapEntry {
+    base_pfn: usize,
+    num_pages: usize,
+    page_map_index: usize,
+}
+
 /// Keeps information for all physical pages in the system.
 pub struct PageMap {
     pages: PageVec<PageInfo>,
-    base_page_index: usize,
+    sparse_map: ArrayVec<SparseMapEntry, MAX_SPARSE_MAP_ENTRIES>,
 }
 
 impl PageMap {
@@ -174,17 +184,16 @@ impl PageMap {
             )
             .expect("Failed to reserve page map");
 
-        let base_page_index = mem_map.regions().next().unwrap().base().index() as usize;
-        let mut page_map = Self::new(struct_pages, base_page_index);
+        let mut page_map = Self::new(struct_pages);
         page_map.populate_from(mem_map);
         page_map
     }
 
     /// Constructs an empty `PageMap` from an existing vector of `PageInfo` structs.
-    fn new(pages: PageVec<PageInfo>, base_page_index: usize) -> Self {
+    fn new(pages: PageVec<PageInfo>) -> Self {
         Self {
             pages,
-            base_page_index,
+            sparse_map: ArrayVec::new(),
         }
     }
 
@@ -199,22 +208,24 @@ impl PageMap {
         //
         // Pages in reserved regions are marked reserved, except for those containing the
         // host VM images, which are considered to be initially hypervisor-owned.
-        let mut last_end: Option<SupervisorPageAddr> = None;
+        let mut current_entry = SparseMapEntry {
+            base_pfn: mem_map.regions().next().unwrap().base().index(),
+            num_pages: 0,
+            page_map_index: 0,
+        };
         for r in mem_map.regions() {
             let base = r.base().get_4k_addr();
-            // All "holes" in the memory map are considered reserved.
-            //
-            // TODO: Support a sparse PageMap.
-            if let Some(end) = last_end {
-                if end != base {
-                    for _ in end.iter_from().take_while(|&a| a != base) {
-                        self.pages.push(PageInfo::new_reserved());
-                    }
-                }
+            if current_entry.base_pfn + current_entry.num_pages != base.index() {
+                let next_entry = SparseMapEntry {
+                    base_pfn: base.index(),
+                    num_pages: 0,
+                    page_map_index: current_entry.page_map_index + current_entry.num_pages,
+                };
+                self.sparse_map.push(current_entry);
+                current_entry = next_entry;
             }
-            let end = r.end().get_4k_addr();
-            last_end = Some(end);
 
+            let end = r.end().get_4k_addr();
             for _ in base.iter_from().take_while(|&a| a != end) {
                 match r.mem_type() {
                     HwMemType::Available => {
@@ -228,8 +239,15 @@ impl PageMap {
                         self.pages.push(PageInfo::new_reserved());
                     }
                 }
+                current_entry.num_pages += 1;
             }
+            // Make sure we won't overflow later.
+            assert!(current_entry
+                .base_pfn
+                .checked_add(current_entry.num_pages)
+                .is_some());
         }
+        self.sparse_map.push(current_entry);
     }
 
     /// Returns a reference to the `PageInfo` struct for the 4k page at `addr`.
@@ -238,7 +256,7 @@ impl PageMap {
         if addr.size().is_huge() {
             return None;
         }
-        let index = addr.index().checked_sub(self.base_page_index)?;
+        let index = self.get_map_index(addr)?;
         self.pages.get(index)
     }
 
@@ -247,7 +265,7 @@ impl PageMap {
         if addr.size().is_huge() {
             return None;
         }
-        let index = addr.index().checked_sub(self.base_page_index)?;
+        let index = self.get_map_index(addr)?;
         self.pages.get_mut(index)
     }
 
@@ -256,8 +274,16 @@ impl PageMap {
         if addr.size().is_huge() {
             return None;
         }
-        let offset = addr.index().checked_sub(self.base_page_index)?;
-        self.pages.len().checked_sub(offset)
+        let index = self.get_map_index(addr)?;
+        self.pages.len().checked_sub(index)
+    }
+
+    /// Returns the index in the `PageMap` for the given address.
+    fn get_map_index(&self, addr: SupervisorPageAddr) -> Option<usize> {
+        self.sparse_map
+            .iter()
+            .find(|s| s.base_pfn <= addr.index() && addr.index() < s.base_pfn + s.num_pages)
+            .map(|entry| entry.page_map_index + addr.index() - entry.base_pfn)
     }
 }
 
@@ -289,34 +315,26 @@ mod tests {
     fn indexing() {
         let pages = stub_page_vec();
         let num_pages = 10;
+        let base_addr = PageAddr::new(RawAddr::supervisor(0x1000_0000)).unwrap();
         let mem_map = unsafe {
             // Not safe - just a test.
             HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(
-                    RawAddr::supervisor(0x1000_0000),
+                    RawAddr::from(base_addr),
                     num_pages * PageSize::Size4k as u64,
                 )
                 .unwrap()
                 .build()
         };
-        let first_index: u64 = mem_map
-            .regions()
-            .nth(0)
-            .unwrap()
-            .base()
-            .index()
-            .try_into()
-            .unwrap();
-        let mut pages = PageMap::new(pages, first_index as usize);
+        let mut pages = PageMap::new(pages);
         pages.populate_from(mem_map);
 
-        let before_addr = PageAddr::new(RawAddr::supervisor((first_index - 1) * 4096)).unwrap();
-        let first_addr = PageAddr::new(RawAddr::supervisor(first_index * 4096)).unwrap();
-        let last_addr = first_addr.checked_add_pages(num_pages - 1).unwrap();
+        let before_addr = PageAddr::new(RawAddr::supervisor(base_addr.bits() - 4096)).unwrap();
+        let last_addr = base_addr.checked_add_pages(num_pages - 1).unwrap();
         let after_addr = last_addr.checked_add_pages(1).unwrap();
 
         assert!(pages.get(before_addr).is_none());
-        assert!(pages.get(first_addr).is_some());
+        assert!(pages.get(base_addr).is_some());
         assert!(pages.get(last_addr).is_some());
         assert!(pages.get(after_addr).is_none());
     }
@@ -345,8 +363,7 @@ mod tests {
                 0x2000,
             )
             .unwrap();
-        let first_index = mem_map.regions().nth(0).unwrap().base().index();
-        let mut pages = PageMap::new(pages, first_index);
+        let mut pages = PageMap::new(pages);
         pages.populate_from(mem_map);
 
         let free_addr = PageAddr::new(RawAddr::supervisor(0x1000_1000)).unwrap();
@@ -356,6 +373,35 @@ mod tests {
         assert!(pages.get(free_addr).unwrap().is_free());
         assert!(pages.get(reserved_addr).unwrap().is_reserved());
         assert!(pages.get(used_addr).unwrap().owner().is_some());
+    }
+
+    #[test]
+    fn sparse_map() {
+        let pages = stub_page_vec();
+        const TOTAL_SIZE: u64 = 0x4_0000;
+        let mem_map = unsafe {
+            // Not safe - just a test.
+            HwMemMapBuilder::new(PageSize::Size4k as u64)
+                .add_memory_region(RawAddr::supervisor(0x1000_0000), TOTAL_SIZE / 2)
+                .unwrap()
+                .add_memory_region(RawAddr::supervisor(0x2000_0000), TOTAL_SIZE / 2)
+                .unwrap()
+                .build()
+        };
+        let mut pages = PageMap::new(pages);
+        pages.populate_from(mem_map);
+
+        let base_addr = PageAddr::new(RawAddr::supervisor(0x1000_0000)).unwrap();
+        let r0_addr = PageAddr::new(RawAddr::supervisor(0x1000_8000)).unwrap();
+        let r1_addr = PageAddr::new(RawAddr::supervisor(0x2000_3000)).unwrap();
+
+        assert!(pages.get(base_addr).unwrap().is_free());
+        assert!(pages.get(r0_addr).unwrap().is_free());
+        assert!(pages.get(r1_addr).unwrap().is_free());
+        assert_eq!(
+            pages.num_after(base_addr).unwrap(),
+            (TOTAL_SIZE / PageSize::Size4k as u64) as usize
+        );
     }
 
     #[test]

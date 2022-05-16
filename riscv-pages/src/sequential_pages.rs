@@ -4,7 +4,7 @@
 
 use core::{fmt, marker::PhantomData};
 
-use crate::page::{AlignedPageAddr, Page, PageSize, PageSize4k, PhysAddr};
+use crate::page::{Page, PageAddr, PageSize, PageSize4k, RawAddr, SupervisorPageAddr};
 
 /// `SequentialPages` holds a range of consecutive pages. Each page's address is one page after the
 /// previous. This forms a contiguous area of memory suitable for holding an array or other linear
@@ -74,9 +74,9 @@ impl<S: PageSize> SequentialPages<S> {
 
     /// Returns the address of the first page in the sequence(the start of the contiguous memory
     /// region).
-    pub fn start_page_addr(&self) -> AlignedPageAddr<S> {
+    pub fn start_page_addr(&self) -> SupervisorPageAddr<S> {
         // unwrap can't fail because `self.addr` is guaranteed to be page aligned at construction.
-        AlignedPageAddr::new(PhysAddr::new(self.addr)).unwrap()
+        PageAddr::new(RawAddr::supervisor(self.addr)).unwrap()
     }
 
     /// Returns the address of the first page in the sequence(the start of the contiguous memory
@@ -105,7 +105,7 @@ impl<S: PageSize> SequentialPages<S> {
     /// # Safety
     /// The range's ownership is given to `SequentialPages`, the caller must uniquely own that
     /// memory.
-    pub unsafe fn from_mem_range(start: AlignedPageAddr<S>, count: u64) -> Self {
+    pub unsafe fn from_mem_range(start: SupervisorPageAddr<S>, count: u64) -> Self {
         Self {
             addr: start.bits(),
             count,
@@ -117,7 +117,10 @@ impl<S: PageSize> SequentialPages<S> {
     /// # Safety
     /// The range's ownership is given to `SequentialPages`, the caller must uniquely own that
     /// memory.
-    pub unsafe fn from_page_range(start: AlignedPageAddr<S>, end: AlignedPageAddr<S>) -> Self {
+    pub unsafe fn from_page_range(
+        start: SupervisorPageAddr<S>,
+        end: SupervisorPageAddr<S>,
+    ) -> Self {
         Self {
             addr: start.bits(),
             count: end.bits().checked_sub(start.bits()).unwrap() / S::SIZE_BYTES,
@@ -154,7 +157,7 @@ impl<S: PageSize> Iterator for SeqPageIter<S> {
         self.pages.count -= 1;
         // Safe because `pages` owns the memory, which can be converted to pages because it is owned
         // and aligned.
-        unsafe { Some(Page::new(AlignedPageAddr::new(PhysAddr::new(addr))?)) }
+        unsafe { Some(Page::new(PageAddr::new(RawAddr::supervisor(addr))?)) }
     }
 }
 
@@ -186,10 +189,10 @@ mod tests {
         let pages = unsafe {
             // Not safe, but memory won't be touched in the test...
             [
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x1000)).unwrap()),
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x2000)).unwrap()),
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x3000)).unwrap()),
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x4000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x1000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x2000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x3000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x4000)).unwrap()),
             ]
         };
 
@@ -201,10 +204,10 @@ mod tests {
         let pages = unsafe {
             // Not safe, but memory won't be touched in the test...
             [
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x1000)).unwrap()),
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x2000)).unwrap()),
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x4000)).unwrap()),
-                Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x5000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x1000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x2000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x4000)).unwrap()),
+                Page4k::new(PageAddr::new(RawAddr::supervisor(0x5000)).unwrap()),
             ]
         };
         let result = SequentialPages::from_pages(pages);
@@ -232,7 +235,7 @@ mod tests {
     fn from_single() {
         let p = unsafe {
             // Not safe, Just a test.
-            Page4k::new(AlignedPageAddr::new(PhysAddr::new(0x1000)).unwrap())
+            Page4k::new(PageAddr::new(RawAddr::supervisor(0x1000)).unwrap())
         };
         let seq = SequentialPages::from(p);
         let mut pages = seq.into_iter();
@@ -245,7 +248,7 @@ mod tests {
         // Not safe, but this is a test
         let seq = unsafe {
             SequentialPages::<PageSize4k>::from_mem_range(
-                AlignedPageAddr::new(PhysAddr::new(0x1000)).unwrap(),
+                PageAddr::new(RawAddr::supervisor(0x1000)).unwrap(),
                 4,
             )
         };

@@ -10,7 +10,8 @@ use core::alloc::Allocator;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_pages::{
-    AlignedPageAddr4k, Page, PageOwnerId, PageSize, PageSize4k, SequentialPages, SequentialPages4k,
+    Page, PageOwnerId, PageSize, PageSize4k, SequentialPages, SequentialPages4k,
+    SupervisorPageAddr4k,
 };
 
 use crate::page_info::PageMap;
@@ -24,7 +25,7 @@ pub enum Error {
     /// Too many guests per system(u64 overflow).
     IdOverflow,
     /// The given page isn't physically present.
-    InvalidPage(AlignedPageAddr4k),
+    InvalidPage(SupervisorPageAddr4k),
     /// The ownership chain is too long to add another owner.
     OwnerOverflow,
     /// The page would become unowned as a result of popping its current owner.
@@ -48,20 +49,20 @@ impl PageStateInner {
     // pops any owners that have exited.
     // Remove owners of the page that have since terminated. This is done lazily as needed to
     // prevent a long running operation on guest exit.
-    fn pop_exited_owners(&mut self, addr: AlignedPageAddr4k) {
+    fn pop_exited_owners(&mut self, addr: SupervisorPageAddr4k) {
         if let Some(info) = self.pages.get_mut(addr) {
             info.pop_owners_while(|id| !self.active_guests.contains(id));
         }
     }
 
     // Pop the current owner returning the page to the previous owner. Returns the removed owner ID.
-    fn pop_owner_internal(&mut self, addr: AlignedPageAddr4k) -> Result<PageOwnerId> {
+    fn pop_owner_internal(&mut self, addr: SupervisorPageAddr4k) -> Result<PageOwnerId> {
         let page_info = self.pages.get_mut(addr).unwrap();
         page_info.pop_owner()
     }
 
     // Sets the owner of the page at `addr` to `owner`
-    fn set_page_owner(&mut self, addr: AlignedPageAddr4k, owner: PageOwnerId) -> Result<()> {
+    fn set_page_owner(&mut self, addr: SupervisorPageAddr4k, owner: PageOwnerId) -> Result<()> {
         self.pop_exited_owners(addr);
 
         let page_info = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
@@ -69,7 +70,7 @@ impl PageStateInner {
     }
 
     // Returns the current owner of the the page ad `addr`.
-    fn owner(&self, addr: AlignedPageAddr4k) -> Option<PageOwnerId> {
+    fn owner(&self, addr: SupervisorPageAddr4k) -> Option<PageOwnerId> {
         let info = self.pages.get(addr)?;
         info.find_owner(|id| self.active_guests.contains(id))
     }
@@ -150,19 +151,19 @@ impl PageState {
     }
 
     /// Sets the owner of the page at the given `addr` to `owner`.
-    pub fn set_page_owner(&mut self, addr: AlignedPageAddr4k, owner: PageOwnerId) -> Result<()> {
+    pub fn set_page_owner(&mut self, addr: SupervisorPageAddr4k, owner: PageOwnerId) -> Result<()> {
         let mut phys_pages = self.inner.lock();
         phys_pages.set_page_owner(addr, owner)
     }
 
     /// Removes the current owner of the page at `addr` and returns it.
-    pub fn pop_owner(&mut self, addr: AlignedPageAddr4k) -> Result<PageOwnerId> {
+    pub fn pop_owner(&mut self, addr: SupervisorPageAddr4k) -> Result<PageOwnerId> {
         let mut phys_pages = self.inner.lock();
         phys_pages.pop_owner_internal(addr)
     }
 
     /// Returns the current owner of the page.
-    pub fn owner(&self, addr: AlignedPageAddr4k) -> Option<PageOwnerId> {
+    pub fn owner(&self, addr: SupervisorPageAddr4k) -> Option<PageOwnerId> {
         let phys_pages = self.inner.lock();
         phys_pages.owner(addr)
     }
@@ -174,7 +175,7 @@ impl PageState {
 /// pages it needs, `HypPageAlloc` should be converted to the list of remaining free memory
 /// regions to be mapped into the host with `drain()`.
 pub struct HypPageAlloc<A: Allocator> {
-    next_page: AlignedPageAddr4k,
+    next_page: SupervisorPageAddr4k,
     pages: PageMap,
     alloc: A,
 }
@@ -279,7 +280,7 @@ impl<A: Allocator> HypPageAlloc<A> {
     /// reference to the global owners list. Panics if there are not `count` pages available.
     pub fn take_pages_with_alignment(&mut self, count: usize, align: u64) -> SequentialPages4k {
         // Helper to test whether a contiguous range of `count` pages is free and aligned.
-        let range_is_free_and_aligned = |start: AlignedPageAddr4k| {
+        let range_is_free_and_aligned = |start: SupervisorPageAddr4k| {
             let end = start.checked_add_pages(count as u64).unwrap();
             if start.bits() & (align - 1) != 0 {
                 return false;
@@ -338,7 +339,7 @@ mod tests {
     use super::*;
     use crate::HwMemMapBuilder;
     use alloc::alloc::Global;
-    use riscv_pages::PhysAddr;
+    use riscv_pages::RawAddr;
 
     fn stub_hyp_mem() -> HypPageAlloc<Global> {
         const ONE_MEG: usize = 1024 * 1024;
@@ -351,7 +352,7 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_pa = PhysAddr::new(aligned_pointer as u64);
+        let start_pa = RawAddr::supervisor(aligned_pointer as u64);
         let hw_map = unsafe {
             // Not safe - just a test
             HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)

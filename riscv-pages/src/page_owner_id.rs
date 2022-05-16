@@ -47,3 +47,38 @@ impl PageOwnerId {
         self.id
     }
 }
+
+/// `AddressSpace` identifies the address space that a raw address is in.
+pub trait AddressSpace: Clone + Copy {
+    /// Returns the `PageOwnerId` for the address space.
+    fn id(&self) -> PageOwnerId;
+}
+
+/// Represents the supervisor (i.e. "actual") physical address space.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SupervisorPhys;
+
+impl AddressSpace for SupervisorPhys {
+    fn id(&self) -> PageOwnerId {
+        PageOwnerId::hypervisor()
+    }
+}
+
+/// Represents a guest physical address space.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GuestPhys(PageOwnerId);
+
+impl GuestPhys {
+    /// Creates a new tag representing a guest physical address space with the given ID.
+    pub fn new(id: PageOwnerId) -> Self {
+        // Hypervisor should never own pages that are mapped into a GPA.
+        assert!(id != PageOwnerId::hypervisor());
+        Self(id)
+    }
+}
+
+impl AddressSpace for GuestPhys {
+    fn id(&self) -> PageOwnerId {
+        self.0
+    }
+}

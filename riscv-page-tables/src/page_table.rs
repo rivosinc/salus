@@ -7,8 +7,9 @@ use core::slice;
 
 use data_measure::data_measure::DataMeasure;
 use riscv_pages::{
-    AlignedPageAddr, AlignedPageAddr4k, CleanPage, Page, Page4k, PageOwnerId, PageSize,
-    PageSize2MB, PageSize4k, SequentialPages, UnmappedPage,
+    CleanPage, GuestPageAddr, GuestPhysAddr, Page, Page4k, PageAddr, PageAddr4k, PageOwnerId,
+    PageSize, PageSize2MB, PageSize4k, SequentialPages, SupervisorPageAddr, SupervisorPageAddr4k,
+    UnmappedPage,
 };
 
 use crate::page_tracking::PageState;
@@ -83,9 +84,7 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             // to a 4 kilobyte page of PTES for the next level.
             let ptes: &'a mut [Pte] = unsafe {
                 slice::from_raw_parts_mut(
-                    AlignedPageAddr::<PageSize4k>::try_from(pte.pfn())
-                        .unwrap()
-                        .bits() as *mut Pte,
+                    PageAddr4k::try_from(pte.pfn()).unwrap().bits() as *mut Pte,
                     L::NextLevel::TABLE_PAGES * 4096,
                 )
             };
@@ -111,7 +110,7 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             let page = unsafe {
                 // Safe because the page table ownes this page and is giving up ownership by
                 // returning it.
-                Page::new(AlignedPageAddr::try_from(pte.pfn()).ok()?)
+                Page::new(PageAddr::try_from(pte.pfn()).ok()?)
             };
             pte.clear();
             Some(page)
@@ -127,7 +126,7 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
             let page = unsafe {
                 // Safe because the page table owns this page and is giving up ownership by
                 // returning it.
-                Page::new(AlignedPageAddr::try_from(pte.pfn()).ok()?)
+                Page::new(PageAddr::try_from(pte.pfn()).ok()?)
             };
             pte.invalidate();
             Some(page)
@@ -145,7 +144,7 @@ impl<'a, L: PageTableLevel> ValidTableEntryMut<'a, L> {
                 .ok_or(Error::InvalidOffset)?;
             if last_offset <= L::LeafPageSize::SIZE_BYTES {
                 // unwrap is ok because the address at the entry must be correctly aligned.
-                let spa = AlignedPageAddr::<L::LeafPageSize>::try_from(pte.pfn())
+                let spa = SupervisorPageAddr::<L::LeafPageSize>::try_from(pte.pfn())
                     .unwrap()
                     .bits() as *mut u8;
                 for (i, c) in bytes.iter().enumerate() {
@@ -192,8 +191,8 @@ where
     }
 
     /// Returns a mutable reference to the entry at the given guest address.
-    fn entry_mut(&mut self, guest_phys_addr: u64) -> &mut Pte {
-        let index = self.index_from_addr(guest_phys_addr); // Guaranteed to be in range.
+    fn entry_mut(&mut self, gpa: GuestPhysAddr) -> &mut Pte {
+        let index = self.index_from_addr(gpa); // Guaranteed to be in range.
 
         // Note - This can be changed to an unchecked index as the index is guaranteed to be in
         // range above.
@@ -203,11 +202,11 @@ where
     /// Map a leaf entry such that the given `guest_phys_addr` will map to `page` after translation.
     pub(crate) fn map_leaf(
         &mut self,
-        guest_phys_addr: u64,
+        gpa: GuestPhysAddr,
         page: Page<LEVEL::LeafPageSize>,
         perms: PteLeafPerms,
     ) {
-        let entry = self.entry_mut(guest_phys_addr);
+        let entry = self.entry_mut(gpa);
         assert!(!entry.valid()); // Panic if already mapped - TODO - type help
 
         let status = {
@@ -219,29 +218,29 @@ where
         entry.set(page, &status);
     }
 
-    fn index_from_addr(&self, addr: u64) -> PageTableIndex<LEVEL> {
-        PageTableIndex::from_addr(addr)
+    fn index_from_addr(&self, gpa: GuestPhysAddr) -> PageTableIndex<LEVEL> {
+        PageTableIndex::from_addr(gpa.bits())
     }
 
     /// Returns a mutable reference to the entry at this level for the address being translated.
-    pub(crate) fn entry_for_addr_mut(&mut self, guest_phys_addr: u64) -> TableEntryMut<LEVEL>
+    pub(crate) fn entry_for_addr_mut(&mut self, gpa: GuestPhysAddr) -> TableEntryMut<LEVEL>
     where
         LEVEL: PageTableLevel,
     {
-        TableEntryMut::from_pte(self.entry_mut(guest_phys_addr))
+        TableEntryMut::from_pte(self.entry_mut(gpa))
     }
 
     /// Returns the next page table level for the given address to translate.
     /// If the next level isn't yet filled, consumes a `free_page` and uses it to map those entries.
     pub(crate) fn next_level_or_fill_fn(
         &mut self,
-        guest_phys_addr: u64,
+        gpa: GuestPhysAddr,
         get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
     ) -> Result<PageTable<LEVEL::NextLevel>>
     where
         LEVEL: PageTableLevel + UpperLevel,
     {
-        let v = match self.entry_for_addr_mut(guest_phys_addr) {
+        let v = match self.entry_for_addr_mut(gpa) {
             TableEntryMut::Valid(v) => v,
             TableEntryMut::Invalid(pte) => {
                 // TODO: Verify ownership of PTE pages.
@@ -328,11 +327,11 @@ pub trait PlatformPageTable {
     // TODO - page permissions
     // TODO - generic enough to work with satp in addition to hgatp
     // TODO - add measurement support for > 4K pages
-    /// Maps a 4k page for translation with address `guest_phys_addr`
+    /// Maps a 4k page for translation with address `gpa`
     /// Optionally extends measurements
     fn map_page_4k(
         &mut self,
-        guest_phys_addr: u64,
+        gpa: GuestPhysAddr,
         page_to_map: Page4k,
         get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
         data_measure: Option<&mut dyn DataMeasure>,
@@ -343,23 +342,23 @@ pub trait PlatformPageTable {
     /// Maps a 2MB page for translation with address `addr`.
     fn map_page_2mb(
         &mut self,
-        addr: u64,
+        gpa: GuestPhysAddr,
         page_to_map: Page<PageSize2MB>,
         get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
     ) -> Result<()>;
 
     /// Unmaps, wipes clean, and returns the host page of the given guest address if that address is
     /// mapped.
-    fn unmap_page(&mut self, guest_phys_addr: u64) -> Option<UnmappedPage>;
+    fn unmap_page(&mut self, gpa: GuestPhysAddr) -> Option<UnmappedPage>;
 
     /// Like `unmap_page` but leaves the entry in the PTE, marking it as invalid.
-    fn invalidate_page(&mut self, guest_phys_addr: u64) -> Option<UnmappedPage>;
+    fn invalidate_page(&mut self, gpa: GuestPhysAddr) -> Option<UnmappedPage>;
 
     /// Returns an iterator to unmapped pages for the given range.
     /// Guarantees that the full range of pages can be unmapped.
     fn unmap_range<S: PageSize>(
         &mut self,
-        addr: AlignedPageAddr<S>,
+        addr: GuestPageAddr<S>,
         num_pages: u64,
     ) -> Option<UnmapIter<Self>>
     where
@@ -369,7 +368,7 @@ pub trait PlatformPageTable {
     /// Guarantees that the full range of pages can be unmapped.
     fn invalidate_range<S: PageSize>(
         &mut self,
-        addr: AlignedPageAddr<S>,
+        addr: GuestPageAddr<S>,
         num_pages: u64,
     ) -> Option<InvalidateIter<Self>>
     where
@@ -377,7 +376,7 @@ pub trait PlatformPageTable {
 
     /// Returns the address of the top level page table.
     /// This is the value that should be written to satp/hgatp to start using the page tables.
-    fn get_root_address(&self) -> AlignedPageAddr4k;
+    fn get_root_address(&self) -> SupervisorPageAddr4k;
 
     /// Calculates the number of PTE pages that are needed to map all pages for `num_pages` maped
     /// pages.
@@ -388,28 +387,33 @@ pub trait PlatformPageTable {
     /// guest has exited, in which case this fixed the PTE entry and returns true. False will be
     /// returned if the page is still owned by the guest it was loaned to, or if the entry is
     /// invalid.
-    fn do_guest_fault(&mut self, guest_phys_addr: u64) -> bool;
+    fn do_guest_fault(&mut self, gpa: GuestPhysAddr) -> bool;
 
-    // Translates the GPA -> SPA, and writes the specified bytes at the given offset
-    // The function will fail if there's no valid GPA -> SPA mapping, or if the
-    // bounds of the page would have been exceeded
-    // Presently supports only 4K pages
-    fn write_guest_owned_page(&mut self, gpa: u64, offset: u64, bytes: &[u8]) -> Result<()>;
+    /// Translates the GPA -> SPA, and writes the specified bytes at the given offset
+    /// The function will fail if there's no valid GPA -> SPA mapping, or if the
+    /// bounds of the page would have been exceeded
+    /// Presently supports only 4K pages
+    fn write_guest_owned_page(
+        &mut self,
+        gpa: GuestPhysAddr,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<()>;
 }
 
 pub struct UnmapIter<'a, T: PlatformPageTable> {
     owner: &'a mut T,
-    curr: u64,
-    end: u64,
+    curr: GuestPhysAddr,
+    end: GuestPhysAddr,
     page_size: u64,
 }
 
 impl<'a, T: PlatformPageTable> UnmapIter<'a, T> {
-    pub fn new(owner: &'a mut T, curr: u64, count: u64, page_size: u64) -> Self {
+    pub fn new(owner: &'a mut T, curr: GuestPhysAddr, count: u64, page_size: u64) -> Self {
         Self {
             owner,
             curr,
-            end: curr + page_size * count,
+            end: curr.checked_increment(page_size * count).unwrap(),
             page_size,
         }
     }
@@ -424,24 +428,24 @@ impl<'a, T: PlatformPageTable> Iterator for UnmapIter<'a, T> {
         }
 
         let this_page = self.curr;
-        self.curr += self.page_size;
+        self.curr = self.curr.checked_increment(self.page_size).unwrap();
         self.owner.unmap_page(this_page).map(CleanPage::from)
     }
 }
 
 pub struct InvalidateIter<'a, T: PlatformPageTable> {
     owner: &'a mut T,
-    curr: u64,
-    end: u64,
+    curr: GuestPhysAddr,
+    end: GuestPhysAddr,
     page_size: u64,
 }
 
 impl<'a, T: PlatformPageTable> InvalidateIter<'a, T> {
-    pub fn new(owner: &'a mut T, curr: u64, count: u64, page_size: u64) -> Self {
+    pub fn new(owner: &'a mut T, curr: GuestPhysAddr, count: u64, page_size: u64) -> Self {
         Self {
             owner,
             curr,
-            end: curr + page_size * count,
+            end: curr.checked_increment(page_size * count).unwrap(),
             page_size,
         }
     }
@@ -456,7 +460,7 @@ impl<'a, T: PlatformPageTable> Iterator for InvalidateIter<'a, T> {
         }
 
         let this_page = self.curr;
-        self.curr += self.page_size;
+        self.curr = self.curr.checked_increment(self.page_size).unwrap();
         self.owner.invalidate_page(this_page)
     }
 }

@@ -87,7 +87,7 @@ fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
     for r in fdt.memory_regions() {
         // Safety: We own all of memory at this point and we trust the FDT is well-formed.
         unsafe {
-            builder = builder.add_memory_region(PhysAddr::new(r.base()), r.size())?;
+            builder = builder.add_memory_region(RawAddr::supervisor(r.base()), r.size())?;
         }
     }
 
@@ -108,7 +108,7 @@ fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
     let resv_base = fdt
         .memory_regions()
         .find(|r| start >= r.base() && fdt_end <= r.base().checked_add(r.size()).unwrap())
-        .map(|r| PhysAddr::new(r.base()))
+        .map(|r| RawAddr::supervisor(r.base()))
         .expect("Hypervisor image does not reside in a contiguous range of DRAM");
 
     // Reserve everything from the start of the region the hypervisor is in up until the end
@@ -123,7 +123,7 @@ fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
     for r in fdt.reserved_memory_regions() {
         builder = builder.reserve_region(
             HwReservedMemType::FirmwareReserved,
-            PhysAddr::new(r.base()),
+            RawAddr::supervisor(r.base()),
             r.size(),
         )?;
     }
@@ -134,7 +134,7 @@ fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
         assert_eq!(r.base() & (T::TOP_LEVEL_ALIGN - 1), 0);
         builder = builder.reserve_region(
             HwReservedMemType::HostKernelImage,
-            PhysAddr::new(r.base()),
+            RawAddr::supervisor(r.base()),
             r.size(),
         )?;
     }
@@ -142,7 +142,7 @@ fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
         assert_eq!(r.base() & (T::TOP_LEVEL_ALIGN - 1), 0);
         builder = builder.reserve_region(
             HwReservedMemType::HostInitramfsImage,
-            PhysAddr::new(r.base()),
+            RawAddr::supervisor(r.base()),
             r.size(),
         )?;
     }
@@ -174,7 +174,7 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
     mem_map
         .reserve_region(
             HwReservedMemType::HypervisorHeap,
-            PhysAddr::from(heap_base),
+            RawAddr::from(heap_base),
             HEAP_SIZE,
         )
         .unwrap();
@@ -294,7 +294,8 @@ where
     let mut host_pages_iter = host_pages.into_iter().flatten();
 
     // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
-    let mut current_gpa = AlignedPageAddr4k::new(PhysAddr::new(host_ram_base)).unwrap();
+    let mut current_gpa =
+        PageAddr4k::new(RawAddr::guest(host_ram_base, PageOwnerId::host())).unwrap();
     let num_pages = KERNEL_OFFSET / PageSize4k::SIZE_BYTES;
     host_root_builder = host_root_builder.add_4k_pages(
         current_gpa,

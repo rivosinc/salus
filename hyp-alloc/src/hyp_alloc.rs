@@ -5,7 +5,7 @@
 use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use core::slice;
-use riscv_pages::{AlignedPageAddr4k, PageSize, PageSize4k, PhysAddr, SequentialPages};
+use riscv_pages::{PageAddr4k, PageSize, PageSize4k, RawAddr, SequentialPages};
 use spin::Mutex;
 
 struct HypAllocInner {
@@ -81,7 +81,7 @@ impl HypAlloc {
         unsafe {
             // Safe since this allocator must own this range of pages.
             SequentialPages::from_mem_range(
-                AlignedPageAddr4k::new(PhysAddr::new(base)).unwrap(),
+                PageAddr4k::new(RawAddr::supervisor(base)).unwrap(),
                 num_pages,
             )
         }
@@ -127,7 +127,7 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_page = AlignedPageAddr4k::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
+        let start_page = PageAddr4k::new(RawAddr::supervisor(aligned_pointer as u64)).unwrap();
         let num_pages = (MEM_SIZE as u64) / PageSize4k::SIZE_BYTES;
         let pages = unsafe {
             // Not safe - just a test

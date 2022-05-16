@@ -84,7 +84,7 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_pa = PhysAddr::new(aligned_pointer as u64);
+        let start_pa = RawAddr::supervisor(aligned_pointer as u64);
         let hw_map = unsafe {
             // Not safe - just a test
             HwMemMapBuilder::new(Sv48x4::TOP_LEVEL_ALIGN)
@@ -112,7 +112,7 @@ mod tests {
         let guest_page = host_pages.next().unwrap();
         let guest_page_addr = guest_page.addr();
         let mut free_pages = host_pages.by_ref().take(3);
-        let guest_addr = 0x8000_0000;
+        let guest_addr = RawAddr::guest(0x8000_0000, PageOwnerId::host());
         assert!(phys_pages
             .set_page_owner(guest_page.addr(), guest_page_table.page_owner_id())
             .is_ok());

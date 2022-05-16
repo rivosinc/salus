@@ -17,10 +17,12 @@ mod page_owner_id;
 mod sequential_pages;
 
 pub use page::{
-    AlignedPageAddr, AlignedPageAddr4k, CleanPage, Page, Page4k, PageSize, PageSize1GB,
-    PageSize2MB, PageSize4k, PageSize512GB, Pfn, PhysAddr, PhysPage, UnmappedPage,
+    CleanPage, GuestPageAddr, GuestPageAddr4k, GuestPfn, GuestPhysAddr, Page, Page4k, PageAddr,
+    PageAddr4k, PageSize, PageSize1GB, PageSize2MB, PageSize4k, PageSize512GB, Pfn, PhysPage,
+    RawAddr, SupervisorPageAddr, SupervisorPageAddr4k, SupervisorPfn, SupervisorPhysAddr,
+    UnmappedPage,
 };
-pub use page_owner_id::PageOwnerId;
+pub use page_owner_id::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys};
 pub use sequential_pages::{
     Error as SequentialPagesError, SeqPageIter, SequentialPages, SequentialPages4k,
 };

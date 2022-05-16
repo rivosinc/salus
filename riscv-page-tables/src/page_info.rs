@@ -5,8 +5,7 @@
 use arrayvec::ArrayVec;
 use page_collections::page_vec::PageVec;
 use riscv_pages::{
-    AlignedPageAddr, AlignedPageAddr4k, PageOwnerId, PageSize, PageSize4k, PhysAddr,
-    SequentialPages,
+    PageOwnerId, PageSize, PageSize4k, RawAddr, SequentialPages, SupervisorPageAddr4k,
 };
 
 use crate::{HwMemMap, HwMemType, HwReservedMemType, PageTrackingError, PageTrackingResult};
@@ -173,7 +172,7 @@ impl PageMap {
         mem_map
             .reserve_region(
                 HwReservedMemType::PageMap,
-                PhysAddr::from(page_map_base),
+                RawAddr::from(page_map_base),
                 page_map_size,
             )
             .expect("Failed to reserve page map");
@@ -203,7 +202,7 @@ impl PageMap {
         //
         // Pages in reserved regions are marked reserved, except for those containing the
         // host VM images, which are considered to be initially hypervisor-owned.
-        let mut last_end: Option<AlignedPageAddr4k> = None;
+        let mut last_end: Option<SupervisorPageAddr4k> = None;
         for r in mem_map.regions() {
             // All "holes" in the memory map are considered reserved.
             //
@@ -235,19 +234,19 @@ impl PageMap {
     }
 
     /// Returns a reference to the `PageInfo` struct for the 4k page at `addr`.
-    pub fn get(&self, addr: AlignedPageAddr<PageSize4k>) -> Option<&PageInfo> {
+    pub fn get(&self, addr: SupervisorPageAddr4k) -> Option<&PageInfo> {
         let index = addr.index().checked_sub(self.base_page_index)?;
         self.pages.get(index)
     }
 
     /// Returns a mutable reference to the `PageInfo` struct for the 4k page at `addr`.
-    pub fn get_mut(&mut self, addr: AlignedPageAddr<PageSize4k>) -> Option<&mut PageInfo> {
+    pub fn get_mut(&mut self, addr: SupervisorPageAddr4k) -> Option<&mut PageInfo> {
         let index = addr.index().checked_sub(self.base_page_index)?;
         self.pages.get_mut(index)
     }
 
     /// Returns the number of pages after the page at `addr`
-    pub fn num_after(&self, addr: AlignedPageAddr<PageSize4k>) -> Option<usize> {
+    pub fn num_after(&self, addr: SupervisorPageAddr4k) -> Option<usize> {
         let offset = addr.index().checked_sub(self.base_page_index)?;
         self.pages.len().checked_sub(offset)
     }
@@ -258,7 +257,7 @@ mod tests {
     use super::*;
 
     use crate::HwMemMapBuilder;
-    use riscv_pages::{Page, PhysAddr, SequentialPages};
+    use riscv_pages::{Page, PageAddr4k, RawAddr, SequentialPages};
 
     fn stub_page_vec() -> PageVec<PageInfo> {
         let backing_mem = vec![0u8; 8192];
@@ -268,8 +267,7 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(4096))
         };
-        let addr: AlignedPageAddr<PageSize4k> =
-            AlignedPageAddr::new(PhysAddr::new(aligned_pointer as u64)).unwrap();
+        let addr = PageAddr4k::new(RawAddr::supervisor(aligned_pointer as u64)).unwrap();
         let page = unsafe {
             // Test-only: safe because the backing memory is leaked so the memory used for this page
             // will live until the test exits.
@@ -286,7 +284,7 @@ mod tests {
             // Not safe - just a test.
             HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
                 .add_memory_region(
-                    PhysAddr::new(0x1000_0000),
+                    RawAddr::supervisor(0x1000_0000),
                     num_pages * PageSize4k::SIZE_BYTES,
                 )
                 .unwrap()
@@ -303,10 +301,8 @@ mod tests {
         let mut pages = PageMap::new(pages, first_index as usize);
         pages.populate_from(mem_map);
 
-        let before_addr: AlignedPageAddr<PageSize4k> =
-            AlignedPageAddr::new(PhysAddr::new((first_index - 1) * 4096)).unwrap();
-        let first_addr: AlignedPageAddr<PageSize4k> =
-            AlignedPageAddr::new(PhysAddr::new(first_index * 4096)).unwrap();
+        let before_addr = PageAddr4k::new(RawAddr::supervisor((first_index - 1) * 4096)).unwrap();
+        let first_addr = PageAddr4k::new(RawAddr::supervisor(first_index * 4096)).unwrap();
         let last_addr = first_addr.checked_add_pages(num_pages - 1).unwrap();
         let after_addr = last_addr.checked_add_pages(1).unwrap();
 
@@ -322,21 +318,21 @@ mod tests {
         let mut mem_map = unsafe {
             // Not safe - just a test.
             HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
-                .add_memory_region(PhysAddr::new(0x1000_0000), 0x2_0000)
+                .add_memory_region(RawAddr::supervisor(0x1000_0000), 0x2_0000)
                 .unwrap()
                 .build()
         };
         mem_map
             .reserve_region(
                 HwReservedMemType::FirmwareReserved,
-                PhysAddr::new(0x1000_4000),
+                RawAddr::supervisor(0x1000_4000),
                 0x1000,
             )
             .unwrap();
         mem_map
             .reserve_region(
                 HwReservedMemType::HostKernelImage,
-                PhysAddr::new(0x1001_0000),
+                RawAddr::supervisor(0x1001_0000),
                 0x2000,
             )
             .unwrap();
@@ -344,9 +340,9 @@ mod tests {
         let mut pages = PageMap::new(pages, first_index);
         pages.populate_from(mem_map);
 
-        let free_addr = AlignedPageAddr4k::new(PhysAddr::new(0x1000_1000)).unwrap();
-        let reserved_addr = AlignedPageAddr4k::new(PhysAddr::new(0x1000_4000)).unwrap();
-        let used_addr = AlignedPageAddr4k::new(PhysAddr::new(0x1001_1000)).unwrap();
+        let free_addr = PageAddr4k::new(RawAddr::supervisor(0x1000_1000)).unwrap();
+        let reserved_addr = PageAddr4k::new(RawAddr::supervisor(0x1000_4000)).unwrap();
+        let used_addr = PageAddr4k::new(RawAddr::supervisor(0x1001_1000)).unwrap();
 
         assert!(pages.get(free_addr).unwrap().is_free());
         assert!(pages.get(reserved_addr).unwrap().is_reserved());

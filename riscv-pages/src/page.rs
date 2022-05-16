@@ -6,6 +6,8 @@
 use core::marker::PhantomData;
 use core::slice;
 
+use crate::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys};
+
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
 const PFN_SHIFT: u64 = 12;
@@ -60,14 +62,13 @@ impl PageSize for PageSize512GB {
     const SIZE_BYTES: u64 = PageSize1GB::SIZE_BYTES * 512;
 }
 
-/// A valid address to physical memory.
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
-pub struct PhysAddr(u64);
+/// A raw address in an address space.
+#[derive(Copy, Clone, Debug)]
+pub struct RawAddr<AS: AddressSpace>(u64, AS);
 
-impl PhysAddr {
-    /// Creates a `PhysAddr` from a given u64 raw address.
-    pub fn new(addr: u64) -> Self {
-        Self(addr)
+impl<AS: AddressSpace> RawAddr<AS> {
+    pub fn new(addr: u64, address_space: AS) -> Self {
+        Self(addr, address_space)
     }
 
     /// Returns the inner 64 address.
@@ -75,35 +76,72 @@ impl PhysAddr {
         self.0
     }
 
+    /// Returns the address space for the address.
+    pub fn address_space(&self) -> AS {
+        self.1
+    }
+
     /// Returns the address incremented by the given number of bytes.
     /// Returns None if the result would overlfow.
     pub fn checked_increment(&self, increment: u64) -> Option<Self> {
-        self.0.checked_add(increment).map(PhysAddr)
+        let addr = self.0.checked_add(increment)?;
+        Some(Self(addr, self.1))
     }
 }
 
-impl<S: PageSize> From<AlignedPageAddr<S>> for PhysAddr {
-    fn from(p: AlignedPageAddr<S>) -> PhysAddr {
+impl RawAddr<SupervisorPhys> {
+    pub fn supervisor(addr: u64) -> Self {
+        Self(addr, SupervisorPhys)
+    }
+}
+
+impl RawAddr<GuestPhys> {
+    pub fn guest(addr: u64, id: PageOwnerId) -> Self {
+        Self(addr, GuestPhys::new(id))
+    }
+}
+
+/// Convenience type aliases for supervisor-physical and guest-physical addresses.
+pub type SupervisorPhysAddr = RawAddr<SupervisorPhys>;
+pub type GuestPhysAddr = RawAddr<GuestPhys>;
+
+impl<AS: AddressSpace, S: PageSize> From<PageAddr<AS, S>> for RawAddr<AS> {
+    fn from(p: PageAddr<AS, S>) -> RawAddr<AS> {
         p.addr
     }
 }
 
-/// An address of a Page of physical memory. It is guaranteed to be aligned to a page boundary.
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct AlignedPageAddr<S: PageSize> {
-    addr: PhysAddr,
+impl<AS: AddressSpace> PartialEq for RawAddr<AS> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<AS: AddressSpace> PartialOrd for RawAddr<AS> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+/// An address of a Page in an address space. It is guaranteed to be aligned to a page boundary.
+#[derive(Copy, Clone, Debug)]
+pub struct PageAddr<AS: AddressSpace, S: PageSize> {
+    addr: RawAddr<AS>,
     phantom: PhantomData<S>,
 }
 
-/// Exports a more convenient way to write `AlignedPageAddr<PageSize4k>`
-pub type AlignedPageAddr4k = AlignedPageAddr<PageSize4k>;
+pub type PageAddr4k<AS> = PageAddr<AS, PageSize4k>;
+pub type SupervisorPageAddr<S> = PageAddr<SupervisorPhys, S>;
+pub type SupervisorPageAddr4k = PageAddr4k<SupervisorPhys>;
+pub type GuestPageAddr<S> = PageAddr<GuestPhys, S>;
+pub type GuestPageAddr4k = PageAddr4k<GuestPhys>;
 
-impl<S: PageSize> AlignedPageAddr<S> {
-    /// Creates a `AlignedPageAddr` from a `PhysAddr`, returns `None` if the address isn't aligned to the
+impl<AS: AddressSpace, S: PageSize> PageAddr<AS, S> {
+    /// Creates a `PageAddr` from a `RawAddr`, returns `None` if the address isn't aligned to the
     /// required page size.
-    pub fn new(addr: PhysAddr) -> Option<Self> {
+    pub fn new(addr: RawAddr<AS>) -> Option<Self> {
         if S::is_aligned(addr.bits()) {
-            Some(AlignedPageAddr {
+            Some(PageAddr {
                 addr,
                 phantom: PhantomData,
             })
@@ -112,28 +150,28 @@ impl<S: PageSize> AlignedPageAddr<S> {
         }
     }
 
-    /// Creates a `AlignedPageAddr` from a `PhysAddr`, rounding up to the nearest multiple of the page
+    /// Creates a `PageAddr` from a `RawAddr`, rounding up to the nearest multiple of the page
     /// size.
-    pub fn with_round_up(addr: PhysAddr) -> Self {
+    pub fn with_round_up(addr: RawAddr<AS>) -> Self {
         Self {
-            addr: PhysAddr::new(S::round_up(addr.bits())),
+            addr: RawAddr::new(S::round_up(addr.bits()), addr.address_space()),
             phantom: PhantomData,
         }
     }
 
     /// Same as above, but rounding down to the nearest multiple of the page size.
-    pub fn with_round_down(addr: PhysAddr) -> Self {
+    pub fn with_round_down(addr: RawAddr<AS>) -> Self {
         Self {
-            addr: PhysAddr::new(S::round_down(addr.bits())),
+            addr: RawAddr::new(S::round_down(addr.bits()), addr.address_space()),
             phantom: PhantomData,
         }
     }
 
     /// Returns the first 4k page address. This is OK because all page sizes must be a multiple of
     /// 4k.
-    pub fn get_4k_addr(&self) -> AlignedPageAddr<PageSize4k> {
+    pub fn get_4k_addr(&self) -> PageAddr<AS, PageSize4k> {
         // Unwrap is OK as all pages are 4k aligned.
-        AlignedPageAddr::new(self.addr).unwrap()
+        PageAddr::new(self.addr).unwrap()
     }
 
     /// Gets the raw bits of the page address.
@@ -142,13 +180,13 @@ impl<S: PageSize> AlignedPageAddr<S> {
     }
 
     /// Moves to the next page address.
-    pub fn iter_from(&self) -> AlignedPageAddrIter<S> {
-        AlignedPageAddrIter::new(*self)
+    pub fn iter_from(&self) -> PageAddrIter<AS, S> {
+        PageAddrIter::new(*self)
     }
 
     /// Gets the pfn of the page address.
-    pub fn pfn(&self) -> Pfn {
-        Pfn::from_bits((self.addr.0 >> PFN_SHIFT) & PFN_MASK)
+    pub fn pfn(&self) -> Pfn<AS> {
+        Pfn::new((self.addr.0 >> PFN_SHIFT) & PFN_MASK, self.addr.1)
     }
 
     /// Adds n pages to the current address.
@@ -164,44 +202,50 @@ impl<S: PageSize> AlignedPageAddr<S> {
     }
 }
 
-impl<S: PageSize> TryFrom<Pfn> for AlignedPageAddr<S> {
+impl<AS: AddressSpace, S: PageSize> TryFrom<Pfn<AS>> for PageAddr<AS, S> {
     type Error = (); // TODO error type
-    fn try_from(pfn: Pfn) -> core::result::Result<Self, Self::Error> {
-        let phys_addr = PhysAddr(pfn.0 << PFN_SHIFT);
+    fn try_from(pfn: Pfn<AS>) -> core::result::Result<Self, Self::Error> {
+        let phys_addr = RawAddr(pfn.0 << PFN_SHIFT, pfn.1);
         Self::new(phys_addr).ok_or(())
     }
 }
 
-impl<S: PageSize> PartialOrd for AlignedPageAddr<S> {
+impl<AS: AddressSpace, S: PageSize> PartialEq for PageAddr<AS, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.addr == other.addr
+    }
+}
+
+impl<AS: AddressSpace, S: PageSize> PartialOrd for PageAddr<AS, S> {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         self.addr.partial_cmp(&other.addr)
     }
 }
 
 /// Generate page addresses for the given size. 4096, 8192, 12288, ... until the end of u64's range
-pub struct AlignedPageAddrIter<S: PageSize> {
-    next: Option<u64>,
+pub struct PageAddrIter<AS: AddressSpace, S: PageSize> {
+    next: Option<PageAddr<AS, S>>,
     phantom: PhantomData<S>,
 }
 
-impl<S: PageSize> AlignedPageAddrIter<S> {
-    pub fn new(start: AlignedPageAddr<S>) -> Self {
+impl<AS: AddressSpace, S: PageSize> PageAddrIter<AS, S> {
+    pub fn new(start: PageAddr<AS, S>) -> Self {
         Self {
-            next: Some(start.addr.0),
+            next: Some(start),
             phantom: PhantomData,
         }
     }
 }
 
-impl<S: PageSize> Iterator for AlignedPageAddrIter<S> {
-    type Item = AlignedPageAddr<S>;
+impl<AS: AddressSpace, S: PageSize> Iterator for PageAddrIter<AS, S> {
+    type Item = PageAddr<AS, S>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.next;
         if let Some(n) = self.next {
-            self.next = n.checked_add(S::SIZE_BYTES);
+            self.next = n.checked_add_pages(1);
         }
-        next.and_then(|a| AlignedPageAddr::new(PhysAddr::new(a)))
+        next
     }
 }
 
@@ -244,29 +288,42 @@ impl UnmappedPage {
 
 /// The page number of a page.
 #[derive(Copy, Clone)]
-pub struct Pfn(u64);
+pub struct Pfn<AS: AddressSpace>(u64, AS);
 
-impl Pfn {
-    /// Creates a PFN from raw bits.
-    pub fn from_bits(bits: u64) -> Pfn {
-        Pfn(bits)
+impl<AS: AddressSpace> Pfn<AS> {
+    pub fn new(bits: u64, address_space: AS) -> Self {
+        Pfn(bits, address_space)
     }
 
     /// Returns the raw bits of the page number.
     pub fn bits(&self) -> u64 {
         self.0
     }
+
+    pub fn address_space(&self) -> AS {
+        self.1
+    }
 }
 
-impl<S: PageSize> From<AlignedPageAddr<S>> for Pfn {
-    fn from(page: AlignedPageAddr<S>) -> Pfn {
-        Pfn(page.addr.0 >> PFN_SHIFT)
+impl Pfn<SupervisorPhys> {
+    /// Creates a PFN from raw bits.
+    pub fn supervisor(bits: u64) -> Self {
+        Pfn(bits, SupervisorPhys)
+    }
+}
+
+pub type SupervisorPfn = Pfn<SupervisorPhys>;
+pub type GuestPfn = Pfn<GuestPhys>;
+
+impl<AS: AddressSpace, S: PageSize> From<PageAddr<AS, S>> for Pfn<AS> {
+    fn from(page: PageAddr<AS, S>) -> Pfn<AS> {
+        Pfn(page.addr.0 >> PFN_SHIFT, page.addr.1)
     }
 }
 
 /// Trait implemented by physical pages of any size.
 pub trait PhysPage {
-    fn pfn(&self) -> Pfn;
+    fn pfn(&self) -> SupervisorPfn;
 }
 
 /// Base type representing a page, generic for different sizes.
@@ -274,7 +331,7 @@ pub trait PhysPage {
 /// This guarantee allows the memory within pages to be assigned to virtual machines, and the taken
 /// back to be uniquely owned by a `Page` here in the hypervisor.
 pub struct Page<S: PageSize> {
-    addr: AlignedPageAddr<S>,
+    addr: SupervisorPageAddr<S>,
 }
 
 /// A 4k page. Shorthand for `Page<PageSize4k>`
@@ -285,7 +342,7 @@ impl<S: PageSize> Page<S> {
     /// The caller must guarantee that memory from `addr` to `addr`+PageSize if uniquely owned.
     /// `new` is intended to be used _only_ when the backing memory region is unmapped from all
     /// virutal machines and can be uniquely owned by the resulting `Page`.
-    pub unsafe fn new(addr: AlignedPageAddr<S>) -> Self {
+    pub unsafe fn new(addr: SupervisorPageAddr<S>) -> Self {
         Self { addr }
     }
 
@@ -302,15 +359,15 @@ impl<S: PageSize> Page<S> {
             ptr.add(ptr.align_offset(4096))
         };
         let page = Self {
-            addr: AlignedPageAddr::new(PhysAddr::new(aligned_ptr as u64)).unwrap(),
+            addr: PageAddr::new(RawAddr::supervisor(aligned_ptr as u64)).unwrap(),
         };
         std::mem::forget(mem);
         page
     }
 
     /// Returns the starting address of this page.
-    pub fn addr(&self) -> AlignedPageAddr<S> {
-        AlignedPageAddr::<S>::new(self.addr.addr).unwrap()
+    pub fn addr(&self) -> SupervisorPageAddr<S> {
+        self.addr
     }
 
     /// Returns the u64 at the given index in the page.
@@ -347,7 +404,7 @@ impl<S: PageSize> Page<S> {
 }
 
 impl<S: PageSize> PhysPage for Page<S> {
-    fn pfn(&self) -> Pfn {
+    fn pfn(&self) -> SupervisorPfn {
         self.addr.pfn()
     }
 }
@@ -398,66 +455,67 @@ mod tests {
 
     #[test]
     fn unaligned_phys() {
-        // check that an unaligned address fails to create a AlignedPageAddr.
-        assert!(AlignedPageAddr::<PageSize4k>::new(PhysAddr::new(0x01)).is_none());
-        assert!(AlignedPageAddr::<PageSize4k>::new(PhysAddr::new(0x1000)).is_some());
-        assert!(AlignedPageAddr::<PageSize2MB>::new(PhysAddr::new(0x1000)).is_none());
-        assert!(AlignedPageAddr::<PageSize2MB>::new(PhysAddr::new(0x20_0000)).is_some());
-        assert!(AlignedPageAddr::<PageSize1GB>::new(PhysAddr::new(0x20_0000)).is_none());
-        assert!(AlignedPageAddr::<PageSize1GB>::new(PhysAddr::new(0x4000_0000)).is_some());
-        assert!(AlignedPageAddr::<PageSize512GB>::new(PhysAddr::new(0x4000_0000)).is_none());
-        assert!(AlignedPageAddr::<PageSize512GB>::new(PhysAddr::new(0x80_0000_0000)).is_some());
+        // check that an unaligned address fails to create a PageAddr.
+        assert!(SupervisorPageAddr::<PageSize4k>::new(RawAddr::supervisor(0x01)).is_none());
+        assert!(SupervisorPageAddr::<PageSize4k>::new(RawAddr::supervisor(0x1000)).is_some());
+        assert!(SupervisorPageAddr::<PageSize2MB>::new(RawAddr::supervisor(0x1000)).is_none());
+        assert!(SupervisorPageAddr::<PageSize2MB>::new(RawAddr::supervisor(0x20_0000)).is_some());
+        assert!(SupervisorPageAddr::<PageSize1GB>::new(RawAddr::supervisor(0x20_0000)).is_none());
+        assert!(SupervisorPageAddr::<PageSize1GB>::new(RawAddr::supervisor(0x4000_0000)).is_some());
+        assert!(
+            SupervisorPageAddr::<PageSize512GB>::new(RawAddr::supervisor(0x4000_0000)).is_none()
+        );
+        assert!(
+            SupervisorPageAddr::<PageSize512GB>::new(RawAddr::supervisor(0x80_0000_0000)).is_some()
+        );
     }
 
     #[test]
     fn round_phys() {
+        assert!(PageAddr4k::with_round_up(RawAddr::supervisor(0x12_2345)).bits() == 0x12_3000);
         assert!(
-            AlignedPageAddr::<PageSize4k>::with_round_up(PhysAddr::new(0x12_2345)).bits()
-                == 0x12_3000
-        );
-        assert!(
-            AlignedPageAddr::<PageSize4k>::with_round_down(PhysAddr::new(0x4567_9521)).bits()
-                == 0x4567_9000
+            PageAddr4k::with_round_down(RawAddr::supervisor(0x4567_9521)).bits() == 0x4567_9000
         );
     }
 
     #[test]
     fn page_iter_start() {
-        let addr4k: AlignedPageAddr<PageSize4k> = AlignedPageAddr::new(PhysAddr::new(0)).unwrap();
+        let addr4k: SupervisorPageAddr<PageSize4k> = PageAddr::new(RawAddr::supervisor(0)).unwrap();
         let mut addrs = addr4k.iter_from();
         assert_eq!(addrs.next(), Some(addr4k));
         assert_eq!(
             addrs.next(),
-            Some(AlignedPageAddr::new(PhysAddr::new(4096)).unwrap())
+            Some(PageAddr::new(RawAddr::supervisor(4096)).unwrap())
         );
         assert_eq!(
             addrs.next(),
-            Some(AlignedPageAddr::new(PhysAddr::new(8192)).unwrap())
+            Some(PageAddr::new(RawAddr::supervisor(8192)).unwrap())
         );
         assert_eq!(
             addrs.next(),
-            Some(AlignedPageAddr::new(PhysAddr::new(12288)).unwrap())
+            Some(PageAddr::new(RawAddr::supervisor(12288)).unwrap())
         );
 
-        let addr_m: AlignedPageAddr<PageSize2MB> = AlignedPageAddr::new(PhysAddr::new(0)).unwrap();
+        let addr_m: SupervisorPageAddr<PageSize2MB> =
+            PageAddr::new(RawAddr::supervisor(0)).unwrap();
         let mut addrs = addr_m.iter_from();
         assert_eq!(addrs.next(), Some(addr_m));
         assert_eq!(
             addrs.next(),
-            Some(AlignedPageAddr::new(PhysAddr::new(1024 * 1024 * 2)).unwrap())
+            Some(PageAddr::new(RawAddr::supervisor(1024 * 1024 * 2)).unwrap())
         );
     }
 
     #[test]
     fn page_iter_end_addr_space() {
-        let addr4k: AlignedPageAddr<PageSize4k> =
-            AlignedPageAddr::new(PhysAddr::new(0_u64.wrapping_sub(4096))).unwrap();
+        let addr4k: SupervisorPageAddr<PageSize4k> =
+            PageAddr::new(RawAddr::supervisor(0_u64.wrapping_sub(4096))).unwrap();
         let mut addrs = addr4k.iter_from();
         assert_eq!(addrs.next(), Some(addr4k));
         assert_eq!(addrs.next(), None);
 
-        let addr_m: AlignedPageAddr<PageSize2MB> =
-            AlignedPageAddr::new(PhysAddr::new(0_u64.wrapping_sub(1024 * 1024 * 2))).unwrap();
+        let addr_m: SupervisorPageAddr<PageSize2MB> =
+            PageAddr::new(RawAddr::supervisor(0_u64.wrapping_sub(1024 * 1024 * 2))).unwrap();
         let mut addrs = addr_m.iter_from();
         assert_eq!(addrs.next(), Some(addr_m));
         assert_eq!(addrs.next(), None);
@@ -505,8 +563,8 @@ mod tests {
             *aligned_ptr.add(4095) = 0xAA;
         };
 
-        let addr: AlignedPageAddr<PageSize4k> =
-            AlignedPageAddr::new(PhysAddr::new(aligned_ptr as u64)).unwrap();
+        let addr: SupervisorPageAddr<PageSize4k> =
+            PageAddr::new(RawAddr::supervisor(aligned_ptr as u64)).unwrap();
 
         // Safe the above allocation guarantees that the result is
         // still a valid pointer.

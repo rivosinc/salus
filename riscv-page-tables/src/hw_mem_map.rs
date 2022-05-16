@@ -4,7 +4,9 @@
 
 use arrayvec::ArrayVec;
 use core::{fmt, result};
-use riscv_pages::{AlignedPageAddr4k, PageSize, PageSize4k, PhysAddr};
+use riscv_pages::{
+    PageAddr4k, PageSize, PageSize4k, RawAddr, SupervisorPageAddr4k, SupervisorPhysAddr,
+};
 
 /// The maximum number of regions in a `HwMemMap`. Statically sized since we don't have
 /// dynamic memory allocation at the point at which the memory map is constructed.
@@ -44,7 +46,7 @@ pub struct HwMemMapBuilder {
 #[derive(Debug, Clone, Copy)]
 pub struct HwMemRegion {
     mem_type: HwMemType,
-    base: AlignedPageAddr4k,
+    base: SupervisorPageAddr4k,
     size: u64,
 }
 
@@ -102,13 +104,13 @@ impl HwMemRegion {
     pub fn mem_type(&self) -> HwMemType {
         self.mem_type
     }
-    pub fn base(&self) -> AlignedPageAddr4k {
+    pub fn base(&self) -> SupervisorPageAddr4k {
         self.base
     }
     pub fn size(&self) -> u64 {
         self.size
     }
-    pub fn end(&self) -> AlignedPageAddr4k {
+    pub fn end(&self) -> SupervisorPageAddr4k {
         // Unwrap ok because `size` must be a mutliple of the page size.
         let pages = self.size / PageSize4k::SIZE_BYTES;
         self.base.checked_add_pages(pages).unwrap()
@@ -136,11 +138,11 @@ impl HwMemMapBuilder {
     /// # Safety
     ///
     /// The region must be a valid range of memory and uniquely owned by `HwMemMapBuilder`.
-    pub unsafe fn add_memory_region(mut self, base: PhysAddr, size: u64) -> Result<Self> {
+    pub unsafe fn add_memory_region(mut self, base: SupervisorPhysAddr, size: u64) -> Result<Self> {
         if !self.inner.is_aligned(base.bits()) {
             return Err(Error::UnalignedRegion);
         }
-        let base = AlignedPageAddr4k::new(base).unwrap();
+        let base = PageAddr4k::new(base).unwrap();
         let size = self.inner.align_down(size);
         let region = HwMemRegion {
             mem_type: HwMemType::Available,
@@ -172,7 +174,7 @@ impl HwMemMapBuilder {
     pub fn reserve_region(
         mut self,
         resv_type: HwReservedMemType,
-        base: PhysAddr,
+        base: SupervisorPhysAddr,
         size: u64,
     ) -> Result<Self> {
         self.inner.reserve_region(resv_type, base, size)?;
@@ -190,12 +192,12 @@ impl HwMemMap {
     pub fn reserve_region(
         &mut self,
         resv_type: HwReservedMemType,
-        base: PhysAddr,
+        base: SupervisorPhysAddr,
         size: u64,
     ) -> Result<()> {
         // Unwrap ok since we align `base` to `min_alignemnt` first, which is itself guaranteed
         // to be 4kB-aligned.
-        let base = AlignedPageAddr4k::new(PhysAddr::new(self.align_down(base.bits()))).unwrap();
+        let base = PageAddr4k::new(RawAddr::supervisor(self.align_down(base.bits()))).unwrap();
         let size = self.align_up(size);
         let region = HwMemRegion {
             mem_type: HwMemType::Reserved(resv_type),
@@ -295,16 +297,16 @@ mod tests {
         let mem_map = unsafe {
             // Not safe -- it's a test.
             HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
-                .add_memory_region(PhysAddr::new(0x1_0000_0000), REGION_SIZE)
+                .add_memory_region(RawAddr::supervisor(0x1_0000_0000), REGION_SIZE)
                 .unwrap()
-                .add_memory_region(PhysAddr::new(0x8000_0000), REGION_SIZE)
+                .add_memory_region(RawAddr::supervisor(0x8000_0000), REGION_SIZE)
                 .unwrap()
-                .add_memory_region(PhysAddr::new(0x1_8000_0000), REGION_SIZE)
+                .add_memory_region(RawAddr::supervisor(0x1_8000_0000), REGION_SIZE)
                 .unwrap()
                 .build()
         };
 
-        let mut last = AlignedPageAddr4k::new(PhysAddr::new(0)).unwrap();
+        let mut last = PageAddr4k::new(RawAddr::supervisor(0)).unwrap();
         for r in mem_map.regions() {
             assert!(last < r.base());
             assert_eq!(r.size(), REGION_SIZE);
@@ -318,38 +320,38 @@ mod tests {
         let builder = unsafe {
             // Not safe -- it's a test.
             HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
-                .add_memory_region(PhysAddr::new(0x8000_0000), REGION_SIZE)
+                .add_memory_region(RawAddr::supervisor(0x8000_0000), REGION_SIZE)
                 .unwrap()
-                .add_memory_region(PhysAddr::new(0x1_0000_0000), REGION_SIZE)
+                .add_memory_region(RawAddr::supervisor(0x1_0000_0000), REGION_SIZE)
                 .unwrap()
-                .add_memory_region(PhysAddr::new(0x1_8000_0000), REGION_SIZE)
+                .add_memory_region(RawAddr::supervisor(0x1_8000_0000), REGION_SIZE)
                 .unwrap()
-                .add_memory_region(PhysAddr::new(0x2_0000_0000), REGION_SIZE)
+                .add_memory_region(RawAddr::supervisor(0x2_0000_0000), REGION_SIZE)
                 .unwrap()
         };
 
         let mem_map = builder
             .reserve_region(
                 HwReservedMemType::FirmwareReserved,
-                PhysAddr::new(0x1_1000_0000),
+                RawAddr::supervisor(0x1_1000_0000),
                 0x1000_0000,
             )
             .unwrap()
             .reserve_region(
                 HwReservedMemType::FirmwareReserved,
-                PhysAddr::new(0x8000_0000),
+                RawAddr::supervisor(0x8000_0000),
                 REGION_SIZE,
             )
             .unwrap()
             .reserve_region(
                 HwReservedMemType::FirmwareReserved,
-                PhysAddr::new(0x1_8000_0000),
+                RawAddr::supervisor(0x1_8000_0000),
                 0x1000_0000,
             )
             .unwrap()
             .reserve_region(
                 HwReservedMemType::FirmwareReserved,
-                PhysAddr::new(0x2_3000_0000),
+                RawAddr::supervisor(0x2_3000_0000),
                 0x1000_0000,
             )
             .unwrap()
@@ -357,42 +359,42 @@ mod tests {
 
         let expected = vec![
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x8000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x8000_0000)).unwrap(),
                 size: REGION_SIZE,
                 mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
             },
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x1_0000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x1_0000_0000)).unwrap(),
                 size: 0x1000_0000,
                 mem_type: HwMemType::Available,
             },
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x1_1000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x1_1000_0000)).unwrap(),
                 size: 0x1000_0000,
                 mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
             },
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x1_2000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x1_2000_0000)).unwrap(),
                 size: 0x2000_0000,
                 mem_type: HwMemType::Available,
             },
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x1_8000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x1_8000_0000)).unwrap(),
                 size: 0x1000_0000,
                 mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
             },
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x1_9000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x1_9000_0000)).unwrap(),
                 size: 0x3000_0000,
                 mem_type: HwMemType::Available,
             },
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x2_0000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x2_0000_0000)).unwrap(),
                 size: 0x3000_0000,
                 mem_type: HwMemType::Available,
             },
             HwMemRegion {
-                base: AlignedPageAddr4k::new(PhysAddr::new(0x2_3000_0000)).unwrap(),
+                base: PageAddr4k::new(RawAddr::supervisor(0x2_3000_0000)).unwrap(),
                 size: 0x1000_0000,
                 mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
             },

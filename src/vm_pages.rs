@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use core::alloc::Allocator;
 use riscv_page_tables::{HypPageAlloc, PageState, PlatformPageTable};
 use riscv_pages::{
-    AlignedPageAddr4k, CleanPage, Page4k, PageOwnerId, PageSize, PageSize4k, PhysAddr, SeqPageIter,
-    SequentialPages, SequentialPages4k, UnmappedPage,
+    CleanPage, GuestPageAddr4k, GuestPhysAddr, Page4k, PageAddr4k, PageOwnerId, PageSize,
+    PageSize4k, RawAddr, SeqPageIter, SequentialPages, SequentialPages4k, UnmappedPage,
 };
 
 use crate::sha256_measure::Sha256Measure;
@@ -24,8 +24,8 @@ pub enum Error {
     PageFaultHandling, // TODO - individual errors from sv48x4
     SettingOwner(riscv_page_tables::PageTrackingError),
     // Vm pages must be aligned to 16k to be used for sv48x4 mappings
-    UnalignedVmPages(AlignedPageAddr4k),
-    UnownedPage(AlignedPageAddr4k),
+    UnalignedVmPages(GuestPageAddr4k),
+    UnownedPage(GuestPageAddr4k),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -56,7 +56,7 @@ impl<T: PlatformPageTable> VmPages<T> {
     /// The `GuestRootBuilder` is used to build a guest VM owned by `self`'s root.page_owner_id().
     pub fn create_guest_root_builder(
         &mut self,
-        from_addr: AlignedPageAddr4k,
+        from_addr: GuestPageAddr4k,
     ) -> Result<(GuestRootBuilder<T>, Page4k)> {
         if (from_addr.bits() as *const u64).align_offset(16 * 1024) != 0 {
             return Err(Error::UnalignedVmPages(from_addr));
@@ -87,7 +87,7 @@ impl<T: PlatformPageTable> VmPages<T> {
     /// Adds pages to be used for building page table entries
     pub fn add_pte_pages_builder(
         &mut self,
-        from_addr: AlignedPageAddr4k,
+        from_addr: GuestPageAddr4k,
         count: u64,
         to: &mut GuestRootBuilder<T>,
     ) -> Result<()> {
@@ -112,10 +112,10 @@ impl<T: PlatformPageTable> VmPages<T> {
     // TODO add other page sizes
     pub fn add_4k_pages_builder(
         &mut self,
-        from_addr: AlignedPageAddr4k,
+        from_addr: GuestPageAddr4k,
         count: u64,
         to: &mut GuestRootBuilder<T>,
-        to_addr: AlignedPageAddr4k,
+        to_addr: GuestPageAddr4k,
         measure_preserve: bool,
     ) -> Result<u64> {
         let mut phys_pages = self.root.phys_pages();
@@ -129,16 +129,16 @@ impl<T: PlatformPageTable> VmPages<T> {
                 .set_page_owner(page.addr(), to.page_owner_id())
                 .map_err(Error::SettingOwner)?;
             if measure_preserve {
-                to.add_data_page(guest_addr.bits(), page)?;
+                to.add_data_page(RawAddr::from(guest_addr), page)?;
             } else {
-                to.add_zero_page(guest_addr.bits(), page)?;
+                to.add_zero_page(RawAddr::from(guest_addr), page)?;
             }
         }
         Ok(count)
     }
 
     /// Remove pages owned and return them to the previous owner.
-    pub fn remove_4k_pages(&mut self, from_addr: AlignedPageAddr4k, count: u64) -> Result<u64> {
+    pub fn remove_4k_pages(&mut self, from_addr: GuestPageAddr4k, count: u64) -> Result<u64> {
         let owner_id = self.root.page_owner_id();
         let mut pp_clone = self.root.phys_pages();
         let clean_pages = self
@@ -146,14 +146,14 @@ impl<T: PlatformPageTable> VmPages<T> {
             .unmap_range(from_addr, count)
             .ok_or(Error::InvalidRange)?
             .map(CleanPage::from);
-        for clean_page in clean_pages {
+        for (clean_page, guest_addr) in clean_pages.zip(from_addr.iter_from()) {
             let unmapped_page: UnmappedPage = clean_page.into();
             let page = unmapped_page.ok4k_or(Error::Non4kPteEntry)?;
             let owner = pp_clone
                 .pop_owner(page.addr())
-                .map_err(|_| Error::UnownedPage(page.addr()))?;
+                .map_err(|_| Error::UnownedPage(guest_addr))?;
             if owner != owner_id {
-                return Err(Error::UnownedPage(page.addr()));
+                return Err(Error::UnownedPage(guest_addr));
             }
         }
         Ok(count)
@@ -165,7 +165,7 @@ impl<T: PlatformPageTable> VmPages<T> {
     }
 
     /// Handles a page fault for the given address.
-    pub fn handle_page_fault(&mut self, addr: u64) -> Result<()> {
+    pub fn handle_page_fault(&mut self, addr: GuestPhysAddr) -> Result<()> {
         if self.root.do_guest_fault(addr) {
             Ok(())
         } else {
@@ -174,19 +174,19 @@ impl<T: PlatformPageTable> VmPages<T> {
     }
 
     // Writes self measurements to the specified GPA
-    pub fn write_measurements_to_guest_owned_page(&mut self, gpa: u64) -> Result<usize> {
+    pub fn write_measurements_to_guest_owned_page(&mut self, gpa: GuestPhysAddr) -> Result<usize> {
         self.root
             .write_guest_owned_page(gpa, 0, self.measurement.get_measurement())
             .map(|_| self.measurement.get_measurement().len())
-            .map_err(|_| Error::UnownedPage(AlignedPageAddr4k::with_round_down(PhysAddr::new(gpa))))
+            .map_err(|_| Error::UnownedPage(PageAddr4k::with_round_down(gpa)))
     }
 
     // Writes to the specified GPA
-    pub fn write_to_guest_owned_page(&mut self, gpa: u64, bytes: &[u8]) -> Result<usize> {
+    pub fn write_to_guest_owned_page(&mut self, gpa: GuestPhysAddr, bytes: &[u8]) -> Result<usize> {
         self.root
             .write_guest_owned_page(gpa, 0, bytes)
             .map(|_| bytes.len())
-            .map_err(|_| Error::UnownedPage(AlignedPageAddr4k::with_round_down(PhysAddr::new(gpa))))
+            .map_err(|_| Error::UnownedPage(PageAddr4k::with_round_down(gpa)))
     }
 }
 
@@ -243,7 +243,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
     }
 
     /// Adds data pages that are measured and mapped to the page tables for the host.
-    pub fn add_4k_data_pages<I>(mut self, to_addr: AlignedPageAddr4k, pages: I) -> Self
+    pub fn add_4k_data_pages<I>(mut self, to_addr: GuestPageAddr4k, pages: I) -> Self
     where
         I: Iterator<Item = Page4k>,
     {
@@ -258,7 +258,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
                 .set_page_owner(page.addr(), root.page_owner_id())
                 .unwrap();
             root.map_page_4k(
-                vm_addr.bits(),
+                RawAddr::from(vm_addr),
                 page,
                 &mut || pte_pages.next(),
                 Some(&mut self.measurement),
@@ -269,7 +269,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
     }
 
     /// Add zeroed pages to the host page tables
-    pub fn add_4k_pages<I>(mut self, to_addr: AlignedPageAddr4k, pages: I) -> Self
+    pub fn add_4k_pages<I>(mut self, to_addr: GuestPageAddr4k, pages: I) -> Self
     where
         I: Iterator<Item = Page4k>,
     {
@@ -284,7 +284,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
             root.phys_pages()
                 .set_page_owner(page.addr(), root.page_owner_id())
                 .unwrap();
-            root.map_page_4k(vm_addr.bits(), page, &mut || pte_pages.next(), None)
+            root.map_page_4k(RawAddr::from(vm_addr), page, &mut || pte_pages.next(), None)
                 .unwrap();
         }
 
@@ -339,8 +339,8 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
 
     /// Add a measured data page for the guest to use.
     /// Currently only supports 4k pages.
-    pub fn add_data_page(&mut self, gpa: u64, page: Page4k) -> Result<()> {
-        self.measurement.add_page(gpa, page.as_bytes());
+    pub fn add_data_page(&mut self, gpa: GuestPhysAddr, page: Page4k) -> Result<()> {
+        self.measurement.add_page(gpa.bits(), page.as_bytes());
         self.root
             .map_page_4k(
                 gpa,
@@ -353,7 +353,7 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
 
     /// Add a zeroed data page for the guest to use.
     /// Currently only supports 4k pages.
-    pub fn add_zero_page(&mut self, gpa: u64, page: Page4k) -> Result<()> {
+    pub fn add_zero_page(&mut self, gpa: GuestPhysAddr, page: Page4k) -> Result<()> {
         self.root
             .map_page_4k(gpa, page, &mut || self.pte_pages.pop(), None)
             .map_err(Error::Mapping4kPage)

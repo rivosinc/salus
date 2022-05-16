@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use riscv_pages::{Pfn, PhysPage};
+use riscv_pages::{Pfn, PhysPage, SupervisorPfn};
 
 // Both Sv39 and Sv48 use 44 bits for the page frame number.
 const PFN_BITS: u64 = 44;
@@ -94,8 +94,8 @@ impl Pte {
     }
 
     /// Returns the pfn of this entry.
-    pub fn pfn(&self) -> Pfn {
-        Pfn::from_bits((self.bits() >> PFN_SHIFT) & PFN_MASK)
+    pub fn pfn(&self) -> SupervisorPfn {
+        Pfn::supervisor((self.bits() >> PFN_SHIFT) & PFN_MASK)
     }
 }
 

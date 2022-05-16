@@ -8,7 +8,7 @@ use memoffset::offset_of;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::PlatformPageTable;
-use riscv_pages::{AlignedPageAddr4k, PageOwnerId, PageSize4k, PhysAddr, SequentialPages};
+use riscv_pages::{PageAddr4k, PageOwnerId, PageSize4k, RawAddr, SequentialPages};
 use riscv_regs::{hgatp, hstatus, scounteren, sstatus, HgatpHelpers};
 use riscv_regs::{
     Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
@@ -513,13 +513,16 @@ impl<T: PlatformPageTable> Vm<T> {
     // Handle access faults. For example, when a returned page needs to be demand-faulted back to
     // the page table.
     fn handle_guest_fault(&mut self) -> core::result::Result<(), vm_pages::Error> {
-        let fault_addr = self.info.trap_csrs.htval << 2 | self.info.trap_csrs.stval & 0x03;
+        let fault_addr = RawAddr::guest(
+            self.info.trap_csrs.htval << 2 | self.info.trap_csrs.stval & 0x03,
+            self.vm_pages.page_owner_id(),
+        );
         println!(
             "got fault {:x} {:x} {:x} {:x}",
             self.info.trap_csrs.stval,
             self.info.trap_csrs.htval,
             self.info.guest_regs.sepc,
-            fault_addr
+            fault_addr.bits(),
         );
 
         self.vm_pages.handle_page_fault(fault_addr)?;
@@ -547,8 +550,11 @@ impl<T: PlatformPageTable> Vm<T> {
             return Err(SbiError::InvalidParam); // TODO different error
         }
 
-        let from_page_addr = AlignedPageAddr4k::new(PhysAddr::new(donor_pages_addr))
-            .ok_or(SbiError::InvalidAddress)?;
+        let from_page_addr = PageAddr4k::new(RawAddr::guest(
+            donor_pages_addr,
+            self.vm_pages.page_owner_id(),
+        ))
+        .ok_or(SbiError::InvalidAddress)?;
 
         let (guest_builder, state_page) = self
             .vm_pages
@@ -607,7 +613,8 @@ impl<T: PlatformPageTable> Vm<T> {
         num_pages: u64,
     ) -> sbi::Result<u64> {
         let from_page_addr =
-            AlignedPageAddr4k::new(PhysAddr::new(from_addr)).ok_or(SbiError::InvalidAddress)?;
+            PageAddr4k::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
+                .ok_or(SbiError::InvalidAddress)?;
 
         self.guests
             .as_mut()
@@ -627,8 +634,8 @@ impl<T: PlatformPageTable> Vm<T> {
 
     fn guest_rm_pages(&mut self, guest_id: u64, gpa: u64, num_pages: u64) -> sbi::Result<u64> {
         println!("Salus - Rm pages {guest_id:x} gpa:{gpa:x} num_pages:{num_pages}",);
-        let from_page_addr =
-            AlignedPageAddr4k::new(PhysAddr::new(gpa)).ok_or(SbiError::InvalidAddress)?;
+        let from_page_addr = PageAddr4k::new(RawAddr::guest(gpa, self.vm_pages.page_owner_id()))
+            .ok_or(SbiError::InvalidAddress)?;
 
         self.guests
             .as_mut()
@@ -663,15 +670,15 @@ impl<T: PlatformPageTable> Vm<T> {
         }
 
         let from_page_addr =
-            AlignedPageAddr4k::new(PhysAddr::new(from_addr)).ok_or(SbiError::InvalidAddress)?;
-        let to_page_addr =
-            AlignedPageAddr4k::new(PhysAddr::new(to_addr)).ok_or(SbiError::InvalidAddress)?;
-
+            PageAddr4k::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
+                .ok_or(SbiError::InvalidAddress)?;
         self.guests
             .as_mut()
             .ok_or(SbiError::InvalidParam)
             .and_then(|guests| guests.initializing_guest_mut(guest_id))
             .and_then(|grb| {
+                let to_page_addr = PageAddr4k::new(RawAddr::guest(to_addr, grb.page_owner_id()))
+                    .ok_or(SbiError::InvalidAddress)?;
                 self.vm_pages
                     .add_4k_pages_builder(
                         from_page_addr,
@@ -694,10 +701,8 @@ impl<T: PlatformPageTable> Vm<T> {
         measurement_type: u64,
         page_addr: u64,
     ) -> sbi::Result<u64> {
-        if (measurement_version != 1)
-            || (measurement_type != 1)
-            || AlignedPageAddr4k::new(PhysAddr::new(page_addr)).is_none()
-        {
+        let gpa = RawAddr::guest(page_addr, self.vm_pages.page_owner_id());
+        if (measurement_version != 1) || (measurement_type != 1) || PageAddr4k::new(gpa).is_none() {
             return Err(SbiError::InvalidParam);
         }
 
@@ -708,8 +713,7 @@ impl<T: PlatformPageTable> Vm<T> {
         // call a helper method to retrieve the measurements and write
         // them using the same mutable reference
         let result = if guest_id == 0 {
-            self.vm_pages
-                .write_measurements_to_guest_owned_page(page_addr)
+            self.vm_pages.write_measurements_to_guest_owned_page(gpa)
         } else {
             let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
             let _ = guests.get_guest_index(guest_id)?;
@@ -722,8 +726,7 @@ impl<T: PlatformPageTable> Vm<T> {
                     .get_measurement()
             };
 
-            self.vm_pages
-                .write_to_guest_owned_page(page_addr, measurements)
+            self.vm_pages.write_to_guest_owned_page(gpa, measurements)
         };
 
         result

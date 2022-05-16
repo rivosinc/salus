@@ -76,8 +76,8 @@ impl Sv48x4 {
     }
 
     // returns true if the given gpa is mapped in the page table.
-    fn addr_mapped(&mut self, guest_phys_addr: u64) -> bool {
-        let addr = match self.host_4k_addr(guest_phys_addr) {
+    fn addr_mapped(&mut self, gpa: GuestPhysAddr) -> bool {
+        let addr = match self.host_4k_addr(gpa) {
             None => return false,
             Some(a) => a,
         };
@@ -86,28 +86,28 @@ impl Sv48x4 {
         self.phys_pages.owner(addr).unwrap() == self.owner
     }
 
-    fn host_4k_addr(&mut self, guest_phys_addr: u64) -> Option<AlignedPageAddr4k> {
+    fn host_4k_addr(&mut self, gpa: GuestPhysAddr) -> Option<SupervisorPageAddr4k> {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
 
         let mut l4 = self.top_level_directory();
-        let mut l3 = match l4.entry_for_addr_mut(guest_phys_addr) {
+        let mut l3 = match l4.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
-            Valid(Leaf(pte)) => return Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
+            Valid(Leaf(pte)) => return Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
         };
-        let mut l2 = match l3.entry_for_addr_mut(guest_phys_addr) {
+        let mut l2 = match l3.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
-            Valid(Leaf(pte)) => return Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
+            Valid(Leaf(pte)) => return Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
         };
-        let mut l1 = match l2.entry_for_addr_mut(guest_phys_addr) {
+        let mut l1 = match l2.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
-            Valid(Leaf(pte)) => return Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
+            Valid(Leaf(pte)) => return Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
         };
-        match l1.entry_for_addr_mut(guest_phys_addr) {
-            Valid(Leaf(pte)) => Some(AlignedPageAddr4k::try_from(pte.pfn()).unwrap()),
+        match l1.entry_for_addr_mut(gpa) {
+            Valid(Leaf(pte)) => Some(PageAddr4k::try_from(pte.pfn()).unwrap()),
             _ => None,
         }
     }
@@ -121,7 +121,7 @@ impl Sv48x4 {
             // TODO     check permissions and type
             return false;
         } else if pte.leaf() {
-            let addr = AlignedPageAddr4k::try_from(pte.pfn()).unwrap();
+            let addr = PageAddr4k::try_from(pte.pfn()).unwrap();
             if phys_pages.owner(addr) == Some(*owner) {
                 // Zero the page before mapping it back to this VM.
                 unsafe {
@@ -173,7 +173,7 @@ impl PlatformPageTable for Sv48x4 {
 
     fn map_page_4k(
         &mut self,
-        guest_phys_addr: u64,
+        gpa: GuestPhysAddr,
         page_to_map: Page4k,
         get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
         data_measure: Option<&mut dyn DataMeasure>,
@@ -187,75 +187,75 @@ impl PlatformPageTable for Sv48x4 {
             return Err(Error::PageNotOwned);
         }
         let mut l4 = self.top_level_directory();
-        let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
-        let mut l2 = l3.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
-        let mut l1 = l2.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
+        let mut l3 = l4.next_level_or_fill_fn(gpa, get_pte_page)?;
+        let mut l2 = l3.next_level_or_fill_fn(gpa, get_pte_page)?;
+        let mut l1 = l2.next_level_or_fill_fn(gpa, get_pte_page)?;
         if let Some(data_measure) = data_measure {
-            data_measure.add_page(guest_phys_addr, page_to_map.as_bytes());
+            data_measure.add_page(gpa.bits(), page_to_map.as_bytes());
         }
-        l1.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
+        l1.map_leaf(gpa, page_to_map, PteLeafPerms::RWX);
         Ok(())
     }
 
     fn map_page_2mb(
         &mut self,
-        guest_phys_addr: u64,
+        gpa: GuestPhysAddr,
         page_to_map: Page<PageSize2MB>,
         get_pte_page: &mut dyn FnMut() -> Option<Page4k>,
     ) -> Result<()> {
         // TODO: Ownership on hugepages?
         let mut l4 = self.top_level_directory();
-        let mut l3 = l4.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
-        let mut l2 = l3.next_level_or_fill_fn(guest_phys_addr, get_pte_page)?;
-        l2.map_leaf(guest_phys_addr, page_to_map, PteLeafPerms::RWX);
+        let mut l3 = l4.next_level_or_fill_fn(gpa, get_pte_page)?;
+        let mut l2 = l3.next_level_or_fill_fn(gpa, get_pte_page)?;
+        l2.map_leaf(gpa, page_to_map, PteLeafPerms::RWX);
         Ok(())
     }
 
-    fn unmap_page(&mut self, guest_phys_addr: u64) -> Option<UnmappedPage> {
+    fn unmap_page(&mut self, gpa: GuestPhysAddr) -> Option<UnmappedPage> {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
         let mut l4 = self.top_level_directory();
-        let mut l3 = match l4.entry_for_addr_mut(guest_phys_addr) {
+        let mut l3 = match l4.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
             Valid(valid_leaf) => return valid_leaf.take_page().map(UnmappedPage::Tera),
         };
-        let mut l2 = match l3.entry_for_addr_mut(guest_phys_addr) {
+        let mut l2 = match l3.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
             Valid(valid_leaf) => return valid_leaf.take_page().map(UnmappedPage::Giga),
         };
-        let mut l1 = match l2.entry_for_addr_mut(guest_phys_addr) {
+        let mut l1 = match l2.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
             Valid(valid_leaf) => return valid_leaf.take_page().map(UnmappedPage::Mega),
         };
-        match l1.entry_for_addr_mut(guest_phys_addr) {
+        match l1.entry_for_addr_mut(gpa) {
             Valid(valid_leaf) => valid_leaf.take_page().map(UnmappedPage::Page),
             _ => None,
         }
     }
 
-    fn invalidate_page(&mut self, guest_phys_addr: u64) -> Option<UnmappedPage> {
+    fn invalidate_page(&mut self, gpa: GuestPhysAddr) -> Option<UnmappedPage> {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
         let mut l4 = self.top_level_directory();
-        let mut l3 = match l4.entry_for_addr_mut(guest_phys_addr) {
+        let mut l3 = match l4.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
             Valid(valid_leaf) => return valid_leaf.invalidate_page().map(UnmappedPage::Tera),
         };
-        let mut l2 = match l3.entry_for_addr_mut(guest_phys_addr) {
+        let mut l2 = match l3.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
             Valid(valid_leaf) => return valid_leaf.invalidate_page().map(UnmappedPage::Giga),
         };
-        let mut l1 = match l2.entry_for_addr_mut(guest_phys_addr) {
+        let mut l1 = match l2.entry_for_addr_mut(gpa) {
             Invalid(_) => return None,
             Valid(Table(t)) => t,
             Valid(valid_leaf) => return valid_leaf.invalidate_page().map(UnmappedPage::Mega),
         };
-        match l1.entry_for_addr_mut(guest_phys_addr) {
+        match l1.entry_for_addr_mut(gpa) {
             Valid(valid_leaf) => valid_leaf.invalidate_page().map(UnmappedPage::Page),
             _ => None,
         }
@@ -263,33 +263,17 @@ impl PlatformPageTable for Sv48x4 {
 
     fn unmap_range<S: PageSize>(
         &mut self,
-        addr: AlignedPageAddr<S>,
+        addr: GuestPageAddr<S>,
         num_pages: u64,
     ) -> Option<UnmapIter<Self>> {
         if addr
             .iter_from()
             .take(num_pages as usize)
-            .all(|a| self.addr_mapped(a.bits()))
+            .all(|a| self.addr_mapped(RawAddr::from(a)))
         {
-            Some(UnmapIter::new(self, addr.bits(), num_pages, S::SIZE_BYTES))
-        } else {
-            None
-        }
-    }
-
-    fn invalidate_range<S: PageSize>(
-        &mut self,
-        addr: AlignedPageAddr<S>,
-        num_pages: u64,
-    ) -> Option<InvalidateIter<Self>> {
-        if addr
-            .iter_from()
-            .take(num_pages as usize)
-            .all(|a| self.addr_mapped(a.bits()))
-        {
-            Some(InvalidateIter::new(
+            Some(UnmapIter::new(
                 self,
-                addr.bits(),
+                RawAddr::from(addr),
                 num_pages,
                 S::SIZE_BYTES,
             ))
@@ -298,11 +282,32 @@ impl PlatformPageTable for Sv48x4 {
         }
     }
 
-    fn get_root_address(&self) -> AlignedPageAddr4k {
+    fn invalidate_range<S: PageSize>(
+        &mut self,
+        addr: GuestPageAddr<S>,
+        num_pages: u64,
+    ) -> Option<InvalidateIter<Self>> {
+        if addr
+            .iter_from()
+            .take(num_pages as usize)
+            .all(|a| self.addr_mapped(RawAddr::from(a)))
+        {
+            Some(InvalidateIter::new(
+                self,
+                RawAddr::from(addr),
+                num_pages,
+                S::SIZE_BYTES,
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn get_root_address(&self) -> SupervisorPageAddr4k {
         self.root.start_page_addr()
     }
 
-    fn do_guest_fault(&mut self, guest_phys_addr: u64) -> bool {
+    fn do_guest_fault(&mut self, gpa: GuestPhysAddr) -> bool {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
 
@@ -311,7 +316,7 @@ impl PlatformPageTable for Sv48x4 {
         let mut phys_pages = self.phys_pages.clone();
         let owner = self.owner;
         let mut l4 = self.top_level_directory();
-        let mut l3 = match l4.entry_for_addr_mut(guest_phys_addr) {
+        let mut l3 = match l4.entry_for_addr_mut(gpa) {
             Invalid(pte) => {
                 return Self::handle_fault_at::<PageSize512GB>(pte, &mut phys_pages, &owner);
             }
@@ -320,7 +325,7 @@ impl PlatformPageTable for Sv48x4 {
                 return false;
             }
         };
-        let mut l2 = match l3.entry_for_addr_mut(guest_phys_addr) {
+        let mut l2 = match l3.entry_for_addr_mut(gpa) {
             Invalid(pte) => {
                 return Self::handle_fault_at::<PageSize1GB>(pte, &mut phys_pages, &owner);
             }
@@ -329,7 +334,7 @@ impl PlatformPageTable for Sv48x4 {
                 return false;
             }
         };
-        let mut l1 = match l2.entry_for_addr_mut(guest_phys_addr) {
+        let mut l1 = match l2.entry_for_addr_mut(gpa) {
             Invalid(pte) => {
                 return Self::handle_fault_at::<PageSize2MB>(pte, &mut phys_pages, &owner);
             }
@@ -338,13 +343,18 @@ impl PlatformPageTable for Sv48x4 {
                 return false;
             }
         };
-        match l1.entry_for_addr_mut(guest_phys_addr) {
+        match l1.entry_for_addr_mut(gpa) {
             Invalid(pte) => Self::handle_fault_at::<PageSize4k>(pte, &mut phys_pages, &owner),
             _ => false,
         }
     }
 
-    fn write_guest_owned_page(&mut self, gpa: u64, offset: u64, bytes: &[u8]) -> Result<()> {
+    fn write_guest_owned_page(
+        &mut self,
+        gpa: GuestPhysAddr,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<()> {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
 

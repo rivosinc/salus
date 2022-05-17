@@ -17,8 +17,8 @@ mod page_owner_id;
 mod sequential_pages;
 
 pub use page::{
-    CleanPage, GuestPageAddr, GuestPfn, GuestPhysAddr, Page, PageAddr, PageSize, Pfn, PhysPage,
-    RawAddr, SupervisorPageAddr, SupervisorPfn, SupervisorPhysAddr, UnmappedPage,
+    CleanPage, GuestPageAddr, GuestPfn, GuestPhysAddr, Page, PageAddr, PageSize, Pfn, RawAddr,
+    SupervisorPageAddr, SupervisorPfn, SupervisorPhysAddr, UnmappedPage,
 };
 pub use page_owner_id::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys};
 pub use sequential_pages::{Error as SequentialPagesError, SeqPageIter, SequentialPages};

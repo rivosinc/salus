@@ -281,11 +281,6 @@ impl<AS: AddressSpace> From<PageAddr<AS>> for Pfn<AS> {
     }
 }
 
-/// Trait implemented by physical pages of any size.
-pub trait PhysPage {
-    fn pfn(&self) -> SupervisorPfn;
-}
-
 /// Base type representing a page, generic for different sizes.
 /// `Page` is a key abstraction; it owns all memory of the backing page.
 /// This guarantee allows the memory within pages to be assigned to virtual machines, and the taken
@@ -327,6 +322,11 @@ impl Page {
         self.addr
     }
 
+    /// Returns the page frame number (PFN) of the page.
+    pub fn pfn(&self) -> SupervisorPfn {
+        self.addr.pfn()
+    }
+
     /// Returns the u64 at the given index in the page.
     pub fn get_u64(&self, index: usize) -> Option<u64> {
         let offset = index * core::mem::size_of::<u64>();
@@ -357,12 +357,6 @@ impl Page {
         // of the underlying page, and the upper bound is
         // guaranteed to be within the size of the page
         unsafe { slice::from_raw_parts(base_ptr, self.addr.size() as usize) }
-    }
-}
-
-impl PhysPage for Page {
-    fn pfn(&self) -> SupervisorPfn {
-        self.addr.pfn()
     }
 }
 

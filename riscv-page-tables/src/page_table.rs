@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::marker::PhantomData;
-use core::slice;
 
 use data_measure::data_measure::DataMeasure;
 use riscv_pages::{
@@ -14,7 +13,7 @@ use riscv_pages::{
 use crate::page_tracking::PageState;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 
-pub(crate) const ENTRIES_PER_PAGE: usize = 4096 / 8;
+pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 
 #[derive(Debug)]
 pub enum Error {
@@ -27,6 +26,7 @@ pub enum Error {
     PageNotOwned,
     TableEntryNotLeaf,
     PageSizeNotSupported(PageSize),
+    MappingExists,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -78,31 +78,27 @@ pub(crate) enum ValidTableEntryMut<'a, T: PlatformPageTable> {
 }
 
 impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
-    /// Asserts if the pte entry is invalid.
+    /// Creates a valid entry from a raw `Pte` at the given level. Asserts if the PTE is invalid.
     pub fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
         assert!(pte.valid()); // TODO -valid pte type to eliminate this runtime assert.
         if pte.leaf() {
             ValidTableEntryMut::Leaf(pte, level)
         } else {
-            // Safe to create a 4kB slice of PTEs from the page pointed to by this entry since:
+            // Safe to create a `PageTable` from the page pointed to by this entry since:
             //  - all valid, non-leaf PTEs must point to an intermediate page table which must
             //    consume exactly one page, and
-            //  - all pages pointed to by PTEs are owned by the table and have their lifetime bound
-            //    to the table.
-            let next_level = level.next().unwrap();
-            assert_eq!(next_level.table_pages(), 1);
-            let ptes: &'a mut [Pte] = unsafe {
-                slice::from_raw_parts_mut(
-                    PageAddr::from_pfn(pte.pfn(), PageSize::Size4k)
-                        .unwrap()
-                        .bits() as *mut Pte,
-                    next_level.table_pages() * 4096,
-                )
-            };
-            ValidTableEntryMut::Table(PageTable {
-                ptes,
-                level: next_level,
-            })
+            //  - all pages pointed to by PTEs in this paging hierarchy are owned by the root
+            //    `PlatformPageTable` and have their lifetime bound to the root.
+            let table = unsafe { PageTable::from_pte(pte, level.next().unwrap()) };
+            ValidTableEntryMut::Table(table)
+        }
+    }
+
+    /// Returns the `PageTableLevel` this entry is at.
+    pub fn level(&self) -> T::Level {
+        match self {
+            ValidTableEntryMut::Leaf(_, level) => *level,
+            ValidTableEntryMut::Table(t) => t.level(),
         }
     }
 
@@ -175,38 +171,72 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     }
 }
 
-/// Holds a reference to entries for the given level of paging structures.
+/// Holds the address of a page table for a given level in the paging structure.
 /// `PageTable`s are loaned by top level pages translation schemes such as `Sv48x4` and `Sv48`
 /// (implementors of `PlatformPageTable`).
-pub struct PageTable<'a, T: PlatformPageTable> {
-    ptes: &'a mut [Pte],
+pub(crate) struct PageTable<'a, T: PlatformPageTable> {
+    table_addr: SupervisorPageAddr,
     level: T::Level,
+    // Bind our lifetime to that of the top-level `PlatformPageTable`.
+    phantom: PhantomData<&'a mut T>,
 }
 
 impl<'a, T: PlatformPageTable> PageTable<'a, T> {
-    /// Creates a page table from the given slice or PTEs.
-    /// `ptes` must be `level.table_pages()` long and be aligned to that number of pages.
-    pub(crate) fn from_slice(ptes: &'a mut [Pte], level: T::Level) -> Self {
-        assert!(ptes.len() == level.table_pages() * ENTRIES_PER_PAGE);
-        assert!(((ptes.as_ptr() as usize) & (level.table_pages() * 4096 - 1)) == 0);
-        Self { ptes, level }
+    /// Creates a `PageTable` from the root of a `PlatformPageTable`.
+    pub fn from_root(owner: &'a mut T) -> Self {
+        Self {
+            table_addr: owner.get_root_address(),
+            level: owner.root_level(),
+            phantom: PhantomData,
+        }
+    }
+
+    /// Creates a `PageTable` from a raw `Pte` at the given level.
+    ///
+    /// # Safety
+    ///
+    /// The given `Pte` must be valid and point to an intermediate paging structure at the specified
+    /// level. The pointed-to page table must be owned by the same `PlatformPageTable` that owns the
+    /// `Pte`.
+    pub unsafe fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
+        assert!(pte.valid());
+        // Beyond the root, every level must be only one 4kB page.
+        assert_eq!(level.table_pages(), 1);
+        Self {
+            // Unwrap ok, PFNs are always 4kB-aligned.
+            table_addr: PageAddr::from_pfn(pte.pfn(), PageSize::Size4k).unwrap(),
+            level,
+            phantom: PhantomData,
+        }
+    }
+
+    /// Returns the `PageTableLevel` this table is at.
+    pub fn level(&self) -> T::Level {
+        self.level
     }
 
     /// Returns a mutable reference to the entry at the given guest address.
-    fn entry_mut(&mut self, gpa: GuestPhysAddr) -> &mut Pte {
-        let index = self.index_from_addr(gpa); // Guaranteed to be in range.
-
-        // Note - This can be changed to an unchecked index as the index is guaranteed to be in
-        // range above.
-        &mut self.ptes[index.index() as usize]
+    fn entry_mut(&mut self, gpa: GuestPhysAddr) -> &'a mut Pte {
+        let index = self.index_from_addr(gpa).index(); // Guaranteed to be in range.
+        let pte_addr = self.table_addr.bits() + index * (core::mem::size_of::<Pte>() as u64);
+        let pte = unsafe { (pte_addr as *mut Pte).as_mut().unwrap() };
+        pte
     }
 
-    /// Map a leaf entry such that the given `guest_phys_addr` will map to `page` after translation.
-    pub(crate) fn map_leaf(&mut self, gpa: GuestPhysAddr, page: Page, perms: PteLeafPerms) {
+    /// Map a leaf entry such that the given `gpa` will map to `spa` after translation, with the
+    /// specified permissions.
+    pub fn map_leaf(
+        &mut self,
+        gpa: GuestPhysAddr,
+        spa: SupervisorPageAddr,
+        perms: PteLeafPerms,
+    ) -> Result<()> {
         let level = self.level;
         let entry = self.entry_mut(gpa);
-        assert!(!entry.valid()); // Panic if already mapped - TODO - type help
-        assert_eq!(page.addr().size(), level.leaf_page_size());
+        if entry.valid() {
+            return Err(Error::MappingExists);
+        }
+        assert_eq!(spa.size(), level.leaf_page_size());
 
         let status = {
             let mut s = PteFieldBits::leaf_with_perms(perms);
@@ -214,7 +244,8 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
             s.set_bit(PteFieldBit::User);
             s
         };
-        entry.set(page, &status);
+        entry.set(spa.pfn(), &status);
+        Ok(())
     }
 
     fn index_from_addr(&self, gpa: GuestPhysAddr) -> PageTableIndex<T> {
@@ -222,24 +253,24 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
     }
 
     /// Returns a mutable reference to the entry at this level for the address being translated.
-    pub(crate) fn entry_for_addr_mut(&mut self, gpa: GuestPhysAddr) -> TableEntryMut<T> {
+    pub fn entry_for_addr_mut(&mut self, gpa: GuestPhysAddr) -> TableEntryMut<'a, T> {
         let level = self.level;
         TableEntryMut::from_pte(self.entry_mut(gpa), level)
     }
 
     /// Returns the next page table level for the given address to translate.
     /// If the next level isn't yet filled, consumes a `free_page` and uses it to map those entries.
-    pub(crate) fn next_level_or_fill_fn(
+    pub fn next_level_or_fill_fn(
         &mut self,
         gpa: GuestPhysAddr,
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
-    ) -> Result<PageTable<T>> {
+    ) -> Result<PageTable<'a, T>> {
         let v = match self.entry_for_addr_mut(gpa) {
             TableEntryMut::Valid(v) => v,
             TableEntryMut::Invalid(pte, level) => {
                 // TODO: Verify ownership of PTE pages.
                 pte.set(
-                    get_pte_page().ok_or(Error::InsufficientPtePages)?,
+                    get_pte_page().ok_or(Error::InsufficientPtePages)?.pfn(),
                     &PteFieldBits::non_leaf(),
                 );
                 ValidTableEntryMut::from_pte(pte, level)
@@ -250,7 +281,7 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
 }
 
 /// An index to an entry in a page table.
-pub trait PteIndex {
+pub(crate) trait PteIndex {
     /// Returns the offset in bytes of the index
     fn offset(&self) -> u64 {
         self.index() * core::mem::size_of::<u64>() as u64
@@ -263,7 +294,7 @@ pub trait PteIndex {
 /// Guarantees that the contained index is within the range of the page table type it is constructed
 /// for.
 #[derive(Copy, Clone)]
-pub struct PageTableIndex<T: PlatformPageTable> {
+pub(crate) struct PageTableIndex<T: PlatformPageTable> {
     index: u64,
     level: PhantomData<T::Level>,
 }

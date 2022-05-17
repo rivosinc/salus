@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use riscv_pages::{Pfn, PhysPage, SupervisorPfn};
+use riscv_pages::{Pfn, SupervisorPfn};
 
 // Both Sv39 and Sv48 use 44 bits for the page frame number.
 const PFN_BITS: u64 = 44;
@@ -59,8 +59,8 @@ pub(crate) struct Pte(u64);
 impl Pte {
     /// Writes the mapping for the given page with that config bits in `status` and marks the entry
     /// as valid.
-    pub fn set<P: PhysPage>(&mut self, page: P, status: &PteFieldBits) {
-        self.0 = (page.pfn().bits() << PFN_SHIFT) | status.bits | PteFieldBit::Valid.mask();
+    pub fn set(&mut self, pfn: SupervisorPfn, status: &PteFieldBits) {
+        self.0 = (pfn.bits() << PFN_SHIFT) | status.bits | PteFieldBit::Valid.mask();
     }
 
     /// Returns the raw bits the make up the PTE.

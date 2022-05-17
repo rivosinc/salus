@@ -9,10 +9,7 @@ use alloc::vec::Vec;
 use core::alloc::Allocator;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{
-    Page, PageOwnerId, PageSize, PageSize4k, SequentialPages, SequentialPages4k,
-    SupervisorPageAddr4k,
-};
+use riscv_pages::{Page, PageOwnerId, PageSize, SequentialPages, SupervisorPageAddr};
 
 use crate::page_info::PageMap;
 use crate::HwMemMap;
@@ -25,7 +22,7 @@ pub enum Error {
     /// Too many guests per system(u64 overflow).
     IdOverflow,
     /// The given page isn't physically present.
-    InvalidPage(SupervisorPageAddr4k),
+    InvalidPage(SupervisorPageAddr),
     /// The ownership chain is too long to add another owner.
     OwnerOverflow,
     /// The page would become unowned as a result of popping its current owner.
@@ -49,20 +46,20 @@ impl PageStateInner {
     // pops any owners that have exited.
     // Remove owners of the page that have since terminated. This is done lazily as needed to
     // prevent a long running operation on guest exit.
-    fn pop_exited_owners(&mut self, addr: SupervisorPageAddr4k) {
+    fn pop_exited_owners(&mut self, addr: SupervisorPageAddr) {
         if let Some(info) = self.pages.get_mut(addr) {
             info.pop_owners_while(|id| !self.active_guests.contains(id));
         }
     }
 
     // Pop the current owner returning the page to the previous owner. Returns the removed owner ID.
-    fn pop_owner_internal(&mut self, addr: SupervisorPageAddr4k) -> Result<PageOwnerId> {
+    fn pop_owner_internal(&mut self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
         let page_info = self.pages.get_mut(addr).unwrap();
         page_info.pop_owner()
     }
 
     // Sets the owner of the page at `addr` to `owner`
-    fn set_page_owner(&mut self, addr: SupervisorPageAddr4k, owner: PageOwnerId) -> Result<()> {
+    fn set_page_owner(&mut self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
         self.pop_exited_owners(addr);
 
         let page_info = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
@@ -70,7 +67,7 @@ impl PageStateInner {
     }
 
     // Returns the current owner of the the page ad `addr`.
-    fn owner(&self, addr: SupervisorPageAddr4k) -> Option<PageOwnerId> {
+    fn owner(&self, addr: SupervisorPageAddr) -> Option<PageOwnerId> {
         let info = self.pages.get(addr)?;
         info.find_owner(|id| self.active_guests.contains(id))
     }
@@ -90,7 +87,7 @@ impl PageState {
     pub fn from<A: Allocator>(
         mut hyp_mem: HypPageAlloc<A>,
         host_alignment: u64,
-    ) -> (Self, Vec<SequentialPages4k, A>) {
+    ) -> (Self, Vec<SequentialPages, A>) {
         // TODO - hard coded to two pages worth of guests. - really dumb if page size is 1G
         let mut active_guests = PageVec::from(hyp_mem.take_pages(2));
         active_guests.push(PageOwnerId::host());
@@ -99,7 +96,7 @@ impl PageState {
 
         // Discard a host_alignment sized chunk to align ourselves.
         let _ = hyp_mem.take_pages_with_alignment(
-            (host_alignment / PageSize4k::SIZE_BYTES)
+            (host_alignment / PageSize::Size4k as u64)
                 .try_into()
                 .unwrap(),
             host_alignment,
@@ -151,19 +148,19 @@ impl PageState {
     }
 
     /// Sets the owner of the page at the given `addr` to `owner`.
-    pub fn set_page_owner(&mut self, addr: SupervisorPageAddr4k, owner: PageOwnerId) -> Result<()> {
+    pub fn set_page_owner(&mut self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
         let mut phys_pages = self.inner.lock();
         phys_pages.set_page_owner(addr, owner)
     }
 
     /// Removes the current owner of the page at `addr` and returns it.
-    pub fn pop_owner(&mut self, addr: SupervisorPageAddr4k) -> Result<PageOwnerId> {
+    pub fn pop_owner(&mut self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
         let mut phys_pages = self.inner.lock();
         phys_pages.pop_owner_internal(addr)
     }
 
     /// Returns the current owner of the page.
-    pub fn owner(&self, addr: SupervisorPageAddr4k) -> Option<PageOwnerId> {
+    pub fn owner(&self, addr: SupervisorPageAddr) -> Option<PageOwnerId> {
         let phys_pages = self.inner.lock();
         phys_pages.owner(addr)
     }
@@ -175,7 +172,7 @@ impl PageState {
 /// pages it needs, `HypPageAlloc` should be converted to the list of remaining free memory
 /// regions to be mapped into the host with `drain()`.
 pub struct HypPageAlloc<A: Allocator> {
-    next_page: SupervisorPageAddr4k,
+    next_page: SupervisorPageAddr,
     pages: PageMap,
     alloc: A,
 }
@@ -185,7 +182,7 @@ impl<A: Allocator> HypPageAlloc<A> {
     /// physical memory can be used by the machine.
     pub fn new(mem_map: HwMemMap, alloc: A) -> Self {
         // Unwrap here (and below) since we can't continue if there isn't any free memory.
-        let first_page = mem_map.regions().next().unwrap().base();
+        let first_page = mem_map.regions().next().unwrap().base().get_4k_addr();
         let page_map = PageMap::build_from(mem_map);
         let first_avail_page = first_page
             .iter_from()
@@ -200,7 +197,7 @@ impl<A: Allocator> HypPageAlloc<A> {
 
     /// Takes ownership of the remaining free pages in the system page map and adds them to 'ranges'.
     /// It also returns the global page info structs as `PageMap`.
-    pub fn drain(mut self) -> (PageMap, Vec<SequentialPages4k, A>) {
+    pub fn drain(mut self) -> (PageMap, Vec<SequentialPages, A>) {
         let mut ranges = Vec::new_in(self.alloc);
         while self.pages.get(self.next_page).is_some() {
             // Find the last page in this contiguous range.
@@ -224,7 +221,10 @@ impl<A: Allocator> HypPageAlloc<A> {
 
             // Safe to create this range as they were previously free and we just took
             // ownership.
-            let range = unsafe { SequentialPages::from_page_range(self.next_page, last_page) };
+            let range = unsafe {
+                // Unwrap ok; we're guaranteed to be working with 4kB pages.
+                SequentialPages::from_page_range(self.next_page, last_page).unwrap()
+            };
             ranges.push(range);
 
             // Skip until the next free page or we reach the end of memory.
@@ -250,7 +250,7 @@ impl<A: Allocator> HypPageAlloc<A> {
     /// Returns the next 4k page for the hypervisor to use.
     /// Asserts if out of memory. If there aren't enough pages to set up hypervisor state, there is
     /// no point in continuing.
-    fn next_page(&mut self) -> Page<PageSize4k> {
+    fn next_page(&mut self) -> Page {
         // OK to unwrap as next_page is guaranteed to be in range.
         self.pages
             .get_mut(self.next_page)
@@ -278,9 +278,9 @@ impl<A: Allocator> HypPageAlloc<A> {
     /// the hypervisor as the owner of the pages, and any pages consumed up until that point,
     /// in the system page map. Allows passing ranges of pages around without a mutable
     /// reference to the global owners list. Panics if there are not `count` pages available.
-    pub fn take_pages_with_alignment(&mut self, count: usize, align: u64) -> SequentialPages4k {
+    pub fn take_pages_with_alignment(&mut self, count: usize, align: u64) -> SequentialPages {
         // Helper to test whether a contiguous range of `count` pages is free and aligned.
-        let range_is_free_and_aligned = |start: SupervisorPageAddr4k| {
+        let range_is_free_and_aligned = |start: SupervisorPageAddr| {
             let end = start.checked_add_pages(count as u64).unwrap();
             if start.bits() & (align - 1) != 0 {
                 return false;
@@ -315,19 +315,20 @@ impl<A: Allocator> HypPageAlloc<A> {
 
         unsafe {
             // It's safe to create a page range of the memory that `self` forfeited ownership of
-            // above and the new `SequentialPages` is now the unique owner.
-            SequentialPages::from_page_range(first_page, last_page)
+            // above and the new `SequentialPages` is now the unique owner. Ok to unwrap here simce
+            // all pages we're working with are 4kB.
+            SequentialPages::from_page_range(first_page, last_page).unwrap()
         }
     }
 
     /// Same as above, but without any alignment requirements.
-    pub fn take_pages(&mut self, count: usize) -> SequentialPages4k {
-        self.take_pages_with_alignment(count, PageSize4k::SIZE_BYTES)
+    pub fn take_pages(&mut self, count: usize) -> SequentialPages {
+        self.take_pages_with_alignment(count, PageSize::Size4k as u64)
     }
 }
 
 impl<A: Allocator> Iterator for HypPageAlloc<A> {
-    type Item = Page<PageSize4k>;
+    type Item = Page;
 
     fn next(&mut self) -> Option<Self::Item> {
         Some(self.next_page())
@@ -355,7 +356,7 @@ mod tests {
         let start_pa = RawAddr::supervisor(aligned_pointer as u64);
         let hw_map = unsafe {
             // Not safe - just a test
-            HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
+            HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
                 .unwrap()
                 .build()
@@ -366,9 +367,9 @@ mod tests {
         hyp_mem
     }
 
-    fn stub_phys_pages() -> (PageState, Vec<SequentialPages4k, Global>) {
+    fn stub_phys_pages() -> (PageState, Vec<SequentialPages, Global>) {
         let hyp_mem = stub_hyp_mem();
-        let (phys_pages, host_mem) = PageState::from(hyp_mem, PageSize4k::SIZE_BYTES);
+        let (phys_pages, host_mem) = PageState::from(hyp_mem, PageSize::Size4k as u64);
         (phys_pages, host_mem)
     }
 
@@ -381,15 +382,15 @@ mod tests {
 
         assert_eq!(
             after_taken.addr().bits(),
-            first.addr().bits() + (PageSize4k::SIZE_BYTES * 3)
+            first.addr().bits() + (PageSize::Size4k as u64 * 3)
         );
         assert_eq!(
             taken.next().unwrap().addr().bits(),
-            first.addr().bits() + PageSize4k::SIZE_BYTES
+            first.addr().bits() + PageSize::Size4k as u64
         );
         assert_eq!(
             taken.next().unwrap().addr().bits(),
-            first.addr().bits() + (PageSize4k::SIZE_BYTES * 2)
+            first.addr().bits() + (PageSize::Size4k as u64 * 2)
         );
     }
 
@@ -402,15 +403,15 @@ mod tests {
 
         assert_eq!(
             after_taken.addr().bits(),
-            first.addr().bits() + (PageSize4k::SIZE_BYTES * 3)
+            first.addr().bits() + (PageSize::Size4k as u64 * 3)
         );
         assert_eq!(
             taken.next().unwrap().addr().bits(),
-            first.addr().bits() + PageSize4k::SIZE_BYTES
+            first.addr().bits() + PageSize::Size4k as u64
         );
         assert_eq!(
             taken.next().unwrap().addr().bits(),
-            first.addr().bits() + (PageSize4k::SIZE_BYTES * 2)
+            first.addr().bits() + (PageSize::Size4k as u64 * 2)
         );
     }
 
@@ -418,7 +419,7 @@ mod tests {
     fn hyp_mem_take_aligned() {
         let mut hyp_mem = stub_hyp_mem();
         let range = hyp_mem.take_pages_with_alignment(4, 16 * 1024);
-        assert_eq!(range.start_page_addr().bits() & (16 * 1024 - 1), 0);
+        assert_eq!(range.base().bits() & (16 * 1024 - 1), 0);
     }
 
     #[test]
@@ -429,7 +430,7 @@ mod tests {
         assert_eq!(host_pages.len(), 1);
         assert_eq!(
             host_pages[0].length_bytes(),
-            remaining * PageSize4k::SIZE_BYTES
+            remaining * PageSize::Size4k as u64
         );
     }
 

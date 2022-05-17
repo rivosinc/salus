@@ -8,9 +8,7 @@ use core::mem::{self, ManuallyDrop};
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
 
-use riscv_pages::{Page4k, PageAddr, PageSize, PageSize4k, RawAddr, SequentialPages};
-
-const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
+use riscv_pages::{PageAddr, PageSize, RawAddr, SequentialPages};
 
 /// Similar to Vec but backed by an integer number of pre-allocated pages.
 /// Used to avoid having an allocator but allow using a Vec for simple storage.
@@ -23,21 +21,18 @@ const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 /// ## Example
 ///
 /// ```rust
-/// use page_collections::page_vec::{PageVec, VecPages};
-/// use riscv_pages::{SequentialPages, Page4k, PageSize, PageSize4k};
+/// use page_collections::page_vec::PageVec;
+/// use riscv_pages::{SequentialPages, Page, PageSize};
 /// use core::result::Result;
 ///
-/// fn sum_in_page<I>(vals: I, pages: SequentialPages<PageSize4k>)
-///     -> Result<(u64, SequentialPages<PageSize4k>), ()>
+/// fn sum_in_page<I>(vals: I, pages: SequentialPages)
+///     -> Result<(u64, SequentialPages), ()>
 /// where
 ///     I: IntoIterator<Item = u64>,
 /// {
 ///     let mut v = PageVec::from(pages);
 ///     assert_eq!(v.len(), 0);
 ///     let capacity = v.capacity();
-///     assert_eq!(capacity,
-///                PageSize4k::SIZE_BYTES as usize /
-///                    core::mem::size_of::<u64>());
 ///     assert!(v.try_reserve(capacity).is_ok());
 ///     for item in vals.into_iter().take(capacity) {
 ///         v.push(item);
@@ -50,15 +45,7 @@ const SIZE_4K: usize = PageSize4k::SIZE_BYTES as usize;
 /// }
 /// ```
 #[derive(Debug)]
-pub struct PageVec<T>(ManuallyDrop<Vec<T>>);
-
-/// Contains the result of reclaiming the pages used to back a Vec created with `PageVec::from_pages`.
-/// See the docs for `vec_to_pages` for usage.
-/// Must be destroyed with `to_pages`, never dropped.
-pub enum VecPages {
-    SinglePage(Page4k),
-    MultiPage(SequentialPages<PageSize4k>),
-}
+pub struct PageVec<T>(ManuallyDrop<Vec<T>>, PageSize);
 
 impl<T> PageVec<T> {
     /// Destroys the given Vec and returns its backing pages.
@@ -67,14 +54,15 @@ impl<T> PageVec<T> {
     /// If multiple pages back the Vec, they are returned in a new Vec contained in `MultiPage`.
     /// In the MultiPage case, the resultant vec should itself be passed to `to_pages` after being
     /// emptied.
-    pub fn to_pages(mut self) -> SequentialPages<PageSize4k> {
+    pub fn to_pages(mut self) -> SequentialPages {
+        let page_size = self.1 as usize;
         self.clear(); // Ensures destructors of any T's still owned are called.
-        let vec_page_count = (self.capacity() * mem::size_of::<T>() + SIZE_4K - 1) / SIZE_4K;
+        let vec_page_count = (self.capacity() * mem::size_of::<T>() + page_size - 1) / page_size;
         unsafe {
             // Safe to create `SequentialPages` from the contained vec as the constructor of PageVec
             // guarantees the owned pages originated from `SequentialPages` so must be valid.
             SequentialPages::from_mem_range(
-                PageAddr::new(RawAddr::supervisor(self.0.as_ptr() as u64)).unwrap(),
+                PageAddr::with_size(RawAddr::supervisor(self.0.as_ptr() as u64), self.1).unwrap(),
                 vec_page_count as u64,
             )
         }
@@ -120,18 +108,21 @@ impl<T> PageVec<T> {
     }
 }
 
-impl<T> From<SequentialPages<PageSize4k>> for PageVec<T> {
-    fn from(pages: SequentialPages<PageSize4k>) -> Self {
+impl<T> From<SequentialPages> for PageVec<T> {
+    fn from(pages: SequentialPages) -> Self {
         let capacity_bytes = pages.length_bytes() as usize;
         let capacity = capacity_bytes / mem::size_of::<T>();
         // Safe because the memory is page-aligned, fully owned, and contiguous(guaranteed by
         // `SequentialPages`).
         unsafe {
-            PageVec(ManuallyDrop::new(Vec::from_raw_parts(
-                pages.base() as *mut T,
-                0,
-                capacity,
-            )))
+            PageVec(
+                ManuallyDrop::new(Vec::from_raw_parts(
+                    pages.base().bits() as *mut T,
+                    0,
+                    capacity,
+                )),
+                pages.base().size(),
+            )
         }
     }
 }
@@ -164,24 +155,27 @@ impl<T, I: SliceIndex<[T]>> IndexMut<I> for PageVec<T> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use riscv_pages::PageAddr4k;
+
+    use riscv_pages::Page;
 
     #[test]
     fn basic() {
-        let mem = vec![0u8; SIZE_4K * 2];
-        const MASK_4K: usize = SIZE_4K - 1;
-        let aligned_addr = (mem.as_ptr() as u64 + PageSize4k::SIZE_BYTES) & !MASK_4K as u64;
+        let mem = vec![0u8; PageSize::Size4k as usize * 2];
+        let aligned_addr = PageSize::Size4k.round_up(mem.as_ptr() as u64);
         // This is not safe, but it's only for a test and mem isn't touched until backing_page is
         // dropped.
         let backing_page =
-            unsafe { Page4k::new(PageAddr4k::new(RawAddr::supervisor(aligned_addr)).unwrap()) };
+            unsafe { Page::new(PageAddr::new(RawAddr::supervisor(aligned_addr)).unwrap()) };
 
         let seq_pages = SequentialPages::from_pages([backing_page]).unwrap();
         let mut v = PageVec::from(seq_pages);
         assert_eq!(v.len(), 0);
         assert!(v.is_empty());
         let capacity = v.capacity();
-        assert_eq!(capacity, SIZE_4K / core::mem::size_of::<u64>());
+        assert_eq!(
+            capacity,
+            PageSize::Size4k as usize / core::mem::size_of::<u64>()
+        );
         assert!(v.try_reserve(10).is_ok());
         assert!(v.try_reserve(capacity).is_ok());
         for item in 0..10 {

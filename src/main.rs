@@ -180,7 +180,10 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
         .unwrap();
     let pages = unsafe {
         // Safe since this region of memory was free in the memory map.
-        SequentialPages::from_mem_range(heap_base, HEAP_SIZE / PageSize4k::SIZE_BYTES)
+        SequentialPages::from_mem_range(
+            heap_base.get_4k_addr(),
+            HEAP_SIZE / PageSize::Size4k as u64,
+        )
     };
     HypAlloc::from_pages(pages)
 }
@@ -213,7 +216,7 @@ where
         let size = DeviceTreeSerializer::new(&hyp_dt).output_size();
         ((size as u64) + T::TOP_LEVEL_ALIGN - 1) & !(T::TOP_LEVEL_ALIGN - 1)
     };
-    let num_fdt_pages = host_fdt_size / PageSize4k::SIZE_BYTES;
+    let num_fdt_pages = host_fdt_size / PageSize::Size4k as u64;
     let host_fdt_pages =
         hyp_pages.take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
 
@@ -282,7 +285,7 @@ where
     let host_fdt_slice = unsafe {
         // Safe because we own these pages.
         slice::from_raw_parts_mut(
-            host_fdt_pages.base() as *mut u8,
+            host_fdt_pages.base().bits() as *mut u8,
             host_fdt_pages.length_bytes().try_into().unwrap(),
         )
     };
@@ -295,42 +298,42 @@ where
 
     // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
     let mut current_gpa =
-        PageAddr4k::new(RawAddr::guest(host_ram_base, PageOwnerId::host())).unwrap();
-    let num_pages = KERNEL_OFFSET / PageSize4k::SIZE_BYTES;
+        PageAddr::new(RawAddr::guest(host_ram_base, PageOwnerId::host())).unwrap();
+    let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
     host_root_builder = host_root_builder.add_4k_pages(
         current_gpa,
         host_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
     );
     current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
-    let num_kernel_pages = host_kernel.size() / PageSize4k::SIZE_BYTES;
+    let num_kernel_pages = host_kernel.size() / PageSize::Size4k as u64;
     let kernel_pages = unsafe {
         // Safe because HwMemMap reserved this region.
-        SequentialPages::from_mem_range(host_kernel.base(), num_kernel_pages)
+        SequentialPages::from_mem_range(host_kernel.base().get_4k_addr(), num_kernel_pages)
     };
     host_root_builder = host_root_builder.add_4k_data_pages(current_gpa, kernel_pages.into_iter());
     current_gpa = current_gpa.checked_add_pages(num_kernel_pages).unwrap();
 
     if let Some(r) = host_initramfs {
         let num_pages =
-            (INITRAMFS_OFFSET - (KERNEL_OFFSET + host_kernel.size())) / PageSize4k::SIZE_BYTES;
+            (INITRAMFS_OFFSET - (KERNEL_OFFSET + host_kernel.size())) / PageSize::Size4k as u64;
         host_root_builder = host_root_builder.add_4k_pages(
             current_gpa,
             host_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
         );
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
-        let num_initramfs_pages = r.size() / PageSize4k::SIZE_BYTES;
+        let num_initramfs_pages = r.size() / PageSize::Size4k as u64;
         let initramfs_pages = unsafe {
             // Safe because HwMemMap reserved this region.
-            SequentialPages::from_mem_range(r.base(), num_initramfs_pages)
+            SequentialPages::from_mem_range(r.base().get_4k_addr(), num_initramfs_pages)
         };
         host_root_builder =
             host_root_builder.add_4k_data_pages(current_gpa, initramfs_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_initramfs_pages).unwrap();
     }
 
-    let num_pages = (FDT_OFFSET - (current_gpa.bits() - host_ram_base)) / PageSize4k::SIZE_BYTES;
+    let num_pages = (FDT_OFFSET - (current_gpa.bits() - host_ram_base)) / PageSize::Size4k as u64;
     host_root_builder = host_root_builder.add_4k_pages(
         current_gpa,
         host_pages_iter.by_ref().take(num_pages.try_into().unwrap()),

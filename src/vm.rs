@@ -8,7 +8,7 @@ use memoffset::offset_of;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::PlatformPageTable;
-use riscv_pages::{PageAddr4k, PageOwnerId, PageSize4k, RawAddr, SequentialPages};
+use riscv_pages::{PageAddr, PageOwnerId, RawAddr, SequentialPages};
 use riscv_regs::{hgatp, hstatus, scounteren, sstatus, HgatpHelpers};
 use riscv_regs::{
     Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
@@ -323,7 +323,7 @@ impl<T: PlatformPageTable> Vm<T> {
 
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
     /// length zero and capacity limits the number of nested guests.
-    fn add_guest_tracking_pages(&mut self, pages: SequentialPages<PageSize4k>) {
+    fn add_guest_tracking_pages(&mut self, pages: SequentialPages) {
         let guests = PageVec::from(pages);
         self.guests = Some(Guests { inner: guests });
     }
@@ -550,7 +550,7 @@ impl<T: PlatformPageTable> Vm<T> {
             return Err(SbiError::InvalidParam); // TODO different error
         }
 
-        let from_page_addr = PageAddr4k::new(RawAddr::guest(
+        let from_page_addr = PageAddr::new(RawAddr::guest(
             donor_pages_addr,
             self.vm_pages.page_owner_id(),
         ))
@@ -613,7 +613,7 @@ impl<T: PlatformPageTable> Vm<T> {
         num_pages: u64,
     ) -> sbi::Result<u64> {
         let from_page_addr =
-            PageAddr4k::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
+            PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
 
         self.guests
@@ -634,7 +634,7 @@ impl<T: PlatformPageTable> Vm<T> {
 
     fn guest_rm_pages(&mut self, guest_id: u64, gpa: u64, num_pages: u64) -> sbi::Result<u64> {
         println!("Salus - Rm pages {guest_id:x} gpa:{gpa:x} num_pages:{num_pages}",);
-        let from_page_addr = PageAddr4k::new(RawAddr::guest(gpa, self.vm_pages.page_owner_id()))
+        let from_page_addr = PageAddr::new(RawAddr::guest(gpa, self.vm_pages.page_owner_id()))
             .ok_or(SbiError::InvalidAddress)?;
 
         self.guests
@@ -664,20 +664,21 @@ impl<T: PlatformPageTable> Vm<T> {
         println!(
             "Add pages {from_addr:x} page_type:{page_type} num_pages:{num_pages} to_addr:{to_addr:x}",
         );
-        if page_type > 3 {
+        if page_type != 0 {
+            // TODO - support huge pages.
             // TODO - need to break up mappings if given address that's part of a huge page.
             return Err(SbiError::InvalidParam);
         }
 
         let from_page_addr =
-            PageAddr4k::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
+            PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
         self.guests
             .as_mut()
             .ok_or(SbiError::InvalidParam)
             .and_then(|guests| guests.initializing_guest_mut(guest_id))
             .and_then(|grb| {
-                let to_page_addr = PageAddr4k::new(RawAddr::guest(to_addr, grb.page_owner_id()))
+                let to_page_addr = PageAddr::new(RawAddr::guest(to_addr, grb.page_owner_id()))
                     .ok_or(SbiError::InvalidAddress)?;
                 self.vm_pages
                     .add_4k_pages_builder(
@@ -702,7 +703,7 @@ impl<T: PlatformPageTable> Vm<T> {
         page_addr: u64,
     ) -> sbi::Result<u64> {
         let gpa = RawAddr::guest(page_addr, self.vm_pages.page_owner_id());
-        if (measurement_version != 1) || (measurement_type != 1) || PageAddr4k::new(gpa).is_none() {
+        if (measurement_version != 1) || (measurement_type != 1) || PageAddr::new(gpa).is_none() {
             return Err(SbiError::InvalidParam);
         }
 
@@ -748,7 +749,7 @@ impl<T: PlatformPageTable> Host<T> {
     /// Creates a new `Host` using the given initial page table root.
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
     /// length zero and capacity limits the number of nested guests.
-    pub fn new(page_root: HostRootPages<T>, pages: SequentialPages<PageSize4k>) -> Self {
+    pub fn new(page_root: HostRootPages<T>, pages: SequentialPages) -> Self {
         let mut inner = Vm::new(page_root.into_inner());
         inner.add_guest_tracking_pages(pages);
         Self { inner }

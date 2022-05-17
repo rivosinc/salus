@@ -5,12 +5,13 @@
 use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use core::slice;
-use riscv_pages::{PageAddr4k, PageSize, PageSize4k, RawAddr, SequentialPages};
+use riscv_pages::{PageAddr, PageSize, RawAddr, SequentialPages};
 use spin::Mutex;
 
 struct HypAllocInner {
     mem: NonNull<[u8]>,
     end: usize,
+    page_size: PageSize,
 }
 
 impl HypAllocInner {
@@ -60,13 +61,14 @@ pub struct HypAlloc {
 
 impl HypAlloc {
     /// Creates an allocator from a range of pages which will be used as storage for the allocator.
-    pub fn from_pages<S: PageSize>(pages: SequentialPages<S>) -> Self {
+    pub fn from_pages(pages: SequentialPages) -> Self {
         let inner = HypAllocInner {
             mem: NonNull::slice_from_raw_parts(
-                NonNull::new(pages.base() as *mut u8).unwrap(),
+                NonNull::new(pages.base().bits() as *mut u8).unwrap(),
                 pages.length_bytes().try_into().unwrap(),
             ),
             end: 0,
+            page_size: pages.page_size(),
         };
         HypAlloc {
             inner: Mutex::new(inner),
@@ -74,14 +76,14 @@ impl HypAlloc {
     }
 
     /// Destroys the allocator and returns the pages which were used as storage.
-    pub fn to_pages(self) -> SequentialPages<PageSize4k> {
+    pub fn to_pages(self) -> SequentialPages {
         let inner = self.inner.lock();
         let base = inner.mem.as_mut_ptr() as u64;
-        let num_pages = (inner.mem.len() as u64) / PageSize4k::SIZE_BYTES;
+        let num_pages = (inner.mem.len() as u64) / inner.page_size as u64;
         unsafe {
             // Safe since this allocator must own this range of pages.
             SequentialPages::from_mem_range(
-                PageAddr4k::new(RawAddr::supervisor(base)).unwrap(),
+                PageAddr::with_size(RawAddr::supervisor(base), inner.page_size).unwrap(),
                 num_pages,
             )
         }
@@ -127,8 +129,8 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
-        let start_page = PageAddr4k::new(RawAddr::supervisor(aligned_pointer as u64)).unwrap();
-        let num_pages = (MEM_SIZE as u64) / PageSize4k::SIZE_BYTES;
+        let start_page = PageAddr::new(RawAddr::supervisor(aligned_pointer as u64)).unwrap();
+        let num_pages = (MEM_SIZE as u64) / PageSize::Size4k as u64;
         let pages = unsafe {
             // Not safe - just a test
             SequentialPages::from_mem_range(start_page, num_pages)

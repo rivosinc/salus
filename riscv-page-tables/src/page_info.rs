@@ -4,9 +4,7 @@
 
 use arrayvec::ArrayVec;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{
-    PageOwnerId, PageSize, PageSize4k, RawAddr, SequentialPages, SupervisorPageAddr4k,
-};
+use riscv_pages::{PageOwnerId, PageSize, RawAddr, SequentialPages, SupervisorPageAddr};
 
 use crate::{HwMemMap, HwMemType, HwReservedMemType, PageTrackingError, PageTrackingResult};
 
@@ -150,22 +148,21 @@ impl PageMap {
         // Determine how many pages we'll need for the page map.
         let total_pages = mem_map
             .regions()
-            .fold(0, |pages, r| pages + r.size() / PageSize4k::SIZE_BYTES);
+            .fold(0, |pages, r| pages + r.size() / PageSize::Size4k as u64);
         let page_map_size =
-            PageSize4k::round_up(total_pages * core::mem::size_of::<PageInfo>() as u64);
-        let page_map_pages = page_map_size / PageSize4k::SIZE_BYTES;
+            PageSize::Size4k.round_up(total_pages * core::mem::size_of::<PageInfo>() as u64);
+        let page_map_pages = page_map_size / PageSize::Size4k as u64;
 
         // Find a space for the page map.
         let page_map_region = mem_map
             .regions()
             .find(|r| r.mem_type() == HwMemType::Available && r.size() >= page_map_size)
             .expect("No free space for PageMap");
-        let page_map_base = page_map_region.base();
+        let page_map_base = page_map_region.base().get_4k_addr();
 
         // Safe to create pages from this memory as `HwMemMap` guarantees that this range is
         // valid and free to use.
-        let seq_pages =
-            unsafe { SequentialPages::<PageSize4k>::from_mem_range(page_map_base, page_map_pages) };
+        let seq_pages = unsafe { SequentialPages::from_mem_range(page_map_base, page_map_pages) };
         let struct_pages = PageVec::from(seq_pages);
 
         // Reserve the memory consumed by the pagemap itself.
@@ -202,21 +199,23 @@ impl PageMap {
         //
         // Pages in reserved regions are marked reserved, except for those containing the
         // host VM images, which are considered to be initially hypervisor-owned.
-        let mut last_end: Option<SupervisorPageAddr4k> = None;
+        let mut last_end: Option<SupervisorPageAddr> = None;
         for r in mem_map.regions() {
+            let base = r.base().get_4k_addr();
             // All "holes" in the memory map are considered reserved.
             //
             // TODO: Support a sparse PageMap.
             if let Some(end) = last_end {
-                if end != r.base() {
-                    for _ in end.iter_from().take_while(|&a| a != r.base()) {
+                if end != base {
+                    for _ in end.iter_from().take_while(|&a| a != base) {
                         self.pages.push(PageInfo::new_reserved());
                     }
                 }
             }
-            last_end = Some(r.end());
+            let end = r.end().get_4k_addr();
+            last_end = Some(end);
 
-            for _ in r.base().iter_from().take_while(|&a| a != r.end()) {
+            for _ in base.iter_from().take_while(|&a| a != end) {
                 match r.mem_type() {
                     HwMemType::Available => {
                         self.pages.push(PageInfo::new());
@@ -234,19 +233,29 @@ impl PageMap {
     }
 
     /// Returns a reference to the `PageInfo` struct for the 4k page at `addr`.
-    pub fn get(&self, addr: SupervisorPageAddr4k) -> Option<&PageInfo> {
+    pub fn get(&self, addr: SupervisorPageAddr) -> Option<&PageInfo> {
+        // TODO: Support ownership tracking of huge-pages.
+        if addr.size().is_huge() {
+            return None;
+        }
         let index = addr.index().checked_sub(self.base_page_index)?;
         self.pages.get(index)
     }
 
     /// Returns a mutable reference to the `PageInfo` struct for the 4k page at `addr`.
-    pub fn get_mut(&mut self, addr: SupervisorPageAddr4k) -> Option<&mut PageInfo> {
+    pub fn get_mut(&mut self, addr: SupervisorPageAddr) -> Option<&mut PageInfo> {
+        if addr.size().is_huge() {
+            return None;
+        }
         let index = addr.index().checked_sub(self.base_page_index)?;
         self.pages.get_mut(index)
     }
 
     /// Returns the number of pages after the page at `addr`
-    pub fn num_after(&self, addr: SupervisorPageAddr4k) -> Option<usize> {
+    pub fn num_after(&self, addr: SupervisorPageAddr) -> Option<usize> {
+        if addr.size().is_huge() {
+            return None;
+        }
         let offset = addr.index().checked_sub(self.base_page_index)?;
         self.pages.len().checked_sub(offset)
     }
@@ -257,7 +266,7 @@ mod tests {
     use super::*;
 
     use crate::HwMemMapBuilder;
-    use riscv_pages::{Page, PageAddr4k, RawAddr, SequentialPages};
+    use riscv_pages::{Page, PageAddr, RawAddr, SequentialPages};
 
     fn stub_page_vec() -> PageVec<PageInfo> {
         let backing_mem = vec![0u8; 8192];
@@ -267,7 +276,7 @@ mod tests {
                 .as_ptr()
                 .add(backing_mem.as_ptr().align_offset(4096))
         };
-        let addr = PageAddr4k::new(RawAddr::supervisor(aligned_pointer as u64)).unwrap();
+        let addr = PageAddr::new(RawAddr::supervisor(aligned_pointer as u64)).unwrap();
         let page = unsafe {
             // Test-only: safe because the backing memory is leaked so the memory used for this page
             // will live until the test exits.
@@ -282,10 +291,10 @@ mod tests {
         let num_pages = 10;
         let mem_map = unsafe {
             // Not safe - just a test.
-            HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
+            HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(
                     RawAddr::supervisor(0x1000_0000),
-                    num_pages * PageSize4k::SIZE_BYTES,
+                    num_pages * PageSize::Size4k as u64,
                 )
                 .unwrap()
                 .build()
@@ -301,8 +310,8 @@ mod tests {
         let mut pages = PageMap::new(pages, first_index as usize);
         pages.populate_from(mem_map);
 
-        let before_addr = PageAddr4k::new(RawAddr::supervisor((first_index - 1) * 4096)).unwrap();
-        let first_addr = PageAddr4k::new(RawAddr::supervisor(first_index * 4096)).unwrap();
+        let before_addr = PageAddr::new(RawAddr::supervisor((first_index - 1) * 4096)).unwrap();
+        let first_addr = PageAddr::new(RawAddr::supervisor(first_index * 4096)).unwrap();
         let last_addr = first_addr.checked_add_pages(num_pages - 1).unwrap();
         let after_addr = last_addr.checked_add_pages(1).unwrap();
 
@@ -317,7 +326,7 @@ mod tests {
         let pages = stub_page_vec();
         let mut mem_map = unsafe {
             // Not safe - just a test.
-            HwMemMapBuilder::new(PageSize4k::SIZE_BYTES)
+            HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(RawAddr::supervisor(0x1000_0000), 0x2_0000)
                 .unwrap()
                 .build()
@@ -340,9 +349,9 @@ mod tests {
         let mut pages = PageMap::new(pages, first_index);
         pages.populate_from(mem_map);
 
-        let free_addr = PageAddr4k::new(RawAddr::supervisor(0x1000_1000)).unwrap();
-        let reserved_addr = PageAddr4k::new(RawAddr::supervisor(0x1000_4000)).unwrap();
-        let used_addr = PageAddr4k::new(RawAddr::supervisor(0x1001_1000)).unwrap();
+        let free_addr = PageAddr::new(RawAddr::supervisor(0x1000_1000)).unwrap();
+        let reserved_addr = PageAddr::new(RawAddr::supervisor(0x1000_4000)).unwrap();
+        let used_addr = PageAddr::new(RawAddr::supervisor(0x1001_1000)).unwrap();
 
         assert!(pages.get(free_addr).unwrap().is_free());
         assert!(pages.get(reserved_addr).unwrap().is_reserved());

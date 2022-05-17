@@ -68,12 +68,13 @@ mod tests {
     use alloc::alloc::Global;
     use alloc::vec::Vec;
     use riscv_pages::*;
+    use std::{mem, slice};
 
     use super::page_table::*;
     use super::sv48x4::Sv48x4;
     use super::*;
 
-    fn stub_sys_memory() -> (PageState, Vec<SequentialPages4k, Global>) {
+    fn stub_sys_memory() -> (PageState, Vec<SequentialPages, Global>) {
         const ONE_MEG: usize = 1024 * 1024;
         const MEM_ALIGN: usize = 2 * ONE_MEG;
         const MEM_SIZE: usize = 256 * ONE_MEG;
@@ -100,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn map_one_4k() {
+    fn map_and_unmap() {
         let (mut phys_pages, host_mem) = stub_sys_memory();
 
         let mut host_pages = host_mem.into_iter().flatten();
@@ -109,18 +110,41 @@ mod tests {
         let mut guest_page_table =
             Sv48x4::new(seq_pages, id, phys_pages.clone()).expect("creating sv48x4");
 
-        let guest_page = host_pages.next().unwrap();
-        let guest_page_addr = guest_page.addr();
-        let mut free_pages = host_pages.by_ref().take(3);
-        let guest_addr = RawAddr::guest(0x8000_0000, PageOwnerId::host());
-        assert!(phys_pages
-            .set_page_owner(guest_page.addr(), guest_page_table.page_owner_id())
-            .is_ok());
-        assert!(guest_page_table
-            .map_page_4k(guest_addr, guest_page, &mut || free_pages.next(), None)
-            .is_ok());
-        // check that fetching the address from 0x8000_0000 returns the mapped page.
-        let returned_page = guest_page_table.unmap_page(guest_addr).unwrap().unwrap_4k();
-        assert!(returned_page.addr().bits() == guest_page_addr.bits());
+        let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
+        let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
+        let mut pte_pages = host_pages.by_ref().take(3);
+        let gpa_base = PageAddr::new(RawAddr::guest(0x8000_0000, PageOwnerId::host())).unwrap();
+        for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
+            // Write to the page so that we can test if it's retained later.
+            unsafe {
+                // Not safe - just a test
+                let slice = slice::from_raw_parts_mut(
+                    page.addr().bits() as *mut u64,
+                    page.addr().size() as usize / mem::size_of::<u64>(),
+                );
+                slice[0] = 0xdeadbeef;
+            }
+            assert!(phys_pages
+                .set_page_owner(page.addr(), guest_page_table.page_owner_id())
+                .is_ok());
+            assert!(guest_page_table
+                .map_page(RawAddr::from(gpa), page, &mut || pte_pages.next(), None)
+                .is_ok());
+        }
+        // The invalidated page should retain its contents.
+        let dirty_page = guest_page_table
+            .invalidate_page(RawAddr::from(gpa_base))
+            .unwrap()
+            .to_page();
+        assert_eq!(dirty_page.addr(), page_addrs[0]);
+        assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
+        // The unmapped page should be claen.
+        let clean_page = Page::from(
+            guest_page_table
+                .unmap_page(RawAddr::from(gpa_base.checked_add_pages(1).unwrap()))
+                .unwrap(),
+        );
+        assert_eq!(clean_page.addr(), page_addrs[1]);
+        assert_eq!(clean_page.get_u64(0).unwrap(), 0);
     }
 }

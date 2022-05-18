@@ -4,7 +4,9 @@
 
 use arrayvec::ArrayVec;
 use core::{fmt, result};
-use riscv_pages::{PageAddr, PageSize, RawAddr, SupervisorPageAddr, SupervisorPhysAddr};
+use riscv_pages::{
+    DeviceMemType, MemType, PageAddr, PageSize, RawAddr, SupervisorPageAddr, SupervisorPhysAddr,
+};
 
 /// The maximum number of regions in a `HwMemMap`. Statically sized since we don't have
 /// dynamic memory allocation at the point at which the memory map is constructed.
@@ -16,21 +18,19 @@ type RegionVec = ArrayVec<HwMemRegion, MAX_HW_MEM_REGIONS>;
 /// foundation of safely assigning memory ownership of system RAM, configuring it correctly is
 /// _critical_ to the safety of the system.
 ///
-/// Use `HwMemMapBuilder` to build a `HwMemMap` populated with the physical memory regions and
-/// initial reserved regions with `add_memory_region()` and `reserve_region()` respectively.
-/// `reserve_region()` can still be called after construction of the `HwMemMap` to reserve
-/// additional ranges if necessary.
-///
-/// TODO: Should IO memory be included in this map? Or only regions that will end up be backed by
-/// Page structs?
+/// Use `HwMemMapBuilder` to build a `HwMemMap` populated with the physical memory and MMIO regions,
+/// as well as the initial reserved physical memory regions. Reserved regions and MMIO regions can
+/// still be added after construction of the `HwMemMap` as additional reserved regions are created
+/// or devices are discovered.
 ///
 /// TODO: NUMA awareness.
 #[derive(Default)]
 pub struct HwMemMap {
     // Maintained in sorted order.
     regions: RegionVec,
-    // Alignment required for each region in the map. Must be a multiple of the system page size.
-    min_alignment: u64,
+    // Alignment required for physical memory regions (and reserved sub-regions) in the map. Must be
+    // a multiple of the system page size.
+    min_ram_alignment: u64,
 }
 
 /// A builder for a `HwMemMap`. Call `add_memory_region()` once for each range of physical memory
@@ -43,19 +43,31 @@ pub struct HwMemMapBuilder {
 /// Describes a contiguous region in the hardware memory map.
 #[derive(Debug, Clone, Copy)]
 pub struct HwMemRegion {
-    mem_type: HwMemType,
+    region_type: HwMemRegionType,
     base: SupervisorPageAddr,
     size: u64,
 }
 
 /// Describes the usage of a region in the hardware memory map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HwMemType {
-    /// Can be used by the hypervisor for any purpose.
+pub enum HwMemRegionType {
+    /// Physical memory that can be used by the hypervisor for any purpose.
     Available,
 
-    /// The region is reserved (may be inaccessible or should not be overwritten).
+    /// Physical memory that is reserved (may be inaccessible or should not be overwritten).
     Reserved(HwReservedMemType),
+
+    /// Memory-mapped IO.
+    Mmio(DeviceMemType),
+}
+
+impl From<HwMemRegionType> for MemType {
+    fn from(region_type: HwMemRegionType) -> MemType {
+        match region_type {
+            HwMemRegionType::Mmio(dev) => MemType::Mmio(dev),
+            _ => MemType::Ram,
+        }
+    }
 }
 
 /// Describes the purpose of a reserved region in the hardware memory mpa.
@@ -100,8 +112,8 @@ pub type Result<T> = result::Result<T, Error>;
 
 impl HwMemRegion {
     /// Returns the type of the memory region.
-    pub fn mem_type(&self) -> HwMemType {
-        self.mem_type
+    pub fn region_type(&self) -> HwMemRegionType {
+        self.region_type
     }
 
     /// Returns the 4kB page-aligned base adddress of the region.
@@ -123,19 +135,19 @@ impl HwMemRegion {
 }
 
 impl HwMemMapBuilder {
-    /// Creates an empty system memory map with a minimum region alignment of `min_alignment`.
-    /// Use `add_memory_region()` to populate it.
-    pub fn new(min_alignment: u64) -> Self {
-        assert!(PageSize::Size4k.is_aligned(min_alignment));
+    /// Creates an empty system memory map with a minimum physical memory region alignment of
+    /// `min_ram_alignment`. Use `add_memory_region()` and `add_mmio_region()` to populate it.
+    pub fn new(min_ram_alignment: u64) -> Self {
+        assert!(PageSize::Size4k.is_aligned(min_ram_alignment));
         let inner = HwMemMap {
             regions: RegionVec::default(),
-            min_alignment,
+            min_ram_alignment,
         };
         Self { inner }
     }
 
     /// Adds a range of initially-available RAM to the system map. The base address must be aligned
-    /// to `min_alignment`; `size` will be rounded down if un-aligned. Must not overlap with any
+    /// to `min_ram_alignment`; `size` will be rounded down if un-aligned. Must not overlap with any
     /// previously-added regions.
     ///
     /// Subsets of the region may later be marked as reserved by calling `reserve_region()`.
@@ -150,7 +162,7 @@ impl HwMemMapBuilder {
         let base = PageAddr::new(base).unwrap();
         let size = self.inner.align_down(size);
         let region = HwMemRegion {
-            mem_type: HwMemType::Available,
+            region_type: HwMemRegionType::Available,
             base,
             size,
         };
@@ -173,9 +185,9 @@ impl HwMemMapBuilder {
         Ok(self)
     }
 
-    /// Reserves a range of memory for the specified purpose. The range must be a subset of
+    /// Reserves a range of RAM for the specified purpose. The range must be a subset of
     /// a previously-added available memory region and must not overlap any other reserved
-    /// regions. `base` and `size` will be rounded to the nearest `min_alignment` boundary.
+    /// regions. `base` and `size` will be rounded to the nearest `min_ram_alignment` boundary.
     pub fn reserve_region(
         mut self,
         resv_type: HwReservedMemType,
@@ -183,6 +195,23 @@ impl HwMemMapBuilder {
         size: u64,
     ) -> Result<Self> {
         self.inner.reserve_region(resv_type, base, size)?;
+        Ok(self)
+    }
+
+    /// Adds a range of MMIO to the system map. The base address will be rounded down and the size
+    /// will be rounded up to a multiple of the system page size. Must not overlap with any physical
+    /// memory regions, or other MMIO regions.
+    ///
+    /// # Safety
+    ///
+    /// The region must be a valid range of MMIO and uniquely owned by `HwMemMapBuilder`.
+    pub unsafe fn add_mmio_region(
+        mut self,
+        dev_type: DeviceMemType,
+        base: SupervisorPhysAddr,
+        size: u64,
+    ) -> Result<Self> {
+        self.inner.add_mmio_region(dev_type, base, size)?;
         Ok(self)
     }
 
@@ -200,12 +229,12 @@ impl HwMemMap {
         base: SupervisorPhysAddr,
         size: u64,
     ) -> Result<()> {
-        // Unwrap ok since we align `base` to `min_alignemnt` first, which is itself guaranteed
+        // Unwrap ok since we align `base` to `min_ram_alignemnt` first, which is itself guaranteed
         // to be 4kB-aligned.
         let base = PageAddr::new(RawAddr::supervisor(self.align_down(base.bits()))).unwrap();
         let size = self.align_up(size);
         let region = HwMemRegion {
-            mem_type: HwMemType::Reserved(resv_type),
+            region_type: HwMemRegionType::Reserved(resv_type),
             base,
             size,
         };
@@ -213,7 +242,7 @@ impl HwMemMap {
             .regions
             .iter()
             .position(|other| {
-                other.mem_type() == HwMemType::Available
+                other.region_type() == HwMemRegionType::Available
                     && region.base() >= other.base()
                     && region.end() <= other.end()
             })
@@ -223,7 +252,7 @@ impl HwMemMap {
         if region.base() > self.regions[index].base() {
             let other = self.regions[index];
             let before = HwMemRegion {
-                mem_type: HwMemType::Available,
+                region_type: HwMemRegionType::Available,
                 base: other.base(),
                 size: region.base().bits() - other.base().bits(),
             };
@@ -237,7 +266,7 @@ impl HwMemMap {
         index += 1;
         if region.end() < end {
             let after = HwMemRegion {
-                mem_type: HwMemType::Available,
+                region_type: HwMemRegionType::Available,
                 base: region.end(),
                 size: end.bits() - region.end().bits(),
             };
@@ -248,6 +277,42 @@ impl HwMemMap {
         Ok(())
     }
 
+    /// Adds an MMIO region. See `HwMemMapBuilder::add_mmio_region()`.
+    ///
+    /// # Safety
+    ///
+    /// The region must be a valid range of MMIO and uniquely owned by `HwMemMapBuilder`.
+    pub unsafe fn add_mmio_region(
+        &mut self,
+        dev_type: DeviceMemType,
+        base: SupervisorPhysAddr,
+        size: u64,
+    ) -> Result<()> {
+        let base = PageAddr::with_round_down(base, PageSize::Size4k);
+        let size = PageSize::Size4k.round_up(size);
+        let region = HwMemRegion {
+            region_type: HwMemRegionType::Mmio(dev_type),
+            base,
+            size,
+        };
+        let mut index = 0;
+        for other in &self.regions {
+            if other.base() > region.base() {
+                if region.end() > other.base() {
+                    return Err(Error::OverlappingRegion);
+                }
+                break;
+            } else if region.base() < other.end() {
+                return Err(Error::OverlappingRegion);
+            }
+            index += 1;
+        }
+        self.regions
+            .try_insert(index, region)
+            .map_err(|_| Error::OutOfSpace)?;
+        Ok(())
+    }
+
     /// Returns an iterator over all regions in the memory map.
     pub fn regions(&self) -> core::slice::Iter<HwMemRegion> {
         self.regions.iter()
@@ -255,25 +320,26 @@ impl HwMemMap {
 
     /// Returns true if the value is aligned to the minimum alignment.
     fn is_aligned(&self, val: u64) -> bool {
-        val & (self.min_alignment - 1) == 0
+        val & (self.min_ram_alignment - 1) == 0
     }
 
     /// Rounds up the given value to the minimum alignment.
     fn align_up(&self, val: u64) -> u64 {
-        (val + self.min_alignment - 1) & !(self.min_alignment - 1)
+        (val + self.min_ram_alignment - 1) & !(self.min_ram_alignment - 1)
     }
 
     /// Rounds down the given value to the minimum alignment.
     fn align_down(&self, val: u64) -> u64 {
-        val & !(self.min_alignment - 1)
+        val & !(self.min_ram_alignment - 1)
     }
 }
 
-impl fmt::Display for HwMemType {
+impl fmt::Display for HwMemRegionType {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match &self {
-            HwMemType::Available => write!(f, "available"),
-            HwMemType::Reserved(r) => write!(f, "reserved ({})", r),
+            HwMemRegionType::Available => write!(f, "available"),
+            HwMemRegionType::Reserved(r) => write!(f, "reserved ({})", r),
+            HwMemRegionType::Mmio(d) => write!(f, "mmio ({})", d),
         }
     }
 }
@@ -320,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_mem() {
+    fn mmio_and_reserved_mem() {
         const REGION_SIZE: u64 = 0x4000_0000;
         let builder = unsafe {
             // Not safe -- it's a test.
@@ -332,6 +398,12 @@ mod tests {
                 .add_memory_region(RawAddr::supervisor(0x1_8000_0000), REGION_SIZE)
                 .unwrap()
                 .add_memory_region(RawAddr::supervisor(0x2_0000_0000), REGION_SIZE)
+                .unwrap()
+                .add_mmio_region(
+                    DeviceMemType::Imsic,
+                    RawAddr::supervisor(0x4000_0000),
+                    0x10_0000,
+                )
                 .unwrap()
         };
 
@@ -364,44 +436,49 @@ mod tests {
 
         let expected = vec![
             HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x4000_0000)).unwrap(),
+                size: 0x10_0000,
+                region_type: HwMemRegionType::Mmio(DeviceMemType::Imsic),
+            },
+            HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x8000_0000)).unwrap(),
                 size: REGION_SIZE,
-                mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_0000_0000)).unwrap(),
                 size: 0x1000_0000,
-                mem_type: HwMemType::Available,
+                region_type: HwMemRegionType::Available,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_1000_0000)).unwrap(),
                 size: 0x1000_0000,
-                mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_2000_0000)).unwrap(),
                 size: 0x2000_0000,
-                mem_type: HwMemType::Available,
+                region_type: HwMemRegionType::Available,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_8000_0000)).unwrap(),
                 size: 0x1000_0000,
-                mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_9000_0000)).unwrap(),
                 size: 0x3000_0000,
-                mem_type: HwMemType::Available,
+                region_type: HwMemRegionType::Available,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x2_0000_0000)).unwrap(),
                 size: 0x3000_0000,
-                mem_type: HwMemType::Available,
+                region_type: HwMemRegionType::Available,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x2_3000_0000)).unwrap(),
                 size: 0x1000_0000,
-                mem_type: HwMemType::Reserved(HwReservedMemType::FirmwareReserved),
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
             },
         ];
 
@@ -409,7 +486,7 @@ mod tests {
         for (i, j) in zipped {
             assert_eq!(i.base(), j.base());
             assert_eq!(i.size(), j.size());
-            assert_eq!(i.mem_type(), j.mem_type());
+            assert_eq!(i.region_type(), j.region_type());
         }
     }
 }

@@ -48,7 +48,7 @@ pub mod sv48x4;
 
 pub use hw_mem_map::Error as MemMapError;
 pub use hw_mem_map::Result as MemMapResult;
-pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemType, HwReservedMemType};
+pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemRegionType, HwReservedMemType};
 pub use page_table::Error as PageTableError;
 pub use page_table::PlatformPageTable;
 pub use page_table::Result as PageTableResult;

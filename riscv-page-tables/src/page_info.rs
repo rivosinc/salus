@@ -4,17 +4,19 @@
 
 use arrayvec::ArrayVec;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{PageOwnerId, PageSize, RawAddr, SequentialPages, SupervisorPageAddr};
+use riscv_pages::{
+    DeviceMemType, MemType, PageOwnerId, PageSize, RawAddr, SequentialPages, SupervisorPageAddr,
+};
 
-use crate::{HwMemMap, HwMemType, HwReservedMemType, PageTrackingError, PageTrackingResult};
+use crate::{HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, PageTrackingResult};
 
 /// Tracks the owners of a page. Ownership is nested in order to establish a "chain-of-custody"
 /// for the page.
-pub type PageOwnerVec = ArrayVec<PageOwnerId, MAX_PAGE_OWNERS>;
+type PageOwnerVec = ArrayVec<PageOwnerId, MAX_PAGE_OWNERS>;
 
-/// `PageInfo` holds the current ownership status of a page.
+/// `PageOwnership` holds the current ownership status of a page.
 #[derive(Clone, Debug)]
-pub enum PageInfo {
+enum PageOwnership {
     /// Not present, reserved, or otherwise not usable.
     Reserved,
 
@@ -34,54 +36,85 @@ pub enum PageInfo {
 /// since pages can't transition between hypervisor-owned and VM-owned post-startup.
 const MAX_PAGE_OWNERS: usize = 3;
 
+/// Holds ownership and typing details about a particular page in the system memory map.
+#[derive(Clone, Debug)]
+pub struct PageInfo {
+    mem_type: MemType,
+    ownership: PageOwnership,
+}
+
 impl PageInfo {
-    /// Creates a new `PageInfo` that is free.
+    /// Creates a new `PageInfo` representing a free RAM page.
     pub fn new() -> Self {
-        PageInfo::Free
+        Self {
+            mem_type: MemType::Ram,
+            ownership: PageOwnership::Free,
+        }
     }
 
-    /// Creates a new `PageInfo` that is initially owned by the hypervisor.
+    /// Creates a new `PageInfo` representing a RAM page that is initially owned by the hypervisor.
     pub fn new_hypervisor_owned() -> Self {
         let mut owners = PageOwnerVec::new();
         owners.push(PageOwnerId::hypervisor());
-        PageInfo::Owned(owners)
+        Self {
+            mem_type: MemType::Ram,
+            ownership: PageOwnership::Owned(owners),
+        }
     }
 
-    /// Creates a new `PageInfo` that is forever reserved.
+    /// Creates a new `PageInfo` representing a RAM page that is forever reserved.
     pub fn new_reserved() -> Self {
-        PageInfo::Reserved
+        Self {
+            mem_type: MemType::Ram,
+            ownership: PageOwnership::Reserved,
+        }
+    }
+
+    /// Creates a new `PageInfo` representing an MMIO page.
+    pub fn new_mmio(dev_type: DeviceMemType) -> Self {
+        let mut owners = PageOwnerVec::new();
+        owners.push(PageOwnerId::hypervisor());
+        Self {
+            mem_type: MemType::Mmio(dev_type),
+            ownership: PageOwnership::Owned(owners),
+        }
     }
 
     /// Returns the current owner, if it exists.
     pub fn owner(&self) -> Option<PageOwnerId> {
-        match self {
-            PageInfo::Owned(ref owners) => Some(owners[owners.len() - 1]),
+        match self.ownership {
+            PageOwnership::Owned(ref owners) => Some(owners[owners.len() - 1]),
             _ => None,
         }
     }
 
     /// Returns if the page is free.
     pub fn is_free(&self) -> bool {
-        matches!(self, PageInfo::Free)
+        matches!(self.ownership, PageOwnership::Free)
     }
 
     /// Returns if the page is marked reserved.
     pub fn is_reserved(&self) -> bool {
-        matches!(self, PageInfo::Reserved)
+        matches!(self.ownership, PageOwnership::Reserved)
+    }
+
+    /// Returns the page type.
+    pub fn mem_type(&self) -> MemType {
+        self.mem_type
     }
 
     /// Pops the current owner if there is one, returning the page to the previous owner.
     pub fn pop_owner(&mut self) -> PageTrackingResult<PageOwnerId> {
-        match self {
-            PageInfo::Owned(ref mut owners) => {
+        match self.ownership {
+            PageOwnership::Owned(ref mut owners) => {
                 if owners.len() == 1 {
                     Err(PageTrackingError::OwnerOverflow) // Can't pop the last owner.
                 } else {
                     Ok(owners.pop().expect("PageOwnerVec can't be empty"))
                 }
             }
-            PageInfo::Reserved => Err(PageTrackingError::ReservedPage),
-            PageInfo::Free => Err(PageTrackingError::UnownedPage),
+            PageOwnership::Reserved => Err(PageTrackingError::ReservedPage),
+            PageOwnership::Free => Err(PageTrackingError::UnownedPage),
         }
     }
 
@@ -102,8 +135,8 @@ impl PageInfo {
     where
         F: Fn(&PageOwnerId) -> bool,
     {
-        match self {
-            PageInfo::Owned(ref owners) => {
+        match self.ownership {
+            PageOwnership::Owned(ref owners) => {
                 // We go in reverse to start at the top of the ownership stack.
                 owners.iter().rev().find(|&o| check(o)).copied()
             }
@@ -114,24 +147,27 @@ impl PageInfo {
     /// Sets the current owner of the page while maintaining a "chain of custody" so the previous
     /// owner is known when the new owner abandons the page.
     pub fn push_owner(&mut self, owner: PageOwnerId) -> PageTrackingResult<()> {
-        match self {
-            PageInfo::Owned(ref mut owners) => owners
+        match self.ownership {
+            PageOwnership::Owned(ref mut owners) => owners
                 .try_push(owner)
                 .map_err(|_| PageTrackingError::OwnerOverflow),
-            PageInfo::Free => {
+            PageOwnership::Free => {
                 let mut owners = PageOwnerVec::new();
                 owners.push(owner);
-                *self = PageInfo::Owned(owners);
+                self.ownership = PageOwnership::Owned(owners);
                 Ok(())
             }
-            PageInfo::Reserved => Err(PageTrackingError::ReservedPage),
+            PageOwnership::Reserved => Err(PageTrackingError::ReservedPage),
         }
     }
 }
 
 impl Default for PageInfo {
     fn default() -> Self {
-        PageInfo::Free
+        Self {
+            mem_type: MemType::Ram,
+            ownership: PageOwnership::Free,
+        }
     }
 }
 
@@ -166,7 +202,7 @@ impl PageMap {
         // Find a space for the page map.
         let page_map_region = mem_map
             .regions()
-            .find(|r| r.mem_type() == HwMemType::Available && r.size() >= page_map_size)
+            .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= page_map_size)
             .expect("No free space for PageMap");
         let page_map_base = page_map_region.base().get_4k_addr();
 
@@ -203,11 +239,14 @@ impl PageMap {
     fn populate_from(&mut self, mem_map: HwMemMap) {
         // Populate the page map with the regions in the memory map.
         //
-        // All pages in available memory regions are initially free and will later become
+        // All pages in available RAM regions are initially free and will later become
         // allocated by the hypervisor (and for most pages, further deligated to the host VM).
         //
         // Pages in reserved regions are marked reserved, except for those containing the
         // host VM images, which are considered to be initially hypervisor-owned.
+        //
+        // MMIO regions are considered to be hyperviosr owned, though they may be further delegated
+        // to VMs.
         let mut current_entry = SparseMapEntry {
             base_pfn: mem_map.regions().next().unwrap().base().index(),
             num_pages: 0,
@@ -227,13 +266,16 @@ impl PageMap {
 
             let end = r.end().get_4k_addr();
             for _ in base.iter_from().take_while(|&a| a != end) {
-                match r.mem_type() {
-                    HwMemType::Available => {
+                match r.region_type() {
+                    HwMemRegionType::Available => {
                         self.pages.push(PageInfo::new());
                     }
-                    HwMemType::Reserved(HwReservedMemType::HostKernelImage)
-                    | HwMemType::Reserved(HwReservedMemType::HostInitramfsImage) => {
+                    HwMemRegionType::Reserved(HwReservedMemType::HostKernelImage)
+                    | HwMemRegionType::Reserved(HwReservedMemType::HostInitramfsImage) => {
                         self.pages.push(PageInfo::new_hypervisor_owned());
+                    }
+                    HwMemRegionType::Mmio(d) => {
+                        self.pages.push(PageInfo::new_mmio(d));
                     }
                     _ => {
                         self.pages.push(PageInfo::new_reserved());
@@ -347,6 +389,12 @@ mod tests {
             HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(RawAddr::supervisor(0x1000_0000), 0x2_0000)
                 .unwrap()
+                .add_mmio_region(
+                    DeviceMemType::Imsic,
+                    RawAddr::supervisor(0x4000_0000),
+                    0x2000,
+                )
+                .unwrap()
                 .build()
         };
         mem_map
@@ -369,10 +417,16 @@ mod tests {
         let free_addr = PageAddr::new(RawAddr::supervisor(0x1000_1000)).unwrap();
         let reserved_addr = PageAddr::new(RawAddr::supervisor(0x1000_4000)).unwrap();
         let used_addr = PageAddr::new(RawAddr::supervisor(0x1001_1000)).unwrap();
+        let mmio_addr = PageAddr::new(RawAddr::supervisor(0x4000_1000)).unwrap();
 
-        assert!(pages.get(free_addr).unwrap().is_free());
+        let free_page = pages.get(free_addr).unwrap();
+        assert!(free_page.is_free());
+        assert_eq!(free_page.mem_type(), MemType::Ram);
         assert!(pages.get(reserved_addr).unwrap().is_reserved());
         assert!(pages.get(used_addr).unwrap().owner().is_some());
+        let mmio_page = pages.get(mmio_addr).unwrap();
+        assert!(mmio_page.owner().is_some());
+        assert_eq!(mmio_page.mem_type(), MemType::Mmio(DeviceMemType::Imsic));
     }
 
     #[test]

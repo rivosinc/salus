@@ -155,7 +155,7 @@ fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
             i,
             r.base().bits(),
             r.end().bits() - 1,
-            r.mem_type()
+            r.region_type()
         );
     }
 
@@ -168,7 +168,7 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
 
     let heap_base = mem_map
         .regions()
-        .find(|r| r.mem_type() == HwMemType::Available && r.size() >= HEAP_SIZE)
+        .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= HEAP_SIZE)
         .map(|r| r.base())
         .expect("Not enough free memory for hypervisor heap");
     mem_map
@@ -426,11 +426,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Find where QEMU loaded the host kernel image.
     let host_kernel = *mem_map
         .regions()
-        .find(|r| r.mem_type() == HwMemType::Reserved(HwReservedMemType::HostKernelImage))
+        .find(|r| r.region_type() == HwMemRegionType::Reserved(HwReservedMemType::HostKernelImage))
         .expect("No host kernel image");
     let host_initramfs = mem_map
         .regions()
-        .find(|r| r.mem_type() == HwMemType::Reserved(HwReservedMemType::HostInitramfsImage))
+        .find(|r| {
+            r.region_type() == HwMemRegionType::Reserved(HwReservedMemType::HostInitramfsImage)
+        })
         .cloned();
 
     let heap = create_heap(&mut mem_map);

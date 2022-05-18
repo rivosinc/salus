@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 use core::alloc::Allocator;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{Page, PageOwnerId, PageSize, PhysPage, SequentialPages, SupervisorPageAddr};
+use riscv_pages::{
+    MemType, Page, PageOwnerId, PageSize, PhysPage, SequentialPages, SupervisorPageAddr,
+};
 
 use crate::page_info::PageMap;
 use crate::HwMemMap;
@@ -70,6 +72,12 @@ impl PageStateInner {
     fn owner(&self, addr: SupervisorPageAddr) -> Option<PageOwnerId> {
         let info = self.pages.get(addr)?;
         info.find_owner(|id| self.active_guests.contains(id))
+    }
+
+    // Returns the type of memory the page represents.
+    fn mem_type(&self, addr: SupervisorPageAddr) -> Option<MemType> {
+        let info = self.pages.get(addr)?;
+        Some(info.mem_type())
     }
 }
 
@@ -163,6 +171,12 @@ impl PageState {
     pub fn owner(&self, addr: SupervisorPageAddr) -> Option<PageOwnerId> {
         let phys_pages = self.inner.lock();
         phys_pages.owner(addr)
+    }
+
+    /// Returns the type of memory the page represents.
+    pub fn mem_type(&self, addr: SupervisorPageAddr) -> Option<MemType> {
+        let phys_pages = self.inner.lock();
+        phys_pages.mem_type(addr)
     }
 }
 
@@ -259,9 +273,8 @@ impl<A: Allocator> HypPageAlloc<A> {
             .expect("Failed to take ownership");
 
         let page = unsafe {
-            // Safe to create a page here as all memory from next_page to end of ram is owned by
-            // self and the ownership of memory backing the new page is uniquely assigned to the
-            // page.
+            // Safe to create a page here since `next_page` was previously free, implying that we
+            // had unique ownership of the page and that it is an ordinary RAM page.
             Page::new(self.next_page)
         };
         // unwrap here because if physical memory runs out before setting up basic hypervisor

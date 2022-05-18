@@ -12,13 +12,15 @@
 #[macro_use]
 extern crate std;
 
+mod memory_type;
 mod page;
 mod page_owner_id;
 mod sequential_pages;
 
+pub use memory_type::{DeviceMemType, MemType};
 pub use page::{
-    CleanPage, GuestPageAddr, GuestPfn, GuestPhysAddr, Page, PageAddr, PageSize, Pfn, RawAddr,
-    SupervisorPageAddr, SupervisorPfn, SupervisorPhysAddr, UnmappedPage,
+    CleanPage, GuestPageAddr, GuestPfn, GuestPhysAddr, Page, PageAddr, PageSize, Pfn, PhysPage,
+    RawAddr, SupervisorPageAddr, SupervisorPfn, SupervisorPhysAddr, UnmappedPage, UnmappedPhysPage,
 };
 pub use page_owner_id::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys};
 pub use sequential_pages::{Error as SequentialPagesError, SeqPageIter, SequentialPages};

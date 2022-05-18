@@ -5,7 +5,7 @@
 /// Represents pages of memory.
 use core::slice;
 
-use crate::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys};
+use crate::{AddressSpace, GuestPhys, MemType, PageOwnerId, SupervisorPhys};
 
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
@@ -231,20 +231,22 @@ impl<AS: AddressSpace> Iterator for PageAddrIter<AS> {
 }
 
 /// A page that was unmapped from the guest.
-pub struct UnmappedPage(Page);
+pub struct UnmappedPhysPage<P: PhysPage>(P);
 
-impl UnmappedPage {
-    /// Creates a new `UnmappedPage` wrapping the given page.
-    pub fn new(page: Page) -> Self {
+impl<P: PhysPage> UnmappedPhysPage<P> {
+    /// Creates a new `UnmappedPhysPage` wrapping the given page.
+    pub fn new(page: P) -> Self {
         Self(page)
     }
 
-    /// Returns the wrapped `Page`. Note that the page retains any contents it had when it was
+    /// Returns the wrapped `PhysPage`. Note that the page retains any contents it had when it was
     /// mapped.
-    pub fn to_page(self) -> Page {
+    pub fn to_page(self) -> P {
         self.0
     }
 }
+
+pub type UnmappedPage = UnmappedPhysPage<Page>;
 
 /// The page number of a page.
 #[derive(Copy, Clone)]
@@ -281,7 +283,37 @@ impl<AS: AddressSpace> From<PageAddr<AS>> for Pfn<AS> {
     }
 }
 
-/// Base type representing a page, generic for different sizes.
+/// Trait representing a page in the physical address space. The page may be backed by RAM, or
+/// a device (for MMIO).
+pub trait PhysPage {
+    /// Creates a new `PhysPage` at the specified address.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the page referenced by `addr` is uniquely owned and not
+    /// mapped into the address space of any VMs. Furthermore, the backing memory must be of the
+    /// same type as this `PhysPage` is intended to represent (e.g. ordinary RAM for `Page`).
+    unsafe fn new(addr: SupervisorPageAddr) -> Self;
+
+    /// Returns the base address of this page.
+    fn addr(&self) -> SupervisorPageAddr;
+
+    /// Returns the type of memory this represents.
+    fn mem_type() -> MemType;
+
+    /// Returns the page size of this page.
+    fn size(&self) -> PageSize {
+        self.addr().size()
+    }
+
+    /// Returns the page frame number (PFN) of this page.
+    fn pfn(&self) -> SupervisorPfn {
+        self.addr().pfn()
+    }
+}
+
+/// Base type representing a page of RAM.
+///
 /// `Page` is a key abstraction; it owns all memory of the backing page.
 /// This guarantee allows the memory within pages to be assigned to virtual machines, and the taken
 /// back to be uniquely owned by a `Page` here in the hypervisor.
@@ -290,14 +322,6 @@ pub struct Page {
 }
 
 impl Page {
-    /// # Safety
-    /// The caller must guarantee that memory from `addr` to `addr`+PageSize if uniquely owned.
-    /// `new` is intended to be used _only_ when the backing memory region is unmapped from all
-    /// virutal machines and can be uniquely owned by the resulting `Page`.
-    pub unsafe fn new(addr: SupervisorPageAddr) -> Self {
-        Self { addr }
-    }
-
     /// Test-only function that creates a page by allocating extra memory for alignement, then
     /// leaking all the memory. While technically "safe" it does leak all that memory so use with
     /// caution.
@@ -315,16 +339,6 @@ impl Page {
         };
         std::mem::forget(mem);
         page
-    }
-
-    /// Returns the starting address of this page.
-    pub fn addr(&self) -> SupervisorPageAddr {
-        self.addr
-    }
-
-    /// Returns the page frame number (PFN) of the page.
-    pub fn pfn(&self) -> SupervisorPfn {
-        self.addr.pfn()
     }
 
     /// Returns the u64 at the given index in the page.
@@ -351,12 +365,32 @@ impl Page {
         }
     }
 
+    /// Returns the contents of the page as a slice of bytes.
     pub fn as_bytes(&self) -> &[u8] {
         let base_ptr = self.addr.bits() as *const u8;
         // Safe because the borrow cannot outlive the lifetime
         // of the underlying page, and the upper bound is
         // guaranteed to be within the size of the page
         unsafe { slice::from_raw_parts(base_ptr, self.addr.size() as usize) }
+    }
+}
+
+impl PhysPage for Page {
+    /// Creates a new `Page` representing a page of ordinary RAM at `addr`.
+    ///
+    /// # Safety
+    ///
+    /// See PhysPage::new(). `addr` must refer to a page of ordinary, idempotent system RAM.
+    unsafe fn new(addr: SupervisorPageAddr) -> Self {
+        Self { addr }
+    }
+
+    fn addr(&self) -> SupervisorPageAddr {
+        self.addr
+    }
+
+    fn mem_type() -> MemType {
+        MemType::Ram
     }
 }
 

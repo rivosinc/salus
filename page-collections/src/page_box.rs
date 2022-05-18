@@ -7,7 +7,7 @@ use core::fmt::{self, Display};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
-use riscv_pages::{Page, PageAddr, PageSize, RawAddr};
+use riscv_pages::{Page, PageAddr, PageSize, PhysPage, RawAddr};
 
 /// A PageBox is a Box-like container that holds a backing page filled with the given type.
 /// Because Salus borrows pages from the host for data it is necessary to track the backing pages

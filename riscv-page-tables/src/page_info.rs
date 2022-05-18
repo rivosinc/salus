@@ -292,7 +292,7 @@ mod tests {
     use super::*;
 
     use crate::HwMemMapBuilder;
-    use riscv_pages::{Page, PageAddr, RawAddr, SequentialPages};
+    use riscv_pages::{Page, PageAddr, PhysPage, RawAddr, SequentialPages};
 
     fn stub_page_vec() -> PageVec<PageInfo> {
         let backing_mem = vec![0u8; 8192];

@@ -156,7 +156,7 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    use riscv_pages::Page;
+    use riscv_pages::{Page, PhysPage};
 
     #[test]
     fn basic() {

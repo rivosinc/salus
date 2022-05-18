@@ -6,8 +6,8 @@ use core::marker::PhantomData;
 
 use data_measure::data_measure::DataMeasure;
 use riscv_pages::{
-    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageAddr, PageOwnerId, PageSize, RawAddr,
-    SequentialPages, SupervisorPageAddr, UnmappedPage,
+    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageAddr, PageOwnerId, PageSize, PhysPage,
+    RawAddr, SequentialPages, SupervisorPageAddr, UnmappedPage,
 };
 
 use crate::page_tracking::PageState;

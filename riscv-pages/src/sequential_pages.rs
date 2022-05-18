@@ -4,7 +4,7 @@
 
 use core::fmt;
 
-use crate::page::{Page, PageSize, SupervisorPageAddr};
+use crate::page::{Page, PageSize, PhysPage, SupervisorPageAddr};
 
 /// `SequentialPages` holds a range of consecutive pages of the same size. Each page's address is one
 /// page after the previous. This forms a contiguous area of memory suitable for holding an array or

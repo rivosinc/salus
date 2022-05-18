@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use core::alloc::Allocator;
 use riscv_page_tables::{HypPageAlloc, PageState, PlatformPageTable};
 use riscv_pages::{
-    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, RawAddr, SeqPageIter,
-    SequentialPages,
+    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, PhysPage, RawAddr,
+    SeqPageIter, SequentialPages,
 };
 
 use crate::sha256_measure::Sha256Measure;

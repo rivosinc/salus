@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::alloc::Allocator;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{Page, PageOwnerId, PageSize, SequentialPages, SupervisorPageAddr};
+use riscv_pages::{Page, PageOwnerId, PageSize, PhysPage, SequentialPages, SupervisorPageAddr};
 
 use crate::page_info::PageMap;
 use crate::HwMemMap;

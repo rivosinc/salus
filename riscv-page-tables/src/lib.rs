@@ -128,22 +128,20 @@ mod tests {
                 .set_page_owner(page.addr(), guest_page_table.page_owner_id())
                 .is_ok());
             assert!(guest_page_table
-                .map_page(RawAddr::from(gpa), page, &mut || pte_pages.next(), None)
+                .map_page(RawAddr::from(gpa), page, &mut || pte_pages.next())
                 .is_ok());
         }
-        // The invalidated page should retain its contents.
-        let dirty_page = guest_page_table
-            .invalidate_page(RawAddr::from(gpa_base))
+        let dirty_page: Page = guest_page_table
+            .unmap_page(RawAddr::from(gpa_base))
             .unwrap()
             .to_page();
         assert_eq!(dirty_page.addr(), page_addrs[0]);
         assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
-        // The unmapped page should be claen.
-        let clean_page = Page::from(
+        let clean_page = Page::from(CleanPage::from(
             guest_page_table
                 .unmap_page(RawAddr::from(gpa_base.checked_add_pages(1).unwrap()))
                 .unwrap(),
-        );
+        ));
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
     }

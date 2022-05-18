@@ -118,7 +118,7 @@ impl<T: PlatformPageTable> VmPages<T> {
         let mut phys_pages = self.root.phys_pages();
         let unmapped_pages = self
             .root
-            .invalidate_range(from_addr, count)
+            .invalidate_range::<Page>(from_addr, count)
             .map_err(Error::Paging)?;
         for (unmapped_page, guest_addr) in unmapped_pages.zip(to_addr.iter_from()) {
             let page = unmapped_page.to_page();
@@ -254,11 +254,11 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
             root.phys_pages()
                 .set_page_owner(page.addr(), root.page_owner_id())
                 .unwrap();
-            root.map_page(
+            root.map_page_with_measurement(
                 RawAddr::from(vm_addr),
                 page,
                 &mut || pte_pages.next(),
-                Some(&mut self.measurement),
+                &mut self.measurement,
             )
             .unwrap();
         }
@@ -282,7 +282,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
             root.phys_pages()
                 .set_page_owner(page.addr(), root.page_owner_id())
                 .unwrap();
-            root.map_page(RawAddr::from(vm_addr), page, &mut || pte_pages.next(), None)
+            root.map_page(RawAddr::from(vm_addr), page, &mut || pte_pages.next())
                 .unwrap();
         }
 
@@ -340,11 +340,11 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
     pub fn add_data_page(&mut self, gpa: GuestPageAddr, page: Page) -> Result<()> {
         self.measurement.add_page(gpa.bits(), page.as_bytes());
         self.root
-            .map_page(
+            .map_page_with_measurement(
                 RawAddr::from(gpa),
                 page,
                 &mut || self.pte_pages.pop(),
-                Some(&mut self.measurement),
+                &mut self.measurement,
             )
             .map_err(Error::Paging)
     }
@@ -353,7 +353,7 @@ impl<T: PlatformPageTable> GuestRootBuilder<T> {
     /// Currently only supports 4k pages.
     pub fn add_zero_page(&mut self, gpa: GuestPageAddr, page: Page) -> Result<()> {
         self.root
-            .map_page(RawAddr::from(gpa), page, &mut || self.pte_pages.pop(), None)
+            .map_page(RawAddr::from(gpa), page, &mut || self.pte_pages.pop())
             .map_err(Error::Paging)
     }
 

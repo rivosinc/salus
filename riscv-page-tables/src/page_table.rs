@@ -6,8 +6,8 @@ use core::marker::PhantomData;
 
 use data_measure::data_measure::DataMeasure;
 use riscv_pages::{
-    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageAddr, PageOwnerId, PageSize, PhysPage,
-    RawAddr, SequentialPages, SupervisorPageAddr, UnmappedPage,
+    GuestPageAddr, GuestPhysAddr, Page, PageAddr, PageOwnerId, PageSize, PhysPage, RawAddr,
+    SequentialPages, SupervisorPageAddr, UnmappedPhysPage,
 };
 
 use crate::page_tracking::PageState;
@@ -27,6 +27,7 @@ pub enum Error {
     TableEntryNotLeaf,
     PageSizeNotSupported(PageSize),
     MappingExists,
+    PageTypeMismatch,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -66,6 +67,15 @@ impl<'a, T: PlatformPageTable> TableEntryMut<'a, T> {
             TableEntryMut::Invalid(pte, level)
         } else {
             TableEntryMut::Valid(ValidTableEntryMut::from_pte(pte, level))
+        }
+    }
+
+    /// Returns the entry as a `ValidTableEntryMut` if it's a valid PTE.
+    pub fn as_valid_entry(entry: TableEntryMut<'a, T>) -> Option<ValidTableEntryMut<'a, T>> {
+        if let TableEntryMut::Valid(v) = entry {
+            Some(v)
+        } else {
+            None
         }
     }
 }
@@ -110,15 +120,31 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
         }
     }
 
+    /// Returns the supervisor physical address mapped by this entry or `None` if it is a table
+    /// pointer.
+    pub fn page_addr(&self) -> Option<SupervisorPageAddr> {
+        if let ValidTableEntryMut::Leaf(pte, level) = self {
+            PageAddr::from_pfn(pte.pfn(), level.leaf_page_size())
+        } else {
+            None
+        }
+    }
+
     /// Take the page out of the page table that owns it and return it.
     /// Returns the page if a valid leaf, otherwise, None.
-    pub fn take_page(self) -> Option<Page> {
-        if let ValidTableEntryMut::Leaf(pte, level) = self {
-            let page = unsafe {
-                // Safe because the page table ownes this page and is giving up ownership by
-                // returning it.
-                Page::new(PageAddr::from_pfn(pte.pfn(), level.leaf_page_size())?)
-            };
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that this page table entry points to a page of memory of the
+    /// same type as `P`.
+    pub unsafe fn take_page<P: PhysPage>(self) -> Option<P> {
+        let addr = self.page_addr()?;
+        if let ValidTableEntryMut::Leaf(pte, _) = self {
+            // The page is guaranteed to be owned by this page table (and by extension the
+            // root `PlatformPageTable`), so the safety requirements of `P::new()` are partially
+            // met. It's up to the caller of `take_page()` to ensure the page is of the correct
+            // type.
+            let page = P::new(addr);
             pte.clear();
             Some(page)
         } else {
@@ -128,13 +154,15 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
 
     /// Mark the page invalid in the page table that owns it and return it.
     /// Returns the page if a valid leaf, otherwise, None.
-    pub fn invalidate_page(self) -> Option<Page> {
-        if let ValidTableEntryMut::Leaf(pte, level) = self {
-            let page = unsafe {
-                // Safe because the page table owns this page and is giving up ownership by
-                // returning it.
-                Page::new(PageAddr::from_pfn(pte.pfn(), level.leaf_page_size())?)
-            };
+    ///
+    /// # Safety
+    ///
+    /// See the safety requirements for `take_page()`.
+    pub unsafe fn invalidate_page<P: PhysPage>(self) -> Option<P> {
+        let addr = self.page_addr()?;
+        if let ValidTableEntryMut::Leaf(pte, _) = self {
+            // See comments above in `take_page()`.
+            let page = P::new(addr);
             pte.invalidate();
             Some(page)
         } else {
@@ -144,7 +172,11 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
 
     /// Writes the given data at `offset` of the mapped page.
     /// Uses volatile access as the VM where this page is mapped may modify it at any time.
-    pub fn write_to_page(&self, offset: u64, bytes: &[u8]) -> Result<()> {
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that this entry points to a page of ordinary system RAM.
+    pub unsafe fn write_to_page(&self, offset: u64, bytes: &[u8]) -> Result<()> {
         if let ValidTableEntryMut::Leaf(pte, level) = self {
             let last_offset = offset
                 .checked_add(bytes.len() as u64)
@@ -155,11 +187,9 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
                     .unwrap()
                     .bits() as *mut u8;
                 for (i, c) in bytes.iter().enumerate() {
-                    unsafe {
-                        // Safe because the page table owns this page and bounds checks were done
-                        // above.
-                        core::ptr::write_volatile(spa.offset(offset as isize + i as isize), *c);
-                    }
+                    // Safe because the page table owns this page and bounds checks were done
+                    // above. Caller must guarantee typing of the memory.
+                    core::ptr::write_volatile(spa.offset(offset as isize + i as isize), *c);
                 }
                 Ok(())
             } else {
@@ -225,7 +255,12 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
 
     /// Map a leaf entry such that the given `gpa` will map to `spa` after translation, with the
     /// specified permissions.
-    pub fn map_leaf(
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `spa` references a page uniquely owned by the root
+    /// `PlatformPageTabel`.
+    pub unsafe fn map_leaf(
         &mut self,
         gpa: GuestPhysAddr,
         spa: SupervisorPageAddr,
@@ -336,36 +371,49 @@ pub trait PlatformPageTable: Sized {
     /// Returns the owner Id for this page table.
     fn page_owner_id(&self) -> PageOwnerId;
 
-    // TODO - page permissions
-    // TODO - generic enough to work with satp in addition to hgatp
-    /// Maps a page for translation with address `gpa`
-    /// Optionally extends measurements
-    fn map_page(
+    /// Maps a page for translation with address `gpa`, using `get_pte_page` to fetch new page-table
+    /// pages if necessary.
+    ///
+    /// TODO: Page permissions.
+    /// TODO: Generic enough to work with (V)S-stage tables in addition to G-stage.
+    fn map_page<P: PhysPage>(
+        &mut self,
+        gpa: GuestPhysAddr,
+        page_to_map: P,
+        get_pte_page: &mut dyn FnMut() -> Option<Page>,
+    ) -> Result<()>;
+
+    /// Same as `map_page()`, but also extends `data_measure` with the address and contents of the
+    /// page to be mapped.
+    fn map_page_with_measurement(
         &mut self,
         gpa: GuestPhysAddr,
         page_to_map: Page,
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
-        data_measure: Option<&mut dyn DataMeasure>,
+        data_measure: &mut dyn DataMeasure,
     ) -> Result<()>;
 
-    /// Unmaps, wipes clean, and returns the host page of the given guest address if that address is
-    /// mapped.
-    fn unmap_page(&mut self, gpa: GuestPhysAddr) -> Result<CleanPage>;
+    /// Invalidates and clears the PTE mapping `gpa`, returning the mapped host page.
+    fn unmap_page<P: PhysPage>(&mut self, gpa: GuestPhysAddr) -> Result<UnmappedPhysPage<P>>;
 
-    /// Like `unmap_page` but leaves the entry in the PTE, marking it as invalid.
-    fn invalidate_page(&mut self, gpa: GuestPhysAddr) -> Result<UnmappedPage>;
-
-    /// Returns an iterator to unmapped pages for the given range.
-    /// Guarantees that the full range of pages can be unmapped.
-    fn unmap_range(&mut self, addr: GuestPageAddr, num_pages: u64) -> Result<UnmapIter<Self>>;
+    /// Like `unmap_page` but leaves the PFN in the PTE intact.
+    fn invalidate_page<P: PhysPage>(&mut self, gpa: GuestPhysAddr) -> Result<UnmappedPhysPage<P>>;
 
     /// Returns an iterator to unmapped pages for the given range.
     /// Guarantees that the full range of pages can be unmapped.
-    fn invalidate_range(
+    fn unmap_range<P: PhysPage>(
         &mut self,
         addr: GuestPageAddr,
         num_pages: u64,
-    ) -> Result<InvalidateIter<Self>>;
+    ) -> Result<UnmapIter<Self, P>>;
+
+    /// Returns an iterator to invalidated pages for the given range.
+    /// Guarantees that the full range of pages can be unmapped.
+    fn invalidate_range<P: PhysPage>(
+        &mut self,
+        addr: GuestPageAddr,
+        num_pages: u64,
+    ) -> Result<InvalidateIter<Self, P>>;
 
     /// Returns the address of the top level page table.
     /// This is the value that should be written to satp/hgatp to start using the page tables.
@@ -397,20 +445,26 @@ pub trait PlatformPageTable: Sized {
     ) -> Result<()>;
 }
 
-pub struct UnmapIter<'a, T: PlatformPageTable> {
+pub struct UnmapIter<'a, T: PlatformPageTable, P: PhysPage> {
     owner: &'a mut T,
     curr: GuestPageAddr,
     count: u64,
+    phantom: PhantomData<P>,
 }
 
-impl<'a, T: PlatformPageTable> UnmapIter<'a, T> {
+impl<'a, T: PlatformPageTable, P: PhysPage> UnmapIter<'a, T, P> {
     pub fn new(owner: &'a mut T, curr: GuestPageAddr, count: u64) -> Self {
-        Self { owner, curr, count }
+        Self {
+            owner,
+            curr,
+            count,
+            phantom: PhantomData,
+        }
     }
 }
 
-impl<'a, T: PlatformPageTable> Iterator for UnmapIter<'a, T> {
-    type Item = CleanPage;
+impl<'a, T: PlatformPageTable, P: PhysPage> Iterator for UnmapIter<'a, T, P> {
+    type Item = UnmappedPhysPage<P>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == 0 {
@@ -424,20 +478,26 @@ impl<'a, T: PlatformPageTable> Iterator for UnmapIter<'a, T> {
     }
 }
 
-pub struct InvalidateIter<'a, T: PlatformPageTable> {
+pub struct InvalidateIter<'a, T: PlatformPageTable, P: PhysPage> {
     owner: &'a mut T,
     curr: GuestPageAddr,
     count: u64,
+    phantom: PhantomData<P>,
 }
 
-impl<'a, T: PlatformPageTable> InvalidateIter<'a, T> {
+impl<'a, T: PlatformPageTable, P: PhysPage> InvalidateIter<'a, T, P> {
     pub fn new(owner: &'a mut T, curr: GuestPageAddr, count: u64) -> Self {
-        Self { owner, curr, count }
+        Self {
+            owner,
+            curr,
+            count,
+            phantom: PhantomData,
+        }
     }
 }
 
-impl<'a, T: PlatformPageTable> Iterator for InvalidateIter<'a, T> {
-    type Item = UnmappedPage;
+impl<'a, T: PlatformPageTable, P: PhysPage> Iterator for InvalidateIter<'a, T, P> {
+    type Item = UnmappedPhysPage<P>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == 0 {

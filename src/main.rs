@@ -13,14 +13,13 @@
     const_ptr_offset_from
 )]
 
-use core::alloc::{Allocator, GlobalAlloc, Layout};
-use core::slice;
+use core::alloc::{GlobalAlloc, Layout};
 
 extern crate alloc;
 
 mod abort;
 mod asm;
-mod host_dt_builder;
+mod host_vm_loader;
 mod print_util;
 mod sha256_measure;
 mod trap;
@@ -28,9 +27,9 @@ mod vm;
 mod vm_pages;
 
 use abort::abort;
-use device_tree::{DeviceTree, DeviceTreeSerializer, Fdt};
+use device_tree::{DeviceTree, Fdt};
 use drivers::CpuInfo;
-use host_dt_builder::HostDtBuilder;
+use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use print_util::*;
 use riscv_page_tables::*;
@@ -38,7 +37,6 @@ use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
 use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
 use vm::Host;
-use vm_pages::HostRootBuilder;
 
 extern "C" {
     static _start: u8;
@@ -187,171 +185,6 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
     HypAlloc::from_pages(pages)
 }
 
-/// Loads a host VM with the given kernel & initramfs images, passing a patched version of the
-/// hypervisor device-tree to the host kernel. Uses `hyp_pages` to allocate any other
-/// hypervisor-internal structures, consuming the rest to map into the host VM.
-///
-/// In order to allow the host VM to allocate physically-aligned blocks necessary for guest VM
-/// creation (specifically, the root of the G-stage page-table), we guarantee that each
-/// contiguous T::TOP_LEVEL_ALIGN block of the guest physical address space of the host VM maps to
-/// a contiguous T::TOP_LEVEL_ALIGN block of the host physical address space.
-fn load_host_vm<T, A>(
-    hyp_dt: DeviceTree<A>,
-    host_kernel: HwMemRegion,
-    host_initramfs: Option<HwMemRegion>,
-    mut hyp_pages: HypPageAlloc<A>,
-) -> Host<T>
-where
-    T: PlatformPageTable,
-    A: Allocator + Clone,
-{
-    // Reserve pages for tracking the host's guests.
-    let host_guests_pages = hyp_pages.take_pages(2);
-
-    // Reserve a contiguous chunk for the host's FDT. We assume it will be no bigger than the size
-    // of the hypervisor's FDT and we align it to `T::TOP_LEVEL_ALIGN` to maintain the contiguous
-    // mapping guarantee from GPA -> HPA mentioned above.
-    let host_fdt_size = {
-        let size = DeviceTreeSerializer::new(&hyp_dt).output_size();
-        ((size as u64) + T::TOP_LEVEL_ALIGN - 1) & !(T::TOP_LEVEL_ALIGN - 1)
-    };
-    let num_fdt_pages = host_fdt_size / PageSize::Size4k as u64;
-    let host_fdt_pages =
-        hyp_pages.take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
-
-    // We use the size of our (the hypervisor's) physical address to estimate the size of the
-    // host's guest phsyical address space since we build the host's address space to match the
-    // actual physical address space, but with the holes (for hypervisor memory, other reserved
-    // regions) removed. This results in a bit of an overestimate for determining the number of
-    // page-table pages, but we should expect the holes to be pretty small.
-    //
-    // TODO: Support discontiguous physical memory.
-    let (phys_mem_base, phys_mem_size) = {
-        let node = hyp_dt
-            .iter()
-            .find(|n| n.name().starts_with("memory"))
-            .unwrap();
-        let mut reg = node
-            .props()
-            .find(|p| p.name() == "reg")
-            .unwrap()
-            .value_u64();
-        (reg.next().unwrap(), reg.next().unwrap())
-    };
-
-    let (host_pages, mut host_root_builder) =
-        HostRootBuilder::<T>::from_hyp_mem(hyp_pages, phys_mem_size);
-
-    // Now that the hypervisor is done claiming memory, determine the actual size of the host's
-    // address space.
-    let host_ram_size = host_pages.iter().fold(0, |acc, r| acc + r.length_bytes())
-        + host_fdt_pages.length_bytes()
-        + host_kernel.size()
-        + host_initramfs.map(|r| r.size()).unwrap_or(0);
-    let host_ram_base = phys_mem_base;
-
-    // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
-    //
-    // TODO: Kernel offset should be pulled from the header in the kernel image.
-    const KERNEL_OFFSET: u64 = 0x20_0000;
-    const INITRAMFS_OFFSET: u64 = KERNEL_OFFSET + 0x800_0000;
-    // Assuming RAM base at 2GB, ends up at 3GB - 16MB which is consistent with QEMU.
-    const FDT_OFFSET: u64 = 0x3f00_0000;
-    assert!(host_ram_size >= FDT_OFFSET + host_fdt_pages.length_bytes());
-
-    // Construct a stripped-down device-tree for the host VM.
-    let mut host_dt_builder = HostDtBuilder::new(&hyp_dt)
-        .unwrap()
-        .add_memory_node(host_ram_base, host_ram_size)
-        .unwrap()
-        .add_cpu_nodes()
-        .unwrap();
-    if let Some(r) = host_initramfs {
-        host_dt_builder = host_dt_builder
-            .set_initramfs_addr(
-                host_ram_base.checked_add(INITRAMFS_OFFSET).unwrap(),
-                r.size(),
-            )
-            .unwrap();
-    }
-
-    // TODO: Add IMSIC & PCIe nodes.
-    let host_dt = host_dt_builder.tree();
-
-    println!("Host DT: {}", host_dt);
-
-    // Serialize the device-tree.
-    let dt_writer = DeviceTreeSerializer::new(&host_dt);
-    assert!(dt_writer.output_size() <= host_fdt_pages.length_bytes().try_into().unwrap());
-    let host_fdt_slice = unsafe {
-        // Safe because we own these pages.
-        slice::from_raw_parts_mut(
-            host_fdt_pages.base().bits() as *mut u8,
-            host_fdt_pages.length_bytes().try_into().unwrap(),
-        )
-    };
-    dt_writer.write_to(host_fdt_slice);
-
-    // HostRootBuilder guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned
-    // block, and because we built the HwMemMap with a minimum region alignment of T::TOP_LEVEL_ALIGN
-    // any discontiguous ranges are also guaranteed to be aligned.
-    let mut host_pages_iter = host_pages.into_iter().flatten();
-
-    // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
-    let mut current_gpa =
-        PageAddr::new(RawAddr::guest(host_ram_base, PageOwnerId::host())).unwrap();
-    let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
-    host_root_builder = host_root_builder.add_4k_pages(
-        current_gpa,
-        host_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
-    );
-    current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
-
-    let num_kernel_pages = host_kernel.size() / PageSize::Size4k as u64;
-    let kernel_pages = unsafe {
-        // Safe because HwMemMap reserved this region.
-        SequentialPages::from_mem_range(host_kernel.base().get_4k_addr(), num_kernel_pages)
-    };
-    host_root_builder = host_root_builder.add_4k_data_pages(current_gpa, kernel_pages.into_iter());
-    current_gpa = current_gpa.checked_add_pages(num_kernel_pages).unwrap();
-
-    if let Some(r) = host_initramfs {
-        let num_pages =
-            (INITRAMFS_OFFSET - (KERNEL_OFFSET + host_kernel.size())) / PageSize::Size4k as u64;
-        host_root_builder = host_root_builder.add_4k_pages(
-            current_gpa,
-            host_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
-        );
-        current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
-
-        let num_initramfs_pages = r.size() / PageSize::Size4k as u64;
-        let initramfs_pages = unsafe {
-            // Safe because HwMemMap reserved this region.
-            SequentialPages::from_mem_range(r.base().get_4k_addr(), num_initramfs_pages)
-        };
-        host_root_builder =
-            host_root_builder.add_4k_data_pages(current_gpa, initramfs_pages.into_iter());
-        current_gpa = current_gpa.checked_add_pages(num_initramfs_pages).unwrap();
-    }
-
-    let num_pages = (FDT_OFFSET - (current_gpa.bits() - host_ram_base)) / PageSize::Size4k as u64;
-    host_root_builder = host_root_builder.add_4k_pages(
-        current_gpa,
-        host_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
-    );
-    current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
-
-    host_root_builder =
-        host_root_builder.add_4k_data_pages(current_gpa, host_fdt_pages.into_iter());
-    current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
-
-    host_root_builder = host_root_builder.add_4k_pages(current_gpa, host_pages_iter);
-    let mut host = Host::new(host_root_builder.create_host(), host_guests_pages);
-    host.add_device_tree(host_ram_base + FDT_OFFSET);
-    host.set_entry_address(host_ram_base + KERNEL_OFFSET);
-    host
-}
-
 /// Initialize (H)S-level CSRs to a reasonable state.
 fn setup_csrs() {
     // Clear and disable any interupts.
@@ -462,8 +295,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // into the host VM.
     let hyp_mem = HypPageAlloc::new(mem_map, &heap);
 
-    // Now build the host VM's address space.
-    let mut host: Host<Sv48x4> = load_host_vm(hyp_dt, host_kernel, host_initramfs, hyp_mem);
+    // Now load the host VM.
+    let mut host: Host<Sv48x4> = HostVmLoader::new(hyp_dt, host_kernel, host_initramfs, hyp_mem)
+        .build_device_tree()
+        .build_address_space();
 
     let _ = host.run(hart_id);
 

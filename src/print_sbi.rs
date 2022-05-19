@@ -100,6 +100,7 @@ impl core::fmt::Write for SbiConsoleDriver {
 }
 
 /// Writes a string without formatting to the console.
+#[allow(dead_code)] // Fixes spurious clippy warning
 pub fn console_write_str(s: &str) {
     // Safety: Depending on the safe usage of `use_as_console`, CONSOLE_DRIVER will only be mutated
     // once before any users of the console, making the global safe to access.

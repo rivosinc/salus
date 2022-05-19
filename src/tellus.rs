@@ -52,6 +52,14 @@ pub fn poweroff() -> ! {
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
+    const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
+    const PAGE_SIZE_4K: u64 = 4096;
+    const NUM_TEE_CREATE_PAGES: u64 = 6;
+    const NUM_TEE_PTE_PAGES: u64 = 10;
+    const NUM_GUEST_DATA_PAGES: u64 = 10;
+    const NUM_GUEST_ZERO_PAGES: u64 = 10;
+    const NUM_GUEST_PAD_PAGES: u64 = 32;
+
     if hart_id != 0 {
         // TODO handle more than 1 cpu
         abort();
@@ -64,7 +72,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     }
     console_write_str("Tellus: Booting the test VM\n");
 
-    // Safe becasue we trust the host to boot with a valid fdt_addr pass in register a1.
+    // Safe because we trust the host to boot with a valid fdt_addr pass in register a1.
     let fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {
         Ok(f) => f,
         Err(e) => panic!("Bad FDT from hypervisor: {}", e),
@@ -81,49 +89,71 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCreate(next_page));
     let vmid = ecall_send(&msg).expect("Tellus - TvmCreate returned error");
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");
-    next_page += 4096 * 6;
+    next_page += PAGE_SIZE_4K * NUM_TEE_CREATE_PAGES;
 
     // Add pages for the page table
-    let num_pte_pages = 10;
     let msg = SbiMessage::Tee(sbi::TeeFunction::AddPageTablePages {
         guest_id: vmid,
         page_addr: next_page,
-        num_pages: num_pte_pages,
+        num_pages: NUM_TEE_PTE_PAGES,
     });
     ecall_send(&msg).expect("Tellus - AddPageTablePages returned error");
-    next_page += 4096 * num_pte_pages;
+    next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
-    let first_guest_page = next_page;
+    /*
+        The Tellus composite image includes the guest image
+        |========== --------> 0x8020_0000 (Tellus _start)
+        | Tellus code and data
+        | ....
+        | .... (Zero padding)
+        | ....
+        |======== -------> 0x8020_0000 + 4096*NUM_GUEST_PAD_PAGES
+        | Guest code and data (Guest _start is mapped at GPA 0x8020_0000)
+        |
+        |=========================================
+    */
 
-    // write junk to some memory given to guest, make sure it's zeroed later.
-    unsafe {
-        // not safe, but it's a test and no one uses this memory.
-        let m = first_guest_page as *mut u64;
-        *m = 0x5446_5446_5446_5446;
-        let m = (first_guest_page + 0x6000) as *mut u64;
-        *m = 0x5446_5446_5446_5446;
-    };
-
+    let first_guest_page = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
+    let measurment_page_addr = next_page;
     // Add data pages
-    let num_data_pages = 10;
     let msg = SbiMessage::Tee(sbi::TeeFunction::AddPages {
         guest_id: vmid,
         page_addr: first_guest_page,
         page_type: 0,
-        num_pages: num_data_pages,
-        gpa: 0x8000_0000,
-        measure_preserve: true,
+        num_pages: NUM_GUEST_DATA_PAGES,
+        gpa: USABLE_RAM_START_ADDRESS,
+        measure_preserve: false,
     });
     ecall_send(&msg).expect("Tellus - AddPages returned error");
 
+    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
+        guest_id: vmid,
+        measurement_version: 1,
+        measurement_type: 1,
+        page_addr: measurment_page_addr,
+    });
+
+    match ecall_send(&msg) {
+        Err(e) => {
+            println!("Guest measurement error {e:?}");
+            panic!("Guest measurement call failed");
+        }
+        Ok(_) => {
+            let measurement =
+                unsafe { core::ptr::read_volatile(measurment_page_addr as *const u64) };
+            println!("Guest measurement was {measurement:x}");
+        }
+    }
+
     // Add zeroed (non-measured) pages
+    // TODO: Make sure that these guest pages are actually zero
     let msg = SbiMessage::Tee(sbi::TeeFunction::AddPages {
         guest_id: vmid,
-        page_addr: first_guest_page + num_data_pages * 0x1000,
+        page_addr: first_guest_page + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
         page_type: 0,
-        num_pages: num_data_pages,
-        gpa: 0x8000_0000 + num_data_pages * 0x1000,
-        measure_preserve: false,
+        num_pages: NUM_GUEST_ZERO_PAGES,
+        gpa: USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
+        measure_preserve: true,
     });
     ecall_send(&msg).expect("Tellus - AddPages Zeroed returned error");
 
@@ -132,81 +162,57 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let msg = SbiMessage::Tee(sbi::TeeFunction::Finalize { guest_id: vmid });
     ecall_send(&msg).expect("Tellus - Finalize returned error");
 
-    let num_remove_pages = num_data_pages / 2;
-    let msg = SbiMessage::Tee(sbi::TeeFunction::RemovePages {
-        guest_id: vmid,
-        gpa: 0x8000_0000 + num_remove_pages * 0x1000,
-        remap_addr: first_guest_page + num_remove_pages * 0x1000,
-        num_pages: 5,
-    });
-    ecall_send(&msg).expect("Tellus - RemovePages returned error");
-
-    // check that junk has been cleared on removed memory
-    let read_res = unsafe {
-        // not safe, but it's a test and no one uses this memory.
-        let m = (first_guest_page + (num_remove_pages + 1) * 0x1000) as *mut u64;
-        core::ptr::read_volatile(m)
-    };
-    if read_res != 0 {
-        panic!(
-            "Tellus - Read back non-zero after unmapping from TVM! : {:x}",
-            read_res
-        );
-    }
-
-    let measurment_page_addr = first_guest_page + (num_remove_pages + 1) * 0x1000;
-    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
-        guest_id: vmid,
-        measurement_version: 1,
-        measurement_type: 1,
-        page_addr: measurment_page_addr,
-    });
-    let result = ecall_send(&msg);
-
-    if result.is_ok() {
-        let measurement = unsafe { core::ptr::read_volatile(measurment_page_addr as *mut u64) };
-        println!("Measurement for guest id {vmid:x} returned {measurement:x}");
-    } else {
-        println!("Measurement error {:?} for guest id {vmid:x}", result.err());
-    }
-
-    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
-        guest_id: 0,
-        measurement_version: 1,
-        measurement_type: 1,
-        page_addr: measurment_page_addr,
-    });
-    let result = ecall_send(&msg);
-
-    if result.is_ok() {
-        let measurement = unsafe { core::ptr::read_volatile(measurment_page_addr as *mut u64) };
-        println!("Measurement for self returned {measurement:x}");
-    } else {
-        println!("Measurement for self returned error {:?}", result.err());
-    }
-
-    /* TODO - need to put code in guest
     let msg = SbiMessage::Tee(sbi::TeeFunction::Run { guest_id: vmid });
     match ecall_send(&msg) {
-        Err(e) => println!("Tellus - Run returned error {:?}", e),
+        Err(e) => {
+            println!("Tellus - Run returned error {:?}", e);
+            panic!("Could not run guest VM");
+        }
         Ok(_) => println!("Tellus - Run success"),
     }
-    */
+
+    // TODO: Move this to an unit test
+    // The second measurement is to exercise the two code paths in
+    // the implementation (init vs. running)
+    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
+        guest_id: vmid,
+        measurement_version: 1,
+        measurement_type: 1,
+        page_addr: measurment_page_addr,
+    });
+
+    match ecall_send(&msg) {
+        Err(e) => {
+            println!("Guest measurement error {e:?}");
+            panic!("Guest measurement call failed");
+        }
+        Ok(_) => {
+            let measurement =
+                unsafe { core::ptr::read_volatile(measurment_page_addr as *const u64) };
+            println!("Guest measurement was {measurement:x}");
+        }
+    }
+
+    let num_remove_pages = NUM_GUEST_DATA_PAGES;
+    let msg = SbiMessage::Tee(sbi::TeeFunction::RemovePages {
+        guest_id: vmid,
+        gpa: USABLE_RAM_START_ADDRESS + num_remove_pages * PAGE_SIZE_4K,
+        remap_addr: first_guest_page,
+        num_pages: NUM_GUEST_DATA_PAGES,
+    });
+    ecall_send(&msg).expect("Tellus - RemovePages returned error");
 
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmDestroy { guest_id: vmid });
     ecall_send(&msg).expect("Tellus - TvmDestroy returned error");
 
-    // check that junk has been cleared on removed memory
-    let read_res = unsafe {
-        // not safe, but it's a test and no one uses this memory.
-        let m = first_guest_page as *mut u64;
-        core::ptr::read_volatile(m)
-    };
-    if read_res != 0 {
-        panic!(
-            "Tellus - Read back non-zero after exiting from TVM! : {:x}",
-            read_res
-        );
+    // check that guest pages have been cleared
+    for i in 0u64..(NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) / 8 {
+        let m = (first_guest_page + i) as *const u64;
+        unsafe {
+            if core::ptr::read_volatile(m) != 0 {
+                panic!("Tellus - Read back non-zero at qword offset {i:x} after exiting from TVM!");
+            }
+        }
     }
 
     println!("Tellus - All OK");

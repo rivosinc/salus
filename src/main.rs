@@ -20,7 +20,6 @@ extern crate alloc;
 
 mod abort;
 mod asm;
-mod cpu;
 mod host_dt_builder;
 mod print_util;
 mod sha256_measure;
@@ -29,8 +28,8 @@ mod vm;
 mod vm_pages;
 
 use abort::abort;
-use cpu::Cpu;
 use device_tree::{DeviceTree, DeviceTreeSerializer, Fdt};
+use drivers::CpuInfo;
 use host_dt_builder::HostDtBuilder;
 use hyp_alloc::HypAlloc;
 use print_util::*;
@@ -264,6 +263,8 @@ where
     let mut host_dt_builder = HostDtBuilder::new(&hyp_dt)
         .unwrap()
         .add_memory_node(host_ram_base, host_ram_size)
+        .unwrap()
+        .add_cpu_nodes()
         .unwrap();
     if let Some(r) = host_initramfs {
         host_dt_builder = host_dt_builder
@@ -439,13 +440,23 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let hyp_dt = DeviceTree::from(&hyp_fdt, &heap).expect("Failed to construct device-tree");
 
     // Discover supported CPU extensions.
-    Cpu::parse_features_from(&hyp_dt);
-    if Cpu::has_sstc() {
+    CpuInfo::parse_from(&hyp_dt);
+    let cpu_info = CpuInfo::get();
+    if cpu_info.has_sstc() {
         println!("Sstc support present");
         // Only write henvcfg when Sstc is present to avoid blowing up on versions of QEMU which
         // don't support the *envcfg registers.
         CSR.henvcfg.modify(henvcfg::stce.val(1));
     }
+    println!(
+        "{} CPU(s) present. Booting on CPU{} (hart {})",
+        cpu_info.num_cpus(),
+        cpu_info
+            .hart_id_to_cpu(hart_id.try_into().unwrap())
+            .unwrap()
+            .raw(),
+        hart_id
+    );
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.

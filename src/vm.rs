@@ -4,6 +4,7 @@
 
 use core::arch::global_asm;
 use core::mem::size_of;
+use drivers::CpuInfo;
 use memoffset::offset_of;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
@@ -16,7 +17,6 @@ use riscv_regs::{
 use sbi::Error as SbiError;
 use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 
-use crate::cpu::Cpu;
 use crate::print_util::*;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
 use crate::{print, println};
@@ -341,8 +341,15 @@ impl<T: PlatformPageTable> Vm<T> {
         CSR.vscause.set(self.info.guest_vcpu_csrs.vscause);
         CSR.vstval.set(self.info.guest_vcpu_csrs.vstval);
         CSR.vsatp.set(self.info.guest_vcpu_csrs.vsatp);
-        if Cpu::has_sstc() {
+        if CpuInfo::get().has_sstc() {
             CSR.vstimecmp.set(self.info.guest_vcpu_csrs.vstimecmp);
+        }
+
+        // TO DO: This assumes that we'll never have a VM with sepc
+        // deliberately set to 0. This is probably generally true
+        // but we can set the start explicitly via an interface
+        if self.info.guest_regs.sepc == 0 {
+            self.info.guest_regs.sepc = 0x8020_0000;
         }
 
         unsafe {
@@ -368,7 +375,7 @@ impl<T: PlatformPageTable> Vm<T> {
         self.info.guest_vcpu_csrs.vscause = CSR.vscause.get();
         self.info.guest_vcpu_csrs.vstval = CSR.vstval.get();
         self.info.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
-        if Cpu::has_sstc() {
+        if CpuInfo::get().has_sstc() {
             self.info.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
         }
     }
@@ -518,7 +525,7 @@ impl<T: PlatformPageTable> Vm<T> {
             self.vm_pages.page_owner_id(),
         );
         println!(
-            "got fault {:x} {:x} {:x} {:x}",
+            "got fault stval: {:x} htval: {:x} sepc: {:x} address: {:x}",
             self.info.trap_csrs.stval,
             self.info.trap_csrs.htval,
             self.info.guest_regs.sepc,

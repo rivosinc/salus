@@ -18,19 +18,22 @@ path = "src/main.rs"
 name = "tellus"
 path = "src/tellus.rs"
 
+[[bin]]
+name = "guestvm"
+path = "src/guestvm.rs"
+
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
 data_measure = { path = "./data-measure" }
 device_tree = { path = "./device-tree" }
+drivers = { path = "./drivers" }
 hyp_alloc = { path = "./hyp-alloc" }
 memoffset = { version = ">=0.6.5", features = ["unstable_const"] }
-once_cell = { version = "1.10", default-features = false }
 page_collections = { path = "./page-collections" }
 riscv_page_tables = { path = "./riscv-page-tables" }
 riscv_pages = { path = "./riscv-pages" }
 riscv_regs = { path = "./riscv-regs" }
 sbi = { path = "./sbi" }
 sha2 = {version = "0.10", default-features = false }
-spin = { version = "*", default-features = false }
 
 [workspace]

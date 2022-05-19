@@ -5,6 +5,7 @@
 use arrayvec::ArrayString;
 use core::{alloc::Allocator, fmt};
 use device_tree::{DeviceTree, DeviceTreeResult};
+use drivers::CpuInfo;
 
 /// A builder for the host VM's device-tree. Starting with the hypervisor's device-tree, makes the
 /// necessary modifications to create a device-tree that reflects the hardware available to the
@@ -39,30 +40,6 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
                 } else {
                     host_child.set_props(hyp_child.props().cloned())?;
                 }
-            } else if hyp_child.name() == "cpus" {
-                // Clone the CPU node hierarchy as-is.
-                let mut iter = hyp_dt.iter_from(c).unwrap();
-                let mut pid = host_root_id;
-                let mut depth = 0;
-                while let Some(src_node) = iter.next() {
-                    let dst_id = host_dt.add_node(src_node.name(), Some(pid))?;
-                    let dst_node = host_dt.get_mut_node(dst_id).unwrap();
-                    dst_node.set_props(src_node.props().cloned())?;
-
-                    // Determine the parent of the next node. We should either be descending by one
-                    // level, or ascending to the level of an ancestor.
-                    if iter.depth() > depth {
-                        assert_eq!(depth + 1, iter.depth());
-                        pid = dst_id;
-                        depth += 1;
-                    } else {
-                        while depth != iter.depth() {
-                            let parent = host_dt.get_node(pid).unwrap();
-                            pid = parent.parent().unwrap();
-                            depth -= 1;
-                        }
-                    }
-                }
             }
         }
 
@@ -80,6 +57,11 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
             .add_prop("reg")?
             .set_value_u64(&[mem_base, mem_size])?;
 
+        Ok(self)
+    }
+
+    pub fn add_cpu_nodes(mut self) -> DeviceTreeResult<Self> {
+        CpuInfo::get().add_host_cpu_nodes(&mut self.tree)?;
         Ok(self)
     }
 

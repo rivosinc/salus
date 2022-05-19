@@ -28,7 +28,7 @@ mod vm_pages;
 
 use abort::abort;
 use device_tree::{DeviceTree, Fdt};
-use drivers::CpuInfo;
+use drivers::{CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use print_util::*;
@@ -289,6 +289,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             .unwrap()
             .raw(),
         hart_id
+    );
+
+    // Probe for the IMSIC.
+    Imsic::probe_from(&hyp_dt, &mut mem_map);
+    let imsic = Imsic::get();
+    println!(
+        "IMSIC at 0x{:08x}; {} guest interrupt files supported",
+        imsic.base_addr().bits(),
+        imsic.guests_per_hart()
     );
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped

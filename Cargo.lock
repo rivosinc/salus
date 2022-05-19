@@ -76,6 +76,9 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "device_tree",
+ "riscv_page_tables",
+ "riscv_pages",
+ "riscv_regs",
  "spin",
 ]
 

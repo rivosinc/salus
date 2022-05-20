@@ -5,7 +5,8 @@
 use arrayvec::ArrayVec;
 use page_collections::page_vec::PageVec;
 use riscv_pages::{
-    DeviceMemType, MemType, PageOwnerId, PageSize, RawAddr, SequentialPages, SupervisorPageAddr,
+    DeviceMemType, MemType, PageOwnerId, PageSize, Pfn, RawAddr, SequentialPages,
+    SupervisorPageAddr,
 };
 
 use crate::{HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, PageTrackingResult};
@@ -320,12 +321,67 @@ impl PageMap {
         self.pages.len().checked_sub(index)
     }
 
+    /// Returns an iterator over the `PageInfo`s starting at `addr`. Returns `None` if `addr` is
+    /// not in the memory map or is a huge page.
+    pub fn iter_from(&self, addr: SupervisorPageAddr) -> Option<PageMapIter> {
+        PageMapIter::new(self, addr)
+    }
+
     /// Returns the index in the `PageMap` for the given address.
     fn get_map_index(&self, addr: SupervisorPageAddr) -> Option<usize> {
         self.sparse_map
             .iter()
             .find(|s| s.base_pfn <= addr.index() && addr.index() < s.base_pfn + s.num_pages)
             .map(|entry| entry.page_map_index + addr.index() - entry.base_pfn)
+    }
+}
+
+/// An iterator over `PageMap` in (PageInfo, address) pairs.
+pub struct PageMapIter<'a> {
+    page_map: &'a PageMap,
+    cur_sparse_entry: usize,
+    cur_index: usize,
+}
+
+impl<'a> PageMapIter<'a> {
+    /// Creates a new iterator from `page_map` starting at `start_addr`.
+    pub fn new(page_map: &'a PageMap, start_addr: SupervisorPageAddr) -> Option<Self> {
+        if start_addr.size().is_huge() {
+            return None;
+        }
+        let (cur_sparse_entry, entry) = page_map.sparse_map.iter().enumerate().find(|(_, s)| {
+            s.base_pfn <= start_addr.index() && start_addr.index() < s.base_pfn + s.num_pages
+        })?;
+        let cur_index = entry.page_map_index + start_addr.index() - entry.base_pfn;
+        Some(Self {
+            page_map,
+            cur_sparse_entry,
+            cur_index,
+        })
+    }
+}
+
+/// A (`PageInfo`, address) pair returned by `PageMapIter`.
+pub struct PageInfoWithAddr<'a> {
+    pub page: &'a PageInfo,
+    pub addr: SupervisorPageAddr,
+}
+
+impl<'a> Iterator for PageMapIter<'a> {
+    type Item = PageInfoWithAddr<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.page_map.sparse_map.get(self.cur_sparse_entry)?;
+        let page = self.page_map.pages.get(self.cur_index).unwrap();
+        let pfn = Pfn::supervisor((entry.base_pfn + self.cur_index - entry.page_map_index) as u64);
+        let addr = SupervisorPageAddr::from_pfn(pfn, PageSize::Size4k).unwrap();
+
+        self.cur_index += 1;
+        if self.cur_index >= entry.num_pages + entry.page_map_index {
+            self.cur_sparse_entry += 1;
+        }
+
+        Some(Self::Item { page, addr })
     }
 }
 

@@ -198,10 +198,12 @@ impl<A: Allocator> HypPageAlloc<A> {
         // Unwrap here (and below) since we can't continue if there isn't any free memory.
         let first_page = mem_map.regions().next().unwrap().base().get_4k_addr();
         let page_map = PageMap::build_from(mem_map);
-        let first_avail_page = first_page
-            .iter_from()
-            .find(|&a| page_map.get(a).unwrap().is_free())
-            .unwrap();
+        let first_avail_page = page_map
+            .iter_from(first_page)
+            .unwrap()
+            .find(|p| p.page.is_free())
+            .unwrap()
+            .addr;
         Self {
             next_page: first_avail_page,
             pages: page_map,
@@ -280,10 +282,12 @@ impl<A: Allocator> HypPageAlloc<A> {
         // unwrap here because if physical memory runs out before setting up basic hypervisor
         // structures, the system can't continue.
         self.next_page = self
-            .next_page
-            .iter_from()
-            .find(|&a| self.pages.get(a).unwrap().is_free())
-            .unwrap();
+            .pages
+            .iter_from(self.next_page)
+            .unwrap()
+            .find(|p| p.page.is_free())
+            .unwrap()
+            .addr;
         page
     }
 
@@ -301,30 +305,36 @@ impl<A: Allocator> HypPageAlloc<A> {
             start
                 .iter_from()
                 .take_while(|&a| a != end)
-                .all(|a| self.pages.get(a).unwrap().is_free())
+                .all(|a| self.pages.get(a).map_or(false, |p| p.is_free()))
         };
 
         // Find the free page rage and mark it, and any free pages we skipped in between,
         // as hypervisor-owned.
         let first_page = self
-            .next_page
-            .iter_from()
-            .find(|&a| range_is_free_and_aligned(a))
-            .unwrap();
+            .pages
+            .iter_from(self.next_page)
+            .unwrap()
+            .find(|p| range_is_free_and_aligned(p.addr))
+            .unwrap()
+            .addr;
         let last_page = first_page.checked_add_pages(count as u64).unwrap();
         for page in self.next_page.iter_from().take_while(|&a| a != last_page) {
-            // OK to unwrap as this struct is new and must have space for one owner.
-            let page_info = self.pages.get_mut(page).unwrap();
-            if page_info.is_free() {
-                page_info.push_owner(PageOwnerId::hypervisor()).unwrap();
+            if let Some(page_info) = self.pages.get_mut(page) {
+                if page_info.is_free() {
+                    // OK to unwrap as this struct is new and must have space for one owner.
+                    page_info.push_owner(PageOwnerId::hypervisor()).unwrap();
+                }
             }
         }
 
         // Move self's next page past these taken pages.
-        self.next_page = last_page
-            .iter_from()
-            .find(|&a| self.pages.get(a).unwrap().is_free())
-            .unwrap();
+        self.next_page = self
+            .pages
+            .iter_from(last_page)
+            .unwrap()
+            .find(|p| p.page.is_free())
+            .unwrap()
+            .addr;
 
         unsafe {
             // It's safe to create a page range of the memory that `self` forfeited ownership of

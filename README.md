@@ -41,7 +41,7 @@ A built copy of openSBI is required to be in the expected path.
   |           | |    Host(linux)  | |         |
   +-----------+ +-----------------+ +---------+
         |                |               |
-   TBD syscall          SBI          SBI(TG-API)
+   TBD syscall      SBI (TH-API)    SBI(TG-API)
         |                |               |
   +-------------HS-mode-----------------------+
   |       Salus                               |
@@ -62,7 +62,7 @@ VS mode.
 Responsibilities:
 - Scheduling
 - Memory allocation (except memory kept by firmware and salus at boot)
-- Guest VM start/stop/scheduling via TEE API provided by salus
+- Guest VM start/stop/scheduling via TEE TH-API provided by salus
 - Device drivers and delegation
 
 #### VMM
@@ -82,6 +82,7 @@ VS-mode operating systems started by the host.
 - Uses memory shared from or donated by the host
 - scheduled by the host
 - can start sub-guests
+- Confidential guests use TG-API for salus/host services
 
 ### Salus
 
@@ -90,6 +91,7 @@ The code in this repository. An HS-mode hypervisor.
 - starts the host and guests
 - manages stage-2 translations and IOMMU configuration for guest isolation
 - delegates some tasks such as attestation to u-mode helpers
+- measured by the trusted firmware/RoT 
 
 ### Firmware
 

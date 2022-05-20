@@ -300,14 +300,30 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         imsic.guests_per_hart()
     );
 
+    // We start RAM in the host address space at the same location as it is in the supervisor
+    // address space.
+    let guest_ram_base = mem_map
+        .regions()
+        .find(|r| !matches!(r.region_type(), HwMemRegionType::Mmio(_)))
+        .map(|r| RawAddr::guest(r.base().bits(), PageOwnerId::host()))
+        .unwrap();
+    let guest_phys_size = mem_map.regions().last().unwrap().end().bits() - guest_ram_base.bits();
+
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.
     let hyp_mem = HypPageAlloc::new(mem_map, &heap);
 
     // Now load the host VM.
-    let mut host: Host<Sv48x4> = HostVmLoader::new(hyp_dt, host_kernel, host_initramfs, hyp_mem)
-        .build_device_tree()
-        .build_address_space();
+    let mut host: Host<Sv48x4> = HostVmLoader::new(
+        hyp_dt,
+        host_kernel,
+        host_initramfs,
+        guest_ram_base,
+        guest_phys_size,
+        hyp_mem,
+    )
+    .build_device_tree()
+    .build_address_space();
 
     let _ = host.run(hart_id);
 

@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use arrayvec::ArrayString;
 use core::{alloc::Allocator, fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
-use drivers::CpuInfo;
+use drivers::{CpuId, CpuInfo, Imsic, ImsicGuestId};
 use riscv_page_tables::{HwMemRegion, HypPageAlloc, PlatformPageTable};
 use riscv_pages::{GuestPhysAddr, PageAddr, PageOwnerId, PageSize, RawAddr, SequentialPages};
 
@@ -41,21 +41,12 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
         // Clone the properties of the root node as-is.
         host_root.set_props(hyp_root.props().cloned())?;
 
-        // Selectively clone the sub-nodes.
-        for &c in hyp_root.children() {
-            let hyp_child = hyp_dt.get_node(c).unwrap();
-            if hyp_child.name().starts_with("chosen") || hyp_child.name() == "soc" {
-                // For "soc" and "chosen" just clone the properties. We'll add sub-nodes (e.g. for
-                // devices we're passing through) later if necessary.
-                let host_child_id = host_dt.add_node(hyp_child.name(), Some(host_root_id))?;
-                let host_child = host_dt.get_mut_node(host_child_id).unwrap();
-                if hyp_child.name().starts_with("chosen") {
-                    if let Some(p) = hyp_child.props().find(|p| p.name().starts_with("bootargs")) {
-                        host_child.insert_prop(p.clone())?;
-                    }
-                } else {
-                    host_child.set_props(hyp_child.props().cloned())?;
-                }
+        // Add a 'chosen' node and copy the bootargs if they exist.
+        let host_chosen_id = host_dt.add_node("chosen", Some(host_root_id))?;
+        let host_chosen = host_dt.get_mut_node(host_chosen_id).unwrap();
+        if let Some(hyp_chosen) = hyp_dt.iter().find(|n| n.name() == "chosen") {
+            if let Some(p) = hyp_chosen.props().find(|p| p.name() == "bootargs") {
+                host_chosen.insert_prop(p.clone())?;
             }
         }
 
@@ -63,16 +54,24 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
     }
 
     /// Adds a "memory" node to the device tree with the given base and size.
-    pub fn add_memory_node(mut self, mem_base: u64, mem_size: u64) -> DeviceTreeResult<Self> {
+    pub fn add_memory_node(
+        mut self,
+        mem_base: GuestPhysAddr,
+        mem_size: u64,
+    ) -> DeviceTreeResult<Self> {
         let mut mem_name = ArrayString::<32>::new();
-        fmt::write(&mut mem_name, format_args!("memory@{:08x}", mem_base)).unwrap();
+        fmt::write(
+            &mut mem_name,
+            format_args!("memory@{:08x}", mem_base.bits()),
+        )
+        .unwrap();
         let mem_id = self.tree.add_node(mem_name.as_str(), self.tree.root())?;
         let mem_node = self.tree.get_mut_node(mem_id).unwrap();
         mem_node.add_prop("device_type")?.set_value_str("memory")?;
         // TODO: Assumes #address-cells/#size-cells of 2.
         mem_node
             .add_prop("reg")?
-            .set_value_u64(&[mem_base, mem_size])?;
+            .set_value_u64(&[mem_base.bits(), mem_size])?;
 
         Ok(self)
     }
@@ -83,8 +82,29 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
         Ok(self)
     }
 
+    /// Add any MMIO devices to the device tree.
+    pub fn add_device_nodes(mut self, imsic_addr: GuestPhysAddr) -> DeviceTreeResult<Self> {
+        // First add a 'soc' subnode of the root.
+        let soc_node_id = self.tree.add_node("soc", self.tree.root())?;
+        let soc_node = self.tree.get_mut_node(soc_node_id).unwrap();
+        soc_node.add_prop("#address-cells")?.set_value_u32(&[2])?;
+        soc_node.add_prop("#size-cells")?.set_value_u32(&[2])?;
+        soc_node.add_prop("ranges")?;
+
+        // All we have is the IMSIC for now.
+        Imsic::get().add_host_imsic_node(&mut self.tree, imsic_addr)?;
+
+        // TODO: Add PCIe nodes.
+
+        Ok(self)
+    }
+
     /// Updates the "chosen" node with the location of the initramfs image.
-    pub fn set_initramfs_addr(mut self, start_addr: u64, len: u64) -> DeviceTreeResult<Self> {
+    pub fn set_initramfs_addr(
+        mut self,
+        start_addr: GuestPhysAddr,
+        len: u64,
+    ) -> DeviceTreeResult<Self> {
         let chosen_id = self
             .tree
             .iter()
@@ -95,11 +115,11 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
 
         chosen_node
             .add_prop("linux,initrd-start")?
-            .set_value_u64(&[start_addr])?;
-        let end_addr = start_addr.checked_add(len).unwrap();
+            .set_value_u64(&[start_addr.bits()])?;
+        let end_addr = start_addr.checked_increment(len).unwrap();
         chosen_node
             .add_prop("linux,initrd-end")?
-            .set_value_u64(&[end_addr])?;
+            .set_value_u64(&[end_addr.bits()])?;
 
         Ok(self)
     }
@@ -126,7 +146,7 @@ pub struct HostVmLoader<T: PlatformPageTable, A: Allocator + Clone> {
     guest_tracking_pages: SequentialPages,
     fdt_pages: SequentialPages,
     zero_pages: Vec<SequentialPages, A>,
-    guest_phys_base: GuestPhysAddr,
+    guest_ram_base: GuestPhysAddr,
 }
 
 impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
@@ -136,6 +156,8 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         hypervisor_dt: DeviceTree<A>,
         kernel: HwMemRegion,
         initramfs: Option<HwMemRegion>,
+        guest_ram_base: GuestPhysAddr,
+        guest_phys_size: u64,
         mut page_alloc: HypPageAlloc<A>,
     ) -> Self {
         // Reserve pages for tracking the host's guests.
@@ -152,28 +174,8 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         let fdt_pages = page_alloc
             .take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
 
-        // We use the size of our (the hypervisor's) physical address to estimate the size of the
-        // host's guest phsyical address space since we build the host's address space to match the
-        // actual physical address space, but with the holes (for hypervisor memory, other reserved
-        // regions) removed. This results in a bit of an overestimate for determining the number of
-        // page-table pages, but we should expect the holes to be pretty small.
-        //
-        // TODO: Support discontiguous physical memory.
-        let (phys_mem_base, phys_mem_size) = {
-            let node = hypervisor_dt
-                .iter()
-                .find(|n| n.name().starts_with("memory"))
-                .unwrap();
-            let mut reg = node
-                .props()
-                .find(|p| p.name() == "reg")
-                .unwrap()
-                .value_u64();
-            (reg.next().unwrap(), reg.next().unwrap())
-        };
-
         let (zero_pages, root_builder) =
-            HostRootBuilder::<T>::from_hyp_mem(page_alloc, phys_mem_size);
+            HostRootBuilder::<T>::from_hyp_mem(page_alloc, guest_phys_size);
 
         Self {
             hypervisor_dt,
@@ -183,7 +185,7 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             guest_tracking_pages,
             fdt_pages,
             zero_pages,
-            guest_phys_base: RawAddr::guest(phys_mem_base, PageOwnerId::host()),
+            guest_ram_base,
         }
     }
 
@@ -202,25 +204,28 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         assert!(ram_size >= FDT_OFFSET + self.fdt_pages.length_bytes());
 
         // Construct a stripped-down device-tree for the host VM.
+        //
+        // We map the IMSIC at the same location in the guest address space as it is in the
+        // supervisor address space.
+        let imsic_base = RawAddr::guest(Imsic::get().base_addr().bits(), PageOwnerId::host());
         let mut host_dt_builder = HostDtBuilder::new(&self.hypervisor_dt)
             .unwrap()
-            .add_memory_node(self.guest_phys_base.bits(), ram_size)
+            .add_memory_node(self.guest_ram_base, ram_size)
             .unwrap()
             .add_cpu_nodes()
+            .unwrap()
+            .add_device_nodes(imsic_base)
             .unwrap();
         if let Some(r) = self.initramfs {
             host_dt_builder = host_dt_builder
                 .set_initramfs_addr(
-                    self.guest_phys_base
+                    self.guest_ram_base
                         .checked_increment(INITRAMFS_OFFSET)
-                        .unwrap()
-                        .bits(),
+                        .unwrap(),
                     r.size(),
                 )
                 .unwrap();
         }
-
-        // TODO: Add IMSIC & PCIe nodes.
         let host_dt = host_dt_builder.tree();
 
         println!("Host DT: {}", host_dt);
@@ -241,6 +246,32 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
 
     /// Constructs the address space for the host VM, returning a `Host` that is ready to run.
     pub fn build_address_space(mut self) -> Host<T> {
+        // Map the IMSIC interrupt files into the guest address space. The host VM's interrupt
+        // file gets mapped to the location of the supervisor interrupt file.
+        let imsic = Imsic::get();
+        let mut imsic_gpa = PageAddr::new(RawAddr::guest(
+            imsic.base_addr().bits(),
+            PageOwnerId::host(),
+        ))
+        .unwrap();
+        // TODO: This should be per-CPU.
+        self.root_builder = self.root_builder.add_pages(
+            imsic_gpa,
+            [imsic
+                .take_guest_file(CpuId::new(0), ImsicGuestId::HostVm)
+                .unwrap()]
+            .into_iter(),
+        );
+        imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
+        for i in 0..(imsic.guests_per_hart() - 1) {
+            let id = ImsicGuestId::GuestVm(i);
+            self.root_builder = self.root_builder.add_pages(
+                imsic_gpa,
+                [imsic.take_guest_file(CpuId::new(0), id).unwrap()].into_iter(),
+            );
+            imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
+        }
+
         // HostRootBuilder guarantees that the host pages it returns start at
         // T::TOP_LEVEL_ALIGN-aligned block, and because we built the HwMemMap with a minimum
         // region alignment of T::TOP_LEVEL_ALIGN any discontiguous ranges are also guaranteed to
@@ -248,9 +279,9 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         let mut zero_pages_iter = self.zero_pages.into_iter().flatten();
 
         // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
-        let mut current_gpa = PageAddr::new(self.guest_phys_base).unwrap();
+        let mut current_gpa = PageAddr::new(self.guest_ram_base).unwrap();
         let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
-        self.root_builder = self.root_builder.add_4k_pages(
+        self.root_builder = self.root_builder.add_pages(
             current_gpa,
             zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
         );
@@ -263,13 +294,13 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         };
         self.root_builder = self
             .root_builder
-            .add_4k_data_pages(current_gpa, kernel_pages.into_iter());
+            .add_measured_pages(current_gpa, kernel_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_kernel_pages).unwrap();
 
         if let Some(r) = self.initramfs {
             let num_pages =
                 (INITRAMFS_OFFSET - (KERNEL_OFFSET + self.kernel.size())) / PageSize::Size4k as u64;
-            self.root_builder = self.root_builder.add_4k_pages(
+            self.root_builder = self.root_builder.add_pages(
                 current_gpa,
                 zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
             );
@@ -282,13 +313,13 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             };
             self.root_builder = self
                 .root_builder
-                .add_4k_data_pages(current_gpa, initramfs_pages.into_iter());
+                .add_measured_pages(current_gpa, initramfs_pages.into_iter());
             current_gpa = current_gpa.checked_add_pages(num_initramfs_pages).unwrap();
         }
 
-        let num_pages = (FDT_OFFSET - (current_gpa.bits() - self.guest_phys_base.bits()))
+        let num_pages = (FDT_OFFSET - (current_gpa.bits() - self.guest_ram_base.bits()))
             / PageSize::Size4k as u64;
-        self.root_builder = self.root_builder.add_4k_pages(
+        self.root_builder = self.root_builder.add_pages(
             current_gpa,
             zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
         );
@@ -297,13 +328,13 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         let num_fdt_pages = self.fdt_pages.len();
         self.root_builder = self
             .root_builder
-            .add_4k_data_pages(current_gpa, self.fdt_pages.into_iter());
+            .add_measured_pages(current_gpa, self.fdt_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
-        self.root_builder = self.root_builder.add_4k_pages(current_gpa, zero_pages_iter);
+        self.root_builder = self.root_builder.add_pages(current_gpa, zero_pages_iter);
         let mut host = Host::new(self.root_builder.create_host(), self.guest_tracking_pages);
-        host.add_device_tree(self.guest_phys_base.bits() + FDT_OFFSET);
-        host.set_entry_address(self.guest_phys_base.bits() + KERNEL_OFFSET);
+        host.add_device_tree(self.guest_ram_base.bits() + FDT_OFFSET);
+        host.set_entry_address(self.guest_ram_base.bits() + KERNEL_OFFSET);
         host
     }
 }

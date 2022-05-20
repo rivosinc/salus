@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use core::alloc::Allocator;
 use riscv_page_tables::{HypPageAlloc, PageState, PlatformPageTable};
 use riscv_pages::{
-    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, PhysPage, RawAddr,
-    SeqPageIter, SequentialPages,
+    CleanPage, GuestPageAddr, GuestPhysAddr, MemType, Page, PageOwnerId, PageSize, PhysPage,
+    RawAddr, SeqPageIter, SequentialPages,
 };
 
 use crate::sha256_measure::Sha256Measure;
@@ -239,7 +239,7 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
     }
 
     /// Adds data pages that are measured and mapped to the page tables for the host.
-    pub fn add_4k_data_pages<I>(mut self, to_addr: GuestPageAddr, pages: I) -> Self
+    pub fn add_measured_pages<I>(mut self, to_addr: GuestPageAddr, pages: I) -> Self
     where
         I: Iterator<Item = Page>,
     {
@@ -265,20 +265,24 @@ impl<T: PlatformPageTable> HostRootBuilder<T> {
         self
     }
 
-    /// Add zeroed pages to the host page tables
-    pub fn add_4k_pages<I>(mut self, to_addr: GuestPageAddr, pages: I) -> Self
+    /// Add pages which need not be measured to the host page tables.
+    pub fn add_pages<I, P>(mut self, to_addr: GuestPageAddr, pages: I) -> Self
     where
-        I: Iterator<Item = Page>,
+        I: Iterator<Item = P>,
+        P: PhysPage,
     {
         let root = &mut self.root;
         let pte_pages = &mut self.pte_pages;
 
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(vm_addr.size(), page.addr().size());
-            assert_eq!(
-                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
-            );
+            if P::mem_type() == MemType::Ram {
+                // GPA -> SPA mappings need to match T::TOP_LEVEL_ALIGN alignment for RAM pages.
+                assert_eq!(
+                    vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
+                    page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+                );
+            }
             root.phys_pages()
                 .set_page_owner(page.addr(), root.page_owner_id())
                 .unwrap();

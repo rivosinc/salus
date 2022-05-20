@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::mem::size_of;
-use drivers::CpuInfo;
+use drivers::{CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
@@ -272,6 +272,7 @@ pub struct Vm<T: PlatformPageTable> {
     info: VmCpuState,
     vm_pages: VmPages<T>,
     guests: Option<Guests<T>>,
+    interrupt_file: Option<ImsicGuestId>, // TODO: Should be per-hart
     has_run: bool, // TODO - different Vm type for different life cycle stages.
 }
 
@@ -307,12 +308,23 @@ impl<T: PlatformPageTable> Vm<T> {
             info,
             vm_pages,
             guests: None,
+            interrupt_file: None,
             has_run: false,
         }
     }
 
     fn set_entry_address(&mut self, entry_addr: u64) {
         self.info.guest_regs.sepc = entry_addr;
+    }
+
+    fn set_interrupt_file(&mut self, interrupt_file: ImsicGuestId) {
+        self.interrupt_file = Some(interrupt_file);
+
+        // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
+        let mut hstatus =
+            LocalRegisterCopy::<u64, hstatus::Register>::new(self.info.guest_regs.hstatus);
+        hstatus.modify(hstatus::vgein.val(interrupt_file.to_raw_index() as u64));
+        self.info.guest_regs.hstatus = hstatus.get();
     }
 
     // TODO - also pass the DT here and copy it?
@@ -351,6 +363,16 @@ impl<T: PlatformPageTable> Vm<T> {
         if self.info.guest_regs.sepc == 0 {
             self.info.guest_regs.sepc = 0x8020_0000;
         }
+
+        // TODO, HGEIE programinng:
+        //  - Track which guests the host wants interrupts from (by trapping HGEIE accesses from
+        //    VS level) and update HGEIE[2:] appropriately.
+        //  - If this is the host: clear HGEIE[1] on entry; inject SGEI into host VM if we receive
+        //    any SGEI at HS level.
+        //  - If this is a guest: set HGEIE[1] on entry; switch to the host VM for any SGEI that
+        //    occur, injecting an SEI for the host interrupts and SGEI for guest VM interrupts.
+
+        // TODO: Enforce that the vCPU has an assigned interrupt file before running.
 
         unsafe {
             // Safe to run the guest as it only touches memory assigned to it by being owned
@@ -759,6 +781,7 @@ impl<T: PlatformPageTable> Host<T> {
     pub fn new(page_root: HostRootPages<T>, pages: SequentialPages) -> Self {
         let mut inner = Vm::new(page_root.into_inner());
         inner.add_guest_tracking_pages(pages);
+        inner.set_interrupt_file(ImsicGuestId::HostVm);
         Self { inner }
     }
 

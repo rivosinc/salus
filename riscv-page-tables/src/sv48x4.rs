@@ -10,7 +10,7 @@ use crate::page_table::{TableEntryMut::*, ValidTableEntryMut::*, *};
 use crate::page_tracking::PageState;
 use crate::pte::PteLeafPerms;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sv48x4Level {
     L1Table,
     L2Table,

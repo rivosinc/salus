@@ -55,7 +55,7 @@ pub trait AddressSpace: Clone + Copy {
 }
 
 /// Represents the supervisor (i.e. "actual") physical address space.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SupervisorPhys;
 
 impl AddressSpace for SupervisorPhys {
@@ -65,7 +65,7 @@ impl AddressSpace for SupervisorPhys {
 }
 
 /// Represents a guest physical address space.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct GuestPhys(PageOwnerId);
 
 impl GuestPhys {

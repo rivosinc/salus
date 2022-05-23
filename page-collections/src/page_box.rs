@@ -46,6 +46,7 @@ use riscv_pages::{Page, PageAddr, PageSize, PhysPage, RawAddr};
 ///     (sum, boxxed_data.to_page())
 /// }
 /// ```
+#[allow(clippy::derive_partial_eq_without_eq)] // Silence buggy clippy warning.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PageBox<T>(NonNull<T>, PageSize);
 

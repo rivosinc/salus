@@ -7,3 +7,5 @@ target/
 lcov.info
 .vscode
 tellus_raw
+tellus_guestvm
+guestvm_raw

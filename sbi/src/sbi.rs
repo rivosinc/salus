@@ -14,6 +14,7 @@ const EXT_BASE: u64 = 0x10;
 const EXT_HART_STATE: u64 = 0x48534D;
 const EXT_RESET: u64 = 0x53525354;
 const EXT_TEE: u64 = 0x544545;
+const EXT_MEASUREMENT: u64 = 0x5464545;
 
 /// Error constants from the sbi [spec](https://github.com/riscv-non-isa/riscv-sbi-doc/releases)
 pub const SBI_SUCCESS: i64 = 0;
@@ -251,18 +252,18 @@ pub enum TeeFunction {
         remap_addr: u64, // TODO should we track this locally?
         num_pages: u64,
     },
-    /// Gets the measurement for the guest and copies it
-    ///  the previously configured data transfer page
+    /// Copies the measurements for the specified guest to the page address in page_addr.
+    /// The measurement version and type must be set to 1 for now.
     /// a6 = 7
-    /// a0 = guest id
-    /// a1 = measurement version
-    /// a2 = measurement type
-    /// a3 = page_addr
+    /// a0 = measurement version
+    /// a1 = measurement type
+    /// a2 = page_addr
+    /// a3 = guest id
     GetGuestMeasurement {
-        guest_id: u64,
         measurement_version: u64,
         measurement_type: u64,
         page_addr: u64,
+        guest_id: u64,
     },
 }
 
@@ -295,10 +296,10 @@ impl TeeFunction {
                 num_pages: args[3],
             }),
             7 => Ok(GetGuestMeasurement {
-                guest_id: args[0],
-                measurement_version: args[1],
-                measurement_type: args[2],
-                page_addr: args[3],
+                measurement_version: args[0],
+                measurement_type: args[1],
+                page_addr: args[2],
+                guest_id: args[3],
             }),
             _ => Err(Error::InvalidParam),
         }
@@ -331,10 +332,10 @@ impl TeeFunction {
                 num_pages: _,
             } => 6,
             GetGuestMeasurement {
-                guest_id: _,
                 measurement_type: _,
                 measurement_version: _,
                 page_addr: _,
+                guest_id: _,
             } => 7,
         }
     }
@@ -366,11 +367,11 @@ impl TeeFunction {
                 num_pages: _,
             } => *guest_id,
             GetGuestMeasurement {
-                guest_id,
-                measurement_version: _,
+                measurement_version,
                 measurement_type: _,
                 page_addr: _,
-            } => *guest_id,
+                guest_id: _,
+            } => *measurement_version,
         }
     }
 
@@ -397,11 +398,11 @@ impl TeeFunction {
                 num_pages: _,
             } => *gpa,
             GetGuestMeasurement {
-                guest_id: _,
-                measurement_version,
-                measurement_type: _,
+                measurement_version: _,
+                measurement_type,
                 page_addr: _,
-            } => *measurement_version,
+                guest_id: _,
+            } => *measurement_type,
             _ => 0,
         }
     }
@@ -429,11 +430,11 @@ impl TeeFunction {
                 num_pages: _,
             } => *remap_addr,
             GetGuestMeasurement {
-                guest_id: _,
                 measurement_version: _,
-                measurement_type,
-                page_addr: _,
-            } => *measurement_type,
+                measurement_type: _,
+                page_addr,
+                guest_id: _,
+            } => *page_addr,
             _ => 0,
         }
     }
@@ -456,11 +457,11 @@ impl TeeFunction {
                 num_pages,
             } => *num_pages,
             GetGuestMeasurement {
-                guest_id: _,
                 measurement_version: _,
                 measurement_type: _,
-                page_addr,
-            } => *page_addr,
+                page_addr: _,
+                guest_id,
+            } => *guest_id,
             _ => 0,
         }
     }
@@ -510,6 +511,86 @@ impl TeeFunction {
     }
 }
 
+#[derive(Copy, Clone)]
+pub enum MeasurementFunction {
+    /// Copies the measurements for the current VM to the page address in page_addr.
+    /// The measurement version and type must be set to 1 for now.
+    /// a6 = 0
+    /// a0 = measurement version
+    /// a1 = measurement type
+    /// a2 = page_addr
+    GetSelfMeasurement {
+        measurement_version: u64,
+        measurement_type: u64,
+        page_addr: u64,
+    },
+}
+
+impl MeasurementFunction {
+    // Takes registers a0-6 as the input.
+    pub fn from_regs(args: &[u64]) -> Result<Self> {
+        use MeasurementFunction::*;
+        match args[6] {
+            0 => Ok(GetSelfMeasurement {
+                measurement_version: args[0],
+                measurement_type: args[1],
+                page_addr: args[2],
+            }),
+            _ => Err(Error::InvalidParam),
+        }
+    }
+
+    pub fn a6(&self) -> u64 {
+        use MeasurementFunction::*;
+        match self {
+            GetSelfMeasurement {
+                measurement_version: _,
+                measurement_type: _,
+                page_addr: _,
+            } => 0,
+        }
+    }
+
+    pub fn a0(&self) -> u64 {
+        use MeasurementFunction::*;
+        match self {
+            GetSelfMeasurement {
+                measurement_version,
+                measurement_type: _,
+                page_addr: _,
+            } => *measurement_version,
+        }
+    }
+
+    pub fn a1(&self) -> u64 {
+        use MeasurementFunction::*;
+        match self {
+            GetSelfMeasurement {
+                measurement_version: _,
+                measurement_type,
+                page_addr: _,
+            } => *measurement_type,
+        }
+    }
+
+    pub fn a2(&self) -> u64 {
+        use MeasurementFunction::*;
+        match self {
+            GetSelfMeasurement {
+                measurement_version: _,
+                measurement_type: _,
+                page_addr,
+            } => *page_addr,
+        }
+    }
+
+    pub fn result(&self, a0: u64, a1: u64) -> Result<u64> {
+        match a0 {
+            0 => Ok(a1),
+            e => Err(Error::from_code(e as i64)),
+        }
+    }
+}
 pub struct SbiReturn {
     pub error_code: i64,
     pub return_value: u64,
@@ -549,6 +630,7 @@ pub enum SbiMessage {
     HartState(StateFunction),
     Reset(ResetFunction),
     Tee(TeeFunction),
+    Measurement(MeasurementFunction),
 }
 
 impl SbiMessage {
@@ -564,6 +646,9 @@ impl SbiMessage {
             EXT_RESET => ResetFunction::from_regs(gprs.reg(A6), gprs.reg(A0), gprs.reg(A1))
                 .map(SbiMessage::Reset),
             EXT_TEE => TeeFunction::from_regs(gprs.a_regs()).map(SbiMessage::Tee),
+            EXT_MEASUREMENT => {
+                MeasurementFunction::from_regs(gprs.a_regs()).map(SbiMessage::Measurement)
+            }
             _ => Err(Error::UnknownSbiExtension),
         }
     }
@@ -576,6 +661,7 @@ impl SbiMessage {
             SbiMessage::HartState(_) => EXT_HART_STATE,
             SbiMessage::Reset(_) => EXT_RESET,
             SbiMessage::Tee(_) => EXT_TEE,
+            SbiMessage::Measurement(_) => EXT_MEASUREMENT,
         }
     }
 
@@ -587,6 +673,7 @@ impl SbiMessage {
             SbiMessage::PutChar(_) => 0,
             SbiMessage::Reset(_) => 0,
             SbiMessage::Tee(f) => f.a6(),
+            SbiMessage::Measurement(f) => f.a6(),
         }
     }
 
@@ -618,6 +705,7 @@ impl SbiMessage {
     pub fn a2(&self) -> u64 {
         match self {
             SbiMessage::Tee(f) => f.a2(),
+            SbiMessage::Measurement(f) => f.a2(),
             _ => 0,
         }
     }
@@ -627,6 +715,7 @@ impl SbiMessage {
         match self {
             SbiMessage::Reset(r) => r.get_a1(),
             SbiMessage::Tee(f) => f.a1(),
+            SbiMessage::Measurement(f) => f.a1(),
             _ => 0,
         }
     }
@@ -637,6 +726,7 @@ impl SbiMessage {
             SbiMessage::Reset(r) => r.get_a0(),
             SbiMessage::PutChar(c) => *c,
             SbiMessage::Tee(f) => f.a0(),
+            SbiMessage::Measurement(f) => f.a0(),
             _ => 0,
         }
     }
@@ -675,6 +765,7 @@ impl SbiMessage {
             SbiMessage::PutChar(_) => Ok(0),
             SbiMessage::Reset(_) => Err(Error::InvalidParam),
             SbiMessage::Tee(f) => f.result(a0, a1),
+            SbiMessage::Measurement(f) => f.result(a0, a1),
         }
     }
 }

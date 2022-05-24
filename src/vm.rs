@@ -15,11 +15,13 @@ use riscv_regs::{
     Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
 };
 use sbi::Error as SbiError;
-use sbi::{self, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
+use sbi::{self, MeasurementFunction, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 
 use crate::print_util::*;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
 use crate::{print, println};
+
+const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
 
 /// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
@@ -465,6 +467,9 @@ impl<T: PlatformPageTable> Vm<T> {
                 SbiMessage::Base(_) => Err(SbiError::NotSupported), // TODO
                 SbiMessage::HartState(_) => Err(SbiError::NotSupported), // TODO
                 SbiMessage::Tee(tee_func) => Ok(Some(self.handle_tee_msg(tee_func))),
+                SbiMessage::Measurement(measurement_func) => {
+                    Ok(Some(self.handle_measurement_msg(measurement_func)))
+                }
             }
         });
 
@@ -529,12 +534,30 @@ impl<T: PlatformPageTable> Vm<T> {
                 num_pages,
             } => self.guest_rm_pages(guest_id, gpa, num_pages).into(),
             GetGuestMeasurement {
+                measurement_version,
+                measurement_type,
+                page_addr,
                 guest_id,
+            } => self
+                .guest_get_measurement(measurement_version, measurement_type, page_addr, guest_id)
+                .into(),
+        }
+    }
+
+    fn handle_measurement_msg(&mut self, measurement_func: MeasurementFunction) -> SbiReturn {
+        use MeasurementFunction::*;
+        match measurement_func {
+            GetSelfMeasurement {
                 measurement_version,
                 measurement_type,
                 page_addr,
             } => self
-                .guest_get_measurement(guest_id, measurement_version, measurement_type, page_addr)
+                .guest_get_measurement(
+                    measurement_version,
+                    measurement_type,
+                    page_addr,
+                    GUEST_ID_SELF_MEASUREMENT,
+                )
                 .into(),
         }
     }
@@ -726,10 +749,10 @@ impl<T: PlatformPageTable> Vm<T> {
     // TODO: Add code to return actual measurements
     fn guest_get_measurement(
         &mut self,
-        guest_id: u64,
         measurement_version: u64,
         measurement_type: u64,
         page_addr: u64,
+        guest_id: u64,
     ) -> sbi::Result<u64> {
         let gpa = RawAddr::guest(page_addr, self.vm_pages.page_owner_id());
         if (measurement_version != 1) || (measurement_type != 1) || PageAddr::new(gpa).is_none() {
@@ -742,7 +765,7 @@ impl<T: PlatformPageTable> Vm<T> {
         // reference to vm_pages to write to the GPA, so we have to
         // call a helper method to retrieve the measurements and write
         // them using the same mutable reference
-        let result = if guest_id == 0 {
+        let result = if guest_id == GUEST_ID_SELF_MEASUREMENT {
             self.vm_pages.write_measurements_to_guest_owned_page(gpa)
         } else {
             let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;

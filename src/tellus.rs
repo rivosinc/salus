@@ -114,7 +114,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     */
 
     let first_guest_page = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
-    let measurment_page_addr = next_page;
+    let measurement_page_addr = next_page;
     // Add data pages
     let msg = SbiMessage::Tee(sbi::TeeFunction::AddPages {
         guest_id: vmid,
@@ -126,11 +126,29 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     });
     ecall_send(&msg).expect("Tellus - AddPages returned error");
 
+    let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {
+        measurement_version: 1,
+        measurement_type: 1,
+        page_addr: measurement_page_addr,
+    });
+
+    match ecall_send(&msg) {
+        Err(e) => {
+            println!("Host measurement error {e:?}");
+            panic!("Host measurement call failed");
+        }
+        Ok(_) => {
+            let measurement =
+                unsafe { core::ptr::read_volatile(measurement_page_addr as *const u64) };
+            println!("Host measurement was {measurement:x}");
+        }
+    }
+
     let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
         guest_id: vmid,
         measurement_version: 1,
         measurement_type: 1,
-        page_addr: measurment_page_addr,
+        page_addr: measurement_page_addr,
     });
 
     match ecall_send(&msg) {
@@ -140,7 +158,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         }
         Ok(_) => {
             let measurement =
-                unsafe { core::ptr::read_volatile(measurment_page_addr as *const u64) };
+                unsafe { core::ptr::read_volatile(measurement_page_addr as *const u64) };
             println!("Guest measurement was {measurement:x}");
         }
     }
@@ -169,28 +187,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             panic!("Could not run guest VM");
         }
         Ok(_) => println!("Tellus - Run success"),
-    }
-
-    // TODO: Move this to an unit test
-    // The second measurement is to exercise the two code paths in
-    // the implementation (init vs. running)
-    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
-        guest_id: vmid,
-        measurement_version: 1,
-        measurement_type: 1,
-        page_addr: measurment_page_addr,
-    });
-
-    match ecall_send(&msg) {
-        Err(e) => {
-            println!("Guest measurement error {e:?}");
-            panic!("Guest measurement call failed");
-        }
-        Ok(_) => {
-            let measurement =
-                unsafe { core::ptr::read_volatile(measurment_page_addr as *const u64) };
-            println!("Guest measurement was {measurement:x}");
-        }
     }
 
     let num_remove_pages = NUM_GUEST_DATA_PAGES;

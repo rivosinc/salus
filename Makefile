@@ -32,7 +32,7 @@ run_tellus_gdb: tellus_bin salus_debug
 		     -nographic \
 		     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
 		     -kernel target/riscv64gc-unknown-none-elf/debug/salus \
-		     -device guest-loader,kernel=tellus_raw,addr=0xc0200000
+		     -device guest-loader,kernel=tellus_guestvm,addr=0xc0200000
 
 run_tellus: tellus_bin salus
 	     ${LOCAL_PATH}qemu-system-riscv64 \

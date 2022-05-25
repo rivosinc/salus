@@ -2,13 +2,11 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use data_measure::data_measure::DataMeasure;
 use riscv_pages::*;
 
 use crate::page_table::Result;
-use crate::page_table::{TableEntryMut::*, ValidTableEntryMut::*, *};
+use crate::page_table::*;
 use crate::page_tracking::PageState;
-use crate::pte::PteLeafPerms;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sv48x4Level {
@@ -76,89 +74,6 @@ pub struct Sv48x4 {
     phys_pages: PageState,
 }
 
-impl Sv48x4 {
-    /// Walks the page table from the root for `gpa` until `pred` returns true. Returns `None` if
-    /// a leaf is reached without `pred` being met.
-    fn walk_until<P>(&mut self, gpa: GuestPhysAddr, mut pred: P) -> Option<TableEntryMut<Self>>
-    where
-        P: FnMut(&TableEntryMut<Self>) -> bool,
-    {
-        let mut entry = PageTable::from_root(self).entry_for_addr_mut(gpa);
-        while !pred(&entry) {
-            if let Valid(Table(mut t)) = entry {
-                entry = t.entry_for_addr_mut(gpa);
-            } else {
-                return None;
-            }
-        }
-        Some(entry)
-    }
-
-    /// Walks the page table to a valid leaf entry mapping `gpa`. Returns `None` if `gpa` is not
-    /// mapped.
-    fn walk_to_leaf(&mut self, gpa: GuestPhysAddr) -> Option<ValidTableEntryMut<Self>> {
-        self.walk_until(gpa, |e| matches!(e, Valid(Leaf(..))))
-            .and_then(TableEntryMut::as_valid_entry)
-    }
-
-    /// Walks the page table until an invalid entry that would map `gpa` is encountered. Returns
-    /// `None` if `gpa` is mapped.
-    fn walk_until_invalid(&mut self, gpa: GuestPhysAddr) -> Option<TableEntryMut<Self>> {
-        self.walk_until(gpa, |e| matches!(e, Invalid(..)))
-    }
-
-    /// Checks the ownership and typing of the page at `page_addr` and then creates a translation
-    /// for `gpa` to `spa` with the given permissions, filling in any intermediate page tables
-    /// using `get_pte_page` as necessary.
-    fn do_map_page<P: PhysPage>(
-        &mut self,
-        gpa: PageAddr<GuestPhys>,
-        spa: SupervisorPageAddr,
-        perms: PteLeafPerms,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
-    ) -> Result<()> {
-        if spa.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(spa.size()));
-        }
-        if self.phys_pages.owner(spa) != Some(self.owner) {
-            return Err(Error::PageNotOwned);
-        }
-        if self.phys_pages.mem_type(spa) != Some(P::mem_type()) {
-            return Err(Error::PageTypeMismatch);
-        }
-
-        let mut table = PageTable::from_root(self);
-        while table.level().leaf_page_size() != spa.size() {
-            table = table.next_level_or_fill_fn(RawAddr::from(gpa), get_pte_page)?;
-        }
-        unsafe {
-            // Safe since we've verified ownership of the page.
-            table.map_leaf(gpa, spa, perms)?
-        };
-        Ok(())
-    }
-
-    /// Returns the valid 4kB leaf PTE mapping `gpa` if the mapped page matches the specified
-    /// `mem_type`.
-    fn get_4k_leaf_with_type(
-        &mut self,
-        gpa: GuestPhysAddr,
-        mem_type: MemType,
-    ) -> Result<ValidTableEntryMut<Self>> {
-        let phys_pages = self.phys_pages.clone();
-        let entry = self.walk_to_leaf(gpa).ok_or(Error::PageNotOwned)?;
-        if !entry.level().is_leaf() {
-            return Err(Error::PageSizeNotSupported(entry.level().leaf_page_size()));
-        }
-        // Unwrap ok, must be a leaf entry.
-        let spa = entry.page_addr().unwrap();
-        if phys_pages.mem_type(spa) != Some(mem_type) {
-            return Err(Error::PageTypeMismatch);
-        }
-        Ok(entry)
-    }
-}
-
 impl GuestStagePageTable for Sv48x4 {
     const HGATP_VALUE: u64 = 9;
 }
@@ -209,39 +124,6 @@ impl PlatformPageTable for Sv48x4 {
         self.phys_pages.clone()
     }
 
-    fn map_page<P: PhysPage>(
-        &mut self,
-        gpa: PageAddr<Self::MappedAddressSpace>,
-        page_to_map: P,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
-    ) -> Result<()> {
-        self.do_map_page::<P>(gpa, page_to_map.addr(), PteLeafPerms::RWX, get_pte_page)
-    }
-
-    fn map_page_with_measurement(
-        &mut self,
-        gpa: PageAddr<Self::MappedAddressSpace>,
-        page_to_map: Page,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
-        data_measure: &mut dyn DataMeasure,
-    ) -> Result<()> {
-        self.do_map_page::<Page>(gpa, page_to_map.addr(), PteLeafPerms::RWX, get_pte_page)?;
-        data_measure.add_page(gpa.bits(), page_to_map.as_bytes());
-        Ok(())
-    }
-
-    fn unmap_page<P: PhysPage>(
-        &mut self,
-        gpa: PageAddr<Self::MappedAddressSpace>,
-    ) -> Result<UnmappedPhysPage<P>> {
-        let entry = self.get_4k_leaf_with_type(RawAddr::from(gpa), P::mem_type())?;
-        let page = unsafe {
-            // Safe since we've verified the typing of the page.
-            entry.take_page().unwrap()
-        };
-        Ok(UnmappedPhysPage::new(page))
-    }
-
     fn invalidate_page<P: PhysPage>(
         &mut self,
         gpa: PageAddr<Self::MappedAddressSpace>,
@@ -252,42 +134,6 @@ impl PlatformPageTable for Sv48x4 {
             entry.invalidate_page().unwrap()
         };
         Ok(UnmappedPhysPage::new(page))
-    }
-
-    fn unmap_range<P: PhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        num_pages: u64,
-    ) -> Result<UnmapIter<Self, P>> {
-        if addr.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(addr.size()));
-        }
-        if addr.iter_from().take(num_pages as usize).all(|a| {
-            self.get_4k_leaf_with_type(RawAddr::from(a), P::mem_type())
-                .is_ok()
-        }) {
-            Ok(UnmapIter::new(self, addr, num_pages))
-        } else {
-            Err(Error::PageNotOwned)
-        }
-    }
-
-    fn invalidate_range<P: PhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        num_pages: u64,
-    ) -> Result<InvalidateIter<Self, P>> {
-        if addr.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(addr.size()));
-        }
-        if addr.iter_from().take(num_pages as usize).all(|a| {
-            self.get_4k_leaf_with_type(RawAddr::from(a), P::mem_type())
-                .is_ok()
-        }) {
-            Ok(InvalidateIter::new(self, addr, num_pages))
-        } else {
-            Err(Error::PageNotOwned)
-        }
     }
 
     fn get_root_address(&self) -> SupervisorPageAddr {
@@ -321,19 +167,6 @@ impl PlatformPageTable for Sv48x4 {
             true
         } else {
             false
-        }
-    }
-
-    fn write_mapped_page(
-        &mut self,
-        gpa: RawAddr<Self::MappedAddressSpace>,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<()> {
-        let entry = self.get_4k_leaf_with_type(gpa, MemType::Ram)?;
-        unsafe {
-            // Safe since we've verified that this is a RAM page.
-            entry.write_to_page(offset, bytes)
         }
     }
 }

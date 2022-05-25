@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
+use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::Pfn;
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;

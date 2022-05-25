@@ -131,7 +131,7 @@ impl PageState {
     }
 
     /// Adds a new guest to the system, giving it the next ID.
-    pub fn add_active_guest(&mut self) -> Result<PageOwnerId> {
+    pub fn add_active_guest(&self) -> Result<PageOwnerId> {
         let mut phys_pages = self.inner.lock();
         // unwrap is fine as next_owner_id is guaranteed to be valid.
         let id = PageOwnerId::new(phys_pages.next_owner_id).unwrap();
@@ -150,19 +150,19 @@ impl PageState {
     }
 
     /// Removes an active guest previously added by `add_active_guest`.
-    pub fn rm_active_guest(&mut self, remove_id: PageOwnerId) {
+    pub fn rm_active_guest(&self, remove_id: PageOwnerId) {
         let mut phys_pages = self.inner.lock();
         phys_pages.active_guests.retain(|&id| id != remove_id);
     }
 
     /// Sets the owner of the page at the given `addr` to `owner`.
-    pub fn set_page_owner(&mut self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
+    pub fn set_page_owner(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
         let mut phys_pages = self.inner.lock();
         phys_pages.set_page_owner(addr, owner)
     }
 
     /// Removes the current owner of the page at `addr` and returns it.
-    pub fn pop_owner(&mut self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
+    pub fn pop_owner(&self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
         let mut phys_pages = self.inner.lock();
         phys_pages.pop_owner_internal(addr)
     }

@@ -35,5 +35,6 @@ riscv_pages = { path = "./riscv-pages" }
 riscv_regs = { path = "./riscv-regs" }
 sbi = { path = "./sbi" }
 sha2 = {version = "0.10", default-features = false }
+spin = { version = "*", default-features = false }
 
 [workspace]

@@ -246,6 +246,7 @@ dependencies = [
  "riscv_regs",
  "sbi",
  "sha2",
+ "spin",
 ]
 
 [[package]]

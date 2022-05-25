@@ -5,8 +5,10 @@
 use data_measure::data_measure::DataMeasure;
 use sha2::{Digest, Sha256};
 
+pub const SHA256_DIGEST_BYTES: usize = 32;
+
 pub struct Sha256Measure {
-    measurement: [u8; 32],
+    measurement: [u8; SHA256_DIGEST_BYTES],
 }
 
 impl DataMeasure for Sha256Measure {
@@ -26,7 +28,7 @@ impl DataMeasure for Sha256Measure {
 impl Sha256Measure {
     pub fn new() -> Self {
         Sha256Measure {
-            measurement: [0u8; 32],
+            measurement: [0u8; SHA256_DIGEST_BYTES],
         }
     }
 }

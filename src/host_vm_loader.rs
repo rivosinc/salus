@@ -332,9 +332,13 @@ impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
         self.root_builder = self.root_builder.add_pages(current_gpa, zero_pages_iter);
-        let mut host = Host::new(self.root_builder.create_host(), self.guest_tracking_pages);
-        host.add_device_tree(self.guest_ram_base.bits() + FDT_OFFSET);
-        host.set_entry_address(self.guest_ram_base.bits() + KERNEL_OFFSET);
+        let host = Host::new(self.root_builder.create_host(), self.guest_tracking_pages);
+        host.set_launch_args(
+            self.guest_ram_base
+                .checked_increment(KERNEL_OFFSET)
+                .unwrap(),
+            self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
+        );
         host
     }
 }

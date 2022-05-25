@@ -8,16 +8,18 @@ use drivers::{CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::PlatformPageTable;
-use riscv_pages::{PageAddr, PageOwnerId, RawAddr, SequentialPages};
-use riscv_regs::{hgatp, hstatus, scounteren, sstatus, HgatpHelpers};
+use riscv_page_tables::{PageState, PlatformPageTable};
+use riscv_pages::{GuestPhysAddr, PageAddr, PageOwnerId, Pfn, RawAddr, SequentialPages};
+use riscv_regs::{hgatp, hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
 };
 use sbi::Error as SbiError;
 use sbi::{self, MeasurementFunction, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
+use spin::{Mutex, RwLock};
 
 use crate::print_util::*;
+use crate::sha256_measure::SHA256_DIGEST_BYTES;
 use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
 use crate::{print, println};
 
@@ -66,9 +68,9 @@ struct GuestVCpuState {
 
 /// CSRs written on an exit from virtualization that are used by the host to determine the cause of
 /// the trap.
-#[derive(Default)]
+#[derive(Default, Clone)]
 #[repr(C)]
-struct TrapState {
+pub struct TrapState {
     scause: u64,
     stval: u64,
     htval: u64,
@@ -186,6 +188,7 @@ global_asm!(
 
 struct Guests<T: PlatformPageTable> {
     inner: PageVec<PageBox<GuestState<T>>>,
+    phys_pages: PageState,
 }
 
 impl<T: PlatformPageTable> Guests<T> {
@@ -211,11 +214,18 @@ impl<T: PlatformPageTable> Guests<T> {
 
     fn remove(&mut self, guest_id: u64) -> sbi::Result<()> {
         let to_remove = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        self.inner.retain(|g| g.page_owner_id() != to_remove);
+        self.inner.retain(|g| {
+            if g.page_owner_id() == to_remove {
+                self.phys_pages.rm_active_guest(g.page_owner_id());
+                true
+            } else {
+                false
+            }
+        });
         Ok(())
     }
 
-    // Returns the guest for the given ID if it exists, otherwise None.
+    // Returns a mutable reference to the guest for the given ID if it exists, otherwise None.
     fn guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut PageBox<GuestState<T>>> {
         let guest_index = self.get_guest_index(guest_id)?;
         self.inner
@@ -223,16 +233,22 @@ impl<T: PlatformPageTable> Guests<T> {
             .ok_or(SbiError::InvalidParam)
     }
 
+    // Returns an immutable reference to the guest for the given ID if it exists, otherwise None.
+    fn guest(&self, guest_id: u64) -> sbi::Result<&PageBox<GuestState<T>>> {
+        let guest_index = self.get_guest_index(guest_id)?;
+        self.inner.get(guest_index).ok_or(SbiError::InvalidParam)
+    }
+
     // returns the initializing guest if it's present and runnable, otherwise none
-    fn initializing_guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut GuestRootBuilder<T>> {
-        self.guest_mut(guest_id)
-            .and_then(|g| g.init_mut().ok_or(SbiError::InvalidParam))
+    fn initializing_guest(&self, guest_id: u64) -> sbi::Result<&GuestRootBuilder<T>> {
+        self.guest(guest_id)
+            .and_then(|g| g.as_guest_root_builder().ok_or(SbiError::InvalidParam))
     }
 
     // Returns the runnable guest if it's present and runnable, otherwise None
-    fn running_guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut Vm<T>> {
-        self.guest_mut(guest_id)
-            .and_then(|g| g.vm_mut().ok_or(SbiError::InvalidParam))
+    fn running_guest(&self, guest_id: u64) -> sbi::Result<&Vm<T>> {
+        self.guest(guest_id)
+            .and_then(|g| g.as_vm().ok_or(SbiError::InvalidParam))
     }
 }
 
@@ -251,119 +267,131 @@ impl<T: PlatformPageTable> GuestState<T> {
         }
     }
 
-    fn init_mut(&mut self) -> Option<&mut GuestRootBuilder<T>> {
+    fn as_guest_root_builder(&self) -> Option<&GuestRootBuilder<T>> {
         match self {
-            Self::Init(ref mut grb) => Some(grb),
+            Self::Init(ref grb) => Some(grb),
             Self::Running(_) => None,
             Self::Temp => unreachable!(),
         }
     }
 
-    fn vm_mut(&mut self) -> Option<&mut Vm<T>> {
+    fn as_vm(&self) -> Option<&Vm<T>> {
         match self {
             Self::Init(_) => None,
-            Self::Running(ref mut v) => Some(v),
+            Self::Running(ref v) => Some(v),
             Self::Temp => unreachable!(),
         }
     }
 }
 
-/// A Vm VM that is being run.
-pub struct Vm<T: PlatformPageTable> {
-    // TODO, info should be per-hart.
-    info: VmCpuState,
-    vm_pages: VmPages<T>,
-    guests: Option<Guests<T>>,
-    interrupt_file: Option<ImsicGuestId>, // TODO: Should be per-hart
-    has_run: bool, // TODO - different Vm type for different life cycle stages.
+/// Identifies the exit cause for a vCPU.
+pub enum VmCpuExit {
+    /// ECALLs from VS mode.
+    Ecall(Option<SbiMessage>),
+    /// G-stage page faults.
+    PageFault(GuestPhysAddr),
+    /// Everything else that we currently don't or can't handle.
+    Other(TrapState),
+    // TODO: Add other exit causes as needed.
 }
 
-impl<T: PlatformPageTable> Vm<T> {
-    /// Create a new guest using the given initial page table and pool of initial pages.
-    fn new(vm_pages: VmPages<T>) -> Self {
-        let mut info = VmCpuState::default();
+/// Represents a single virtual CPU of a VM.
+pub struct VmCpu {
+    state: VmCpuState,
+    interrupt_file: Option<ImsicGuestId>,
+    page_owner_id: PageOwnerId,
+}
+
+impl VmCpu {
+    /// Creates a new vCPU using the address space of `vm_pages`.
+    fn new<T: PlatformPageTable>(vm_pages: &VmPages<T>) -> Self {
+        let mut state = VmCpuState::default();
 
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
-        hgatp.set_from(vm_pages.root(), 1);
-        info.guest_vcpu_csrs.hgatp = hgatp.get();
+        hgatp.modify(hgatp::vmid.val(1)); // TODO: VMID assignments.
+        hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
+        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
+        state.guest_vcpu_csrs.hgatp = hgatp.get();
 
         let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(0);
         hstatus.modify(hstatus::spv.val(1));
         hstatus.modify(hstatus::spvp::Supervisor);
-        info.guest_regs.hstatus = hstatus.get();
+        state.guest_regs.hstatus = hstatus.get();
 
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
         sstatus.modify(sstatus::spie.val(1));
         sstatus.modify(sstatus::spp::Supervisor);
-        info.guest_regs.sstatus = sstatus.get();
+        state.guest_regs.sstatus = sstatus.get();
 
         let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);
         scounteren.modify(scounteren::cycle.val(1));
         scounteren.modify(scounteren::time.val(1));
         scounteren.modify(scounteren::instret.val(1));
-        info.guest_regs.scounteren = scounteren.get();
+        state.guest_regs.scounteren = scounteren.get();
 
         // set the hart ID - TODO other hart IDs when multi-threaded
-        info.guest_regs.gprs.set_reg(GprIndex::A0, 0);
+        state.guest_regs.gprs.set_reg(GprIndex::A0, 0);
 
-        Vm {
-            info,
-            vm_pages,
-            guests: None,
+        Self {
+            state,
             interrupt_file: None,
-            has_run: false,
+            page_owner_id: vm_pages.page_owner_id(),
         }
     }
 
-    fn set_entry_address(&mut self, entry_addr: u64) {
-        self.info.guest_regs.sepc = entry_addr;
+    /// Sets the launch arguments (entry point and A1) for this vCPU.
+    fn set_launch_args(&mut self, entry_addr: GuestPhysAddr, a1: u64) {
+        self.state.guest_regs.sepc = entry_addr.bits();
+        self.state.guest_regs.gprs.set_reg(GprIndex::A1, a1);
     }
 
+    /// Updates A0/A1 with the result of an SBI call.
+    fn set_ecall_result(&mut self, result: SbiReturn) {
+        self.state
+            .guest_regs
+            .gprs
+            .set_reg(GprIndex::A0, result.error_code as u64);
+        if result.error_code == sbi::SBI_SUCCESS {
+            self.state
+                .guest_regs
+                .gprs
+                .set_reg(GprIndex::A1, result.return_value as u64);
+        }
+    }
+
+    /// Sets the interrupt file for this vCPU.
     fn set_interrupt_file(&mut self, interrupt_file: ImsicGuestId) {
         self.interrupt_file = Some(interrupt_file);
 
         // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
         let mut hstatus =
-            LocalRegisterCopy::<u64, hstatus::Register>::new(self.info.guest_regs.hstatus);
+            LocalRegisterCopy::<u64, hstatus::Register>::new(self.state.guest_regs.hstatus);
         hstatus.modify(hstatus::vgein.val(interrupt_file.to_raw_index() as u64));
-        self.info.guest_regs.hstatus = hstatus.get();
+        self.state.guest_regs.hstatus = hstatus.get();
     }
 
-    // TODO - also pass the DT here and copy it?
-    fn add_device_tree(&mut self, dt_addr: u64) {
-        // set the DT address to the one passed in.
-        self.info.guest_regs.gprs.set_reg(GprIndex::A1, dt_addr);
-    }
-
-    /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
-    /// length zero and capacity limits the number of nested guests.
-    fn add_guest_tracking_pages(&mut self, pages: SequentialPages) {
-        let guests = PageVec::from(pages);
-        self.guests = Some(Guests { inner: guests });
-    }
-
-    /// Run this VM until the guest exits
-    fn run_to_exit(&mut self, _hart_id: u64) {
+    /// Runs this vCPU until it exits.
+    fn run_to_exit(&mut self) -> VmCpuExit {
         // Load the vCPU CSRs. Safe as these don't take effect until V=1.
-        CSR.hgatp.set(self.info.guest_vcpu_csrs.hgatp);
-        CSR.htimedelta.set(self.info.guest_vcpu_csrs.htimedelta);
-        CSR.vsstatus.set(self.info.guest_vcpu_csrs.vsstatus);
-        CSR.vsie.set(self.info.guest_vcpu_csrs.vsie);
-        CSR.vstvec.set(self.info.guest_vcpu_csrs.vstvec);
-        CSR.vsscratch.set(self.info.guest_vcpu_csrs.vsscratch);
-        CSR.vsepc.set(self.info.guest_vcpu_csrs.vsepc);
-        CSR.vscause.set(self.info.guest_vcpu_csrs.vscause);
-        CSR.vstval.set(self.info.guest_vcpu_csrs.vstval);
-        CSR.vsatp.set(self.info.guest_vcpu_csrs.vsatp);
+        CSR.hgatp.set(self.state.guest_vcpu_csrs.hgatp);
+        CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
+        CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
+        CSR.vsie.set(self.state.guest_vcpu_csrs.vsie);
+        CSR.vstvec.set(self.state.guest_vcpu_csrs.vstvec);
+        CSR.vsscratch.set(self.state.guest_vcpu_csrs.vsscratch);
+        CSR.vsepc.set(self.state.guest_vcpu_csrs.vsepc);
+        CSR.vscause.set(self.state.guest_vcpu_csrs.vscause);
+        CSR.vstval.set(self.state.guest_vcpu_csrs.vstval);
+        CSR.vsatp.set(self.state.guest_vcpu_csrs.vsatp);
         if CpuInfo::get().has_sstc() {
-            CSR.vstimecmp.set(self.info.guest_vcpu_csrs.vstimecmp);
+            CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
         }
 
         // TO DO: This assumes that we'll never have a VM with sepc
         // deliberately set to 0. This is probably generally true
         // but we can set the start explicitly via an interface
-        if self.info.guest_regs.sepc == 0 {
-            self.info.guest_regs.sepc = 0x8020_0000;
+        if self.state.guest_regs.sepc == 0 {
+            self.state.guest_regs.sepc = 0x8020_0000;
         }
 
         // TODO, HGEIE programinng:
@@ -379,124 +407,158 @@ impl<T: PlatformPageTable> Vm<T> {
         unsafe {
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table.
-            _run_guest(&mut self.info as *mut VmCpuState);
+            _run_guest(&mut self.state as *mut VmCpuState);
         }
 
         // Save off the trap information.
-        self.info.trap_csrs.scause = CSR.scause.get();
-        self.info.trap_csrs.stval = CSR.stval.get();
-        self.info.trap_csrs.htval = CSR.htval.get();
-        self.info.trap_csrs.htinst = CSR.htinst.get();
+        self.state.trap_csrs.scause = CSR.scause.get();
+        self.state.trap_csrs.stval = CSR.stval.get();
+        self.state.trap_csrs.htval = CSR.htval.get();
+        self.state.trap_csrs.htinst = CSR.htinst.get();
 
         // Save the vCPU state.
-        self.info.guest_vcpu_csrs.hgatp = CSR.hgatp.get();
-        self.info.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
-        self.info.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
-        self.info.guest_vcpu_csrs.vsie = CSR.vsie.get();
-        self.info.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
-        self.info.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
-        self.info.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
-        self.info.guest_vcpu_csrs.vscause = CSR.vscause.get();
-        self.info.guest_vcpu_csrs.vstval = CSR.vstval.get();
-        self.info.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
+        self.state.guest_vcpu_csrs.hgatp = CSR.hgatp.get();
+        self.state.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
+        self.state.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
+        self.state.guest_vcpu_csrs.vsie = CSR.vsie.get();
+        self.state.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
+        self.state.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
+        self.state.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
+        self.state.guest_vcpu_csrs.vscause = CSR.vscause.get();
+        self.state.guest_vcpu_csrs.vstval = CSR.vstval.get();
+        self.state.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
         if CpuInfo::get().has_sstc() {
-            self.info.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
+            self.state.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
         }
-    }
 
-    /// Run this guest until it requests an exit or an interrupt is received for the host.
-    fn run(&mut self, hart_id: u64) -> Trap {
+        // Determine the exit cause from the trap CSRs.
         use Exception::*;
-        self.has_run = true;
-        loop {
-            self.run_to_exit(hart_id);
-            match Trap::from_scause(self.info.trap_csrs.scause).unwrap() {
-                Trap::Exception(VirtualSupervisorEnvCall) => {
-                    self.handle_ecall();
-                    self.inc_sepc_ecall(); // must return to _after_ the ecall.
-                }
-                Trap::Exception(GuestInstructionPageFault) => {
-                    if self.handle_guest_fault(/*Instruction*/).is_err() {
-                        return Trap::Exception(GuestInstructionPageFault);
-                    }
-                }
-                Trap::Exception(GuestLoadPageFault) => {
-                    if self.handle_guest_fault(/*Load*/).is_err() {
-                        return Trap::Exception(GuestLoadPageFault);
-                    }
-                }
-                Trap::Exception(GuestStorePageFault) => {
-                    if self.handle_guest_fault(/*Store*/).is_err() {
-                        return Trap::Exception(GuestStorePageFault);
-                    }
-                }
-                e => return e, // TODO
+        match Trap::from_scause(self.state.trap_csrs.scause).unwrap() {
+            Trap::Exception(VirtualSupervisorEnvCall) => {
+                let sbi_msg = SbiMessage::from_regs(&self.state.guest_regs.gprs).ok();
+                self.state.guest_regs.sepc += 4;
+                VmCpuExit::Ecall(sbi_msg)
             }
+            Trap::Exception(GuestInstructionPageFault)
+            | Trap::Exception(GuestLoadPageFault)
+            | Trap::Exception(GuestStorePageFault) => {
+                let fault_addr = RawAddr::guest(
+                    self.state.trap_csrs.htval << 2 | self.state.trap_csrs.stval & 0x03,
+                    self.page_owner_id,
+                );
+                VmCpuExit::PageFault(fault_addr)
+            }
+            _ => VmCpuExit::Other(self.state.trap_csrs.clone()),
+        }
+    }
+}
+
+/// A VM that is being run.
+pub struct Vm<T: PlatformPageTable> {
+    // TODO: Support multiple vCPUs.
+    vcpu: Mutex<VmCpu>,
+    vm_pages: VmPages<T>,
+    guests: Option<RwLock<Guests<T>>>,
+}
+
+impl<T: PlatformPageTable> Vm<T> {
+    /// Create a new guest using the given initial page table and pool of initial pages.
+    fn new(vm_pages: VmPages<T>) -> Self {
+        Self {
+            vcpu: Mutex::new(VmCpu::new(&vm_pages)),
+            vm_pages,
+            guests: None,
         }
     }
 
-    /// Advances the sepc past the ecall instruction that caused the exit.
-    fn inc_sepc_ecall(&mut self) {
-        self.info.guest_regs.sepc += 4;
+    /// Sets the launch arguments (entry point and A1) for vCPU0.
+    fn set_launch_args(&self, entry_addr: GuestPhysAddr, a1: u64) {
+        let mut vcpu = self.vcpu.lock();
+        vcpu.set_launch_args(entry_addr, a1);
     }
 
-    /// Handles ecalls from the guest.
-    fn handle_ecall(&mut self) {
-        // determine the call from a7, a6, and a2-5, put error code in a0 and return value in a1.
-        // a0 and a1 aren't set by legacy extensions so the block below yields an `Option` that is
-        // written when set to `Some(val)`.
-        let result = SbiMessage::from_regs(&self.info.guest_regs.gprs).and_then(|msg| {
-            match msg {
-                SbiMessage::PutChar(c) => {
-                    // put char - legacy command
-                    print!("{}", c as u8 as char);
-                    Ok(None)
-                }
-                SbiMessage::Reset(r) => {
-                    match r {
-                        ResetFunction::Reset {
-                            reset_type: _,
-                            reason: _,
-                        } => {
-                            // TODO do shutdown of VM or system if from primary host VM
-                            println!("Vm shutdown/reboot request");
-                            crate::poweroff();
+    /// Sets the interrupt file for vCPU0.
+    fn set_interrupt_file(&self, interrupt_file: ImsicGuestId) {
+        let mut vcpu = self.vcpu.lock();
+        vcpu.set_interrupt_file(interrupt_file);
+    }
+
+    /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
+    /// length zero and capacity limits the number of nested guests.
+    fn add_guest_tracking_pages(&mut self, pages: SequentialPages) {
+        let guests = PageVec::from(pages);
+        self.guests = Some(RwLock::new(Guests {
+            inner: guests,
+            phys_pages: self.vm_pages.phys_pages(),
+        }));
+    }
+
+    /// Run this guest until an unhandled exit is encountered.
+    fn run(&self, _vcpu_id: u64) -> VmCpuExit {
+        loop {
+            let mut vcpu = self.vcpu.lock();
+            let exit = vcpu.run_to_exit();
+            match exit {
+                VmCpuExit::Ecall(Some(sbi_msg)) => {
+                    match self.handle_ecall(sbi_msg) {
+                        Ok(Some(sbi_ret)) => {
+                            vcpu.set_ecall_result(sbi_ret);
+                        }
+                        Ok(None) => {
+                            // for legacy, leave the a0 and a1 registers as-is.
+                        }
+                        Err(error_code) => {
+                            vcpu.set_ecall_result(SbiReturn::from(error_code));
                         }
                     }
                 }
-                SbiMessage::Base(_) => Err(SbiError::NotSupported), // TODO
-                SbiMessage::HartState(_) => Err(SbiError::NotSupported), // TODO
-                SbiMessage::Tee(tee_func) => Ok(Some(self.handle_tee_msg(tee_func))),
-                SbiMessage::Measurement(measurement_func) => {
-                    Ok(Some(self.handle_measurement_msg(measurement_func)))
+                VmCpuExit::Ecall(None) => {
+                    // Unrecognized ECALL, return an error.
+                    vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
                 }
-            }
-        });
-
-        match result {
-            Ok(Some(sbi_ret)) => {
-                self.info
-                    .guest_regs
-                    .gprs
-                    .set_reg(GprIndex::A0, sbi_ret.error_code as u64);
-                self.info
-                    .guest_regs
-                    .gprs
-                    .set_reg(GprIndex::A1, sbi_ret.return_value as u64);
-            }
-            Ok(None) => {
-                // for legacy, leave the a0 and a1 registers as-is.
-            }
-            Err(error_code) => {
-                self.info
-                    .guest_regs
-                    .gprs
-                    .set_reg(GprIndex::A0, SbiReturn::from(error_code).error_code as u64);
+                VmCpuExit::PageFault(addr) => {
+                    if self.handle_guest_fault(addr).is_err() {
+                        return exit;
+                    }
+                }
+                VmCpuExit::Other(ref trap_csrs) => {
+                    println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
+                    return exit;
+                }
             }
         }
     }
 
-    fn handle_tee_msg(&mut self, tee_func: TeeFunction) -> SbiReturn {
+    /// Handles ecalls from the guest.
+    fn handle_ecall(&self, msg: SbiMessage) -> sbi::Result<Option<SbiReturn>> {
+        match msg {
+            SbiMessage::PutChar(c) => {
+                // put char - legacy command
+                print!("{}", c as u8 as char);
+                Ok(None)
+            }
+            SbiMessage::Reset(r) => {
+                match r {
+                    ResetFunction::Reset {
+                        reset_type: _,
+                        reason: _,
+                    } => {
+                        // TODO do shutdown of VM or system if from primary host VM
+                        println!("Vm shutdown/reboot request");
+                        crate::poweroff();
+                    }
+                }
+            }
+            SbiMessage::Base(_) => Err(SbiError::NotSupported), // TODO
+            SbiMessage::HartState(_) => Err(SbiError::NotSupported), // TODO
+            SbiMessage::Tee(tee_func) => Ok(Some(self.handle_tee_msg(tee_func))),
+            SbiMessage::Measurement(measurement_func) => {
+                Ok(Some(self.handle_measurement_msg(measurement_func)))
+            }
+        }
+    }
+
+    fn handle_tee_msg(&self, tee_func: TeeFunction) -> SbiReturn {
         use TeeFunction::*;
         match tee_func {
             TvmCreate(state_page) => self.add_guest(state_page).into(),
@@ -544,7 +606,7 @@ impl<T: PlatformPageTable> Vm<T> {
         }
     }
 
-    fn handle_measurement_msg(&mut self, measurement_func: MeasurementFunction) -> SbiReturn {
+    fn handle_measurement_msg(&self, measurement_func: MeasurementFunction) -> SbiReturn {
         use MeasurementFunction::*;
         match measurement_func {
             GetSelfMeasurement {
@@ -564,19 +626,7 @@ impl<T: PlatformPageTable> Vm<T> {
 
     // Handle access faults. For example, when a returned page needs to be demand-faulted back to
     // the page table.
-    fn handle_guest_fault(&mut self) -> core::result::Result<(), vm_pages::Error> {
-        let fault_addr = RawAddr::guest(
-            self.info.trap_csrs.htval << 2 | self.info.trap_csrs.stval & 0x03,
-            self.vm_pages.page_owner_id(),
-        );
-        println!(
-            "got fault stval: {:x} htval: {:x} sepc: {:x} address: {:x}",
-            self.info.trap_csrs.stval,
-            self.info.trap_csrs.htval,
-            self.info.guest_regs.sepc,
-            fault_addr.bits(),
-        );
-
+    fn handle_guest_fault(&self, fault_addr: GuestPhysAddr) -> vm_pages::Result<()> {
         self.vm_pages.handle_page_fault(fault_addr)?;
 
         // Get instruction that caused the fault
@@ -596,7 +646,7 @@ impl<T: PlatformPageTable> Vm<T> {
         Ok(())
     }
 
-    fn add_guest(&mut self, donor_pages_addr: u64) -> sbi::Result<u64> {
+    fn add_guest(&self, donor_pages_addr: u64) -> sbi::Result<u64> {
         println!("Add guest {:x}", donor_pages_addr);
         if self.guests.is_none() {
             return Err(SbiError::InvalidParam); // TODO different error
@@ -618,25 +668,22 @@ impl<T: PlatformPageTable> Vm<T> {
         // create a boxpage for builder state and add it to the list of vms.
         let guest_state: PageBox<GuestState<T>> =
             PageBox::new_with(GuestState::Init(guest_builder), state_page);
-        self.guests
-            .as_mut()
-            .ok_or(SbiError::InvalidParam)
-            .and_then(|g| g.add(guest_state))?;
+
+        let mut guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.write();
+        guests.add(guest_state)?;
 
         Ok(id.raw())
     }
 
-    fn destroy_guest(&mut self, guest_id: u64) -> sbi::Result<u64> {
-        self.guests
-            .as_mut()
-            .ok_or(SbiError::InvalidParam)
-            .and_then(|guests| guests.remove(guest_id))?;
+    fn destroy_guest(&self, guest_id: u64) -> sbi::Result<u64> {
+        let mut guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.write();
+        guests.remove(guest_id)?;
         Ok(0)
     }
 
     // converts the given guest from init to running
-    fn guest_finalize(&mut self, guest_id: u64) -> sbi::Result<u64> {
-        let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
+    fn guest_finalize(&self, guest_id: u64) -> sbi::Result<u64> {
+        let mut guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.write();
         guests.guest_mut(guest_id).map(|g| {
             let mut temp = GuestState::Temp;
             core::mem::swap(&mut **g, &mut temp);
@@ -649,17 +696,15 @@ impl<T: PlatformPageTable> Vm<T> {
         Ok(0)
     }
 
-    fn guest_run(&mut self, guest_id: u64) -> sbi::Result<u64> {
-        self.guests
-            .as_mut()
-            .ok_or(SbiError::InvalidParam)
-            .and_then(|guests| guests.running_guest_mut(guest_id))
-            .map(|v| v.run(0))?; // TODO take hart id
-        Ok(0)
+    fn guest_run(&self, guest_id: u64) -> sbi::Result<u64> {
+        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
+        let guest_vm = guests.running_guest(guest_id)?;
+        guest_vm.run(0); // TODO: Take vCPU ID.
+        Ok(0) // TODO: Return the exit reason to the host.
     }
 
     fn guest_add_page_table_pages(
-        &mut self,
+        &self,
         guest_id: u64,
         from_addr: u64,
         num_pages: u64,
@@ -668,44 +713,38 @@ impl<T: PlatformPageTable> Vm<T> {
             PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
 
-        self.guests
-            .as_mut()
-            .ok_or(SbiError::InvalidParam)
-            .and_then(|guests| guests.initializing_guest_mut(guest_id))
-            .and_then(|grb| {
-                self.vm_pages
-                    .add_pte_pages_builder(from_page_addr, num_pages, grb)
-                    .map_err(|e| {
-                        println!("Salus - pte_pages_builder error {e:?}");
-                        SbiError::InvalidAddress
-                    })
+        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
+        let grb = guests.initializing_guest(guest_id)?;
+        self.vm_pages
+            .add_pte_pages_builder(from_page_addr, num_pages, grb)
+            .map_err(|e| {
+                println!("Salus - pte_pages_builder error {e:?}");
+                SbiError::InvalidAddress
             })?;
 
         Ok(0)
     }
 
-    fn guest_rm_pages(&mut self, guest_id: u64, gpa: u64, num_pages: u64) -> sbi::Result<u64> {
+    fn guest_rm_pages(&self, guest_id: u64, gpa: u64, num_pages: u64) -> sbi::Result<u64> {
         println!("Salus - Rm pages {guest_id:x} gpa:{gpa:x} num_pages:{num_pages}",);
         let from_page_addr = PageAddr::new(RawAddr::guest(gpa, self.vm_pages.page_owner_id()))
             .ok_or(SbiError::InvalidAddress)?;
 
-        self.guests
-            .as_mut()
-            .ok_or(SbiError::InvalidParam)
-            .and_then(|guests| guests.running_guest_mut(guest_id))
-            .and_then(|g| {
-                g.vm_pages
-                    .remove_4k_pages(from_page_addr, num_pages)
-                    .map_err(|e| {
-                        println!("Salus - remove_4k_pages error {e:?}");
-                        SbiError::InvalidAddress
-                    })
+        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
+        // TODO: Enforce that pages can't be removed while the guest is alive.
+        let guest_vm = guests.running_guest(guest_id)?;
+        guest_vm
+            .vm_pages
+            .remove_4k_pages(from_page_addr, num_pages)
+            .map_err(|e| {
+                println!("Salus - remove_4k_pages error {e:?}");
+                SbiError::InvalidAddress
             })
     }
 
     /// page_type: 0 => 4K, 1=> 2M, 2=> 1G, 3=512G
     fn guest_add_pages(
-        &mut self,
+        &self,
         guest_id: u64,
         from_addr: u64,
         page_type: u64,
@@ -725,30 +764,26 @@ impl<T: PlatformPageTable> Vm<T> {
         let from_page_addr =
             PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
-        self.guests
-            .as_mut()
-            .ok_or(SbiError::InvalidParam)
-            .and_then(|guests| guests.initializing_guest_mut(guest_id))
-            .and_then(|grb| {
-                let to_page_addr = PageAddr::new(RawAddr::guest(to_addr, grb.page_owner_id()))
-                    .ok_or(SbiError::InvalidAddress)?;
-                self.vm_pages
-                    .add_4k_pages_builder(
-                        from_page_addr,
-                        num_pages,
-                        grb,
-                        to_page_addr,
-                        measure_preserve,
-                    )
-                    .map_err(|_| SbiError::InvalidParam)
-            })?;
+        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
+        let grb = guests.initializing_guest(guest_id)?;
+        let to_page_addr = PageAddr::new(RawAddr::guest(to_addr, grb.page_owner_id()))
+            .ok_or(SbiError::InvalidAddress)?;
+        self.vm_pages
+            .add_4k_pages_builder(
+                from_page_addr,
+                num_pages,
+                grb,
+                to_page_addr,
+                measure_preserve,
+            )
+            .map_err(|_| SbiError::InvalidParam)?;
 
         Ok(num_pages)
     }
 
     // TODO: Add code to return actual measurements
     fn guest_get_measurement(
-        &mut self,
+        &self,
         measurement_version: u64,
         measurement_type: u64,
         page_addr: u64,
@@ -768,18 +803,25 @@ impl<T: PlatformPageTable> Vm<T> {
         let result = if guest_id == GUEST_ID_SELF_MEASUREMENT {
             self.vm_pages.write_measurements_to_guest_owned_page(gpa)
         } else {
-            let guests = self.guests.as_mut().ok_or(SbiError::InvalidParam)?;
+            // TODO: Define a compile-time constant for the maximum length of any measurement we
+            // would conceivably use.
+            let mut bytes = [0u8; SHA256_DIGEST_BYTES];
+            let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
             let _ = guests.get_guest_index(guest_id)?;
-            let measurements = if let Ok(running_guest) = guests.running_guest_mut(guest_id) {
-                running_guest.vm_pages.get_measurement()
+            if let Ok(running_guest) = guests.running_guest(guest_id) {
+                running_guest
+                    .vm_pages
+                    .get_measurement(&mut bytes)
+                    .map_err(|_| SbiError::Failed)?;
             } else {
                 guests
-                    .initializing_guest_mut(guest_id)
+                    .initializing_guest(guest_id)
                     .unwrap()
-                    .get_measurement()
-            };
+                    .get_measurement(&mut bytes)
+                    .map_err(|_| SbiError::Failed)?;
+            }
 
-            self.vm_pages.write_to_guest_owned_page(gpa, measurements)
+            self.vm_pages.write_to_guest_owned_page(gpa, &bytes)
         };
 
         result
@@ -787,17 +829,13 @@ impl<T: PlatformPageTable> Vm<T> {
             .map_err(|_| SbiError::InvalidAddress)
     }
 }
+
 /// Represents the special VM that serves as the host for the system.
 pub struct Host<T: PlatformPageTable> {
     inner: Vm<T>,
 }
 
 impl<T: PlatformPageTable> Host<T> {
-    /* TODO
-    /// Creates from the system memory pool
-    pub fn from_mem_pool(HypMemMap?) -> Self{}
-    */
-
     /// Creates a new `Host` using the given initial page table root.
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
     /// length zero and capacity limits the number of nested guests.
@@ -808,19 +846,14 @@ impl<T: PlatformPageTable> Host<T> {
         Self { inner }
     }
 
-    // TODO - also pass the DT here and copy it?
-    pub fn add_device_tree(&mut self, dt_addr: u64) {
-        self.inner.add_device_tree(dt_addr)
-    }
-
-    /// Set the address we should 'sret' to upon entering the VM.
-    pub fn set_entry_address(&mut self, entry_addr: u64) {
-        self.inner.set_entry_address(entry_addr);
+    /// Sets the launch arguments (entry point and FDT) for the host vCPU.
+    pub fn set_launch_args(&self, entry_addr: GuestPhysAddr, fdt_addr: GuestPhysAddr) {
+        self.inner.set_launch_args(entry_addr, fdt_addr.bits());
     }
 
     /// Run the host. Only returns for system shutdown
-    //TODO - return value need to be host specific
-    pub fn run(&mut self, hart_id: u64) -> Trap {
-        self.inner.run(hart_id)
+    pub fn run(&mut self, vcpu_id: u64) -> VmCpuExit {
+        // TODO - return value need to be host specific
+        self.inner.run(vcpu_id)
     }
 }

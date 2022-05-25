@@ -112,7 +112,7 @@ impl Sv48x4 {
     /// using `get_pte_page` as necessary.
     fn do_map_page<P: PhysPage>(
         &mut self,
-        gpa: GuestPhysAddr,
+        gpa: PageAddr<GuestPhys>,
         spa: SupervisorPageAddr,
         perms: PteLeafPerms,
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
@@ -129,7 +129,7 @@ impl Sv48x4 {
 
         let mut table = PageTable::from_root(self);
         while table.level().leaf_page_size() != spa.size() {
-            table = table.next_level_or_fill_fn(gpa, get_pte_page)?;
+            table = table.next_level_or_fill_fn(RawAddr::from(gpa), get_pte_page)?;
         }
         unsafe {
             // Safe since we've verified ownership of the page.
@@ -159,10 +159,15 @@ impl Sv48x4 {
     }
 }
 
+impl GuestStagePageTable for Sv48x4 {
+    const HGATP_VALUE: u64 = 9;
+}
+
 // TODO: Support non-4k page sizes.
 impl PlatformPageTable for Sv48x4 {
     type Level = Sv48x4Level;
-    const HGATP_VALUE: u64 = 9;
+    type MappedAddressSpace = GuestPhys;
+
     const TOP_LEVEL_ALIGN: u64 = 16 * 1024;
 
     fn page_owner_id(&self) -> PageOwnerId {
@@ -206,7 +211,7 @@ impl PlatformPageTable for Sv48x4 {
 
     fn map_page<P: PhysPage>(
         &mut self,
-        gpa: GuestPhysAddr,
+        gpa: PageAddr<Self::MappedAddressSpace>,
         page_to_map: P,
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
     ) -> Result<()> {
@@ -215,7 +220,7 @@ impl PlatformPageTable for Sv48x4 {
 
     fn map_page_with_measurement(
         &mut self,
-        gpa: GuestPhysAddr,
+        gpa: PageAddr<Self::MappedAddressSpace>,
         page_to_map: Page,
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
         data_measure: &mut dyn DataMeasure,
@@ -225,8 +230,11 @@ impl PlatformPageTable for Sv48x4 {
         Ok(())
     }
 
-    fn unmap_page<P: PhysPage>(&mut self, gpa: GuestPhysAddr) -> Result<UnmappedPhysPage<P>> {
-        let entry = self.get_4k_leaf_with_type(gpa, P::mem_type())?;
+    fn unmap_page<P: PhysPage>(
+        &mut self,
+        gpa: PageAddr<Self::MappedAddressSpace>,
+    ) -> Result<UnmappedPhysPage<P>> {
+        let entry = self.get_4k_leaf_with_type(RawAddr::from(gpa), P::mem_type())?;
         let page = unsafe {
             // Safe since we've verified the typing of the page.
             entry.take_page().unwrap()
@@ -234,8 +242,11 @@ impl PlatformPageTable for Sv48x4 {
         Ok(UnmappedPhysPage::new(page))
     }
 
-    fn invalidate_page<P: PhysPage>(&mut self, gpa: GuestPhysAddr) -> Result<UnmappedPhysPage<P>> {
-        let entry = self.get_4k_leaf_with_type(gpa, P::mem_type())?;
+    fn invalidate_page<P: PhysPage>(
+        &mut self,
+        gpa: PageAddr<Self::MappedAddressSpace>,
+    ) -> Result<UnmappedPhysPage<P>> {
+        let entry = self.get_4k_leaf_with_type(RawAddr::from(gpa), P::mem_type())?;
         let page = unsafe {
             // Safe since we've verified the typing of the page.
             entry.invalidate_page().unwrap()
@@ -245,7 +256,7 @@ impl PlatformPageTable for Sv48x4 {
 
     fn unmap_range<P: PhysPage>(
         &mut self,
-        addr: GuestPageAddr,
+        addr: PageAddr<Self::MappedAddressSpace>,
         num_pages: u64,
     ) -> Result<UnmapIter<Self, P>> {
         if addr.size().is_huge() {
@@ -263,7 +274,7 @@ impl PlatformPageTable for Sv48x4 {
 
     fn invalidate_range<P: PhysPage>(
         &mut self,
-        addr: GuestPageAddr,
+        addr: PageAddr<Self::MappedAddressSpace>,
         num_pages: u64,
     ) -> Result<InvalidateIter<Self, P>> {
         if addr.size().is_huge() {
@@ -283,7 +294,7 @@ impl PlatformPageTable for Sv48x4 {
         self.root.base()
     }
 
-    fn do_guest_fault(&mut self, gpa: GuestPhysAddr) -> bool {
+    fn do_fault(&mut self, gpa: RawAddr<Self::MappedAddressSpace>) -> bool {
         // avoid double self borrow, by cloning the pages, each layer borrows self, so the borrow
         // checked can't tell that phys_pages is only borrowed once.
         let phys_pages = self.phys_pages.clone();
@@ -313,9 +324,9 @@ impl PlatformPageTable for Sv48x4 {
         }
     }
 
-    fn write_guest_owned_page(
+    fn write_mapped_page(
         &mut self,
-        gpa: GuestPhysAddr,
+        gpa: RawAddr<Self::MappedAddressSpace>,
         offset: u64,
         bytes: &[u8],
     ) -> Result<()> {

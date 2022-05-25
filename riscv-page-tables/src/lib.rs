@@ -50,8 +50,8 @@ pub use hw_mem_map::Error as MemMapError;
 pub use hw_mem_map::Result as MemMapResult;
 pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemRegionType, HwReservedMemType};
 pub use page_table::Error as PageTableError;
-pub use page_table::PlatformPageTable;
 pub use page_table::Result as PageTableResult;
+pub use page_table::{GuestStagePageTable, PlatformPageTable};
 pub use page_tracking::Error as PageTrackingError;
 pub use page_tracking::Result as PageTrackingResult;
 pub use page_tracking::{HypPageAlloc, PageState};
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn map_and_unmap() {
-        let (mut phys_pages, host_mem) = stub_sys_memory();
+        let (phys_pages, host_mem) = stub_sys_memory();
 
         let mut host_pages = host_mem.into_iter().flatten();
         let seq_pages = SequentialPages::from_pages(host_pages.by_ref().take(4)).unwrap();
@@ -128,18 +128,15 @@ mod tests {
                 .set_page_owner(page.addr(), guest_page_table.page_owner_id())
                 .is_ok());
             assert!(guest_page_table
-                .map_page(RawAddr::from(gpa), page, &mut || pte_pages.next())
+                .map_page(gpa, page, &mut || pte_pages.next())
                 .is_ok());
         }
-        let dirty_page: Page = guest_page_table
-            .unmap_page(RawAddr::from(gpa_base))
-            .unwrap()
-            .to_page();
+        let dirty_page: Page = guest_page_table.unmap_page(gpa_base).unwrap().to_page();
         assert_eq!(dirty_page.addr(), page_addrs[0]);
         assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
         let clean_page = Page::from(CleanPage::from(
             guest_page_table
-                .unmap_page(RawAddr::from(gpa_base.checked_add_pages(1).unwrap()))
+                .unmap_page(gpa_base.checked_add_pages(1).unwrap())
                 .unwrap(),
         ));
         assert_eq!(clean_page.addr(), page_addrs[1]);

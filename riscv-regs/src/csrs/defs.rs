@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use riscv_page_tables::PlatformPageTable;
+use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::Pfn;
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
@@ -355,11 +355,11 @@ register_bitfields![u64,
 ];
 
 pub trait HgatpHelpers {
-    fn set_from<T: PlatformPageTable>(&mut self, pt_root: &T, vmid: u64);
+    fn set_from<T: GuestStagePageTable>(&mut self, pt_root: &T, vmid: u64);
 }
 
 impl HgatpHelpers for LocalRegisterCopy<u64, hgatp::Register> {
-    fn set_from<T: PlatformPageTable>(&mut self, pt: &T, vmid: u64) {
+    fn set_from<T: GuestStagePageTable>(&mut self, pt: &T, vmid: u64) {
         self.modify(hgatp::vmid.val(vmid));
         self.modify(hgatp::ppn.val(Pfn::from(pt.get_root_address()).bits()));
         self.modify(hgatp::mode.val(T::HGATP_VALUE));

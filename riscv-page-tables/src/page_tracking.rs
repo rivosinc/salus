@@ -459,9 +459,9 @@ mod tests {
 
     #[test]
     fn drop_one_phys_pages_ref() {
-        let (mut phys_pages, _host_mem) = stub_phys_pages();
+        let (phys_pages, _host_mem) = stub_phys_pages();
         let new_id = {
-            let mut c = phys_pages.clone();
+            let c = phys_pages.clone();
             c.add_active_guest().unwrap()
         };
         assert_eq!(phys_pages.inner.lock().active_guests.len(), 2);

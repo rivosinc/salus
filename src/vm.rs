@@ -8,7 +8,7 @@ use drivers::{CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{PageState, PlatformPageTable};
+use riscv_page_tables::{GuestStagePageTable, PageState};
 use riscv_pages::{GuestPhysAddr, PageAddr, PageOwnerId, Pfn, RawAddr, SequentialPages};
 use riscv_regs::{hgatp, hstatus, scounteren, sstatus};
 use riscv_regs::{
@@ -186,12 +186,12 @@ global_asm!(
     guest_sepc = const guest_csr_offset!(sepc),
 );
 
-struct Guests<T: PlatformPageTable> {
+struct Guests<T: GuestStagePageTable> {
     inner: PageVec<PageBox<GuestState<T>>>,
     phys_pages: PageState,
 }
 
-impl<T: PlatformPageTable> Guests<T> {
+impl<T: GuestStagePageTable> Guests<T> {
     fn add(&mut self, guest_state: PageBox<GuestState<T>>) -> sbi::Result<()> {
         self.inner
             .try_reserve(1)
@@ -252,13 +252,13 @@ impl<T: PlatformPageTable> Guests<T> {
     }
 }
 
-enum GuestState<T: PlatformPageTable> {
+enum GuestState<T: GuestStagePageTable> {
     Init(GuestRootBuilder<T>),
     Running(Vm<T>),
     Temp,
 }
 
-impl<T: PlatformPageTable> GuestState<T> {
+impl<T: GuestStagePageTable> GuestState<T> {
     fn page_owner_id(&self) -> PageOwnerId {
         match self {
             Self::Init(grb) => grb.page_owner_id(),
@@ -304,7 +304,7 @@ pub struct VmCpu {
 
 impl VmCpu {
     /// Creates a new vCPU using the address space of `vm_pages`.
-    fn new<T: PlatformPageTable>(vm_pages: &VmPages<T>) -> Self {
+    fn new<T: GuestStagePageTable>(vm_pages: &VmPages<T>) -> Self {
         let mut state = VmCpuState::default();
 
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
@@ -454,14 +454,14 @@ impl VmCpu {
 }
 
 /// A VM that is being run.
-pub struct Vm<T: PlatformPageTable> {
+pub struct Vm<T: GuestStagePageTable> {
     // TODO: Support multiple vCPUs.
     vcpu: Mutex<VmCpu>,
     vm_pages: VmPages<T>,
     guests: Option<RwLock<Guests<T>>>,
 }
 
-impl<T: PlatformPageTable> Vm<T> {
+impl<T: GuestStagePageTable> Vm<T> {
     /// Create a new guest using the given initial page table and pool of initial pages.
     fn new(vm_pages: VmPages<T>) -> Self {
         Self {
@@ -831,11 +831,11 @@ impl<T: PlatformPageTable> Vm<T> {
 }
 
 /// Represents the special VM that serves as the host for the system.
-pub struct Host<T: PlatformPageTable> {
+pub struct Host<T: GuestStagePageTable> {
     inner: Vm<T>,
 }
 
-impl<T: PlatformPageTable> Host<T> {
+impl<T: GuestStagePageTable> Host<T> {
     /// Creates a new `Host` using the given initial page table root.
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
     /// length zero and capacity limits the number of nested guests.

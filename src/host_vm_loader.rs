@@ -7,7 +7,7 @@ use arrayvec::ArrayString;
 use core::{alloc::Allocator, fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
 use drivers::{CpuId, CpuInfo, Imsic, ImsicGuestId};
-use riscv_page_tables::{HwMemRegion, HypPageAlloc, PlatformPageTable};
+use riscv_page_tables::{GuestStagePageTable, HwMemRegion, HypPageAlloc};
 use riscv_pages::{GuestPhysAddr, PageAddr, PageOwnerId, PageSize, RawAddr, SequentialPages};
 
 use crate::print_util::*;
@@ -138,7 +138,7 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
 /// creation (specifically, the root of the G-stage page-table), we guarantee that each
 /// contiguous T::TOP_LEVEL_ALIGN block of the guest physical address space of the host VM maps to
 /// a contiguous T::TOP_LEVEL_ALIGN block of the host physical address space.
-pub struct HostVmLoader<T: PlatformPageTable, A: Allocator + Clone> {
+pub struct HostVmLoader<T: GuestStagePageTable, A: Allocator + Clone> {
     hypervisor_dt: DeviceTree<A>,
     kernel: HwMemRegion,
     initramfs: Option<HwMemRegion>,
@@ -149,7 +149,7 @@ pub struct HostVmLoader<T: PlatformPageTable, A: Allocator + Clone> {
     guest_ram_base: GuestPhysAddr,
 }
 
-impl<T: PlatformPageTable, A: Allocator + Clone> HostVmLoader<T, A> {
+impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
     /// Creates a new loader with the given device-tree and kernel & initramfs images. Uses
     /// `page_alloc` to allocate any additional pages that are necessary to load the VM.
     pub fn new(

@@ -2,11 +2,16 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use alloc::vec::Vec;
+use core::{alloc::Allocator, mem};
 use drivers::ImsicGuestId;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, PageState};
-use riscv_pages::{GuestPhysAddr, PageAddr, PageOwnerId, RawAddr, SequentialPages};
+use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageState};
+use riscv_pages::{
+    GuestPageAddr, GuestPhysAddr, MemType, Page, PageAddr, PageOwnerId, PageSize, PhysPage,
+    RawAddr, SequentialPages,
+};
 use sbi::Error as SbiError;
 use sbi::{self, MeasurementFunction, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
 use spin::{Mutex, RwLock};
@@ -14,10 +19,13 @@ use spin::{Mutex, RwLock};
 use crate::print_util::*;
 use crate::sha256_measure::SHA256_DIGEST_BYTES;
 use crate::vm_cpu::{VmCpu, VmCpuExit};
-use crate::vm_pages::{self, GuestRootBuilder, HostRootPages, VmPages};
+use crate::vm_pages::{self, VmPages};
 use crate::{print, println};
 
 const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
+
+pub enum VmStateInitializing {}
+pub enum VmStateFinalized {}
 
 struct Guests<T: GuestStagePageTable> {
     inner: PageVec<PageBox<GuestState<T>>>,
@@ -72,43 +80,43 @@ impl<T: GuestStagePageTable> Guests<T> {
         self.inner.get(guest_index).ok_or(SbiError::InvalidParam)
     }
 
-    // returns the initializing guest if it's present and runnable, otherwise none
-    fn initializing_guest(&self, guest_id: u64) -> sbi::Result<&GuestRootBuilder<T>> {
+    // Returns the initializing guest if it's present, otherwise None.
+    fn initializing_guest(&self, guest_id: u64) -> sbi::Result<&Vm<T, VmStateInitializing>> {
         self.guest(guest_id)
-            .and_then(|g| g.as_guest_root_builder().ok_or(SbiError::InvalidParam))
+            .and_then(|g| g.as_initializing_vm().ok_or(SbiError::InvalidParam))
     }
 
-    // Returns the runnable guest if it's present and runnable, otherwise None
-    fn running_guest(&self, guest_id: u64) -> sbi::Result<&Vm<T>> {
+    // Returns the runnable guest if it's present, otherwise None
+    fn running_guest(&self, guest_id: u64) -> sbi::Result<&Vm<T, VmStateFinalized>> {
         self.guest(guest_id)
-            .and_then(|g| g.as_vm().ok_or(SbiError::InvalidParam))
+            .and_then(|g| g.as_finalized_vm().ok_or(SbiError::InvalidParam))
     }
 }
 
 enum GuestState<T: GuestStagePageTable> {
-    Init(GuestRootBuilder<T>),
-    Running(Vm<T>),
+    Init(Vm<T, VmStateInitializing>),
+    Running(Vm<T, VmStateFinalized>),
     Temp,
 }
 
 impl<T: GuestStagePageTable> GuestState<T> {
     fn page_owner_id(&self) -> PageOwnerId {
         match self {
-            Self::Init(grb) => grb.page_owner_id(),
+            Self::Init(v) => v.vm_pages.page_owner_id(),
             Self::Running(v) => v.vm_pages.page_owner_id(),
             Self::Temp => unreachable!(),
         }
     }
 
-    fn as_guest_root_builder(&self) -> Option<&GuestRootBuilder<T>> {
+    fn as_initializing_vm(&self) -> Option<&Vm<T, VmStateInitializing>> {
         match self {
-            Self::Init(ref grb) => Some(grb),
+            Self::Init(ref v) => Some(v),
             Self::Running(_) => None,
             Self::Temp => unreachable!(),
         }
     }
 
-    fn as_vm(&self) -> Option<&Vm<T>> {
+    fn as_finalized_vm(&self) -> Option<&Vm<T, VmStateFinalized>> {
         match self {
             Self::Init(_) => None,
             Self::Running(ref v) => Some(v),
@@ -118,16 +126,16 @@ impl<T: GuestStagePageTable> GuestState<T> {
 }
 
 /// A VM that is being run.
-pub struct Vm<T: GuestStagePageTable> {
+pub struct Vm<T: GuestStagePageTable, S = VmStateFinalized> {
     // TODO: Support multiple vCPUs.
     vcpu: Mutex<VmCpu>,
-    vm_pages: VmPages<T>,
+    vm_pages: VmPages<T, S>,
     guests: Option<RwLock<Guests<T>>>,
 }
 
-impl<T: GuestStagePageTable> Vm<T> {
+impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     /// Create a new guest using the given initial page table and pool of initial pages.
-    fn new(vm_pages: VmPages<T>) -> Self {
+    pub fn new(vm_pages: VmPages<T, VmStateInitializing>) -> Self {
         Self {
             vcpu: Mutex::new(VmCpu::new(&vm_pages)),
             vm_pages,
@@ -157,6 +165,17 @@ impl<T: GuestStagePageTable> Vm<T> {
         }));
     }
 
+    /// Completes intialization of the `Vm`, returning it in a finalized state.
+    fn finalize(self) -> Vm<T, VmStateFinalized> {
+        Vm {
+            vcpu: self.vcpu,
+            vm_pages: self.vm_pages.finalize(),
+            guests: self.guests,
+        }
+    }
+}
+
+impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     /// Run this guest until an unhandled exit is encountered.
     fn run(&self, _vcpu_id: u64) -> VmCpuExit {
         loop {
@@ -322,16 +341,15 @@ impl<T: GuestStagePageTable> Vm<T> {
         ))
         .ok_or(SbiError::InvalidAddress)?;
 
-        let (guest_builder, state_page) = self
+        let (guest_vm, state_page) = self
             .vm_pages
-            .create_guest_root_builder(from_page_addr)
+            .create_guest_vm(from_page_addr)
             .map_err(|_| SbiError::InvalidParam)?;
-        // unwrap can't fail because a valid guest must have a valid guest id.
-        let id = guest_builder.page_owner_id();
+        let id = guest_vm.vm_pages.page_owner_id();
 
         // create a boxpage for builder state and add it to the list of vms.
         let guest_state: PageBox<GuestState<T>> =
-            PageBox::new_with(GuestState::Init(guest_builder), state_page);
+            PageBox::new_with(GuestState::Init(guest_vm), state_page);
 
         let mut guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.write();
         guests.add(guest_state)?;
@@ -352,7 +370,7 @@ impl<T: GuestStagePageTable> Vm<T> {
             let mut temp = GuestState::Temp;
             core::mem::swap(&mut **g, &mut temp);
             let mut running = match temp {
-                GuestState::Init(gbr) => GuestState::Running(Vm::new(gbr.create_pages())),
+                GuestState::Init(v) => GuestState::Running(v.finalize()),
                 t => t,
             };
             core::mem::swap(&mut **g, &mut running);
@@ -378,9 +396,9 @@ impl<T: GuestStagePageTable> Vm<T> {
                 .ok_or(SbiError::InvalidAddress)?;
 
         let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-        let grb = guests.initializing_guest(guest_id)?;
+        let guest_vm = guests.initializing_guest(guest_id)?;
         self.vm_pages
-            .add_pte_pages_builder(from_page_addr, num_pages, grb)
+            .add_pte_pages_builder(from_page_addr, num_pages, &guest_vm.vm_pages)
             .map_err(|e| {
                 println!("Salus - pte_pages_builder error {e:?}");
                 SbiError::InvalidAddress
@@ -429,14 +447,15 @@ impl<T: GuestStagePageTable> Vm<T> {
             PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
         let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-        let grb = guests.initializing_guest(guest_id)?;
-        let to_page_addr = PageAddr::new(RawAddr::guest(to_addr, grb.page_owner_id()))
-            .ok_or(SbiError::InvalidAddress)?;
+        let guest_vm = guests.initializing_guest(guest_id)?;
+        let to_page_addr =
+            PageAddr::new(RawAddr::guest(to_addr, guest_vm.vm_pages.page_owner_id()))
+                .ok_or(SbiError::InvalidAddress)?;
         self.vm_pages
             .add_4k_pages_builder(
                 from_page_addr,
                 num_pages,
-                grb,
+                &guest_vm.vm_pages,
                 to_page_addr,
                 measure_preserve,
             )
@@ -481,6 +500,7 @@ impl<T: GuestStagePageTable> Vm<T> {
                 guests
                     .initializing_guest(guest_id)
                     .unwrap()
+                    .vm_pages
                     .get_measurement(&mut bytes)
                     .map_err(|_| SbiError::Failed)?;
             }
@@ -495,19 +515,38 @@ impl<T: GuestStagePageTable> Vm<T> {
 }
 
 /// Represents the special VM that serves as the host for the system.
-pub struct Host<T: GuestStagePageTable> {
-    inner: Vm<T>,
+pub struct HostVm<T: GuestStagePageTable, S = VmStateFinalized> {
+    inner: Vm<T, S>,
 }
 
-impl<T: GuestStagePageTable> Host<T> {
-    /// Creates a new `Host` using the given initial page table root.
-    /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
-    /// length zero and capacity limits the number of nested guests.
-    pub fn new(page_root: HostRootPages<T>, pages: SequentialPages) -> Self {
-        let mut inner = Vm::new(page_root.into_inner());
-        inner.add_guest_tracking_pages(pages);
-        inner.set_interrupt_file(ImsicGuestId::HostVm);
-        Self { inner }
+impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
+    /// Creates an initializing host VM with an expected guest physical address space size of
+    /// `host_gpa_size` from the hypervisor page allocator. Returns the remaining free pages
+    /// from the allocator, along with the newly constructed `HostVm`.
+    pub fn from_hyp_mem<A: Allocator>(
+        mut hyp_mem: HypPageAlloc<A>,
+        host_gpa_size: u64,
+    ) -> (Vec<SequentialPages, A>, Self) {
+        let root_table_pages = hyp_mem.take_pages_with_alignment(4, T::TOP_LEVEL_ALIGN);
+        let num_pte_pages = T::max_pte_pages(host_gpa_size / PageSize::Size4k as u64);
+        let pte_pages = hyp_mem.take_pages(num_pte_pages as usize).into_iter();
+        let guest_tracking_pages = hyp_mem.take_pages(2);
+
+        let num_pte_vec_pages = PageSize::Size4k
+            .round_up(num_pte_pages * mem::size_of::<Page>() as u64)
+            / (PageSize::Size4k as u64);
+        let pte_vec_pages = hyp_mem.take_pages(num_pte_vec_pages as usize);
+        let (phys_pages, host_pages) = PageState::from(hyp_mem, T::TOP_LEVEL_ALIGN);
+        let root = T::new(root_table_pages, PageOwnerId::host(), phys_pages).unwrap();
+        let vm_pages = VmPages::new(root, pte_vec_pages);
+        for p in pte_pages {
+            vm_pages.add_pte_page(p).unwrap();
+        }
+        let mut vm = Vm::new(vm_pages);
+        vm.add_guest_tracking_pages(guest_tracking_pages);
+        vm.set_interrupt_file(ImsicGuestId::HostVm);
+
+        (host_pages, Self { inner: vm })
     }
 
     /// Sets the launch arguments (entry point and FDT) for the host vCPU.
@@ -515,6 +554,62 @@ impl<T: GuestStagePageTable> Host<T> {
         self.inner.set_launch_args(entry_addr, fdt_addr.bits());
     }
 
+    /// Adds data pages that are measured and mapped to the page tables for the host. Requires
+    /// that the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
+    pub fn add_measured_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
+    where
+        I: Iterator<Item = Page>,
+    {
+        let phys_pages = self.inner.vm_pages.phys_pages();
+        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
+            assert_eq!(vm_addr.size(), page.addr().size());
+            assert_eq!(
+                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
+                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+            );
+            phys_pages
+                .set_page_owner(page.addr(), self.inner.vm_pages.page_owner_id())
+                .unwrap();
+            self.inner
+                .vm_pages
+                .add_measured_4k_page(vm_addr, page)
+                .unwrap();
+        }
+    }
+
+    /// Add pages which need not be measured to the host page tables. For RAM pages, requires that
+    /// the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
+    pub fn add_pages<I, P>(&mut self, to_addr: GuestPageAddr, pages: I)
+    where
+        I: Iterator<Item = P>,
+        P: PhysPage,
+    {
+        let phys_pages = self.inner.vm_pages.phys_pages();
+        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
+            assert_eq!(vm_addr.size(), page.addr().size());
+            if P::mem_type() == MemType::Ram {
+                // GPA -> SPA mappings need to match T::TOP_LEVEL_ALIGN alignment for RAM pages.
+                assert_eq!(
+                    vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
+                    page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+                );
+            }
+            phys_pages
+                .set_page_owner(page.addr(), self.inner.vm_pages.page_owner_id())
+                .unwrap();
+            self.inner.vm_pages.add_4k_page(vm_addr, page).unwrap();
+        }
+    }
+
+    /// Completes intialization of the host, returning it in a finalized state.
+    pub fn finalize(self) -> HostVm<T, VmStateFinalized> {
+        HostVm {
+            inner: self.inner.finalize(),
+        }
+    }
+}
+
+impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
     /// Run the host. Only returns for system shutdown
     pub fn run(&mut self, vcpu_id: u64) -> VmCpuExit {
         // TODO - return value need to be host specific

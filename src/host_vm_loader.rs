@@ -12,8 +12,7 @@ use riscv_pages::{GuestPhysAddr, PageAddr, PageOwnerId, PageSize, RawAddr, Seque
 
 use crate::print_util::*;
 use crate::println;
-use crate::vm::Host;
-use crate::vm_pages::HostRootBuilder;
+use crate::vm::{HostVm, VmStateFinalized, VmStateInitializing};
 
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
 //
@@ -142,8 +141,7 @@ pub struct HostVmLoader<T: GuestStagePageTable, A: Allocator + Clone> {
     hypervisor_dt: DeviceTree<A>,
     kernel: HwMemRegion,
     initramfs: Option<HwMemRegion>,
-    root_builder: HostRootBuilder<T>,
-    guest_tracking_pages: SequentialPages,
+    vm: HostVm<T, VmStateInitializing>,
     fdt_pages: SequentialPages,
     zero_pages: Vec<SequentialPages, A>,
     guest_ram_base: GuestPhysAddr,
@@ -160,9 +158,6 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         guest_phys_size: u64,
         mut page_alloc: HypPageAlloc<A>,
     ) -> Self {
-        // Reserve pages for tracking the host's guests.
-        let guest_tracking_pages = page_alloc.take_pages(2);
-
         // Reserve a contiguous chunk for the host's FDT. We assume it will be no bigger than the
         // size of the hypervisor's FDT and we align it to `T::TOP_LEVEL_ALIGN` to maintain the
         // contiguous mapping guarantee from GPA -> HPA mentioned above.
@@ -174,15 +169,13 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         let fdt_pages = page_alloc
             .take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
 
-        let (zero_pages, root_builder) =
-            HostRootBuilder::<T>::from_hyp_mem(page_alloc, guest_phys_size);
+        let (zero_pages, vm) = HostVm::from_hyp_mem(page_alloc, guest_phys_size);
 
         Self {
             hypervisor_dt,
             kernel,
             initramfs,
-            root_builder,
-            guest_tracking_pages,
+            vm,
             fdt_pages,
             zero_pages,
             guest_ram_base,
@@ -244,8 +237,8 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         self
     }
 
-    /// Constructs the address space for the host VM, returning a `Host` that is ready to run.
-    pub fn build_address_space(mut self) -> Host<T> {
+    /// Constructs the address space for the host VM, returning a `HostVm` that is ready to run.
+    pub fn build_address_space(mut self) -> HostVm<T, VmStateFinalized> {
         // Map the IMSIC interrupt files into the guest address space. The host VM's interrupt
         // file gets mapped to the location of the supervisor interrupt file.
         let imsic = Imsic::get();
@@ -255,7 +248,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         ))
         .unwrap();
         // TODO: This should be per-CPU.
-        self.root_builder = self.root_builder.add_pages(
+        self.vm.add_pages(
             imsic_gpa,
             [imsic
                 .take_guest_file(CpuId::new(0), ImsicGuestId::HostVm)
@@ -265,23 +258,22 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
         for i in 0..(imsic.guests_per_hart() - 1) {
             let id = ImsicGuestId::GuestVm(i);
-            self.root_builder = self.root_builder.add_pages(
+            self.vm.add_pages(
                 imsic_gpa,
                 [imsic.take_guest_file(CpuId::new(0), id).unwrap()].into_iter(),
             );
             imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
         }
 
-        // HostRootBuilder guarantees that the host pages it returns start at
-        // T::TOP_LEVEL_ALIGN-aligned block, and because we built the HwMemMap with a minimum
-        // region alignment of T::TOP_LEVEL_ALIGN any discontiguous ranges are also guaranteed to
-        // be aligned.
+        // Host guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned block,
+        // and because we built the HwMemMap with a minimum region alignment of T::TOP_LEVEL_ALIGN
+        // any discontiguous ranges are also guaranteed to be aligned.
         let mut zero_pages_iter = self.zero_pages.into_iter().flatten();
 
         // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
         let mut current_gpa = PageAddr::new(self.guest_ram_base).unwrap();
         let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
-        self.root_builder = self.root_builder.add_pages(
+        self.vm.add_pages(
             current_gpa,
             zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
         );
@@ -292,15 +284,14 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             // Safe because HwMemMap reserved this region.
             SequentialPages::from_mem_range(self.kernel.base().get_4k_addr(), num_kernel_pages)
         };
-        self.root_builder = self
-            .root_builder
+        self.vm
             .add_measured_pages(current_gpa, kernel_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_kernel_pages).unwrap();
 
         if let Some(r) = self.initramfs {
             let num_pages =
                 (INITRAMFS_OFFSET - (KERNEL_OFFSET + self.kernel.size())) / PageSize::Size4k as u64;
-            self.root_builder = self.root_builder.add_pages(
+            self.vm.add_pages(
                 current_gpa,
                 zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
             );
@@ -311,34 +302,31 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
                 // Safe because HwMemMap reserved this region.
                 SequentialPages::from_mem_range(r.base().get_4k_addr(), num_initramfs_pages)
             };
-            self.root_builder = self
-                .root_builder
+            self.vm
                 .add_measured_pages(current_gpa, initramfs_pages.into_iter());
             current_gpa = current_gpa.checked_add_pages(num_initramfs_pages).unwrap();
         }
 
         let num_pages = (FDT_OFFSET - (current_gpa.bits() - self.guest_ram_base.bits()))
             / PageSize::Size4k as u64;
-        self.root_builder = self.root_builder.add_pages(
+        self.vm.add_pages(
             current_gpa,
             zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
         );
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
         let num_fdt_pages = self.fdt_pages.len();
-        self.root_builder = self
-            .root_builder
+        self.vm
             .add_measured_pages(current_gpa, self.fdt_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
-        self.root_builder = self.root_builder.add_pages(current_gpa, zero_pages_iter);
-        let host = Host::new(self.root_builder.create_host(), self.guest_tracking_pages);
-        host.set_launch_args(
+        self.vm.add_pages(current_gpa, zero_pages_iter);
+        self.vm.set_launch_args(
             self.guest_ram_base
                 .checked_increment(KERNEL_OFFSET)
                 .unwrap(),
             self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
         );
-        host
+        self.vm.finalize()
     }
 }

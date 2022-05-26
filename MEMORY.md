@@ -10,15 +10,13 @@ classDiagram
     }
     class HypPageAlloc {
     }
-    class HostRootBuilder {
+    class HostVm {
     }
     class VmPages {
     }
-    class HostVm {
-    }
     HwMemMap --> HypPageAlloc : creates
-    HypPageAlloc --> HostRootBuilder : creates
-    HostRootBuilder --> VmPages : creates
+    HypPageAlloc --> HostVm : creates
+    HostVm --> VmPages : creates
     HostVm *-- VmPages
 ```
 
@@ -26,7 +24,7 @@ classDiagram
 the device tree as input. It is then converted in to a `HypPageAlloc` struct
 that is used to allocate the pages needed for the hypervisor. After the
 hypervisor has taken it's pages, the remaining pages in `HypPageAlloc` are
-moved in to `HostRootBuilder`, which is used to build the host Vm and its
+moved in to `HostVm`, which is used to build the host Vm and its
 `VmPages` structure.
 
 # Memory ownership

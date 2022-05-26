@@ -2,19 +2,18 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use alloc::vec::Vec;
-use core::alloc::Allocator;
 use core::marker::PhantomData;
 use data_measure::data_measure::DataMeasure;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageState};
+use riscv_page_tables::{GuestStagePageTable, PageState};
 use riscv_pages::{
-    CleanPage, GuestPageAddr, GuestPhysAddr, MemType, Page, PageOwnerId, PageSize, PhysPage,
-    SeqPageIter, SequentialPages, SupervisorPageAddr,
+    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, PhysPage,
+    SequentialPages, SupervisorPageAddr,
 };
 use spin::Mutex;
 
 use crate::sha256_measure::Sha256Measure;
+use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
 
 #[derive(Debug)]
 pub enum Error {
@@ -26,13 +25,11 @@ pub enum Error {
     // Vm pages must be aligned to 16k to be used for sv48x4 mappings
     UnalignedVmPages(GuestPageAddr),
     UnownedPage(GuestPageAddr),
+    UnsupportedPageSize(PageSize),
     MeasurementBufferTooSmall,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
-
-pub enum VmPagesBuilding {}
-pub enum VmPagesConstructed {}
 
 /// VmPages is the single management point for memory used by virtual machines.
 ///
@@ -41,27 +38,17 @@ pub enum VmPagesConstructed {}
 ///
 /// Machines are allowed to donate pages to child machines and to share donated pages with parent
 /// machines.
-pub struct VmPages<T: GuestStagePageTable, S = VmPagesConstructed> {
+pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     page_owner_id: PageOwnerId,
     phys_pages: PageState,
-    // Locking order: `root` must be locked before `measurement`
+    // Locking order: `root` -> `measurement` -> `pte_pages`
     root: Mutex<T>,
     measurement: Mutex<Sha256Measure>,
+    pte_pages: Mutex<PageVec<Page>>,
     phantom: PhantomData<S>,
 }
 
 impl<T: GuestStagePageTable, S> VmPages<T, S> {
-    /// Creates a new `VmPages` from the given root page table.
-    fn new(root: T) -> Self {
-        Self {
-            page_owner_id: root.page_owner_id(),
-            phys_pages: root.phys_pages(),
-            root: Mutex::new(root),
-            measurement: Mutex::new(Sha256Measure::new()),
-            phantom: PhantomData,
-        }
-    }
-
     /// Returns the `PageOwnerId` associated with the pages contained in this machine.
     pub fn page_owner_id(&self) -> PageOwnerId {
         self.page_owner_id
@@ -91,13 +78,16 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     }
 }
 
-impl<T: GuestStagePageTable> VmPages<T, VmPagesConstructed> {
+impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
     /// Creates a `GuestRootBuilder` from pages owned by `self`.
     /// The `GuestRootBuilder` is used to build a guest VM owned by `self`'s root.page_owner_id().
-    pub fn create_guest_root_builder(
+    pub fn create_guest_vm(
         &self,
         from_addr: GuestPageAddr,
-    ) -> Result<(GuestRootBuilder<T>, Page)> {
+    ) -> Result<(Vm<T, VmStateInitializing>, Page)> {
+        if from_addr.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(from_addr.size()));
+        }
         if (from_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedVmPages(from_addr));
         }
@@ -119,7 +109,10 @@ impl<T: GuestStagePageTable> VmPages<T, VmPagesConstructed> {
         let pte_page = clean_pages.next().unwrap();
         let state_page = clean_pages.next().unwrap();
 
-        Ok((GuestRootBuilder::new(guest_root, pte_page), state_page))
+        Ok((
+            Vm::new(VmPages::new(guest_root, SequentialPages::from(pte_page))),
+            state_page,
+        ))
     }
 
     /// Adds pages to be used for building page table entries
@@ -127,8 +120,11 @@ impl<T: GuestStagePageTable> VmPages<T, VmPagesConstructed> {
         &self,
         from_addr: GuestPageAddr,
         count: u64,
-        to: &GuestRootBuilder<T>,
+        to: &VmPages<T, VmStateInitializing>,
     ) -> Result<()> {
+        if from_addr.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(from_addr.size()));
+        }
         let mut root = self.root.lock();
         let clean_pages = root
             .invalidate_range(from_addr, count)
@@ -150,10 +146,13 @@ impl<T: GuestStagePageTable> VmPages<T, VmPagesConstructed> {
         &self,
         from_addr: GuestPageAddr,
         count: u64,
-        to: &GuestRootBuilder<T>,
+        to: &VmPages<T, VmStateInitializing>,
         to_addr: GuestPageAddr,
         measure_preserve: bool,
     ) -> Result<u64> {
+        if from_addr.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(from_addr.size()));
+        }
         let mut root = self.root.lock();
         let unmapped_pages = root
             .invalidate_range::<Page>(from_addr, count)
@@ -164,9 +163,9 @@ impl<T: GuestStagePageTable> VmPages<T, VmPagesConstructed> {
                 .set_page_owner(page.addr(), to.page_owner_id())
                 .map_err(Error::SettingOwner)?;
             if measure_preserve {
-                to.add_data_page(guest_addr, page)?;
+                to.add_measured_4k_page(guest_addr, page)?;
             } else {
-                to.add_zero_page(guest_addr, page)?;
+                to.add_4k_page(guest_addr, page)?;
             }
         }
         Ok(count)
@@ -174,6 +173,9 @@ impl<T: GuestStagePageTable> VmPages<T, VmPagesConstructed> {
 
     /// Remove pages owned and return them to the previous owner.
     pub fn remove_4k_pages(&self, from_addr: GuestPageAddr, count: u64) -> Result<u64> {
+        if from_addr.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(from_addr.size()));
+        }
         let mut root = self.root.lock();
         let clean_pages = root
             .unmap_range(from_addr, count)
@@ -220,169 +222,26 @@ impl<T: GuestStagePageTable> VmPages<T, VmPagesConstructed> {
     }
 }
 
-impl<T: GuestStagePageTable> VmPages<T, VmPagesBuilding> {
-    /// Maps a page into the guest's address space and measures it.
-    fn add_measured_4k_page(
-        &self,
-        to_addr: GuestPageAddr,
-        page: Page,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
-    ) -> Result<()> {
-        let mut root = self.root.lock();
-        let mut measurement = self.measurement.lock();
-        root.map_page_with_measurement(to_addr, page, get_pte_page, &mut *measurement)
-            .map_err(Error::Paging)
-    }
-
-    /// Maps an unmeasured page into the guest's address space.
-    fn add_4k_page<P: PhysPage>(
-        &self,
-        to_addr: GuestPageAddr,
-        page: P,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
-    ) -> Result<()> {
-        let mut root = self.root.lock();
-        root.map_page(to_addr, page, get_pte_page)
-            .map_err(Error::Paging)
-    }
-
-    /// Consumes this `VmPages`, returning a finalized one.
-    fn finalize(self) -> VmPages<T, VmPagesConstructed> {
-        VmPages {
-            page_owner_id: self.page_owner_id,
-            phys_pages: self.phys_pages,
-            root: self.root,
-            measurement: self.measurement,
+impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
+    /// Creates a new `VmPages` from the given root page table, using `pte_vec_page` for a vector
+    /// of page-table pages.
+    pub fn new(root: T, pte_vec_pages: SequentialPages) -> Self {
+        Self {
+            page_owner_id: root.page_owner_id(),
+            phys_pages: root.phys_pages(),
+            root: Mutex::new(root),
+            measurement: Mutex::new(Sha256Measure::new()),
+            pte_pages: Mutex::new(PageVec::from(pte_vec_pages)),
             phantom: PhantomData,
         }
-    }
-}
-
-/// Keeps the state of the host's pages.
-pub struct HostRootPages<T: GuestStagePageTable> {
-    inner: VmPages<T, VmPagesConstructed>,
-}
-
-impl<T: GuestStagePageTable> HostRootPages<T> {
-    pub fn into_inner(self) -> VmPages<T> {
-        self.inner
-    }
-}
-
-/// Builder used to construct the page management structure for the host.
-///
-/// Note that HostRootBuilder enforces that the GPA -> HPA mappings that are created always map
-/// a T::TOP_LEVEL_ALIGN-aligned chunk.
-pub struct HostRootBuilder<T: GuestStagePageTable> {
-    inner: VmPages<T, VmPagesBuilding>,
-    pte_pages: SeqPageIter,
-}
-
-impl<T: GuestStagePageTable> HostRootBuilder<T> {
-    /// To be used to create the initial `HostRootPages` for the host VM.
-    pub fn from_hyp_mem<A: Allocator>(
-        mut hyp_mem: HypPageAlloc<A>,
-        host_gpa_size: u64,
-    ) -> (Vec<SequentialPages, A>, Self) {
-        let root_table_pages = hyp_mem.take_pages_with_alignment(4, T::TOP_LEVEL_ALIGN);
-        let num_pte_pages = T::max_pte_pages(host_gpa_size / PageSize::Size4k as u64);
-        let pte_pages = hyp_mem.take_pages(num_pte_pages as usize).into_iter();
-
-        let (phys_pages, host_pages) = PageState::from(hyp_mem, T::TOP_LEVEL_ALIGN);
-        let root = T::new(root_table_pages, PageOwnerId::host(), phys_pages).unwrap();
-
-        (
-            host_pages,
-            Self {
-                inner: VmPages::new(root),
-                pte_pages,
-            },
-        )
-    }
-
-    /// Adds data pages that are measured and mapped to the page tables for the host.
-    pub fn add_measured_pages<I>(mut self, to_addr: GuestPageAddr, pages: I) -> Self
-    where
-        I: Iterator<Item = Page>,
-    {
-        let pte_pages = &mut self.pte_pages;
-        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(vm_addr.size(), page.addr().size());
-            assert_eq!(
-                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
-            );
-            self.inner
-                .phys_pages
-                .set_page_owner(page.addr(), self.inner.page_owner_id())
-                .unwrap();
-            self.inner
-                .add_measured_4k_page(vm_addr, page, &mut || pte_pages.next())
-                .unwrap();
-        }
-        self
-    }
-
-    /// Add pages which need not be measured to the host page tables.
-    pub fn add_pages<I, P>(mut self, to_addr: GuestPageAddr, pages: I) -> Self
-    where
-        I: Iterator<Item = P>,
-        P: PhysPage,
-    {
-        let pte_pages = &mut self.pte_pages;
-        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(vm_addr.size(), page.addr().size());
-            if P::mem_type() == MemType::Ram {
-                // GPA -> SPA mappings need to match T::TOP_LEVEL_ALIGN alignment for RAM pages.
-                assert_eq!(
-                    vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                    page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
-                );
-            }
-            self.inner
-                .phys_pages
-                .set_page_owner(page.addr(), self.inner.page_owner_id())
-                .unwrap();
-            self.inner
-                .add_4k_page(vm_addr, page, &mut || pte_pages.next())
-                .unwrap();
-        }
-
-        self
-    }
-
-    /// Returns the host root pages as configured with data and zero pages.
-    pub fn create_host(self) -> HostRootPages<T> {
-        HostRootPages {
-            inner: self.inner.finalize(),
-        }
-    }
-}
-
-/// Builder used to configure `VmPages` for a new guest VM.
-pub struct GuestRootBuilder<T: GuestStagePageTable> {
-    inner: VmPages<T, VmPagesBuilding>,
-    pte_pages: Mutex<PageVec<Page>>,
-}
-
-impl<T: GuestStagePageTable> GuestRootBuilder<T> {
-    /// Create a new `GuestRootBuilder` with `root` as the backing page table and `pte_page` used to
-    /// hose a Vec of pte pages.
-    pub fn new(root: T, pte_page: Page) -> Self {
-        Self {
-            inner: VmPages::new(root),
-            pte_pages: Mutex::new(PageVec::from(SequentialPages::from(pte_page))),
-        }
-    }
-
-    /// Return the page owner ID these pages will be assigned to.
-    pub fn page_owner_id(&self) -> PageOwnerId {
-        self.inner.page_owner_id()
     }
 
     /// Add a page to be used for building the guest's page tables.
     /// Currently only supports 4k pages.
     pub fn add_pte_page(&self, page: Page) -> Result<()> {
+        if page.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(page.size()));
+        }
         let mut pte_pages = self.pte_pages.lock();
         pte_pages
             .try_reserve(1)
@@ -391,28 +250,38 @@ impl<T: GuestStagePageTable> GuestRootBuilder<T> {
         Ok(())
     }
 
-    /// Add a measured data page for the guest to use.
-    /// Currently only supports 4k pages.
-    pub fn add_data_page(&self, gpa: GuestPageAddr, page: Page) -> Result<()> {
+    /// Maps a page into the guest's address space and measures it.
+    pub fn add_measured_4k_page(&self, to_addr: GuestPageAddr, page: Page) -> Result<()> {
+        if page.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(page.size()));
+        }
+        let mut root = self.root.lock();
+        let mut measurement = self.measurement.lock();
         let mut pte_pages = self.pte_pages.lock();
-        self.inner
-            .add_measured_4k_page(gpa, page, &mut || pte_pages.pop())
+        root.map_page_with_measurement(to_addr, page, &mut || pte_pages.pop(), &mut *measurement)
+            .map_err(Error::Paging)
     }
 
-    /// Add a zeroed data page for the guest to use.
-    /// Currently only supports 4k pages.
-    pub fn add_zero_page(&self, gpa: GuestPageAddr, page: Page) -> Result<()> {
+    /// Maps an unmeasured page into the guest's address space.
+    pub fn add_4k_page<P: PhysPage>(&self, to_addr: GuestPageAddr, page: P) -> Result<()> {
+        if page.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(page.size()));
+        }
+        let mut root = self.root.lock();
         let mut pte_pages = self.pte_pages.lock();
-        self.inner.add_4k_page(gpa, page, &mut || pte_pages.pop())
+        root.map_page(to_addr, page, &mut || pte_pages.pop())
+            .map_err(Error::Paging)
     }
 
-    /// Consumes the builder and returns the guest's VmPages struct.
-    pub fn create_pages(self) -> VmPages<T, VmPagesConstructed> {
-        self.inner.finalize()
-    }
-
-    /// Copies the current measurement for the builder into `dest`.
-    pub fn get_measurement(&self, dest: &mut [u8]) -> Result<()> {
-        self.inner.get_measurement(dest)
+    /// Consumes this `VmPages`, returning a finalized one.
+    pub fn finalize(self) -> VmPages<T, VmStateFinalized> {
+        VmPages {
+            page_owner_id: self.page_owner_id,
+            phys_pages: self.phys_pages,
+            root: self.root,
+            measurement: self.measurement,
+            pte_pages: self.pte_pages,
+            phantom: PhantomData,
+        }
     }
 }

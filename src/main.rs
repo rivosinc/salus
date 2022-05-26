@@ -37,7 +37,7 @@ use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
 use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
-use vm::Host;
+use vm::HostVm;
 
 extern "C" {
     static _start: u8;
@@ -315,7 +315,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let hyp_mem = HypPageAlloc::new(mem_map, &heap);
 
     // Now load the host VM.
-    let mut host: Host<Sv48x4> = HostVmLoader::new(
+    let mut host: HostVm<Sv48x4> = HostVmLoader::new(
         hyp_dt,
         host_kernel,
         host_initramfs,

@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::vm_pages::VmPages;
 use core::arch::global_asm;
 use core::mem::size_of;
 use drivers::{CpuInfo, ImsicGuestId};
@@ -14,6 +13,9 @@ use riscv_regs::{
     Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
 };
 use sbi::{SbiMessage, SbiReturn};
+
+use crate::vm::VmStateInitializing;
+use crate::vm_pages::VmPages;
 
 /// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
@@ -196,7 +198,7 @@ pub struct VmCpu {
 
 impl VmCpu {
     /// Creates a new vCPU using the address space of `vm_pages`.
-    pub fn new<T: GuestStagePageTable>(vm_pages: &VmPages<T>) -> Self {
+    pub fn new<T: GuestStagePageTable>(vm_pages: &VmPages<T, VmStateInitializing>) -> Self {
         let mut state = VmCpuState::default();
 
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);

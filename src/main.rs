@@ -24,6 +24,7 @@ mod print_util;
 mod sha256_measure;
 mod trap;
 mod vm;
+mod vm_cpu;
 mod vm_pages;
 
 use abort::abort;

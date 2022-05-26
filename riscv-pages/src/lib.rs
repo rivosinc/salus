@@ -22,5 +22,5 @@ pub use page::{
     CleanPage, GuestPageAddr, GuestPfn, GuestPhysAddr, Page, PageAddr, PageSize, Pfn, PhysPage,
     RawAddr, SupervisorPageAddr, SupervisorPfn, SupervisorPhysAddr, UnmappedPage, UnmappedPhysPage,
 };
-pub use page_owner_id::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys};
+pub use page_owner_id::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys, SupervisorVirt};
 pub use sequential_pages::{Error as SequentialPagesError, SeqPageIter, SequentialPages};

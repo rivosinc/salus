@@ -5,7 +5,7 @@
 /// Represents pages of memory.
 use core::slice;
 
-use crate::{AddressSpace, GuestPhys, MemType, PageOwnerId, SupervisorPhys};
+use crate::{AddressSpace, GuestPhys, MemType, PageOwnerId, SupervisorPhys, SupervisorVirt};
 
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
@@ -74,6 +74,12 @@ impl<AS: AddressSpace> RawAddr<AS> {
 impl RawAddr<SupervisorPhys> {
     pub fn supervisor(addr: u64) -> Self {
         Self(addr, SupervisorPhys)
+    }
+}
+
+impl RawAddr<SupervisorVirt> {
+    pub fn supervisor_virt(addr: u64) -> Self {
+        Self(addr, SupervisorVirt)
     }
 }
 

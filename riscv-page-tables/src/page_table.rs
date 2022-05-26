@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 use data_measure::data_measure::DataMeasure;
 use riscv_pages::{
     AddressSpace, GuestPhys, MemType, Page, PageAddr, PageOwnerId, PageSize, PhysPage, RawAddr,
-    SequentialPages, SupervisorPageAddr, UnmappedPhysPage,
+    SequentialPages, SupervisorPageAddr, SupervisorVirt, UnmappedPhysPage,
 };
 
 use crate::page_tracking::PageState;
@@ -353,6 +353,13 @@ impl<T: PlatformPageTable> PteIndex for PageTableIndex<T> {
     fn index(&self) -> u64 {
         self.index
     }
+}
+
+/// A page table for a S or U mode. It's enabled by storing its root address in `satp`.
+/// Examples include `Sv39`, `Sv48`, or `Sv57`
+pub trait FirstStagePageTable: PlatformPageTable<MappedAddressSpace = SupervisorVirt> {
+    /// `SATP_VALUE` must be set to the paging mode stored in register satp.
+    const SATP_VALUE: u64;
 }
 
 /// A page table for a VM. It's enabled by storing its root address in `hgatp`.

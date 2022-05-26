@@ -44,6 +44,7 @@ mod hw_mem_map;
 mod page_info;
 mod page_table;
 pub mod page_tracking;
+mod sv48;
 pub mod sv48x4;
 
 pub use hw_mem_map::Error as MemMapError;
@@ -51,10 +52,11 @@ pub use hw_mem_map::Result as MemMapResult;
 pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemRegionType, HwReservedMemType};
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
-pub use page_table::{GuestStagePageTable, PlatformPageTable};
+pub use page_table::{FirstStagePageTable, GuestStagePageTable, PlatformPageTable};
 pub use page_tracking::Error as PageTrackingError;
 pub use page_tracking::Result as PageTrackingResult;
 pub use page_tracking::{HypPageAlloc, PageState};
+pub use sv48::Sv48;
 pub use sv48x4::Sv48x4;
 
 pub mod pte;
@@ -71,6 +73,7 @@ mod tests {
     use std::{mem, slice};
 
     use super::page_table::*;
+    use super::sv48::Sv48;
     use super::sv48x4::Sv48x4;
     use super::*;
 
@@ -101,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn map_and_unmap() {
+    fn map_and_unmap_sv48x4() {
         let (phys_pages, host_mem) = stub_sys_memory();
 
         let mut host_pages = host_mem.into_iter().flatten();
@@ -114,6 +117,49 @@ mod tests {
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
         let mut pte_pages = host_pages.by_ref().take(3);
         let gpa_base = PageAddr::new(RawAddr::guest(0x8000_0000, PageOwnerId::host())).unwrap();
+        for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
+            // Write to the page so that we can test if it's retained later.
+            unsafe {
+                // Not safe - just a test
+                let slice = slice::from_raw_parts_mut(
+                    page.addr().bits() as *mut u64,
+                    page.addr().size() as usize / mem::size_of::<u64>(),
+                );
+                slice[0] = 0xdeadbeef;
+            }
+            assert!(phys_pages
+                .set_page_owner(page.addr(), guest_page_table.page_owner_id())
+                .is_ok());
+            assert!(guest_page_table
+                .map_page(gpa, page, &mut || pte_pages.next())
+                .is_ok());
+        }
+        let dirty_page: Page = guest_page_table.unmap_page(gpa_base).unwrap().to_page();
+        assert_eq!(dirty_page.addr(), page_addrs[0]);
+        assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
+        let clean_page = Page::from(CleanPage::from(
+            guest_page_table
+                .unmap_page(gpa_base.checked_add_pages(1).unwrap())
+                .unwrap(),
+        ));
+        assert_eq!(clean_page.addr(), page_addrs[1]);
+        assert_eq!(clean_page.get_u64(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn map_and_unmap_sv48() {
+        let (phys_pages, host_mem) = stub_sys_memory();
+
+        let mut host_pages = host_mem.into_iter().flatten();
+        let seq_pages = SequentialPages::from_pages(host_pages.by_ref().take(1)).unwrap();
+        let id = phys_pages.add_active_guest().unwrap();
+        let mut guest_page_table =
+            Sv48::new(seq_pages, id, phys_pages.clone()).expect("creating sv48");
+
+        let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
+        let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
+        let mut pte_pages = host_pages.by_ref().take(3);
+        let gpa_base = PageAddr::new(RawAddr::supervisor_virt(0x8000_0000)).unwrap();
         for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
             // Write to the page so that we can test if it's retained later.
             unsafe {

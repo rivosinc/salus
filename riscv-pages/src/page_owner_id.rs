@@ -64,6 +64,16 @@ impl AddressSpace for SupervisorPhys {
     }
 }
 
+/// Represents the supervisor's virtual address space.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SupervisorVirt;
+
+impl AddressSpace for SupervisorVirt {
+    fn id(&self) -> PageOwnerId {
+        PageOwnerId::hypervisor()
+    }
+}
+
 /// Represents a guest physical address space.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct GuestPhys(PageOwnerId);

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use riscv_page_tables::GuestStagePageTable;
+use riscv_page_tables::{FirstStagePageTable, GuestStagePageTable};
 use riscv_pages::Pfn;
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
@@ -176,14 +176,14 @@ register_bitfields![u64,
 ];
 
 pub trait SatpHelpers {
-    fn set_from<T: PlatformPageTable>(&mut self, pt_root: &T, asid: u64);
+    fn set_from<T: FirstStagePageTable>(&mut self, pt_root: &T, asid: u64);
 }
 
 impl SatpHelpers for LocalRegisterCopy<u64, satp::Register> {
-    fn set_from<T: PlatformPageTable>(&mut self, pt: &T, asid: u64) {
+    fn set_from<T: FirstStagePageTable>(&mut self, pt: &T, asid: u64) {
         self.modify(satp::asid.val(asid));
         self.modify(satp::ppn.val(Pfn::from(pt.get_root_address()).bits()));
-        // TODO: Set paging mode.
+        self.modify(satp::mode.val(T::SATP_VALUE));
     }
 }
 

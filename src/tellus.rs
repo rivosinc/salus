@@ -54,7 +54,7 @@ pub fn poweroff() -> ! {
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const PAGE_SIZE_4K: u64 = 4096;
-    const NUM_TEE_CREATE_PAGES: u64 = 6;
+    const NUM_TEE_CREATE_PAGES: u64 = 32;
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_GUEST_DATA_PAGES: u64 = 10;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
@@ -99,6 +99,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     });
     ecall_send(&msg).expect("Tellus - AddPageTablePages returned error");
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
+
+    // Add vCPU0.
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuCreate {
+        guest_id: vmid,
+        vcpu_id: 0,
+    });
+    ecall_send(&msg).expect("Tellus - TvmCpuCreate returned error");
 
     /*
         The Tellus composite image includes the guest image
@@ -175,12 +182,24 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     });
     ecall_send(&msg).expect("Tellus - AddPages Zeroed returned error");
 
+    // Set the entry point.
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
+        guest_id: vmid,
+        vcpu_id: 0,
+        register: sbi::TvmCpuRegister::Pc,
+        value: 0x8020_0000,
+    });
+    ecall_send(&msg).expect("Tellus - TvmCpuSetRegister returned error");
+
     // TODO test that access to pages crashes somehow
 
     let msg = SbiMessage::Tee(sbi::TeeFunction::Finalize { guest_id: vmid });
     ecall_send(&msg).expect("Tellus - Finalize returned error");
 
-    let msg = SbiMessage::Tee(sbi::TeeFunction::Run { guest_id: vmid });
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuRun {
+        guest_id: vmid,
+        vcpu_id: 0,
+    });
     match ecall_send(&msg) {
         Err(e) => {
             println!("Tellus - Run returned error {:?}", e);

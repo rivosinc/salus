@@ -12,13 +12,14 @@ use riscv_pages::{
     GuestPageAddr, GuestPhysAddr, MemType, Page, PageAddr, PageOwnerId, PageSize, PhysPage,
     RawAddr, SequentialPages,
 };
+use riscv_regs::GprIndex;
 use sbi::Error as SbiError;
 use sbi::{self, MeasurementFunction, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
-use spin::{Mutex, RwLock};
+use spin::RwLock;
 
 use crate::print_util::*;
 use crate::sha256_measure::SHA256_DIGEST_BYTES;
-use crate::vm_cpu::{VmCpu, VmCpuExit};
+use crate::vm_cpu::{VmCpuExit, VmCpus, VM_CPUS_PAGES};
 use crate::vm_pages::{self, VmPages};
 use crate::{print, println};
 
@@ -127,32 +128,38 @@ impl<T: GuestStagePageTable> GuestState<T> {
 
 /// A VM that is being run.
 pub struct Vm<T: GuestStagePageTable, S = VmStateFinalized> {
-    // TODO: Support multiple vCPUs.
-    vcpu: Mutex<VmCpu>,
+    vcpus: VmCpus,
     vm_pages: VmPages<T, S>,
     guests: Option<RwLock<Guests<T>>>,
 }
 
 impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
-    /// Create a new guest using the given initial page table and pool of initial pages.
-    pub fn new(vm_pages: VmPages<T, VmStateInitializing>) -> Self {
+    /// Create a new guest using the given initial page table and vCPU tracking table.
+    pub fn new(vm_pages: VmPages<T, VmStateInitializing>, vcpus: VmCpus) -> Self {
         Self {
-            vcpu: Mutex::new(VmCpu::new(&vm_pages)),
+            vcpus,
             vm_pages,
             guests: None,
         }
     }
 
-    /// Sets the launch arguments (entry point and A1) for vCPU0.
-    fn set_launch_args(&self, entry_addr: GuestPhysAddr, a1: u64) {
-        let mut vcpu = self.vcpu.lock();
-        vcpu.set_launch_args(entry_addr, a1);
-    }
-
-    /// Sets the interrupt file for vCPU0.
-    fn set_interrupt_file(&self, interrupt_file: ImsicGuestId) {
-        let mut vcpu = self.vcpu.lock();
-        vcpu.set_interrupt_file(interrupt_file);
+    /// Sets a vCPU register.
+    fn set_vcpu_reg(
+        &self,
+        vcpu_id: u64,
+        register: sbi::TvmCpuRegister,
+        value: u64,
+    ) -> sbi::Result<()> {
+        let vcpu = self
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .map_err(|_| SbiError::InvalidParam)?;
+        let mut vcpu = vcpu.lock();
+        match register {
+            sbi::TvmCpuRegister::Pc => vcpu.set_sepc(value),
+            sbi::TvmCpuRegister::A1 => vcpu.set_gpr(GprIndex::A1, value),
+        };
+        Ok(())
     }
 
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
@@ -165,10 +172,22 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
         }));
     }
 
+    /// Adds a vCPU to this VM.
+    fn add_vcpu(&self, vcpu_id: u64) -> sbi::Result<()> {
+        let vcpu = self
+            .vcpus
+            .add_vcpu(vcpu_id)
+            .map_err(|_| SbiError::InvalidParam)?;
+        let mut vcpu = vcpu.lock();
+        vcpu.set_hgatp(&self.vm_pages);
+        vcpu.set_gpr(GprIndex::A0, vcpu_id);
+        Ok(())
+    }
+
     /// Completes intialization of the `Vm`, returning it in a finalized state.
     fn finalize(self) -> Vm<T, VmStateFinalized> {
         Vm {
-            vcpu: self.vcpu,
+            vcpus: self.vcpus,
             vm_pages: self.vm_pages.finalize(),
             guests: self.guests,
         }
@@ -176,10 +195,29 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
 }
 
 impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
+    /// Binds the specified vCPU to an IMSIC interrupt file.
+    fn bind_vcpu(&self, vcpu_id: u64, interrupt_file: ImsicGuestId) -> sbi::Result<()> {
+        let vcpu = self
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .map_err(|_| SbiError::InvalidParam)?;
+        let mut vcpu = vcpu.lock();
+        // TODO: Bind to this (physical) CPU as well.
+        vcpu.set_interrupt_file(interrupt_file);
+        Ok(())
+    }
+
     /// Run this guest until an unhandled exit is encountered.
-    fn run(&self, _vcpu_id: u64) -> VmCpuExit {
+    fn run_vcpu(&self, vcpu_id: u64) -> sbi::Result<VmCpuExit> {
+        // Take the vCPU out of self.vcpus, giving us exclusive ownership.
+        let vcpu = self
+            .vcpus
+            .take_vcpu(vcpu_id)
+            .map_err(|_| SbiError::InvalidParam)?;
+        let mut vcpu = vcpu.lock();
+
+        // Run until there's an exit we can't handle.
         loop {
-            let mut vcpu = self.vcpu.lock();
             let exit = vcpu.run_to_exit();
             match exit {
                 VmCpuExit::Ecall(Some(sbi_msg)) => {
@@ -201,12 +239,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 }
                 VmCpuExit::PageFault(addr) => {
                     if self.handle_guest_fault(addr).is_err() {
-                        return exit;
+                        return Ok(exit);
                     }
                 }
                 VmCpuExit::Other(ref trap_csrs) => {
                     println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
-                    return exit;
+                    return Ok(exit);
                 }
             }
         }
@@ -271,7 +309,16 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 )
                 .into(),
             Finalize { guest_id } => self.guest_finalize(guest_id).into(),
-            Run { guest_id } => self.guest_run(guest_id).into(),
+            TvmCpuRun { guest_id, vcpu_id } => self.guest_run_vcpu(guest_id, vcpu_id).into(),
+            TvmCpuCreate { guest_id, vcpu_id } => self.guest_add_vcpu(guest_id, vcpu_id).into(),
+            TvmCpuSetRegister {
+                guest_id,
+                vcpu_id,
+                register,
+                value,
+            } => self
+                .guest_set_vcpu_reg(guest_id, vcpu_id, register, value)
+                .into(),
             RemovePages {
                 guest_id,
                 gpa,
@@ -378,10 +425,33 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         Ok(0)
     }
 
-    fn guest_run(&self, guest_id: u64) -> sbi::Result<u64> {
+    /// Adds a vCPU with `vcpu_id` to a guest VM.
+    fn guest_add_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
+        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
+        let guest_vm = guests.initializing_guest(guest_id)?;
+        guest_vm.add_vcpu(vcpu_id)?;
+        Ok(0)
+    }
+
+    /// Sets a register in a guest VM's vCPU.
+    fn guest_set_vcpu_reg(
+        &self,
+        guest_id: u64,
+        vcpu_id: u64,
+        register: sbi::TvmCpuRegister,
+        value: u64,
+    ) -> sbi::Result<u64> {
+        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
+        let guest_vm = guests.initializing_guest(guest_id)?;
+        guest_vm.set_vcpu_reg(vcpu_id, register, value)?;
+        Ok(0)
+    }
+
+    /// Runs a guest VM's vCPU.
+    fn guest_run_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
         let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
         let guest_vm = guests.running_guest(guest_id)?;
-        guest_vm.run(0); // TODO: Take vCPU ID.
+        guest_vm.run_vcpu(vcpu_id)?;
         Ok(0) // TODO: Return the exit reason to the host.
     }
 
@@ -532,26 +602,41 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let pte_pages = hyp_mem.take_pages(num_pte_pages as usize).into_iter();
         let guest_tracking_pages = hyp_mem.take_pages(2);
 
+        // Pages for the array of vCPUs.
+        let vcpus_pages = hyp_mem.take_pages(VM_CPUS_PAGES as usize);
+
+        // Pages for the array of free page-table pages.
         let num_pte_vec_pages = PageSize::Size4k
             .round_up(num_pte_pages * mem::size_of::<Page>() as u64)
             / (PageSize::Size4k as u64);
         let pte_vec_pages = hyp_mem.take_pages(num_pte_vec_pages as usize);
+
         let (phys_pages, host_pages) = PageState::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root = T::new(root_table_pages, PageOwnerId::host(), phys_pages).unwrap();
         let vm_pages = VmPages::new(root, pte_vec_pages);
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();
         }
-        let mut vm = Vm::new(vm_pages);
+        let mut vm = Vm::new(
+            vm_pages,
+            VmCpus::new(PageOwnerId::host(), vcpus_pages).unwrap(),
+        );
         vm.add_guest_tracking_pages(guest_tracking_pages);
-        vm.set_interrupt_file(ImsicGuestId::HostVm);
+
+        // TODO: Add additional CPUs.
+        vm.add_vcpu(0).unwrap();
 
         (host_pages, Self { inner: vm })
     }
 
     /// Sets the launch arguments (entry point and FDT) for the host vCPU.
     pub fn set_launch_args(&self, entry_addr: GuestPhysAddr, fdt_addr: GuestPhysAddr) {
-        self.inner.set_launch_args(entry_addr, fdt_addr.bits());
+        self.inner
+            .set_vcpu_reg(0, sbi::TvmCpuRegister::Pc, entry_addr.bits())
+            .unwrap();
+        self.inner
+            .set_vcpu_reg(0, sbi::TvmCpuRegister::A1, fdt_addr.bits())
+            .unwrap();
     }
 
     /// Adds data pages that are measured and mapped to the page tables for the host. Requires
@@ -613,6 +698,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
     /// Run the host. Only returns for system shutdown
     pub fn run(&mut self, vcpu_id: u64) -> VmCpuExit {
         // TODO - return value need to be host specific
-        self.inner.run(vcpu_id)
+        self.inner.bind_vcpu(vcpu_id, ImsicGuestId::HostVm).unwrap();
+        self.inner.run_vcpu(vcpu_id).unwrap()
     }
 }

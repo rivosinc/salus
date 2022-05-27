@@ -266,7 +266,7 @@ impl<A: Allocator> HypPageAlloc<A> {
     /// Returns the next 4k page for the hypervisor to use.
     /// Asserts if out of memory. If there aren't enough pages to set up hypervisor state, there is
     /// no point in continuing.
-    fn next_page(&mut self) -> Page {
+    pub fn next_page(&mut self) -> Page {
         // OK to unwrap as next_page is guaranteed to be in range.
         self.pages
             .get_mut(self.next_page)

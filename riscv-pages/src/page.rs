@@ -23,6 +23,11 @@ pub enum PageSize {
 }
 
 impl PageSize {
+    /// Returns `val` divided by 4kB, rounded up.
+    pub const fn num_4k_pages(val: u64) -> u64 {
+        (val + PageSize::Size4k as u64 - 1) / (PageSize::Size4k as u64)
+    }
+
     /// Checks if the given quantity is aligned to this page size.
     pub fn is_aligned(&self, val: u64) -> bool {
         (val & (*self as u64 - 1)) == 0

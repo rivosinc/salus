@@ -196,6 +196,23 @@ impl ResetFunction {
     }
 }
 
+#[repr(u64)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum TvmCpuRegister {
+    Pc = 0,
+    A1 = 1,
+}
+
+impl TvmCpuRegister {
+    pub fn from_reg(a2: u64) -> Result<Self> {
+        match a2 {
+            0 => Ok(TvmCpuRegister::Pc),
+            1 => Ok(TvmCpuRegister::A1),
+            _ => Err(Error::InvalidParam),
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub enum TeeFunction {
     /// Message to create a TVM, contains a u64 address 5 coniguous, 16k-aligned 4k pages.
@@ -236,10 +253,11 @@ pub enum TeeFunction {
     /// a6 = 4
     /// a0 = guest id
     Finalize { guest_id: u64 },
-    /// Runs the given TVM.
+    /// Runs the given vCPU in the TVM
     /// a6 = 5
     /// a0 = guest id
-    Run { guest_id: u64 },
+    /// a1 = vCPU id
+    TvmCpuRun { guest_id: u64, vcpu_id: u64 },
     /// Removes pages that were previously added with `AddPages`.
     /// a6 = 6
     /// a0 = guest id,
@@ -265,6 +283,27 @@ pub enum TeeFunction {
         page_addr: u64,
         guest_id: u64,
     },
+    /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`. vCPUs may not be added after the TVM
+    /// is finalized.
+    ///
+    /// a6 = 8
+    /// a0 = guest id
+    /// a1 = vCPU id
+    TvmCpuCreate { guest_id: u64, vcpu_id: u64 },
+    /// Sets the register identified by `register` to `value` in the vCPU with ID `vcpu_id`. vCPU
+    /// register state may not be modified after the TVM is finalized.
+    ///
+    /// a6 = 9
+    /// a0 = guest id
+    /// a1 = vCPU id
+    /// a2 = register id
+    /// a3 = register value
+    TvmCpuSetRegister {
+        guest_id: u64,
+        vcpu_id: u64,
+        register: TvmCpuRegister,
+        value: u64,
+    },
 }
 
 impl TeeFunction {
@@ -288,7 +327,10 @@ impl TeeFunction {
                 measure_preserve: args[5] == 0,
             }),
             4 => Ok(Finalize { guest_id: args[0] }),
-            5 => Ok(Run { guest_id: args[0] }),
+            5 => Ok(TvmCpuRun {
+                guest_id: args[0],
+                vcpu_id: args[1],
+            }),
             6 => Ok(RemovePages {
                 guest_id: args[0],
                 gpa: args[1],
@@ -300,6 +342,16 @@ impl TeeFunction {
                 measurement_type: args[1],
                 page_addr: args[2],
                 guest_id: args[3],
+            }),
+            8 => Ok(TvmCpuCreate {
+                guest_id: args[0],
+                vcpu_id: args[1],
+            }),
+            9 => Ok(TvmCpuSetRegister {
+                guest_id: args[0],
+                vcpu_id: args[1],
+                register: TvmCpuRegister::from_reg(args[2])?,
+                value: args[3],
             }),
             _ => Err(Error::InvalidParam),
         }
@@ -324,7 +376,10 @@ impl TeeFunction {
                 measure_preserve: _,
             } => 3,
             Finalize { guest_id: _ } => 4,
-            Run { guest_id: _ } => 5,
+            TvmCpuRun {
+                guest_id: _,
+                vcpu_id: _,
+            } => 5,
             RemovePages {
                 guest_id: _,
                 gpa: _,
@@ -337,6 +392,16 @@ impl TeeFunction {
                 page_addr: _,
                 guest_id: _,
             } => 7,
+            TvmCpuCreate {
+                guest_id: _,
+                vcpu_id: _,
+            } => 8,
+            TvmCpuSetRegister {
+                guest_id: _,
+                vcpu_id: _,
+                register: _,
+                value: _,
+            } => 9,
         }
     }
 
@@ -359,7 +424,10 @@ impl TeeFunction {
                 measure_preserve: _,
             } => *guest_id,
             Finalize { guest_id } => *guest_id,
-            Run { guest_id } => *guest_id,
+            TvmCpuRun {
+                guest_id,
+                vcpu_id: _,
+            } => *guest_id,
             RemovePages {
                 guest_id,
                 gpa: _,
@@ -372,6 +440,16 @@ impl TeeFunction {
                 page_addr: _,
                 guest_id: _,
             } => *measurement_version,
+            TvmCpuCreate {
+                guest_id,
+                vcpu_id: _,
+            } => *guest_id,
+            TvmCpuSetRegister {
+                guest_id,
+                vcpu_id: _,
+                register: _,
+                value: _,
+            } => *guest_id,
         }
     }
 
@@ -391,6 +469,10 @@ impl TeeFunction {
                 gpa: _,
                 measure_preserve: _,
             } => *page_addr,
+            TvmCpuRun {
+                guest_id: _,
+                vcpu_id,
+            } => *vcpu_id,
             RemovePages {
                 guest_id: _,
                 gpa,
@@ -403,6 +485,16 @@ impl TeeFunction {
                 page_addr: _,
                 guest_id: _,
             } => *measurement_type,
+            TvmCpuCreate {
+                guest_id: _,
+                vcpu_id,
+            } => *vcpu_id,
+            TvmCpuSetRegister {
+                guest_id: _,
+                vcpu_id,
+                register: _,
+                value: _,
+            } => *vcpu_id,
             _ => 0,
         }
     }
@@ -435,6 +527,12 @@ impl TeeFunction {
                 page_addr,
                 guest_id: _,
             } => *page_addr,
+            TvmCpuSetRegister {
+                guest_id: _,
+                vcpu_id: _,
+                register,
+                value: _,
+            } => *register as u64,
             _ => 0,
         }
     }
@@ -462,6 +560,12 @@ impl TeeFunction {
                 page_addr: _,
                 guest_id,
             } => *guest_id,
+            TvmCpuSetRegister {
+                guest_id: _,
+                vcpu_id: _,
+                register: _,
+                value,
+            } => *value,
             _ => 0,
         }
     }

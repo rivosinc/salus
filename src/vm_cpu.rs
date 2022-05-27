@@ -3,19 +3,37 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::global_asm;
-use core::mem::size_of;
-use drivers::{CpuInfo, ImsicGuestId};
+use core::{mem::size_of, ops::Deref};
+use drivers::{CpuInfo, ImsicGuestId, MAX_CPUS};
 use memoffset::offset_of;
+use page_collections::page_vec::PageVec;
 use riscv_page_tables::GuestStagePageTable;
-use riscv_pages::{GuestPhysAddr, PageOwnerId, Pfn, RawAddr};
+use riscv_pages::{GuestPhysAddr, PageOwnerId, PageSize, Pfn, RawAddr, SequentialPages};
 use riscv_regs::{hgatp, hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
 };
 use sbi::{SbiMessage, SbiReturn};
+use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::vm::VmStateInitializing;
 use crate::vm_pages::VmPages;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Error {
+    BadCpuId,
+    VmCpuExists,
+    VmCpuNotFound,
+    VmCpuRunning,
+    InsufficientVmCpuStorage,
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
+/// The number of 4kB pages required to hold the vCPU state per VM.
+pub const VM_CPUS_PAGES: u64 = PageSize::num_4k_pages(
+    (MAX_CPUS * size_of::<VmCpusInner>() + size_of::<PageVec<VmCpusInner>>()) as u64,
+);
 
 /// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
@@ -193,19 +211,13 @@ pub enum VmCpuExit {
 pub struct VmCpu {
     state: VmCpuState,
     interrupt_file: Option<ImsicGuestId>,
-    page_owner_id: PageOwnerId,
+    guest_id: PageOwnerId,
 }
 
 impl VmCpu {
-    /// Creates a new vCPU using the address space of `vm_pages`.
-    pub fn new<T: GuestStagePageTable>(vm_pages: &VmPages<T, VmStateInitializing>) -> Self {
+    /// Creates a new vCPU.
+    pub fn new(guest_id: PageOwnerId) -> Self {
         let mut state = VmCpuState::default();
-
-        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
-        hgatp.modify(hgatp::vmid.val(1)); // TODO: VMID assignments.
-        hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
-        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
-        state.guest_vcpu_csrs.hgatp = hgatp.get();
 
         let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(0);
         hstatus.modify(hstatus::spv.val(1));
@@ -223,33 +235,40 @@ impl VmCpu {
         scounteren.modify(scounteren::instret.val(1));
         state.guest_regs.scounteren = scounteren.get();
 
-        // set the hart ID - TODO other hart IDs when multi-threaded
-        state.guest_regs.gprs.set_reg(GprIndex::A0, 0);
-
         Self {
             state,
             interrupt_file: None,
-            page_owner_id: vm_pages.page_owner_id(),
+            guest_id,
         }
     }
 
-    /// Sets the launch arguments (entry point and A1) for this vCPU.
-    pub fn set_launch_args(&mut self, entry_addr: GuestPhysAddr, a1: u64) {
-        self.state.guest_regs.sepc = entry_addr.bits();
-        self.state.guest_regs.gprs.set_reg(GprIndex::A1, a1);
+    /// Sets the `hgatp` CSR to point to the root page table of `vm_pages`.
+    pub fn set_hgatp<T: GuestStagePageTable>(
+        &mut self,
+        vm_pages: &VmPages<T, VmStateInitializing>,
+    ) {
+        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
+        hgatp.modify(hgatp::vmid.val(1)); // TODO: VMID assignments.
+        hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
+        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
+        self.state.guest_vcpu_csrs.hgatp = hgatp.get();
+    }
+
+    /// Sets the `sepc` CSR, or the PC value the vCPU will jump to when it is run.
+    pub fn set_sepc(&mut self, sepc: u64) {
+        self.state.guest_regs.sepc = sepc;
+    }
+
+    /// Sets one of the vCPU's general-purpose registers.
+    pub fn set_gpr(&mut self, gpr: GprIndex, value: u64) {
+        self.state.guest_regs.gprs.set_reg(gpr, value);
     }
 
     /// Updates A0/A1 with the result of an SBI call.
     pub fn set_ecall_result(&mut self, result: SbiReturn) {
-        self.state
-            .guest_regs
-            .gprs
-            .set_reg(GprIndex::A0, result.error_code as u64);
+        self.set_gpr(GprIndex::A0, result.error_code as u64);
         if result.error_code == sbi::SBI_SUCCESS {
-            self.state
-                .guest_regs
-                .gprs
-                .set_reg(GprIndex::A1, result.return_value as u64);
+            self.set_gpr(GprIndex::A1, result.return_value as u64);
         }
     }
 
@@ -279,13 +298,6 @@ impl VmCpu {
         CSR.vsatp.set(self.state.guest_vcpu_csrs.vsatp);
         if CpuInfo::get().has_sstc() {
             CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
-        }
-
-        // TO DO: This assumes that we'll never have a VM with sepc
-        // deliberately set to 0. This is probably generally true
-        // but we can set the start explicitly via an interface
-        if self.state.guest_regs.sepc == 0 {
-            self.state.guest_regs.sepc = 0x8020_0000;
         }
 
         // TODO, HGEIE programinng:
@@ -338,11 +350,139 @@ impl VmCpu {
             | Trap::Exception(GuestStorePageFault) => {
                 let fault_addr = RawAddr::guest(
                     self.state.trap_csrs.htval << 2 | self.state.trap_csrs.stval & 0x03,
-                    self.page_owner_id,
+                    self.guest_id,
                 );
                 VmCpuExit::PageFault(fault_addr)
             }
             _ => VmCpuExit::Other(self.state.trap_csrs.clone()),
+        }
+    }
+}
+
+/// Represents the state of a vCPU in a VM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmCpuStatus {
+    /// There is no vCPU with this ID in the VM.
+    NotPresent,
+    /// The vCPU is not currently running.
+    Available,
+    /// The vCPU has been claimed exclusively for running on a (physical) CPU.
+    Running,
+}
+
+struct VmCpusInner {
+    // Locking: status must be locked before vcpu.
+    status: RwLock<VmCpuStatus>,
+    vcpu: Mutex<VmCpu>,
+}
+
+/// A reference to an "Available" (idle) `VmCpu`. The `VmCpu` is guaranteed not to change states
+/// while this reference is held.
+pub struct IdleVmCpu<'a> {
+    _status: RwLockReadGuard<'a, VmCpuStatus>,
+    vcpu: &'a Mutex<VmCpu>,
+}
+
+impl<'a> Deref for IdleVmCpu<'a> {
+    type Target = Mutex<VmCpu>;
+
+    fn deref(&self) -> &Mutex<VmCpu> {
+        self.vcpu
+    }
+}
+
+/// A reference to an exclusively-owned `VmCpu` in the "Running" state. The `VmCpu` transitions
+/// back to idle when this reference is dropped.
+pub struct RunningVmCpu<'a> {
+    parent: &'a VmCpus,
+    vcpu: &'a Mutex<VmCpu>,
+    id: u64,
+}
+
+impl<'a> Deref for RunningVmCpu<'a> {
+    type Target = Mutex<VmCpu>;
+
+    fn deref(&self) -> &Mutex<VmCpu> {
+        self.vcpu
+    }
+}
+
+impl<'a> Drop for RunningVmCpu<'a> {
+    fn drop(&mut self) {
+        let entry = self.parent.inner.get(self.id as usize).unwrap();
+        let mut status = entry.status.write();
+        assert_eq!(*status, VmCpuStatus::Running);
+        *status = VmCpuStatus::Available;
+    }
+}
+
+/// The set of vCPUs in a VM.
+pub struct VmCpus {
+    inner: PageVec<VmCpusInner>,
+}
+
+impl VmCpus {
+    /// Creates a new vCPU tracking structure backed by `pages`.
+    pub fn new(guest_id: PageOwnerId, pages: SequentialPages) -> Result<Self> {
+        if pages.len() < VM_CPUS_PAGES {
+            return Err(Error::InsufficientVmCpuStorage);
+        }
+        let mut inner = PageVec::from(pages);
+        for _ in 0..MAX_CPUS {
+            let entry = VmCpusInner {
+                status: RwLock::new(VmCpuStatus::NotPresent),
+                vcpu: Mutex::new(VmCpu::new(guest_id)),
+            };
+            inner.push(entry);
+        }
+        Ok(Self { inner })
+    }
+
+    /// Adds the vCPU at `vcpu_id` as an available vCPU, returning a reference to it.
+    pub fn add_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
+        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let mut status = entry.status.write();
+        if *status != VmCpuStatus::NotPresent {
+            return Err(Error::VmCpuExists);
+        }
+        *status = VmCpuStatus::Available;
+        Ok(IdleVmCpu {
+            _status: status.downgrade(),
+            vcpu: &entry.vcpu,
+        })
+    }
+
+    /// Returns a reference to the vCPU with `vcpu_id` if it exists and is not currently running.
+    /// The returned `IdleVmCpu` is guaranteed not to change state until it is dropped.
+    pub fn get_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
+        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let status = entry.status.read();
+        match *status {
+            VmCpuStatus::Available => Ok(IdleVmCpu {
+                _status: status,
+                vcpu: &entry.vcpu,
+            }),
+            VmCpuStatus::Running => Err(Error::VmCpuRunning),
+            _ => Err(Error::VmCpuNotFound),
+        }
+    }
+
+    /// Takes exclusive ownership of the vCPU with `vcpu_id`, marking it as running. The vCPU is
+    /// returned to the "Available" state when the returned `RunningVmCpu` is dropped.
+    pub fn take_vcpu(&self, vcpu_id: u64) -> Result<RunningVmCpu> {
+        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let mut status = entry.status.write();
+        match *status {
+            VmCpuStatus::Available => {
+                *status = VmCpuStatus::Running;
+                Ok(RunningVmCpu {
+                    parent: self,
+                    vcpu: &entry.vcpu,
+                    id: vcpu_id,
+                })
+            }
+            VmCpuStatus::Running => Err(Error::VmCpuRunning),
+            VmCpuStatus::NotPresent => Err(Error::VmCpuNotFound),
         }
     }
 }

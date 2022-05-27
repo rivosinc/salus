@@ -14,6 +14,7 @@ use spin::Mutex;
 
 use crate::sha256_measure::Sha256Measure;
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
+use crate::vm_cpu::{VmCpus, VM_CPUS_PAGES};
 
 #[derive(Debug)]
 pub enum Error {
@@ -30,6 +31,14 @@ pub enum Error {
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
+
+/// The minimum number of pages required to track free page-table pages.
+pub const MIN_PTE_VEC_PAGES: u64 = 1;
+
+/// The number of pages required to be donated for creating a new VM.
+///
+/// TODO: Expose this to the host via a TEECALL.
+pub const NEW_GUEST_PAGES: u64 = 4 + VM_CPUS_PAGES + MIN_PTE_VEC_PAGES + 1;
 
 /// VmPages is the single management point for memory used by virtual machines.
 ///
@@ -94,7 +103,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         let id = self.phys_pages.add_active_guest().map_err(Error::GuestId)?;
         let mut root = self.root.lock();
         let mut clean_pages = root
-            .invalidate_range(from_addr, 6)
+            .invalidate_range(from_addr, NEW_GUEST_PAGES)
             .map_err(Error::Paging)?
             .map(CleanPage::from)
             .map(Page::from)
@@ -106,11 +115,20 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         // Can't fail if enough aligned pages are provided(checked above).
         let guest_root_pages = SequentialPages::from_pages(clean_pages.by_ref().take(4)).unwrap();
         let guest_root = T::new(guest_root_pages, id, self.phys_pages.clone()).unwrap();
-        let pte_page = clean_pages.next().unwrap();
+        let pte_vec_pages =
+            SequentialPages::from_pages(clean_pages.by_ref().take(MIN_PTE_VEC_PAGES as usize))
+                .unwrap();
         let state_page = clean_pages.next().unwrap();
+        // TODO: Make the max number of vCPUs configurable at TVM creation time so the host doesn't
+        // have to unconditionally donate enough pages to support MAX_CPUS.
+        let vcpu_pages =
+            SequentialPages::from_pages(clean_pages.by_ref().take(VM_CPUS_PAGES as usize)).unwrap();
 
         Ok((
-            Vm::new(VmPages::new(guest_root, SequentialPages::from(pte_page))),
+            Vm::new(
+                VmPages::new(guest_root, pte_vec_pages),
+                VmCpus::new(id, vcpu_pages).unwrap(),
+            ),
             state_page,
         ))
     }

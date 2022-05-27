@@ -245,6 +245,17 @@ impl<T: GuestStagePageTable> VmPages<T, VmPagesBuilding> {
         root.map_page(to_addr, page, get_pte_page)
             .map_err(Error::Paging)
     }
+
+    /// Consumes this `VmPages`, returning a finalized one.
+    fn finalize(self) -> VmPages<T, VmPagesConstructed> {
+        VmPages {
+            page_owner_id: self.page_owner_id,
+            phys_pages: self.phys_pages,
+            root: self.root,
+            measurement: self.measurement,
+            phantom: PhantomData,
+        }
+    }
 }
 
 /// Keeps the state of the host's pages.
@@ -342,9 +353,8 @@ impl<T: GuestStagePageTable> HostRootBuilder<T> {
 
     /// Returns the host root pages as configured with data and zero pages.
     pub fn create_host(self) -> HostRootPages<T> {
-        let root = self.inner.root.into_inner();
         HostRootPages {
-            inner: VmPages::new(root),
+            inner: self.inner.finalize(),
         }
     }
 }
@@ -398,8 +408,7 @@ impl<T: GuestStagePageTable> GuestRootBuilder<T> {
 
     /// Consumes the builder and returns the guest's VmPages struct.
     pub fn create_pages(self) -> VmPages<T, VmPagesConstructed> {
-        let root = self.inner.root.into_inner();
-        VmPages::new(root)
+        self.inner.finalize()
     }
 
     /// Copies the current measurement for the builder into `dest`.

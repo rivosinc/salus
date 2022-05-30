@@ -10,8 +10,6 @@
 mod consts;
 pub use consts::*;
 
-use riscv_regs::{GeneralPurposeRegisters, GprIndex};
-
 /// Errors passed over the SBI protocol.
 ///
 /// Constants from the SBI [spec](https://github.com/riscv-non-isa/riscv-sbi-doc/releases).
@@ -1607,17 +1605,14 @@ impl SbiMessage {
     /// Creates an SbiMessage struct from the given GPRs. Intended for use from the ECALL handler
     /// and passed the saved register state from the calling OS. A7 must contain a valid SBI
     /// extension and the other A* registers will be interpreted based on the extension A7 selects.
-    pub fn from_regs(gprs: &GeneralPurposeRegisters) -> Result<Self> {
-        use GprIndex::*;
-        match gprs.reg(A7) {
-            EXT_PUT_CHAR => Ok(SbiMessage::PutChar(gprs.reg(A0))),
-            EXT_BASE => BaseFunction::from_regs(gprs.a_regs()).map(SbiMessage::Base),
-            EXT_HART_STATE => StateFunction::from_regs(gprs.a_regs()).map(SbiMessage::HartState),
-            EXT_RESET => ResetFunction::from_regs(gprs.a_regs()).map(SbiMessage::Reset),
-            EXT_TEE => TeeFunction::from_regs(gprs.a_regs()).map(SbiMessage::Tee),
-            EXT_ATTESTATION => {
-                AttestationFunction::from_regs(gprs.a_regs()).map(SbiMessage::Attestation)
-            }
+    pub fn from_regs(args: &[u64]) -> Result<Self> {
+        match args[7] {
+            EXT_PUT_CHAR => Ok(SbiMessage::PutChar(args[0])),
+            EXT_BASE => BaseFunction::from_regs(args).map(SbiMessage::Base),
+            EXT_HART_STATE => StateFunction::from_regs(args).map(SbiMessage::HartState),
+            EXT_RESET => ResetFunction::from_regs(args).map(SbiMessage::Reset),
+            EXT_TEE => TeeFunction::from_regs(args).map(SbiMessage::Tee),
+            EXT_ATTESTATION => AttestationFunction::from_regs(args).map(SbiMessage::Attestation),
             _ => Err(Error::NotSupported),
         }
     }

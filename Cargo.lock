@@ -449,9 +449,6 @@ dependencies = [
 [[package]]
 name = "sbi"
 version = "0.1.0"
-dependencies = [
- "riscv_regs",
-]
 
 [[package]]
 name = "scopeguard"

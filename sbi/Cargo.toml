@@ -7,6 +7,3 @@ edition = "2021"
 
 [lib]
 path = "./src/sbi.rs"
-
-[dependencies]
-riscv_regs = { path = "../riscv-regs" }

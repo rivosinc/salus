@@ -332,7 +332,7 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
         use Exception::*;
         match Trap::from_scause(self.state.trap_csrs.scause).unwrap() {
             Trap::Exception(VirtualSupervisorEnvCall) => {
-                let sbi_msg = SbiMessage::from_regs(&self.state.guest_regs.gprs).ok();
+                let sbi_msg = SbiMessage::from_regs(self.state.guest_regs.gprs.a_regs()).ok();
                 VmCpuExit::Ecall(sbi_msg)
             }
             Trap::Exception(GuestInstructionPageFault)

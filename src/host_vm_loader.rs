@@ -242,27 +242,24 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         // Map the IMSIC interrupt files into the guest address space. The host VM's interrupt
         // file gets mapped to the location of the supervisor interrupt file.
         let imsic = Imsic::get();
-        let mut imsic_gpa = PageAddr::new(RawAddr::guest(
-            imsic.base_addr().bits(),
-            PageOwnerId::host(),
-        ))
-        .unwrap();
-        // TODO: This should be per-CPU.
-        self.vm.add_pages(
-            imsic_gpa,
-            [imsic
-                .take_guest_file(CpuId::new(0), ImsicGuestId::HostVm)
-                .unwrap()]
-            .into_iter(),
-        );
-        imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
-        for i in 0..(imsic.guests_per_hart() - 1) {
-            let id = ImsicGuestId::GuestVm(i);
-            self.vm.add_pages(
-                imsic_gpa,
-                [imsic.take_guest_file(CpuId::new(0), id).unwrap()].into_iter(),
-            );
+        let cpu_info = CpuInfo::get();
+        for i in 0..cpu_info.num_cpus() {
+            let cpu_id = CpuId::new(i);
+            let mut imsic_gpa = PageAddr::new(RawAddr::guest(
+                imsic.supervisor_file_addr(cpu_id).unwrap().bits(),
+                PageOwnerId::host(),
+            ))
+            .unwrap();
+            let page = imsic.take_guest_file(cpu_id, ImsicGuestId::HostVm).unwrap();
+            self.vm.add_pages(imsic_gpa, [page].into_iter());
             imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
+            for j in 0..(imsic.guests_per_hart() - 1) {
+                let page = imsic
+                    .take_guest_file(cpu_id, ImsicGuestId::GuestVm(j))
+                    .unwrap();
+                self.vm.add_pages(imsic_gpa, [page].into_iter());
+                imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
+            }
         }
 
         // Host guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned block,

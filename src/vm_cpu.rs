@@ -25,6 +25,8 @@ pub enum Error {
     VmCpuExists,
     VmCpuNotFound,
     VmCpuRunning,
+    VmCpuOff,
+    VmCpuAlreadyPowered,
     InsufficientVmCpuStorage,
 }
 
@@ -225,7 +227,6 @@ impl VmCpu {
         state.guest_regs.hstatus = hstatus.get();
 
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
-        sstatus.modify(sstatus::spie.val(1));
         sstatus.modify(sstatus::spp::Supervisor);
         state.guest_regs.sstatus = sstatus.get();
 
@@ -364,8 +365,10 @@ impl VmCpu {
 pub enum VmCpuStatus {
     /// There is no vCPU with this ID in the VM.
     NotPresent,
-    /// The vCPU is not currently running.
-    Available,
+    /// The vCPU is present, but not powered on.
+    PoweredOff,
+    /// The vCPU is available to be run.
+    Runnable,
     /// The vCPU has been claimed exclusively for running on a (physical) CPU.
     Running,
 }
@@ -397,6 +400,14 @@ pub struct RunningVmCpu<'a> {
     parent: &'a VmCpus,
     vcpu: &'a Mutex<VmCpu>,
     id: u64,
+    power_off: bool,
+}
+
+impl<'a> RunningVmCpu<'a> {
+    /// Mark this vCPU as powered off when it is returned.
+    pub fn power_off(&mut self) {
+        self.power_off = true;
+    }
 }
 
 impl<'a> Deref for RunningVmCpu<'a> {
@@ -412,7 +423,11 @@ impl<'a> Drop for RunningVmCpu<'a> {
         let entry = self.parent.inner.get(self.id as usize).unwrap();
         let mut status = entry.status.write();
         assert_eq!(*status, VmCpuStatus::Running);
-        *status = VmCpuStatus::Available;
+        *status = if self.power_off {
+            VmCpuStatus::PoweredOff
+        } else {
+            VmCpuStatus::Runnable
+        };
     }
 }
 
@@ -445,7 +460,7 @@ impl VmCpus {
         if *status != VmCpuStatus::NotPresent {
             return Err(Error::VmCpuExists);
         }
-        *status = VmCpuStatus::Available;
+        *status = VmCpuStatus::PoweredOff;
         Ok(IdleVmCpu {
             _status: status.downgrade(),
             vcpu: &entry.vcpu,
@@ -458,12 +473,30 @@ impl VmCpus {
         let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
         let status = entry.status.read();
         match *status {
-            VmCpuStatus::Available => Ok(IdleVmCpu {
+            VmCpuStatus::PoweredOff | VmCpuStatus::Runnable => Ok(IdleVmCpu {
                 _status: status,
                 vcpu: &entry.vcpu,
             }),
             VmCpuStatus::Running => Err(Error::VmCpuRunning),
-            _ => Err(Error::VmCpuNotFound),
+            VmCpuStatus::NotPresent => Err(Error::VmCpuNotFound),
+        }
+    }
+
+    /// Marks the vCPU with `vcpu_id` as powered on and runnable and returns a reference to it.
+    /// The returned `IdleVmCpu` is guaranteed not to change state until it is dropped.
+    pub fn power_on_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
+        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let mut status = entry.status.write();
+        match *status {
+            VmCpuStatus::PoweredOff => {
+                *status = VmCpuStatus::Runnable;
+                Ok(IdleVmCpu {
+                    _status: status.downgrade(),
+                    vcpu: &entry.vcpu,
+                })
+            }
+            VmCpuStatus::Running | VmCpuStatus::Runnable => Err(Error::VmCpuAlreadyPowered),
+            VmCpuStatus::NotPresent => Err(Error::VmCpuNotFound),
         }
     }
 
@@ -473,16 +506,24 @@ impl VmCpus {
         let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
         let mut status = entry.status.write();
         match *status {
-            VmCpuStatus::Available => {
+            VmCpuStatus::Runnable => {
                 *status = VmCpuStatus::Running;
                 Ok(RunningVmCpu {
                     parent: self,
                     vcpu: &entry.vcpu,
                     id: vcpu_id,
+                    power_off: false,
                 })
             }
             VmCpuStatus::Running => Err(Error::VmCpuRunning),
+            VmCpuStatus::PoweredOff => Err(Error::VmCpuOff),
             VmCpuStatus::NotPresent => Err(Error::VmCpuNotFound),
         }
+    }
+
+    /// Returns the status of the specified vCPU.
+    pub fn get_vcpu_status(&self, vcpu_id: u64) -> Result<VmCpuStatus> {
+        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        Ok(*entry.status.read())
     }
 }

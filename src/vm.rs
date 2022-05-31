@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 use core::{alloc::Allocator, mem};
-use drivers::ImsicGuestId;
+use drivers::{CpuId, CpuInfo, ImsicGuestId};
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageState};
@@ -14,19 +14,43 @@ use riscv_pages::{
 };
 use riscv_regs::GprIndex;
 use sbi::Error as SbiError;
-use sbi::{self, MeasurementFunction, ResetFunction, SbiMessage, SbiReturn, TeeFunction};
+use sbi::{
+    self, BaseFunction, HartState, MeasurementFunction, SbiMessage, SbiReturn, StateFunction,
+    TeeFunction,
+};
 use spin::RwLock;
 
 use crate::print_util::*;
 use crate::sha256_measure::SHA256_DIGEST_BYTES;
-use crate::vm_cpu::{VmCpuExit, VmCpus, VM_CPUS_PAGES};
+use crate::smp;
+use crate::vm_cpu::{VmCpuExit, VmCpuStatus, VmCpus, VM_CPUS_PAGES};
 use crate::vm_pages::{self, VmPages};
 use crate::{print, println};
 
 const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
 
+// What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
+// confuses us with BBL/OpenSBI.
+const SBI_IMPL_ID_SALUS: u64 = 7;
+
 pub enum VmStateInitializing {}
 pub enum VmStateFinalized {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmExitCause {
+    PowerOff,
+    CpuStart(u64),
+    CpuStop,
+    UnhandledTrap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EcallAction {
+    LegacyOk,
+    Unhandled,
+    Continue(SbiReturn),
+    Break(VmExitCause, SbiReturn),
+}
 
 struct Guests<T: GuestStagePageTable> {
     inner: PageVec<PageBox<GuestState<T>>>,
@@ -207,75 +231,151 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         Ok(())
     }
 
-    /// Run this guest until an unhandled exit is encountered.
-    fn run_vcpu(&self, vcpu_id: u64) -> sbi::Result<VmCpuExit> {
-        // Take the vCPU out of self.vcpus, giving us exclusive ownership.
+    /// Makes the specified vCPU runnable.
+    fn power_on_vcpu(&self, vcpu_id: u64) -> sbi::Result<()> {
+        self.vcpus
+            .power_on_vcpu(vcpu_id)
+            .map_err(|_| SbiError::InvalidParam)?;
+        Ok(())
+    }
+
+    /// Sets the entry point of the specified vCPU and makes it runnable.
+    fn start_vcpu(&self, vcpu_id: u64, start_addr: u64, opaque: u64) -> sbi::Result<()> {
         let vcpu = self
+            .vcpus
+            .power_on_vcpu(vcpu_id)
+            .map_err(|_| SbiError::InvalidParam)?;
+        let mut vcpu = vcpu.lock();
+        vcpu.set_sepc(start_addr);
+        vcpu.set_gpr(GprIndex::A1, opaque);
+        Ok(())
+    }
+
+    /// Gets the state of the specified vCPU.
+    fn get_vcpu_status(&self, vcpu_id: u64) -> sbi::Result<u64> {
+        let vcpu_status = self
+            .vcpus
+            .get_vcpu_status(vcpu_id)
+            .map_err(|_| SbiError::InvalidParam)?;
+        let status = match vcpu_status {
+            VmCpuStatus::Runnable | VmCpuStatus::Running => HartState::Started,
+            VmCpuStatus::PoweredOff => HartState::Stopped,
+            VmCpuStatus::NotPresent => {
+                return Err(SbiError::InvalidParam);
+            }
+        };
+        Ok(status as u64)
+    }
+
+    /// Run this guest until an unhandled exit is encountered.
+    fn run_vcpu(&self, vcpu_id: u64) -> sbi::Result<VmExitCause> {
+        // Take the vCPU out of self.vcpus, giving us exclusive ownership.
+        let mut vcpu = self
             .vcpus
             .take_vcpu(vcpu_id)
             .map_err(|_| SbiError::InvalidParam)?;
-        let mut vcpu = vcpu.lock();
+        let exit = {
+            let mut vcpu = vcpu.lock();
 
-        // Run until there's an exit we can't handle.
-        loop {
-            let exit = vcpu.run_to_exit();
-            match exit {
-                VmCpuExit::Ecall(Some(sbi_msg)) => {
-                    match self.handle_ecall(sbi_msg) {
-                        Ok(Some(sbi_ret)) => {
-                            vcpu.set_ecall_result(sbi_ret);
-                        }
-                        Ok(None) => {
-                            // for legacy, leave the a0 and a1 registers as-is.
-                        }
-                        Err(error_code) => {
-                            vcpu.set_ecall_result(SbiReturn::from(error_code));
+            // Run until there's an exit we can't handle.
+            loop {
+                let exit = vcpu.run_to_exit();
+                match exit {
+                    VmCpuExit::Ecall(Some(sbi_msg)) => {
+                        match self.handle_ecall(sbi_msg) {
+                            EcallAction::LegacyOk => {
+                                // for legacy, leave the a0 and a1 registers as-is.
+                            }
+                            EcallAction::Unhandled => {
+                                vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
+                            }
+                            EcallAction::Continue(sbi_ret) => {
+                                vcpu.set_ecall_result(sbi_ret);
+                            }
+                            EcallAction::Break(reason, sbi_ret) => {
+                                vcpu.set_ecall_result(sbi_ret);
+                                break reason;
+                            }
                         }
                     }
-                }
-                VmCpuExit::Ecall(None) => {
-                    // Unrecognized ECALL, return an error.
-                    vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
-                }
-                VmCpuExit::PageFault(addr) => {
-                    if self.handle_guest_fault(addr).is_err() {
-                        return Ok(exit);
+                    VmCpuExit::Ecall(None) => {
+                        // Unrecognized ECALL, return an error.
+                        vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
                     }
-                }
-                VmCpuExit::Other(ref trap_csrs) => {
-                    println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
-                    return Ok(exit);
+                    VmCpuExit::PageFault(addr) => {
+                        if self.handle_guest_fault(addr).is_err() {
+                            break VmExitCause::UnhandledTrap;
+                        }
+                    }
+                    VmCpuExit::Other(ref trap_csrs) => {
+                        println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
+                        break VmExitCause::UnhandledTrap;
+                    }
                 }
             }
+        };
+        if matches!(exit, VmExitCause::PowerOff | VmExitCause::CpuStop) {
+            vcpu.power_off();
         }
+        Ok(exit)
     }
 
     /// Handles ecalls from the guest.
-    fn handle_ecall(&self, msg: SbiMessage) -> sbi::Result<Option<SbiReturn>> {
+    fn handle_ecall(&self, msg: SbiMessage) -> EcallAction {
         match msg {
             SbiMessage::PutChar(c) => {
                 // put char - legacy command
                 print!("{}", c as u8 as char);
-                Ok(None)
+                EcallAction::LegacyOk
             }
-            SbiMessage::Reset(r) => {
-                match r {
-                    ResetFunction::Reset {
-                        reset_type: _,
-                        reason: _,
-                    } => {
-                        // TODO do shutdown of VM or system if from primary host VM
-                        println!("Vm shutdown/reboot request");
-                        crate::poweroff();
-                    }
-                }
+            SbiMessage::Reset(_) => {
+                EcallAction::Break(VmExitCause::PowerOff, SbiReturn::success(0))
             }
-            SbiMessage::Base(_) => Err(SbiError::NotSupported), // TODO
-            SbiMessage::HartState(_) => Err(SbiError::NotSupported), // TODO
-            SbiMessage::Tee(tee_func) => Ok(Some(self.handle_tee_msg(tee_func))),
+            SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
+            SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
+            SbiMessage::Tee(tee_func) => EcallAction::Continue(self.handle_tee_msg(tee_func)),
             SbiMessage::Measurement(measurement_func) => {
-                Ok(Some(self.handle_measurement_msg(measurement_func)))
+                EcallAction::Continue(self.handle_measurement_msg(measurement_func))
             }
+        }
+    }
+
+    fn handle_base_msg(&self, base_func: BaseFunction) -> SbiReturn {
+        use BaseFunction::*;
+        let ret = match base_func {
+            GetSpecificationVersion => 3,
+            GetImplementationID => SBI_IMPL_ID_SALUS,
+            GetImplementationVersion => 0,
+            ProbeSbiExtension(ext) => match ext {
+                sbi::EXT_PUT_CHAR
+                | sbi::EXT_BASE
+                | sbi::EXT_HART_STATE
+                | sbi::EXT_RESET
+                | sbi::EXT_TEE
+                | sbi::EXT_MEASUREMENT => 1,
+                _ => 0,
+            },
+            // TODO: 0 is valid result for the GetMachine* SBI calls but we should probably
+            // report real values here.
+            _ => 0,
+        };
+        SbiReturn::success(ret)
+    }
+
+    fn handle_hart_state_msg(&self, hsm_func: StateFunction) -> EcallAction {
+        use StateFunction::*;
+        match hsm_func {
+            HartStart {
+                hart_id,
+                start_addr,
+                opaque,
+            } => match self.start_vcpu(hart_id, start_addr, opaque) {
+                Ok(()) => EcallAction::Break(VmExitCause::CpuStart(hart_id), SbiReturn::success(0)),
+                Err(e) => EcallAction::Continue(SbiReturn::from(e)),
+            },
+            HartStop => EcallAction::Break(VmExitCause::CpuStop, SbiReturn::success(0)),
+            HartStatus { hart_id } => EcallAction::Continue(self.get_vcpu_status(hart_id).into()),
+            _ => EcallAction::Unhandled,
         }
     }
 
@@ -422,6 +522,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             };
             core::mem::swap(&mut **g, &mut running);
         })?;
+        let guest_vm = guests.running_guest(guest_id)?;
+        // Power on vCPU0 initially. Remaining vCPUs will get powered on by the VM itself via
+        // HSM SBI calls.
+        //
+        // TODO: Should the boot vCPU be specified explicilty?
+        guest_vm.power_on_vcpu(0)?;
         Ok(0)
     }
 
@@ -623,8 +729,10 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         );
         vm.add_guest_tracking_pages(guest_tracking_pages);
 
-        // TODO: Add additional CPUs.
-        vm.add_vcpu(0).unwrap();
+        let cpu_info = CpuInfo::get();
+        for i in 0..cpu_info.num_cpus() {
+            vm.add_vcpu(i as u64).unwrap();
+        }
 
         (host_pages, Self { inner: vm })
     }
@@ -695,10 +803,48 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
 }
 
 impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
-    /// Run the host. Only returns for system shutdown
-    pub fn run(&mut self, vcpu_id: u64) -> VmCpuExit {
-        // TODO - return value need to be host specific
+    /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.
+    pub fn run(&self, vcpu_id: u64) {
         self.inner.bind_vcpu(vcpu_id, ImsicGuestId::HostVm).unwrap();
-        self.inner.run_vcpu(vcpu_id).unwrap()
+
+        // Always make vCPU0 the boot CPU.
+        if vcpu_id == 0 {
+            self.inner.power_on_vcpu(0).unwrap();
+        }
+
+        loop {
+            // Wait until this vCPU is ready to run.
+            while !self.vcpu_is_runnable(vcpu_id) {
+                smp::wfi();
+            }
+
+            // Run until we shut down, or this vCPU stops.
+            loop {
+                match self.inner.run_vcpu(vcpu_id).unwrap() {
+                    VmExitCause::PowerOff => {
+                        println!("Host VM requested shutdown");
+                        crate::poweroff();
+                    }
+                    VmExitCause::CpuStart(id) => {
+                        smp::send_ipi(CpuId::new(id as usize));
+                    }
+                    VmExitCause::CpuStop => {
+                        break;
+                    }
+                    VmExitCause::UnhandledTrap => {
+                        println!("Unhandled host VM exception; shutting down");
+                        crate::poweroff();
+                    }
+                };
+            }
+        }
+    }
+
+    /// Returns if the vCPU with `vcpu_id` is runnable.
+    fn vcpu_is_runnable(&self, vcpu_id: u64) -> bool {
+        matches!(
+            self.inner.vcpus.get_vcpu_status(vcpu_id),
+            Ok(VmCpuStatus::Runnable)
+        )
     }
 }

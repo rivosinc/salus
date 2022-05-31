@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::asm;
-use drivers::{CpuId, CpuInfo};
+use drivers::{CpuId, CpuInfo, Imsic};
 use riscv_page_tables::{HwMemMap, HwMemRegionType, HwReservedMemType};
 use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
+use riscv_regs::{sstatus, ReadWriteable, CSR};
 use sbi::{SbiMessage, StateFunction};
 use spin::Once;
 
@@ -115,6 +116,20 @@ impl PerCpu {
     pub fn set_online(&self) {
         self.online.call_once(|| true);
     }
+}
+
+/// Halts this CPU until an interrupt (for example, delivered via `kick_cpu()`) is received.
+pub fn wfi() {
+    CSR.sstatus.modify(sstatus::sie.val(1));
+    // Safety: WFI behavior is well-defined.
+    unsafe { asm!("wfi", options(nomem, nostack)) };
+    CSR.sstatus.modify(sstatus::sie.val(0));
+}
+
+/// Sends an IPI to `cpu`.
+pub fn send_ipi(cpu: CpuId) {
+    println!("sending IPI to {}", cpu.raw());
+    Imsic::get().send_ipi(cpu).unwrap();
 }
 
 /// Boots secondary CPUs, using the HSM SBI call. Upon return, all secondary CPUs will have

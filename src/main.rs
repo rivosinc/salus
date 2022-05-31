@@ -30,7 +30,6 @@ mod vm_cpu;
 mod vm_pages;
 
 use abort::abort;
-use core::arch::asm;
 use device_tree::{DeviceTree, Fdt};
 use drivers::{CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
@@ -41,6 +40,7 @@ use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
 use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
 use smp::PerCpu;
+use spin::Once;
 use vm::HostVm;
 
 extern "C" {
@@ -68,6 +68,9 @@ static GENERAL_ALLOCATOR: GeneralGlobalAlloc = GeneralGlobalAlloc;
 pub fn alloc_error(_layout: Layout) -> ! {
     abort()
 }
+
+/// The host VM that all CPUs enter at boot.
+static HOST_VM: Once<HostVm<Sv48x4>> = Once::new();
 
 /// Powers off this machine.
 pub fn poweroff() -> ! {
@@ -319,7 +322,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let hyp_mem = HypPageAlloc::new(mem_map, &heap);
 
     // Now load the host VM.
-    let mut host: HostVm<Sv48x4> = HostVmLoader::new(
+    let host = HostVmLoader::new(
         hyp_dt,
         host_kernel,
         host_initramfs,
@@ -329,12 +332,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     )
     .build_device_tree()
     .build_address_space();
+    HOST_VM.call_once(|| host);
 
-    let _ = host.run(hart_id);
-
-    println!("Salus: Host exited");
-
-    poweroff();
+    let cpu_id = PerCpu::this_cpu().cpu_id();
+    HOST_VM.get().unwrap().run(cpu_id.raw() as u64);
 }
 
 #[no_mangle]
@@ -349,9 +350,5 @@ extern "C" fn secondary_init(_hart_id: u64) {
     let me = PerCpu::this_cpu();
     me.set_online();
 
-    // TODO: Start a host VM vCPU.
-    loop {
-        // Safety: WFI behavior is well-defined.
-        unsafe { asm!("wfi", options(nomem, nostack)) };
-    }
+    HOST_VM.wait().run(me.cpu_id().raw() as u64);
 }

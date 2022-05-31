@@ -157,6 +157,28 @@ register_bitfields![u64,
     ]
 ];
 
+// IMSIC indirect CSR address register.
+register_bitfields![u64,
+    pub siselect [
+        reg_addr OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+// IMSIC indirect CSR value register.
+register_bitfields![u64,
+    pub sireg [
+        reg_val OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+// External interrupt claim reigster.
+register_bitfields![u64,
+    pub stopei [
+        interrupt_id OFFSET(16) NUMBITS(11) [],
+        interrupt_prio OFFSET(0) NUMBITS(11) [],
+    ]
+];
+
 // Supervisor address translation register.
 register_bitfields![u64,
     pub satp [
@@ -186,6 +208,14 @@ impl SatpHelpers for LocalRegisterCopy<u64, satp::Register> {
         self.modify(satp::mode.val(T::SATP_VALUE));
     }
 }
+
+// Top-level interrupt claim reigster.
+register_bitfields![u64,
+    pub stopi [
+        interrupt_id OFFSET(16) NUMBITS(8) [],
+        interrupt_prio OFFSET(0) NUMBITS(8) [],
+    ]
+];
 
 // Hypervisor status register.
 register_bitfields![u64,

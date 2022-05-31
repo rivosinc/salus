@@ -30,7 +30,11 @@ pub struct CSR {
     pub stval: ReadWriteRiscvCsr<stval::Register, CSR_STVAL>,
     pub sip: ReadWriteRiscvCsr<sie::Register, CSR_SIP>,
     pub stimecmp: ReadWriteRiscvCsr<stimecmp::Register, 0x14d>,
+    pub siselect: ReadWriteRiscvCsr<siselect::Register, 0x150>,
+    pub sireg: ReadWriteRiscvCsr<sireg::Register, 0x151>,
+    pub stopei: ReadWriteRiscvCsr<stopei::Register, 0x15c>,
     pub satp: ReadWriteRiscvCsr<satp::Register, CSR_SATP>,
+    pub stopi: ReadWriteRiscvCsr<stopi::Register, 0xdb0>,
 
     pub hstatus: ReadWriteRiscvCsr<hstatus::Register, CSR_HSTATUS>,
     pub hedeleg: ReadWriteRiscvCsr<hedeleg::Register, CSR_HEDELEG>,
@@ -56,7 +60,11 @@ pub struct CSR {
     pub vstval: ReadWriteRiscvCsr<stval::Register, CSR_VSTVAL>,
     pub vsip: ReadWriteRiscvCsr<sie::Register, CSR_VSIP>,
     pub vstimecmp: ReadWriteRiscvCsr<stimecmp::Register, 0x24d>,
+    pub vsiselect: ReadWriteRiscvCsr<siselect::Register, 0x250>,
+    pub vsireg: ReadWriteRiscvCsr<sireg::Register, 0x251>,
+    pub vstopei: ReadWriteRiscvCsr<stopei::Register, 0x25c>,
     pub vsatp: ReadWriteRiscvCsr<satp::Register, CSR_VSATP>,
+    pub vstopi: ReadWriteRiscvCsr<stopi::Register, 0xeb0>,
 }
 
 // Define the "addresses" of each CSR register.
@@ -71,7 +79,11 @@ pub const CSR: &CSR = &CSR {
     stval: ReadWriteRiscvCsr::new(),
     sip: ReadWriteRiscvCsr::new(),
     stimecmp: ReadWriteRiscvCsr::new(),
+    siselect: ReadWriteRiscvCsr::new(),
+    sireg: ReadWriteRiscvCsr::new(),
+    stopei: ReadWriteRiscvCsr::new(),
     satp: ReadWriteRiscvCsr::new(),
+    stopi: ReadWriteRiscvCsr::new(),
 
     hstatus: ReadWriteRiscvCsr::new(),
     hedeleg: ReadWriteRiscvCsr::new(),
@@ -97,5 +109,9 @@ pub const CSR: &CSR = &CSR {
     vstval: ReadWriteRiscvCsr::new(),
     vsip: ReadWriteRiscvCsr::new(),
     vstimecmp: ReadWriteRiscvCsr::new(),
+    vsiselect: ReadWriteRiscvCsr::new(),
+    vsireg: ReadWriteRiscvCsr::new(),
+    vstopei: ReadWriteRiscvCsr::new(),
     vsatp: ReadWriteRiscvCsr::new(),
+    vstopi: ReadWriteRiscvCsr::new(),
 };

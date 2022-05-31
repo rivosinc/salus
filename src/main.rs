@@ -248,9 +248,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Reset CSRs to a sane state.
     setup_csrs();
 
-    // Safety: This is the very beginning of the kernel, there are no other users of the UART or the
-    // CONSOLE_DRIVER global.
-    unsafe { UartDriver::new(0x1000_0000).use_as_console() }
+    // Safety: This is the very beginning of the kernel, there are no other users of the UART and
+    // we expect that a UART is at this address.
+    unsafe { UartDriver::init(RawAddr::supervisor(0x1000_0000)) };
     println!("Salus: Boot test VM");
 
     // Safe because we trust that the firmware passed a valid FDT.

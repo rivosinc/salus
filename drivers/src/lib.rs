@@ -19,7 +19,10 @@ pub mod cpu;
 pub mod imsic;
 
 pub use cpu::{CpuId, CpuInfo, MAX_CPUS};
-pub use imsic::{Error as ImsicError, Imsic, ImsicGuestId, ImsicGuestPage, Result as ImsicResult};
+pub use imsic::{
+    Error as ImsicError, Imsic, ImsicGuestId, ImsicGuestPage, ImsicInterruptId,
+    Result as ImsicResult,
+};
 
 #[cfg(test)]
 mod tests {

@@ -299,6 +299,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         imsic.base_addr().bits(),
         imsic.guests_per_hart()
     );
+    Imsic::setup_this_cpu();
 
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);
@@ -343,6 +344,7 @@ extern "C" fn secondary_init(_hart_id: u64) {
     if cpu_info.has_sstc() {
         CSR.henvcfg.modify(henvcfg::stce.val(1));
     }
+    Imsic::setup_this_cpu();
 
     let me = PerCpu::this_cpu();
     me.set_online();

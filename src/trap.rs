@@ -4,8 +4,11 @@
 
 use core::arch::global_asm;
 use core::mem::size_of;
+use drivers::{Imsic, ImsicInterruptId};
 use memoffset::offset_of;
-use riscv_regs::{GeneralPurposeRegisters, GprIndex, Readable, Trap, Writeable, CSR};
+use riscv_regs::{
+    sie, GeneralPurposeRegisters, GprIndex, Interrupt, Readable, Trap, Writeable, CSR,
+};
 
 use crate::print_util::*;
 use crate::{print, println};
@@ -65,6 +68,26 @@ global_asm!(
     tf_sepc = const offset_of!(TrapFrame, sepc),
 );
 
+/// Attempts to handle an interrupt, returning true if the interrupt was successfully handled.
+fn handle_interrupt(irq: Interrupt) -> bool {
+    match irq {
+        Interrupt::SupervisorExternal => {
+            let mut handled = false;
+            while let Some(id) = Imsic::next_pending_interrupt() {
+                match id {
+                    // For now IPIs just wake up the CPU.
+                    ImsicInterruptId::Ipi => {
+                        handled = true;
+                    }
+                }
+            }
+            handled
+        }
+        // TODO: Handle supervisor guest external interrupts.
+        _ => false,
+    }
+}
+
 /// The rust entry point for handling traps. For now we don't expect to take any traps in HS mode
 /// outside of VM exits, so this handler just dumps state and panics.
 ///
@@ -77,6 +100,11 @@ extern "C" fn handle_trap(tf_ptr: *const TrapFrame) {
     let scause = CSR.scause.get();
 
     if let Ok(t) = Trap::from_scause(scause) {
+        if let Trap::Interrupt(i) = t {
+            if handle_interrupt(i) {
+                return;
+            }
+        }
         print!("Unexpected trap: {}, ", t);
     } else {
         print!("Unexpected trap: <not decoded>, ");
@@ -158,4 +186,7 @@ extern "C" fn handle_trap(tf_ptr: *const TrapFrame) {
 /// Installs a handler for HS-level traps.
 pub fn install_trap_handler() {
     CSR.stvec.set((_trap_entry as usize).try_into().unwrap());
+
+    // We only expect supervisor-level external interrupts for now.
+    CSR.sie.read_and_set_bits(1 << sie::sext.shift);
 }

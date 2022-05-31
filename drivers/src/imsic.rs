@@ -10,7 +10,7 @@ use riscv_pages::{
     DeviceMemType, GuestPhysAddr, MemType, PageAddr, PageSize, PhysPage, RawAddr,
     SupervisorPageAddr,
 };
-use riscv_regs::sie;
+use riscv_regs::{sie, stopei, Readable, Writeable, CSR};
 use spin::{Mutex, Once};
 
 use crate::{CpuId, CpuInfo, MAX_CPUS};
@@ -29,6 +29,53 @@ pub enum Error {
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
+
+/// IMSIC indirect CSRs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImsicRegister {
+    Eidelivery,
+    Eithreshold,
+    Eie(u64),
+}
+
+impl ImsicRegister {
+    /// Returns the ISELECT value used to access this register.
+    fn to_raw(self) -> u64 {
+        match self {
+            ImsicRegister::Eidelivery => 0x70,
+            ImsicRegister::Eithreshold => 0x72,
+            ImsicRegister::Eie(i) => 0xc0 + i / 64,
+        }
+    }
+}
+
+/// IMSIC external interrupt IDs.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImsicInterruptId {
+    // For now, we only expect to handle IPIs at HS-level.
+    Ipi = 1,
+}
+
+impl ImsicInterruptId {
+    /// Returns the interrupt corresponding to `id`.
+    fn from_raw(id: u64) -> Option<Self> {
+        match id {
+            1 => Some(ImsicInterruptId::Ipi),
+            _ => None,
+        }
+    }
+
+    /// Returns the indirect EIE register used to enable this interrupt.
+    fn eie_register(&self) -> ImsicRegister {
+        ImsicRegister::Eie(*self as u64 / 64)
+    }
+
+    /// Returns the bit position of this interrupt in its indirect EIE register.
+    fn eie_bit(&self) -> u64 {
+        *self as u64 % 64
+    }
+}
 
 /// A `PhysPage` implementation representing an IMSIC guest interrupt file page.
 pub struct ImsicGuestPage {
@@ -223,8 +270,6 @@ static IMSIC: Once<Imsic> = Once::new();
 // HGEIE.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 fn get_guests_per_hart(_guest_index_bits: u32) -> usize {
-    use riscv_regs::{Readable, Writeable, CSR};
-
     let old = CSR.hgeie.get();
     CSR.hgeie.set(!0);
     let guests_per_hart = CSR.hgeie.get().count_ones() as usize;
@@ -237,6 +282,16 @@ fn get_guests_per_hart(_guest_index_bits: u32) -> usize {
 #[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
 fn get_guests_per_hart(guest_index_bits: u32) -> usize {
     (1 << guest_index_bits as usize) - 1
+}
+
+fn indirect_csr_write(reg: ImsicRegister, val: u64) {
+    CSR.siselect.set(reg.to_raw());
+    CSR.sireg.set(val);
+}
+
+fn indirect_csr_set_bits(reg: ImsicRegister, mask: u64) {
+    CSR.siselect.set(reg.to_raw());
+    CSR.sireg.read_and_set_bits(mask);
 }
 
 impl Imsic {
@@ -416,6 +471,19 @@ impl Imsic {
         });
     }
 
+    /// Initializes the IMSIC-related CSRs on this CPU. Upon return, the IMSIC on this CPU is set
+    /// up to receive IPIs.
+    pub fn setup_this_cpu() {
+        // Enable external interrupt delivery.
+        indirect_csr_write(ImsicRegister::Eidelivery, 1);
+        // We don't care about prioritization, so just set EITHRESHOLD to 0.
+        indirect_csr_write(ImsicRegister::Eithreshold, 0);
+
+        // The only interrupts we handle right now are IPIs.
+        let id = ImsicInterruptId::Ipi;
+        indirect_csr_set_bits(id.eie_register(), 1 << id.eie_bit());
+    }
+
     /// Returns a reference to the global IMSIC state.
     pub fn get() -> &'static Self {
         IMSIC.get().unwrap()
@@ -452,6 +520,23 @@ impl Imsic {
         let imisc = self.inner.lock();
         let pcpu = imisc.get_cpu(cpu).ok_or(Error::InvalidCpu(cpu))?;
         Ok(pcpu.base_addr())
+    }
+
+    /// Sends an IPI to the specified CPU.
+    pub fn send_ipi(&self, cpu: CpuId) -> Result<()> {
+        let addr = self.supervisor_file_addr(cpu)?;
+        unsafe {
+            // Safe since `addr` maps a valid supervisor-level IMSIC interrupt file.
+            core::ptr::write_volatile(addr.bits() as *mut u32, ImsicInterruptId::Ipi as u32)
+        };
+        Ok(())
+    }
+
+    /// Claims and returns the ID of the next pending interrupt in this CPU's supervisor-level
+    /// interrupt file, or `None` if no interrupt is pending.
+    pub fn next_pending_interrupt() -> Option<ImsicInterruptId> {
+        let raw_id = CSR.stopei.atomic_replace(0) >> stopei::interrupt_id.shift;
+        ImsicInterruptId::from_raw(raw_id)
     }
 
     /// Adds an IMSIC node to the host device-tree, with the IMSIC starting at `guest_base_addr`.

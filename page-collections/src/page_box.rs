@@ -164,6 +164,10 @@ impl<T: Display> Display for PageBox<T> {
     }
 }
 
+// Safety: Like Box<T>, PageBox<T> is Send/Sync iff T is Send/Sync.
+unsafe impl<T> Send for PageBox<T> where T: Send {}
+unsafe impl<T> Sync for PageBox<T> where T: Sync {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

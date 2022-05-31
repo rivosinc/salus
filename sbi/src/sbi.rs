@@ -9,12 +9,12 @@
 
 use riscv_regs::{GeneralPurposeRegisters, GprIndex};
 
-const EXT_PUT_CHAR: u64 = 0x01;
-const EXT_BASE: u64 = 0x10;
-const EXT_HART_STATE: u64 = 0x48534D;
-const EXT_RESET: u64 = 0x53525354;
-const EXT_TEE: u64 = 0x544545;
-const EXT_MEASUREMENT: u64 = 0x5464545;
+pub const EXT_PUT_CHAR: u64 = 0x01;
+pub const EXT_BASE: u64 = 0x10;
+pub const EXT_HART_STATE: u64 = 0x48534D;
+pub const EXT_RESET: u64 = 0x53525354;
+pub const EXT_TEE: u64 = 0x544545;
+pub const EXT_MEASUREMENT: u64 = 0x5464545;
 
 /// Error constants from the sbi [spec](https://github.com/riscv-non-isa/riscv-sbi-doc/releases)
 pub const SBI_SUCCESS: i64 = 0;
@@ -65,50 +65,165 @@ impl Error {
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// Functions defined for the Base extension
+#[derive(Clone, Copy)]
 pub enum BaseFunction {
     GetSpecificationVersion,
     GetImplementationID,
     GetImplementationVersion,
+    ProbeSbiExtension(u64),
     GetMachineVendorID,
     GetMachineArchitectureID,
     GetMachineImplementationID,
 }
 
 impl BaseFunction {
-    fn from_func_id(a6: u64) -> Result<Self> {
+    pub fn from_regs(args: &[u64]) -> Result<Self> {
         use BaseFunction::*;
 
-        Ok(match a6 {
-            0 => GetSpecificationVersion,
-            1 => GetImplementationID,
-            2 => GetImplementationVersion,
-            3 => GetMachineVendorID,
-            4 => GetMachineArchitectureID,
-            5 => GetMachineImplementationID,
-            _ => return Err(Error::InvalidParam),
-        })
+        match args[6] {
+            0 => Ok(GetSpecificationVersion),
+            1 => Ok(GetImplementationID),
+            2 => Ok(GetImplementationVersion),
+            3 => Ok(ProbeSbiExtension(args[0])),
+            4 => Ok(GetMachineVendorID),
+            5 => Ok(GetMachineArchitectureID),
+            6 => Ok(GetMachineImplementationID),
+            _ => Err(Error::InvalidParam),
+        }
+    }
+
+    pub fn a6(&self) -> u64 {
+        use BaseFunction::*;
+        match self {
+            GetSpecificationVersion => 0,
+            GetImplementationID => 1,
+            GetImplementationVersion => 2,
+            ProbeSbiExtension(_) => 3,
+            GetMachineVendorID => 4,
+            GetMachineArchitectureID => 5,
+            GetMachineImplementationID => 6,
+        }
+    }
+
+    pub fn a0(&self) -> u64 {
+        use BaseFunction::*;
+        match self {
+            ProbeSbiExtension(ext) => *ext,
+            _ => 0,
+        }
     }
 }
 
 /// Functions defined for the State extension
+#[derive(Clone, Copy)]
 pub enum StateFunction {
-    HartStart,
+    HartStart {
+        hart_id: u64,
+        start_addr: u64,
+        opaque: u64,
+    },
     HartStop,
-    HartStatus,
-    HartSuspend,
+    HartStatus {
+        hart_id: u64,
+    },
+    HartSuspend {
+        suspend_type: u32,
+        resume_addr: u64,
+        opaque: u64,
+    },
+}
+
+/// Return value for the HartStatus SBI call.
+#[repr(u64)]
+pub enum HartState {
+    Started = 0,
+    Stopped = 1,
+    StartPending = 2,
+    StopPending = 3,
+    Suspended = 4,
+    SuspendPending = 5,
 }
 
 impl StateFunction {
-    fn from_func_id(a6: u64) -> Result<Self> {
+    pub fn from_regs(args: &[u64]) -> Result<Self> {
         use StateFunction::*;
+        match args[6] {
+            0 => Ok(HartStart {
+                hart_id: args[0],
+                start_addr: args[1],
+                opaque: args[2],
+            }),
+            1 => Ok(HartStop),
+            2 => Ok(HartStatus { hart_id: args[0] }),
+            3 => Ok(HartSuspend {
+                suspend_type: args[0] as u32,
+                resume_addr: args[1],
+                opaque: args[2],
+            }),
+            _ => Err(Error::InvalidParam),
+        }
+    }
 
-        Ok(match a6 {
-            0 => HartStart,
-            1 => HartStop,
-            2 => HartStatus,
-            3 => HartSuspend,
-            _ => return Err(Error::InvalidParam),
-        })
+    pub fn a6(&self) -> u64 {
+        use StateFunction::*;
+        match self {
+            HartStart { .. } => 0,
+            HartStop => 1,
+            HartStatus { .. } => 2,
+            HartSuspend { .. } => 3,
+        }
+    }
+
+    pub fn a0(&self) -> u64 {
+        use StateFunction::*;
+        match self {
+            HartStart {
+                hart_id,
+                start_addr: _,
+                opaque: _,
+            } => *hart_id,
+            HartStatus { hart_id } => *hart_id,
+            HartSuspend {
+                suspend_type,
+                resume_addr: _,
+                opaque: _,
+            } => *suspend_type as u64,
+            _ => 0,
+        }
+    }
+
+    pub fn a1(&self) -> u64 {
+        use StateFunction::*;
+        match self {
+            HartStart {
+                hart_id: _,
+                start_addr,
+                opaque: _,
+            } => *start_addr,
+            HartSuspend {
+                suspend_type: _,
+                resume_addr,
+                opaque: _,
+            } => *resume_addr,
+            _ => 0,
+        }
+    }
+
+    pub fn a2(&self) -> u64 {
+        use StateFunction::*;
+        match self {
+            HartStart {
+                hart_id: _,
+                start_addr: _,
+                opaque,
+            } => *opaque,
+            HartSuspend {
+                suspend_type: _,
+                resume_addr: _,
+                opaque,
+            } => *opaque,
+            _ => 0,
+        }
     }
 }
 
@@ -695,6 +810,8 @@ impl MeasurementFunction {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SbiReturn {
     pub error_code: i64,
     pub return_value: u64,
@@ -728,6 +845,7 @@ impl From<Error> for SbiReturn {
 }
 
 /// SBI Message used to invoke the specified SBI extension in the firmware.
+#[derive(Clone, Copy)]
 pub enum SbiMessage {
     Base(BaseFunction),
     PutChar(u64),
@@ -745,8 +863,8 @@ impl SbiMessage {
         use GprIndex::*;
         match gprs.reg(A7) {
             EXT_PUT_CHAR => Ok(SbiMessage::PutChar(gprs.reg(A0))),
-            EXT_BASE => BaseFunction::from_func_id(gprs.reg(A6)).map(SbiMessage::Base),
-            EXT_HART_STATE => StateFunction::from_func_id(gprs.reg(A6)).map(SbiMessage::HartState),
+            EXT_BASE => BaseFunction::from_regs(gprs.a_regs()).map(SbiMessage::Base),
+            EXT_HART_STATE => StateFunction::from_regs(gprs.a_regs()).map(SbiMessage::HartState),
             EXT_RESET => ResetFunction::from_regs(gprs.reg(A6), gprs.reg(A0), gprs.reg(A1))
                 .map(SbiMessage::Reset),
             EXT_TEE => TeeFunction::from_regs(gprs.a_regs()).map(SbiMessage::Tee),
@@ -772,8 +890,8 @@ impl SbiMessage {
     /// Returns the register value for this `SbiMessage`.
     pub fn a6(&self) -> u64 {
         match self {
-            SbiMessage::Base(_) => 0,      //TODO
-            SbiMessage::HartState(_) => 0, //TODO
+            SbiMessage::Base(_) => 0, //TODO
+            SbiMessage::HartState(f) => f.a6(),
             SbiMessage::PutChar(_) => 0,
             SbiMessage::Reset(_) => 0,
             SbiMessage::Tee(f) => f.a6(),
@@ -808,6 +926,7 @@ impl SbiMessage {
     /// Returns the register value for this `SbiMessage`.
     pub fn a2(&self) -> u64 {
         match self {
+            SbiMessage::HartState(f) => f.a2(),
             SbiMessage::Tee(f) => f.a2(),
             SbiMessage::Measurement(f) => f.a2(),
             _ => 0,
@@ -818,6 +937,7 @@ impl SbiMessage {
     pub fn a1(&self) -> u64 {
         match self {
             SbiMessage::Reset(r) => r.get_a1(),
+            SbiMessage::HartState(f) => f.a1(),
             SbiMessage::Tee(f) => f.a1(),
             SbiMessage::Measurement(f) => f.a1(),
             _ => 0,
@@ -829,6 +949,7 @@ impl SbiMessage {
         match self {
             SbiMessage::Reset(r) => r.get_a0(),
             SbiMessage::PutChar(c) => *c,
+            SbiMessage::HartState(f) => f.a0(),
             SbiMessage::Tee(f) => f.a0(),
             SbiMessage::Measurement(f) => f.a0(),
             _ => 0,

@@ -234,3 +234,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     poweroff();
 }
+
+#[no_mangle]
+extern "C" fn secondary_init(_hart_id: u64) {}

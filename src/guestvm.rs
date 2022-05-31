@@ -82,3 +82,6 @@ extern "C" fn kernel_init() {
         core::ptr::read_volatile(0 as *const u64);
     }
 }
+
+#[no_mangle]
+extern "C" fn secondary_init(_hart_id: u64) {}

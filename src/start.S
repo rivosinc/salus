@@ -6,17 +6,17 @@
 
 .section .text.start
 
+// The entry point for the boot CPU.
 .global _start
 _start:
 
 .option push
 .option norelax
-	la		gp, _global_pointer
+    la gp, _global_pointer
 .option pop
-    la		sp, _stack_end
-    li		t0, 0b11 << 11 | (1 << 13)
-    csrw	sstatus, t0
-    csrw	sie, zero
+    la sp, _stack_end
+    csrw sstatus, zero
+    csrw sie, zero
 
     la t1, kernel_init
     la ra, 1f
@@ -26,3 +26,21 @@ _start:
 1:
     wfi
     j 1b
+
+// The entry point for secondary CPUs.
+.global _secondary_start
+_secondary_start:
+
+.option push
+.option norelax
+    la gp, _global_pointer
+.option pop
+    csrw sstatus, zero
+    csrw sie, zero
+    // TP holds the address of our PerCpu struct, which is also the top of our stack.
+    mv sp, a1
+    mv tp, a1
+
+    la t1, secondary_init
+    la ra, 1b
+    jr t1

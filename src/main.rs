@@ -19,15 +19,18 @@ extern crate alloc;
 
 mod abort;
 mod asm;
+mod ecall;
 mod host_vm_loader;
 mod print_util;
 mod sha256_measure;
+mod smp;
 mod trap;
 mod vm;
 mod vm_cpu;
 mod vm_pages;
 
 use abort::abort;
+use core::arch::asm;
 use device_tree::{DeviceTree, Fdt};
 use drivers::{CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
@@ -37,6 +40,7 @@ use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
 use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
+use smp::PerCpu;
 use vm::HostVm;
 
 extern "C" {
@@ -187,7 +191,7 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
 }
 
 /// Initialize (H)S-level CSRs to a reasonable state.
-fn setup_csrs() {
+pub fn setup_csrs() {
     // Clear and disable any interupts.
     CSR.sie.set(0);
     CSR.sip.set(0);
@@ -240,11 +244,6 @@ fn setup_csrs() {
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
-    if hart_id != 0 {
-        // TODO handle more than 1 cpu
-        abort();
-    }
-
     // Reset CSRs to a sane state.
     setup_csrs();
 
@@ -301,6 +300,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         imsic.guests_per_hart()
     );
 
+    // Set up per-CPU memory and boot the secondary CPUs.
+    PerCpu::init(hart_id, &mut mem_map);
+    smp::start_secondary_cpus();
+
     // We start RAM in the host address space at the same location as it is in the supervisor
     // address space.
     let guest_ram_base = mem_map
@@ -331,4 +334,22 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     println!("Salus: Host exited");
 
     poweroff();
+}
+
+#[no_mangle]
+extern "C" fn secondary_init(_hart_id: u64) {
+    setup_csrs();
+    let cpu_info = CpuInfo::get();
+    if cpu_info.has_sstc() {
+        CSR.henvcfg.modify(henvcfg::stce.val(1));
+    }
+
+    let me = PerCpu::this_cpu();
+    me.set_online();
+
+    // TODO: Start a host VM vCPU.
+    loop {
+        // Safety: WFI behavior is well-defined.
+        unsafe { asm!("wfi", options(nomem, nostack)) };
+    }
 }

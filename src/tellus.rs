@@ -54,7 +54,7 @@ pub fn poweroff() -> ! {
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const PAGE_SIZE_4K: u64 = 4096;
-    const NUM_TEE_CREATE_PAGES: u64 = 32;
+    const NUM_TEE_CREATE_PAGES: u64 = 40;
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_GUEST_DATA_PAGES: u64 = 10;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;

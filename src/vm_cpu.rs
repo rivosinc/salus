@@ -11,7 +11,8 @@ use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::{GuestPhysAddr, PageOwnerId, PageSize, Pfn, RawAddr, SequentialPages};
 use riscv_regs::{hgatp, hstatus, scounteren, sstatus};
 use riscv_regs::{
-    Exception, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy, Readable, Trap, Writeable, CSR,
+    Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
+    Readable, Trap, Writeable, CSR,
 };
 use sbi::{SbiMessage, SbiReturn};
 use spin::{Mutex, RwLock, RwLockReadGuard};
@@ -54,6 +55,8 @@ struct HostCpuState {
 #[repr(C)]
 struct GuestCpuState {
     gprs: GeneralPurposeRegisters,
+    fprs: FloatingPointRegisters,
+    fcsr: u64,
     sstatus: u64,
     hstatus: u64,
     scounteren: u64,
@@ -117,6 +120,10 @@ const fn guest_gpr_offset(index: GprIndex) -> usize {
     offset_of!(VmCpuState, guest_regs)
         + offset_of!(GuestCpuState, gprs)
         + (index as usize) * size_of::<u64>()
+}
+
+const fn guest_fpr_offset(index: usize) -> usize {
+    offset_of!(VmCpuState, guest_regs) + offset_of!(GuestCpuState, fprs) + index * size_of::<u64>()
 }
 
 macro_rules! host_csr_offset {
@@ -192,6 +199,41 @@ global_asm!(
     guest_t5 = const guest_gpr_offset(GprIndex::T5),
     guest_t6 = const guest_gpr_offset(GprIndex::T6),
     guest_sp = const guest_gpr_offset(GprIndex::SP),
+    guest_f0 = const guest_fpr_offset(0),
+    guest_f1 = const guest_fpr_offset(1),
+    guest_f2 = const guest_fpr_offset(2),
+    guest_f3 = const guest_fpr_offset(3),
+    guest_f4 = const guest_fpr_offset(4),
+    guest_f5 = const guest_fpr_offset(5),
+    guest_f6 = const guest_fpr_offset(6),
+    guest_f7 = const guest_fpr_offset(7),
+    guest_f8 = const guest_fpr_offset(8),
+    guest_f9 = const guest_fpr_offset(9),
+    guest_f10 = const guest_fpr_offset(10),
+    guest_f11 = const guest_fpr_offset(11),
+    guest_f12 = const guest_fpr_offset(12),
+    guest_f13 = const guest_fpr_offset(13),
+    guest_f14 = const guest_fpr_offset(14),
+    guest_f15 = const guest_fpr_offset(15),
+    guest_f16 = const guest_fpr_offset(16),
+    guest_f17 = const guest_fpr_offset(17),
+    guest_f18 = const guest_fpr_offset(18),
+    guest_f19 = const guest_fpr_offset(19),
+    guest_f20 = const guest_fpr_offset(20),
+    guest_f21 = const guest_fpr_offset(21),
+    guest_f22 = const guest_fpr_offset(22),
+    guest_f23 = const guest_fpr_offset(23),
+    guest_f24 = const guest_fpr_offset(24),
+    guest_f25 = const guest_fpr_offset(25),
+    guest_f26 = const guest_fpr_offset(26),
+    guest_f27 = const guest_fpr_offset(27),
+    guest_f28 = const guest_fpr_offset(28),
+    guest_f29 = const guest_fpr_offset(29),
+    guest_f30 = const guest_fpr_offset(30),
+    guest_f31 = const guest_fpr_offset(31),
+    guest_fcsr = const guest_csr_offset!(fcsr),
+    sstatus_fs_dirty = const sstatus::fs::Dirty.value,
+    sstatus_fs_clean = const sstatus::fs::Clean.value,
     guest_sstatus = const guest_csr_offset!(sstatus),
     guest_hstatus = const guest_csr_offset!(hstatus),
     guest_scounteren = const guest_csr_offset!(scounteren),
@@ -230,6 +272,7 @@ impl VmCpu {
 
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
         sstatus.modify(sstatus::spp::Supervisor);
+        sstatus.modify(sstatus::fs::Initial);
         state.guest_regs.sstatus = sstatus.get();
 
         let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);

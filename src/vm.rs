@@ -307,6 +307,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                             break VmExitCause::UnhandledTrap;
                         }
                     }
+                    VmCpuExit::DelegatedException(e, stval) => {
+                        vcpu.inject_exception(e, stval);
+                    }
                     VmCpuExit::Other(ref trap_csrs) => {
                         println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
                         break VmExitCause::UnhandledTrap;

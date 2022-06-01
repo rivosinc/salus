@@ -204,6 +204,8 @@ pub enum VmCpuExit {
     Ecall(Option<SbiMessage>),
     /// G-stage page faults.
     PageFault(GuestPhysAddr),
+    /// An exception which we expected to handle directly at VS, but trapped to HS instead.
+    DelegatedException(Exception, u64),
     /// Everything else that we currently don't or can't handle.
     Other(VmCpuTrapState),
     // TODO: Add other exit causes as needed.
@@ -284,6 +286,29 @@ impl VmCpu {
         self.state.guest_regs.hstatus = hstatus.get();
     }
 
+    /// Delivers the given exception to the vCPU, setting up its register state to handle the trap
+    /// the next time it is run.
+    pub fn inject_exception(&mut self, exception: Exception, stval: u64) {
+        // Update previous privelege level and interrupt state in VSSTATUS.
+        let mut vsstatus =
+            LocalRegisterCopy::<u64, sstatus::Register>::new(self.state.guest_vcpu_csrs.vsstatus);
+        if vsstatus.is_set(sstatus::sie) {
+            vsstatus.modify(sstatus::spie.val(1));
+        }
+        vsstatus.modify(sstatus::sie.val(0));
+        let sstatus =
+            LocalRegisterCopy::<u64, sstatus::Register>::new(self.state.guest_regs.sstatus);
+        vsstatus.modify(sstatus::spp.val(sstatus.read(sstatus::spp)));
+        self.state.guest_vcpu_csrs.vsstatus = vsstatus.get();
+
+        self.state.guest_vcpu_csrs.vscause = Trap::Exception(exception).to_scause();
+        self.state.guest_vcpu_csrs.vstval = stval;
+        self.state.guest_vcpu_csrs.vsepc = self.state.guest_regs.sepc;
+
+        // Redirect the vCPU to its STVEC on entry.
+        self.state.guest_regs.sepc = self.state.guest_vcpu_csrs.vstvec;
+    }
+
     /// Runs this vCPU until it exits.
     pub fn run_to_exit(&mut self) -> VmCpuExit {
         // Load the vCPU CSRs. Safe as these don't take effect until V=1.
@@ -354,6 +379,17 @@ impl VmCpu {
                     self.guest_id,
                 );
                 VmCpuExit::PageFault(fault_addr)
+            }
+            Trap::Exception(e) => {
+                if e.to_hedeleg_field()
+                    .map_or(false, |f| CSR.hedeleg.matches_any(f))
+                {
+                    // Even if we intended to delegate this exception it might not be set in
+                    // medeleg, in which case firmware may send it our way instead.
+                    VmCpuExit::DelegatedException(e, self.state.trap_csrs.stval)
+                } else {
+                    VmCpuExit::Other(self.state.trap_csrs.clone())
+                }
             }
             _ => VmCpuExit::Other(self.state.trap_csrs.clone()),
         }

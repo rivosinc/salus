@@ -204,7 +204,10 @@ pub fn setup_csrs() {
     // Delegate traps to VS.
     let mut hedeleg = LocalRegisterCopy::<u64, hedeleg::Register>::new(0);
     hedeleg.modify(Exception::InstructionMisaligned.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::IllegalInstruction.to_hedeleg_field().unwrap());
     hedeleg.modify(Exception::Breakpoint.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::LoadMisaligned.to_hedeleg_field().unwrap());
+    hedeleg.modify(Exception::StoreMisaligned.to_hedeleg_field().unwrap());
     hedeleg.modify(Exception::UserEnvCall.to_hedeleg_field().unwrap());
     hedeleg.modify(Exception::InstructionPageFault.to_hedeleg_field().unwrap());
     hedeleg.modify(Exception::LoadPageFault.to_hedeleg_field().unwrap());

@@ -31,6 +31,21 @@ impl Trap {
     pub fn from_scause(csr: u64) -> Result<Self> {
         Self::try_from(LocalRegisterCopy::<u64, scause::Register>::new(csr))
     }
+
+    /// Returns the raw scause value for this trap.
+    pub fn to_scause(self) -> u64 {
+        let mut scause = LocalRegisterCopy::<u64, scause::Register>::new(0);
+        match self {
+            Trap::Interrupt(i) => {
+                scause.modify(scause::is_interrupt.val(1));
+                scause.modify(scause::reason.val(i as u64));
+            }
+            Trap::Exception(e) => {
+                scause.modify(scause::reason.val(e as u64));
+            }
+        }
+        scause.get()
+    }
 }
 
 impl TryFrom<LocalRegisterCopy<u64, scause::Register>> for Trap {
@@ -51,44 +66,46 @@ impl TryFrom<LocalRegisterCopy<u64, scause::Register>> for Trap {
 
 /// Interrupt causes.
 #[derive(Copy, Clone, Debug)]
+#[repr(u64)]
 pub enum Interrupt {
-    UserSoft,
-    SupervisorSoft,
-    VirtualSupervisorSoft,
-    MachineSoft,
-    UserTimer,
-    SupervisorTimer,
-    VirtualSupervisorTimer,
-    MachineTimer,
-    UserExternal,
-    SupervisorExternal,
-    VirtualSupervisorExternal,
-    MachineExternal,
-    SupervisorGuestExternal,
+    UserSoft = 0,
+    SupervisorSoft = 1,
+    VirtualSupervisorSoft = 2,
+    MachineSoft = 3,
+    UserTimer = 4,
+    SupervisorTimer = 5,
+    VirtualSupervisorTimer = 6,
+    MachineTimer = 7,
+    UserExternal = 8,
+    SupervisorExternal = 9,
+    VirtualSupervisorExternal = 10,
+    MachineExternal = 11,
+    SupervisorGuestExternal = 12,
 }
 
 /// Exception causes.
 #[derive(Copy, Clone, Debug)]
+#[repr(u64)]
 pub enum Exception {
-    InstructionMisaligned,
-    InstructionFault,
-    IllegalInstruction,
-    Breakpoint,
-    LoadMisaligned,
-    LoadFault,
-    StoreMisaligned,
-    StoreFault,
-    UserEnvCall,
-    SupervisorEnvCall,
-    VirtualSupervisorEnvCall,
-    MachineEnvCall,
-    InstructionPageFault,
-    LoadPageFault,
-    StorePageFault,
-    GuestInstructionPageFault,
-    GuestLoadPageFault,
-    VirtualInstruction,
-    GuestStorePageFault,
+    InstructionMisaligned = 0,
+    InstructionFault = 1,
+    IllegalInstruction = 2,
+    Breakpoint = 3,
+    LoadMisaligned = 4,
+    LoadFault = 5,
+    StoreMisaligned = 6,
+    StoreFault = 7,
+    UserEnvCall = 8,
+    SupervisorEnvCall = 9,
+    VirtualSupervisorEnvCall = 10,
+    MachineEnvCall = 11,
+    InstructionPageFault = 12,
+    LoadPageFault = 13,
+    StorePageFault = 15,
+    GuestInstructionPageFault = 20,
+    GuestLoadPageFault = 21,
+    VirtualInstruction = 22,
+    GuestStorePageFault = 23,
 }
 
 impl Interrupt {

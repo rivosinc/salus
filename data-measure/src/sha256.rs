@@ -32,3 +32,9 @@ impl Sha256Measure {
         }
     }
 }
+
+impl Default for Sha256Measure {
+    fn default() -> Self {
+        Self::new()
+    }
+}

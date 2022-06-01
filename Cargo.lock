@@ -51,6 +51,9 @@ dependencies = [
 [[package]]
 name = "data_measure"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "device_tree"
@@ -231,6 +234,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "s_mode_utils"
+version = "0.1.0"
+dependencies = [
+ "sbi",
+]
+
+[[package]]
 name = "salus"
 version = "0.1.0"
 dependencies = [
@@ -244,9 +254,10 @@ dependencies = [
  "riscv_page_tables",
  "riscv_pages",
  "riscv_regs",
+ "s_mode_utils",
  "sbi",
- "sha2",
  "spin",
+ "test_workloads",
 ]
 
 [[package]]
@@ -312,6 +323,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "test_workloads"
+version = "0.1.0"
+dependencies = [
+ "device_tree",
+ "s_mode_utils",
+ "sbi",
 ]
 
 [[package]]

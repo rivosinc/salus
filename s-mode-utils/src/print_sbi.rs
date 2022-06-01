@@ -4,51 +4,27 @@
 
 use sbi::SbiMessage;
 
-use crate::ecall_send;
-use core::arch::asm;
+use crate::ecall::ecall_send;
+pub use crate::println;
 
 #[macro_export]
 macro_rules! print {
-	($($args:tt)*) => {
-		unsafe {
-			use core::fmt::Write;
-			CONSOLE_DRIVER.as_mut().map(|c| write!(c, $($args)*));
-		}
-	};
+    ($($args:tt)*) => {
+	unsafe {
+	    use core::fmt::Write;
+	    CONSOLE_DRIVER.as_mut().map(|c| write!(c, $($args)*));
+	}
+    };
 }
 
 #[macro_export]
 macro_rules! println {
-	($($args:tt)*) => {
-		unsafe {
-			use core::fmt::Write;
-			CONSOLE_DRIVER.as_mut().map(|c| writeln!(c, $($args)*));
-		}
-	};
-}
-
-macro_rules! _unreachable {
-    () => {{
-        println!("reached unreachable statement @ {}:{}", file!(), line!());
-        abort();
-    }};
-}
-
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!("panic : {:?}", info);
-    abort();
-}
-
-/// Silently ends execution of this thread forever.
-pub fn abort() -> ! {
-    loop {
-        // Safety: the WFI op has defined behavior and no side effects other then stoping execution
-        // for some time.
-        unsafe {
-            asm!("wfi", options(nomem, nostack));
-        }
-    }
+    ($($args:tt)*) => {
+	unsafe {
+	    use core::fmt::Write;
+	    CONSOLE_DRIVER.as_mut().map(|c| writeln!(c, $($args)*));
+	}
+    };
 }
 
 pub static mut CONSOLE_DRIVER: Option<SbiConsoleDriver> = None;

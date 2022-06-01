@@ -10,18 +10,6 @@ strip = "debuginfo"
 codegen-units = 1
 panic = "abort"
 
-[[bin]]
-name = "salus"
-path = "src/main.rs"
-
-[[bin]]
-name = "tellus"
-path = "src/tellus.rs"
-
-[[bin]]
-name = "guestvm"
-path = "src/guestvm.rs"
-
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
 data_measure = { path = "./data-measure" }
@@ -33,8 +21,13 @@ page_collections = { path = "./page-collections" }
 riscv_page_tables = { path = "./riscv-page-tables" }
 riscv_pages = { path = "./riscv-pages" }
 riscv_regs = { path = "./riscv-regs" }
+s_mode_utils = { path = "./s-mode-utils" }
 sbi = { path = "./sbi" }
-sha2 = {version = "0.10", default-features = false }
 spin = { version = "*", default-features = false }
+test_workloads = { path = "./test-workloads" }
 
 [workspace]
+
+members = [
+        "test-workloads",
+]

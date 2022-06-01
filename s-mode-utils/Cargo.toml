@@ -1,0 +1,9 @@
+[package]
+name = "s_mode_utils"
+authors = ["Rivos, Inc."]
+license = "Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sbi = { path = "../sbi" }

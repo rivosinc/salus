@@ -11,9 +11,9 @@ use riscv_regs::{sstatus, ReadWriteable, CSR};
 use sbi::{SbiMessage, StateFunction};
 use spin::Once;
 
-use crate::ecall::ecall_send;
 use crate::vm_id::VmIdTracker;
 use crate::{print_util::*, println};
+use s_mode_utils::ecall::ecall_send;
 
 // The secondary CPU entry point, defined in start.S.
 extern "C" {

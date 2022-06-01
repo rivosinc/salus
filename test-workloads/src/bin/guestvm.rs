@@ -9,13 +9,11 @@
 use core::alloc::{GlobalAlloc, Layout};
 
 extern crate alloc;
+extern crate test_workloads;
 
-mod asm;
-mod ecall;
-mod print_sbi;
-
-use ecall::ecall_send;
-use print_sbi::*;
+use s_mode_utils::abort::abort;
+use s_mode_utils::ecall::ecall_send;
+use s_mode_utils::print_sbi::*;
 use sbi::SbiMessage;
 
 // Dummy global allocator - panic if anything tries to do an allocation.

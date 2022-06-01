@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 use arrayvec::ArrayVec;
 use core::{alloc::Allocator, mem, slice};
+use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
@@ -14,6 +15,7 @@ use riscv_pages::{
     RawAddr, SequentialPages,
 };
 use riscv_regs::GprIndex;
+use s_mode_utils::abort::abort;
 use sbi::Error as SbiError;
 use sbi::{
     self, BaseFunction, HartState, MeasurementFunction, SbiMessage, SbiReturn, StateFunction,
@@ -22,7 +24,6 @@ use sbi::{
 use spin::RwLock;
 
 use crate::print_util::*;
-use crate::sha256_measure::SHA256_DIGEST_BYTES;
 use crate::smp;
 use crate::vm_cpu::{VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::{self, ActiveVmPages, VmPages, TVM_STATE_PAGES};
@@ -33,6 +34,16 @@ const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
 // What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
+
+/// Powers off this machine.
+pub fn poweroff() -> ! {
+    // Safety: on this platform, a write of 0x5555 to 0x100000 will trigger the platform to
+    // poweroff, which is defined behavior.
+    unsafe {
+        core::ptr::write_volatile(0x10_0000 as *mut u32, 0x5555);
+    }
+    abort()
+}
 
 pub enum VmStateInitializing {}
 pub enum VmStateFinalized {}
@@ -893,7 +904,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
                 match self.inner.run_vcpu(vcpu_id).unwrap() {
                     VmExitCause::PowerOff => {
                         println!("Host VM requested shutdown");
-                        crate::poweroff();
+                        poweroff();
                     }
                     VmExitCause::CpuStart(id) => {
                         smp::send_ipi(CpuId::new(id as usize));
@@ -903,7 +914,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
                     }
                     VmExitCause::UnhandledTrap => {
                         println!("Unhandled host VM exception; shutting down");
-                        crate::poweroff();
+                        poweroff();
                     }
                 };
             }

@@ -5,6 +5,7 @@
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
+use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, PageState};
 use riscv_pages::{
@@ -14,7 +15,6 @@ use riscv_pages::{
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
 
-use crate::sha256_measure::Sha256Measure;
 use crate::smp::PerCpu;
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
 use crate::vm_cpu::VmCpus;

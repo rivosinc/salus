@@ -6,39 +6,24 @@ use core::ptr::NonNull;
 use riscv_pages::SupervisorPhysAddr;
 use spin::{Mutex, Once};
 
-use crate::abort::abort;
-
 #[macro_export]
 macro_rules! print {
-	($($args:tt)*) => {
-		unsafe {
-			use core::fmt::Write;
-			CONSOLE_DRIVER.get_mut().map(|c| write!(c, $($args)*));
-		}
-	};
+    ($($args:tt)*) => {
+	unsafe {
+	    use core::fmt::Write;
+	    CONSOLE_DRIVER.get_mut().map(|c| write!(c, $($args)*));
+	}
+    };
 }
 
 #[macro_export]
 macro_rules! println {
-	($($args:tt)*) => {
-		unsafe {
-			use core::fmt::Write;
-			CONSOLE_DRIVER.get_mut().map(|c| writeln!(c, $($args)*));
-		}
-	};
-}
-
-macro_rules! _unreachable {
-    () => {{
-        println!("reached unreachable statement @ {}:{}", file!(), line!());
-        abort();
-    }};
-}
-
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!("panic : {:?}", info);
-    abort();
+    ($($args:tt)*) => {
+	unsafe {
+	    use core::fmt::Write;
+	    CONSOLE_DRIVER.get_mut().map(|c| writeln!(c, $($args)*));
+	}
+    };
 }
 
 pub static mut CONSOLE_DRIVER: Once<UartDriver> = Once::new();

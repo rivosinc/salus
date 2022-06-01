@@ -17,12 +17,9 @@ use core::alloc::{GlobalAlloc, Layout};
 
 extern crate alloc;
 
-mod abort;
 mod asm;
-mod ecall;
 mod host_vm_loader;
 mod print_util;
-mod sha256_measure;
 mod smp;
 mod trap;
 mod vm;
@@ -30,7 +27,6 @@ mod vm_cpu;
 mod vm_id;
 mod vm_pages;
 
-use abort::abort;
 use device_tree::{DeviceTree, Fdt};
 use drivers::{CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
@@ -40,9 +36,16 @@ use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
 use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
+use s_mode_utils::abort::abort;
 use smp::PerCpu;
 use spin::Once;
 use vm::HostVm;
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    println!("panic : {:?}", info);
+    abort();
+}
 
 extern "C" {
     static _start: u8;
@@ -72,16 +75,6 @@ pub fn alloc_error(_layout: Layout) -> ! {
 
 /// The host VM that all CPUs enter at boot.
 static HOST_VM: Once<HostVm<Sv48x4>> = Once::new();
-
-/// Powers off this machine.
-pub fn poweroff() -> ! {
-    // Safety: on this platform, a write of 0x5555 to 0x100000 will trigger the platform to
-    // poweroff, which is defined behavior.
-    unsafe {
-        core::ptr::write_volatile(0x10_0000 as *mut u32, 0x5555);
-    }
-    abort()
-}
 
 /// Builds the hardware memory map from the device-tree. The kernel & initramfs image regions are
 /// aligned to `T::TOP_LEVEL_ALIGN` so that they can be mapped directly into the host VM's guest

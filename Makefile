@@ -19,11 +19,11 @@ tellus_bin: tellus
 	./create_guest_image.sh tellus_raw guestvm_raw tellus_guestvm
 
 guestvm:
-	RUSTFLAGS='-Clink-arg=-Tlds/guest.lds' cargo build --release --bin guestvm
+	RUSTFLAGS='-Clink-arg=-Tlds/guest.lds' cargo build --package test_workloads --release --bin guestvm
 
 .PHONY: tellus
 tellus: guestvm
-	cargo build --bin tellus --release
+	cargo build --package test_workloads --bin tellus --release
 
 run_tellus_gdb: tellus_bin salus_debug
 	     ${LOCAL_PATH}qemu-system-riscv64 \

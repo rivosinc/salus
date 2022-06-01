@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use data_measure::data_measure::DataMeasure;
+use crate::data_measure::DataMeasure;
 use sha2::{Digest, Sha256};
 
 pub const SHA256_DIGEST_BYTES: usize = 32;

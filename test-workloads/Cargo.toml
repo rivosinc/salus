@@ -1,0 +1,11 @@
+[package]
+name = "test_workloads"
+authors = ["Rivos, Inc."]
+license = "Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+device_tree = { path = "../device-tree" }
+s_mode_utils = { path = "../s-mode-utils" }
+sbi = { path = "../sbi" }

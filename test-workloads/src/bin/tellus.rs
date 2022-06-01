@@ -9,16 +9,13 @@
 use core::alloc::{GlobalAlloc, Layout};
 
 extern crate alloc;
-
-mod asm;
-mod ecall;
-mod print_sbi;
-
-use sbi::SbiMessage;
+extern crate test_workloads;
 
 use device_tree::Fdt;
-use ecall::ecall_send;
-use print_sbi::*;
+use s_mode_utils::abort::abort;
+use s_mode_utils::ecall::ecall_send;
+use s_mode_utils::print_sbi::*;
+use sbi::SbiMessage;
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;

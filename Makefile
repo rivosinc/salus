@@ -3,6 +3,11 @@ MACH_ARGS ?= -M virt,aia=aplic-imsic,aia-guests=4 -cpu rv64,x-aia=true
 NCPU ?= 1
 MEM_SIZE ?= 4096
 
+# Sanitize LOCAL_PATH
+ifdef LOCAL_PATH
+LOCAL_PATH:=${LOCAL_PATH}/
+endif
+
 all: salus tellus guestvm
 
 .PHONY: salus

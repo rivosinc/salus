@@ -203,7 +203,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
             .add_vcpu(vcpu_id)
             .map_err(|_| SbiError::InvalidParam)?;
         let mut vcpu = vcpu.lock();
-        vcpu.set_hgatp(&self.vm_pages);
         vcpu.set_gpr(GprIndex::A0, vcpu_id);
         Ok(())
     }
@@ -279,7 +278,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 
             // Run until there's an exit we can't handle.
             loop {
-                let exit = vcpu.run_to_exit();
+                let exit = vcpu.run_to_exit(&self.vm_pages);
                 match exit {
                     VmCpuExit::Ecall(Some(sbi_msg)) => {
                         match self.handle_ecall(sbi_msg) {

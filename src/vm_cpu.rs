@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::{mem::size_of, ops::Deref};
-use drivers::{CpuInfo, ImsicGuestId, MAX_CPUS};
+use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use memoffset::offset_of;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::GuestStagePageTable;
@@ -17,7 +17,8 @@ use riscv_regs::{
 use sbi::{SbiMessage, SbiReturn};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
-use crate::vm::VmStateInitializing;
+use crate::smp::PerCpu;
+use crate::vm_id::VmId;
 use crate::vm_pages::VmPages;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -68,7 +69,6 @@ struct GuestCpuState {
 #[derive(Default)]
 #[repr(C)]
 struct GuestVCpuState {
-    hgatp: u64,
     htimedelta: u64,
     vsstatus: u64,
     vsie: u64,
@@ -256,6 +256,8 @@ pub enum VmCpuExit {
 /// Represents a single virtual CPU of a VM.
 pub struct VmCpu {
     state: VmCpuState,
+    phys_cpu: Option<CpuId>,
+    vmid: Option<VmId>,
     interrupt_file: Option<ImsicGuestId>,
     guest_id: PageOwnerId,
 }
@@ -283,21 +285,11 @@ impl VmCpu {
 
         Self {
             state,
+            phys_cpu: None,
+            vmid: None,
             interrupt_file: None,
             guest_id,
         }
-    }
-
-    /// Sets the `hgatp` CSR to point to the root page table of `vm_pages`.
-    pub fn set_hgatp<T: GuestStagePageTable>(
-        &mut self,
-        vm_pages: &VmPages<T, VmStateInitializing>,
-    ) {
-        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
-        hgatp.modify(hgatp::vmid.val(1)); // TODO: VMID assignments.
-        hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
-        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
-        self.state.guest_vcpu_csrs.hgatp = hgatp.get();
     }
 
     /// Sets the `sepc` CSR, or the PC value the vCPU will jump to when it is run.
@@ -352,10 +344,36 @@ impl VmCpu {
         self.state.guest_regs.sepc = self.state.guest_vcpu_csrs.vstvec;
     }
 
+    /// Programs HGATP to use the 2nd-stage translation tables from `vm_pages`.
+    fn enter_vm_pages<T: GuestStagePageTable>(&mut self, vm_pages: &VmPages<T>) {
+        // Get the VMID to use for this VM's address space on this physical CPU.
+        let this_cpu = PerCpu::this_cpu();
+        if self.phys_cpu != Some(this_cpu.cpu_id()) {
+            // If we've changed CPUs, then any existing VMID is invalid.
+            //
+            // TODO: Migration between physical CPUs needs to be done explicitly via TEECALL.
+            self.vmid = None;
+            self.phys_cpu = Some(this_cpu.cpu_id());
+        }
+        let mut vmid_tracker = this_cpu.vmid_tracker_mut();
+        if self.vmid.map(|id| id.version()) != Some(vmid_tracker.current_version()) {
+            // If VMIDs rolled over next_vmid() will do the necessary flush.
+            self.vmid = Some(vmid_tracker.next_vmid());
+        }
+        let vmid = self.vmid.unwrap();
+
+        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
+        hgatp.modify(hgatp::vmid.val(vmid.vmid()));
+        hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
+        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
+        CSR.hgatp.set(hgatp.get());
+    }
+
     /// Runs this vCPU until it exits.
-    pub fn run_to_exit(&mut self) -> VmCpuExit {
+    pub fn run_to_exit<T: GuestStagePageTable>(&mut self, vm_pages: &VmPages<T>) -> VmCpuExit {
+        self.enter_vm_pages(vm_pages);
+
         // Load the vCPU CSRs. Safe as these don't take effect until V=1.
-        CSR.hgatp.set(self.state.guest_vcpu_csrs.hgatp);
         CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
         CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
         CSR.vsie.set(self.state.guest_vcpu_csrs.vsie);
@@ -392,7 +410,6 @@ impl VmCpu {
         self.state.trap_csrs.htinst = CSR.htinst.get();
 
         // Save the vCPU state.
-        self.state.guest_vcpu_csrs.hgatp = CSR.hgatp.get();
         self.state.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
         self.state.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
         self.state.guest_vcpu_csrs.vsie = CSR.vsie.get();

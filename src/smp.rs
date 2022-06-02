@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::asm;
+use core::cell::{RefCell, RefMut};
 use drivers::{CpuId, CpuInfo, Imsic};
 use riscv_page_tables::{HwMemMap, HwMemRegionType, HwReservedMemType};
 use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
@@ -11,6 +12,7 @@ use sbi::{SbiMessage, StateFunction};
 use spin::Once;
 
 use crate::ecall::ecall_send;
+use crate::vm_id::VmIdTracker;
 use crate::{print_util::*, println};
 
 // The secondary CPU entry point, defined in start.S.
@@ -23,6 +25,7 @@ extern "C" {
 #[repr(C)]
 pub struct PerCpu {
     cpu_id: CpuId,
+    vmid_tracker: RefCell<VmIdTracker>,
     online: Once<bool>,
 }
 
@@ -60,6 +63,7 @@ impl PerCpu {
             let ptr = Self::ptr_for_cpu(CpuId::new(i));
             let pcpu = PerCpu {
                 cpu_id,
+                vmid_tracker: RefCell::new(VmIdTracker::new()),
                 online: Once::new(),
             };
             // Safety: ptr is guaranteed to be properly aligned and point to valid memory owned by
@@ -116,6 +120,11 @@ impl PerCpu {
     pub fn set_online(&self) {
         self.online.call_once(|| true);
     }
+
+    /// Returns a mutable reference to this CPU's VMID tracker.
+    pub fn vmid_tracker_mut(&self) -> RefMut<VmIdTracker> {
+        self.vmid_tracker.borrow_mut()
+    }
 }
 
 /// Halts this CPU until an interrupt (for example, delivered via `kick_cpu()`) is received.
@@ -128,7 +137,6 @@ pub fn wfi() {
 
 /// Sends an IPI to `cpu`.
 pub fn send_ipi(cpu: CpuId) {
-    println!("sending IPI to {}", cpu.raw());
     Imsic::get().send_ipi(cpu).unwrap();
 }
 

@@ -27,6 +27,7 @@ mod smp;
 mod trap;
 mod vm;
 mod vm_cpu;
+mod vm_id;
 mod vm_pages;
 
 use abort::abort;

@@ -46,6 +46,7 @@ mod page_table;
 pub mod page_tracking;
 mod sv48;
 pub mod sv48x4;
+pub mod tlb;
 
 pub use hw_mem_map::Error as MemMapError;
 pub use hw_mem_map::Result as MemMapResult;

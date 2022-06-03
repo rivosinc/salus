@@ -43,11 +43,6 @@ extern "C" fn kernel_init() {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const NUM_GUEST_DATA_PAGES: u64 = 10;
     const PAGE_SIZE_4K: u64 = 4096;
-    // Safe because this is the very begining of the program and nothing has set the console driver
-    // yet.
-    unsafe {
-        SbiConsoleDriver::new().use_as_console();
-    }
 
     let measurement_page_addr = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
     let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {

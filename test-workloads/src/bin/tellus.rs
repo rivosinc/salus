@@ -65,12 +65,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         abort();
     }
 
-    // Safe because this is the very begining of the program and nothing has set the console driver
-    // yet.
-    unsafe {
-        SbiConsoleDriver::new().use_as_console();
-    }
-    console_write_str("Tellus: Booting the test VM\n");
+    console_write_bytes(b"Tellus: Booting the test VM\n");
 
     // Safe because we trust the host to boot with a valid fdt_addr pass in register a1.
     let fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {

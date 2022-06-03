@@ -24,7 +24,7 @@ use crate::print_util::*;
 use crate::sha256_measure::SHA256_DIGEST_BYTES;
 use crate::smp;
 use crate::vm_cpu::{VmCpuExit, VmCpuStatus, VmCpus, VM_CPUS_PAGES};
-use crate::vm_pages::{self, VmPages};
+use crate::vm_pages::{self, ActiveVmPages, VmPages};
 use crate::{print, println};
 
 const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
@@ -284,7 +284,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 let exit = active_vcpu.run_to_exit();
                 match exit {
                     VmCpuExit::Ecall(Some(sbi_msg)) => {
-                        match self.handle_ecall(sbi_msg) {
+                        match self.handle_ecall(sbi_msg, active_vcpu.active_pages()) {
                             EcallAction::LegacyOk => {
                                 // for legacy, leave the a0 and a1 registers as-is.
                             }
@@ -327,7 +327,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Handles ecalls from the guest.
-    fn handle_ecall(&self, msg: SbiMessage) -> EcallAction {
+    fn handle_ecall(&self, msg: SbiMessage, active_pages: &ActiveVmPages<T>) -> EcallAction {
         match msg {
             SbiMessage::PutChar(c) => {
                 // put char - legacy command
@@ -339,9 +339,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             }
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
-            SbiMessage::Tee(tee_func) => EcallAction::Continue(self.handle_tee_msg(tee_func)),
+            SbiMessage::Tee(tee_func) => {
+                EcallAction::Continue(self.handle_tee_msg(tee_func, active_pages))
+            }
             SbiMessage::Measurement(measurement_func) => {
-                EcallAction::Continue(self.handle_measurement_msg(measurement_func))
+                EcallAction::Continue(self.handle_measurement_msg(measurement_func, active_pages))
             }
         }
     }
@@ -385,7 +387,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         }
     }
 
-    fn handle_tee_msg(&self, tee_func: TeeFunction) -> SbiReturn {
+    fn handle_tee_msg(&self, tee_func: TeeFunction, active_pages: &ActiveVmPages<T>) -> SbiReturn {
         use TeeFunction::*;
         match tee_func {
             TvmCreate(state_page) => self.add_guest(state_page).into(),
@@ -434,27 +436,38 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             GetGuestMeasurement {
                 measurement_version,
                 measurement_type,
-                page_addr,
+                dest_addr,
                 guest_id,
             } => self
-                .guest_get_measurement(measurement_version, measurement_type, page_addr, guest_id)
+                .guest_get_measurement(
+                    measurement_version,
+                    measurement_type,
+                    dest_addr,
+                    guest_id,
+                    active_pages,
+                )
                 .into(),
         }
     }
 
-    fn handle_measurement_msg(&self, measurement_func: MeasurementFunction) -> SbiReturn {
+    fn handle_measurement_msg(
+        &self,
+        measurement_func: MeasurementFunction,
+        active_pages: &ActiveVmPages<T>,
+    ) -> SbiReturn {
         use MeasurementFunction::*;
         match measurement_func {
             GetSelfMeasurement {
                 measurement_version,
                 measurement_type,
-                page_addr,
+                dest_addr,
             } => self
                 .guest_get_measurement(
                     measurement_version,
                     measurement_type,
-                    page_addr,
+                    dest_addr,
                     GUEST_ID_SELF_MEASUREMENT,
+                    active_pages,
                 )
                 .into(),
         }
@@ -651,48 +664,41 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         &self,
         measurement_version: u64,
         measurement_type: u64,
-        page_addr: u64,
+        dest_addr: u64,
         guest_id: u64,
+        active_pages: &ActiveVmPages<T>,
     ) -> sbi::Result<u64> {
-        let gpa = RawAddr::guest(page_addr, self.vm_pages.page_owner_id());
-        if (measurement_version != 1) || (measurement_type != 1) || PageAddr::new(gpa).is_none() {
+        if (measurement_version != 1) || (measurement_type != 1) {
             return Err(SbiError::InvalidParam);
         }
 
-        // The guest_id of 0 is a special identifier used to retrieve
-        // measurements for self. Note that since we are borrowing
-        // measurements from vm_pages, we can't take another mutable
-        // reference to vm_pages to write to the GPA, so we have to
-        // call a helper method to retrieve the measurements and write
-        // them using the same mutable reference
-        let result = if guest_id == GUEST_ID_SELF_MEASUREMENT {
-            self.vm_pages.write_measurements_to_guest_owned_page(gpa)
+        // TODO: Define a compile-time constant for the maximum length of any measurement we
+        // would conceivably use.
+        let mut bytes = [0u8; SHA256_DIGEST_BYTES];
+        if guest_id == GUEST_ID_SELF_MEASUREMENT {
+            // The guest_id of 0 is a special identifier used to retrieve
+            // measurements for self.
+            self.vm_pages.get_measurement(&mut bytes)
         } else {
-            // TODO: Define a compile-time constant for the maximum length of any measurement we
-            // would conceivably use.
-            let mut bytes = [0u8; SHA256_DIGEST_BYTES];
             let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
             let _ = guests.get_guest_index(guest_id)?;
             if let Ok(running_guest) = guests.running_guest(guest_id) {
-                running_guest
-                    .vm_pages
-                    .get_measurement(&mut bytes)
-                    .map_err(|_| SbiError::Failed)?;
+                running_guest.vm_pages.get_measurement(&mut bytes)
             } else {
                 guests
                     .initializing_guest(guest_id)
                     .unwrap()
                     .vm_pages
                     .get_measurement(&mut bytes)
-                    .map_err(|_| SbiError::Failed)?;
             }
+        }
+        .map_err(|_| SbiError::Failed)?;
 
-            self.vm_pages.write_to_guest_owned_page(gpa, &bytes)
-        };
-
-        result
-            .map(|bytes| bytes as u64)
-            .map_err(|_| SbiError::InvalidAddress)
+        let gpa = RawAddr::guest(dest_addr, self.vm_pages.page_owner_id());
+        active_pages
+            .copy_to_guest(gpa, &bytes)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        Ok(bytes.len() as u64)
     }
 }
 

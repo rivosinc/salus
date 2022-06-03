@@ -169,36 +169,6 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
             None
         }
     }
-
-    /// Writes the given data at `offset` of the mapped page.
-    /// Uses volatile access as the VM where this page is mapped may modify it at any time.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that this entry points to a page of ordinary system RAM.
-    pub unsafe fn write_to_page(&self, offset: u64, bytes: &[u8]) -> Result<()> {
-        if let ValidTableEntryMut::Leaf(pte, level) = self {
-            let last_offset = offset
-                .checked_add(bytes.len() as u64)
-                .ok_or(Error::InvalidOffset)?;
-            if last_offset <= level.leaf_page_size() as u64 {
-                // unwrap is ok because the address at the entry must be correctly aligned.
-                let spa = PageAddr::from_pfn(pte.pfn(), level.leaf_page_size())
-                    .unwrap()
-                    .bits() as *mut u8;
-                for (i, c) in bytes.iter().enumerate() {
-                    // Safe because the page table owns this page and bounds checks were done
-                    // above. Caller must guarantee typing of the memory.
-                    core::ptr::write_volatile(spa.offset(offset as isize + i as isize), *c);
-                }
-                Ok(())
-            } else {
-                Err(Error::OutOfBounds)
-            }
-        } else {
-            Err(Error::TableEntryNotLeaf)
-        }
-    }
 }
 
 /// Holds the address of a page table for a given level in the paging structure.
@@ -495,23 +465,6 @@ pub trait PlatformPageTable: Sized {
             Ok(InvalidateIter::new(self, addr, num_pages))
         } else {
             Err(Error::PageNotOwned)
-        }
-    }
-
-    /// Translates the Mapped address -> SPA, and writes the specified bytes at the given offset.
-    /// The function will fail if there's no valid mapping of the mapped address, or if the bounds
-    /// of the page would have been exceeded.
-    /// Presently supports only 4K pages
-    fn write_mapped_page(
-        &mut self,
-        addr: RawAddr<Self::MappedAddressSpace>,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<()> {
-        let entry = self.get_4k_leaf_with_type(addr, MemType::Ram)?;
-        unsafe {
-            // Safe since we've verified that this is a RAM page.
-            entry.write_to_page(offset, bytes)
         }
     }
 }

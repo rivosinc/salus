@@ -230,6 +230,14 @@ impl Exception {
             _ => Err(Error::InvalidCause),
         }
     }
+
+    pub fn is_guest_page_fault(&self) -> bool {
+        use Exception::*;
+        matches!(
+            self,
+            GuestLoadPageFault | GuestStorePageFault | GuestInstructionPageFault
+        )
+    }
 }
 
 impl fmt::Display for Trap {

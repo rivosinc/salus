@@ -385,17 +385,17 @@ pub enum TeeFunction {
         remap_addr: u64, // TODO should we track this locally?
         num_pages: u64,
     },
-    /// Copies the measurements for the specified guest to the page address in page_addr.
+    /// Copies the measurements for the specified guest to the physical address `dest_addr`.
     /// The measurement version and type must be set to 1 for now.
     /// a6 = 7
     /// a0 = measurement version
     /// a1 = measurement type
-    /// a2 = page_addr
+    /// a2 = dest_addr
     /// a3 = guest id
     GetGuestMeasurement {
         measurement_version: u64,
         measurement_type: u64,
-        page_addr: u64,
+        dest_addr: u64,
         guest_id: u64,
     },
     /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`. vCPUs may not be added after the TVM
@@ -455,7 +455,7 @@ impl TeeFunction {
             7 => Ok(GetGuestMeasurement {
                 measurement_version: args[0],
                 measurement_type: args[1],
-                page_addr: args[2],
+                dest_addr: args[2],
                 guest_id: args[3],
             }),
             8 => Ok(TvmCpuCreate {
@@ -504,7 +504,7 @@ impl TeeFunction {
             GetGuestMeasurement {
                 measurement_type: _,
                 measurement_version: _,
-                page_addr: _,
+                dest_addr: _,
                 guest_id: _,
             } => 7,
             TvmCpuCreate {
@@ -552,7 +552,7 @@ impl TeeFunction {
             GetGuestMeasurement {
                 measurement_version,
                 measurement_type: _,
-                page_addr: _,
+                dest_addr: _,
                 guest_id: _,
             } => *measurement_version,
             TvmCpuCreate {
@@ -597,7 +597,7 @@ impl TeeFunction {
             GetGuestMeasurement {
                 measurement_version: _,
                 measurement_type,
-                page_addr: _,
+                dest_addr: _,
                 guest_id: _,
             } => *measurement_type,
             TvmCpuCreate {
@@ -639,9 +639,9 @@ impl TeeFunction {
             GetGuestMeasurement {
                 measurement_version: _,
                 measurement_type: _,
-                page_addr,
+                dest_addr,
                 guest_id: _,
-            } => *page_addr,
+            } => *dest_addr,
             TvmCpuSetRegister {
                 guest_id: _,
                 vcpu_id: _,
@@ -672,7 +672,7 @@ impl TeeFunction {
             GetGuestMeasurement {
                 measurement_version: _,
                 measurement_type: _,
-                page_addr: _,
+                dest_addr: _,
                 guest_id,
             } => *guest_id,
             TvmCpuSetRegister {
@@ -732,16 +732,16 @@ impl TeeFunction {
 
 #[derive(Copy, Clone)]
 pub enum MeasurementFunction {
-    /// Copies the measurements for the current VM to the page address in page_addr.
+    /// Copies the measurements for the current VM to the (guest) physical address in `dest_addr`.
     /// The measurement version and type must be set to 1 for now.
     /// a6 = 0
     /// a0 = measurement version
     /// a1 = measurement type
-    /// a2 = page_addr
+    /// a2 = dest_addr
     GetSelfMeasurement {
         measurement_version: u64,
         measurement_type: u64,
-        page_addr: u64,
+        dest_addr: u64,
     },
 }
 
@@ -753,7 +753,7 @@ impl MeasurementFunction {
             0 => Ok(GetSelfMeasurement {
                 measurement_version: args[0],
                 measurement_type: args[1],
-                page_addr: args[2],
+                dest_addr: args[2],
             }),
             _ => Err(Error::InvalidParam),
         }
@@ -765,7 +765,7 @@ impl MeasurementFunction {
             GetSelfMeasurement {
                 measurement_version: _,
                 measurement_type: _,
-                page_addr: _,
+                dest_addr: _,
             } => 0,
         }
     }
@@ -776,7 +776,7 @@ impl MeasurementFunction {
             GetSelfMeasurement {
                 measurement_version,
                 measurement_type: _,
-                page_addr: _,
+                dest_addr: _,
             } => *measurement_version,
         }
     }
@@ -787,7 +787,7 @@ impl MeasurementFunction {
             GetSelfMeasurement {
                 measurement_version: _,
                 measurement_type,
-                page_addr: _,
+                dest_addr: _,
             } => *measurement_type,
         }
     }
@@ -798,8 +798,8 @@ impl MeasurementFunction {
             GetSelfMeasurement {
                 measurement_version: _,
                 measurement_type: _,
-                page_addr,
-            } => *page_addr,
+                dest_addr,
+            } => *dest_addr,
         }
     }
 

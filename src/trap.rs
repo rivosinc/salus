@@ -11,6 +11,7 @@ use riscv_regs::{
 };
 
 use crate::print_util::*;
+use crate::smp::PerCpu;
 use crate::{print, println};
 
 /// Stores the trap context as pushed onto the stack by the trap handler.
@@ -88,23 +89,35 @@ fn handle_interrupt(irq: Interrupt) -> bool {
     }
 }
 
-/// The rust entry point for handling traps. For now we don't expect to take any traps in HS mode
-/// outside of VM exits, so this handler just dumps state and panics.
+/// The rust entry point for handling traps. The only traps we expect to take in HS mode are IPIs
+/// (to wake the receiving CPU from WFI) and guest page faults while copying to/from guest memory.
+/// For everything else we just dump state and panic.
 ///
 /// TODO: If/when the serial driver takes locks we will need to bust them here in order to avoid
 /// deadlock.
 #[no_mangle]
-extern "C" fn handle_trap(tf_ptr: *const TrapFrame) {
+extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
     // Safe since we trust that TrapFrame was properly intialized by _trap_entry.
-    let tf = unsafe { tf_ptr.as_ref().unwrap() };
+    let mut tf = unsafe { tf_ptr.as_mut().unwrap() };
     let scause = CSR.scause.get();
 
+    let this_cpu = PerCpu::this_cpu();
     if let Ok(t) = Trap::from_scause(scause) {
-        if let Trap::Interrupt(i) = t {
-            if handle_interrupt(i) {
-                return;
+        match t {
+            Trap::Interrupt(i) => {
+                if handle_interrupt(i) {
+                    return;
+                }
             }
-        }
+            Trap::Exception(e) => {
+                if this_cpu.in_guest_memcpy() && e.is_guest_page_fault() {
+                    // We took a guest page fault while copying to/from guest memory.
+                    // _copy_{to,from}_guest set T0 to where they want to jump to on a fault.
+                    tf.sepc = tf.gprs.reg(GprIndex::T0);
+                    return;
+                }
+            }
+        };
         print!("Unexpected trap: {}, ", t);
     } else {
         print!("Unexpected trap: <not decoded>, ");

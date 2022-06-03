@@ -257,7 +257,7 @@ pub enum VmCpuExit {
 /// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
 pub struct ActiveVmCpu<'vcpu, 'pages, T: GuestStagePageTable> {
     vcpu: &'vcpu mut VmCpu,
-    _active_pages: ActiveVmPages<'pages, T>,
+    active_pages: ActiveVmPages<'pages, T>,
 }
 
 impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
@@ -343,6 +343,11 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
             }
             _ => VmCpuExit::Other(self.state.trap_csrs.clone()),
         }
+    }
+
+    /// Returns this active vCPU's `ActiveVmPages`.
+    pub fn active_pages(&self) -> &ActiveVmPages<'pages, T> {
+        &self.active_pages
     }
 }
 
@@ -477,7 +482,7 @@ impl VmCpu {
         let active_pages = vm_pages.enter_with_vmid(self.vmid.unwrap());
         Ok(ActiveVmCpu {
             vcpu: self,
-            _active_pages: active_pages,
+            active_pages,
         })
     }
 }

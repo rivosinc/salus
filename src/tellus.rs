@@ -136,7 +136,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {
         measurement_version: 1,
         measurement_type: 1,
-        page_addr: measurement_page_addr,
+        dest_addr: measurement_page_addr,
     });
 
     match ecall_send(&msg) {
@@ -155,7 +155,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         guest_id: vmid,
         measurement_version: 1,
         measurement_type: 1,
-        page_addr: measurement_page_addr,
+        dest_addr: measurement_page_addr,
     });
 
     match ecall_send(&msg) {

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use page_collections::page_vec::PageVec;
@@ -14,6 +15,7 @@ use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
 
 use crate::sha256_measure::Sha256Measure;
+use crate::smp::PerCpu;
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
 use crate::vm_cpu::{VmCpus, VM_CPUS_PAGES};
 use crate::vm_id::VmId;
@@ -30,6 +32,7 @@ pub enum Error {
     UnownedPage(GuestPageAddr),
     UnsupportedPageSize(PageSize),
     MeasurementBufferTooSmall,
+    AddressOverflow,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -42,8 +45,16 @@ pub const MIN_PTE_VEC_PAGES: u64 = 1;
 /// TODO: Expose this to the host via a TEECALL.
 pub const NEW_GUEST_PAGES: u64 = 4 + VM_CPUS_PAGES + MIN_PTE_VEC_PAGES + 1;
 
+global_asm!(include_str!("guest_mem.S"));
+
+// The copy to/from guest memory routines defined in guest_mem.S.
+extern "C" {
+    fn _copy_to_guest(dest_gpa: u64, src: *const u8, len: usize) -> usize;
+    fn _copy_from_guest(dest: *mut u8, src_gpa: u64, len: usize) -> usize;
+}
+
 /// Represents a reference to the current VM address space. The previous address space is restored
-/// when dropped.
+/// when dropped. Used to directly access a guest's memory.
 pub struct ActiveVmPages<'a, T: GuestStagePageTable> {
     prev_hgatp: u64,
     vm_pages: &'a VmPages<T>,
@@ -60,6 +71,64 @@ impl<'a, T: GuestStagePageTable> Deref for ActiveVmPages<'a, T> {
 
     fn deref(&self) -> &VmPages<T> {
         self.vm_pages
+    }
+}
+
+impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
+    /// Copies from `src` to the guest physical address in `dest`. Returns an error if a fault was
+    /// encountered while copying.
+    pub fn copy_to_guest(&self, dest: GuestPhysAddr, src: &[u8]) -> Result<()> {
+        // Safety: _copy_to_guest internally detects and handles an invalid guest physical
+        // address in `dest`.
+        self.do_guest_copy(dest, src.as_ptr(), src.len(), |gpa, ptr, len| unsafe {
+            _copy_to_guest(gpa.bits(), ptr, len)
+        })
+    }
+
+    /// Copies from the guest physical address in `src` to `dest`. Returns an error if a fault was
+    /// encountered while copying.
+    #[allow(dead_code)]
+    pub fn copy_from_guest(&self, dest: &mut [u8], src: GuestPhysAddr) -> Result<()> {
+        // Safety: _copy_from_guest internally detects and handles an invalid guest physical address
+        // in `src`.
+        self.do_guest_copy(src, dest.as_ptr(), dest.len(), |gpa, ptr, len| unsafe {
+            _copy_from_guest(ptr as *mut u8, gpa.bits(), len)
+        })
+    }
+
+    /// Uses `copy_fn` to copy `len` bytes between `guest_addr` and `host_ptr`. Attempts to handle
+    /// any page faults that occur during the copy.
+    fn do_guest_copy<F>(
+        &self,
+        guest_addr: GuestPhysAddr,
+        host_ptr: *const u8,
+        len: usize,
+        mut copy_fn: F,
+    ) -> Result<()>
+    where
+        F: FnMut(GuestPhysAddr, *const u8, usize) -> usize,
+    {
+        let this_cpu = PerCpu::this_cpu();
+        let mut copied = 0;
+        let mut cur_gpa = guest_addr;
+        let mut cur_ptr = host_ptr;
+        while copied < len {
+            this_cpu.enter_guest_memcpy();
+            let bytes = copy_fn(cur_gpa, cur_ptr, len - copied);
+            this_cpu.exit_guest_memcpy();
+            copied += bytes;
+            if copied < len {
+                // Partial copy: we encountered a page fault. See if we can handle it and retry.
+                cur_gpa = cur_gpa
+                    .checked_increment(bytes as u64)
+                    .ok_or(Error::AddressOverflow)?;
+                self.vm_pages.handle_page_fault(cur_gpa)?;
+
+                // Safety: cur_ptr + bytes must be less than the original host_ptr + len.
+                cur_ptr = unsafe { cur_ptr.add(bytes) };
+            }
+        }
+        Ok(())
     }
 }
 
@@ -262,23 +331,6 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             prev_hgatp,
             vm_pages: self,
         }
-    }
-
-    pub fn write_measurements_to_guest_owned_page(&self, gpa: GuestPhysAddr) -> Result<usize> {
-        let mut root = self.root.lock();
-        let measurement = self.measurement.lock();
-        let bytes = measurement.get_measurement();
-        root.write_mapped_page(gpa, 0, bytes)
-            .map(|_| bytes.len())
-            .map_err(Error::Paging)
-    }
-
-    /// Writes `bytes` to the specified guest address.
-    pub fn write_to_guest_owned_page(&self, gpa: GuestPhysAddr, bytes: &[u8]) -> Result<usize> {
-        let mut root = self.root.lock();
-        root.write_mapped_page(gpa, 0, bytes)
-            .map(|_| bytes.len())
-            .map_err(Error::Paging)
     }
 }
 

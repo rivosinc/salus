@@ -26,6 +26,7 @@ extern "C" {
 pub struct PerCpu {
     cpu_id: CpuId,
     vmid_tracker: RefCell<VmIdTracker>,
+    in_guest_copy: RefCell<bool>,
     online: Once<bool>,
 }
 
@@ -64,6 +65,7 @@ impl PerCpu {
             let pcpu = PerCpu {
                 cpu_id,
                 vmid_tracker: RefCell::new(VmIdTracker::new()),
+                in_guest_copy: RefCell::new(false),
                 online: Once::new(),
             };
             // Safety: ptr is guaranteed to be properly aligned and point to valid memory owned by
@@ -124,6 +126,22 @@ impl PerCpu {
     /// Returns a mutable reference to this CPU's VMID tracker.
     pub fn vmid_tracker_mut(&self) -> RefMut<VmIdTracker> {
         self.vmid_tracker.borrow_mut()
+    }
+
+    /// Marks this CPU as being in the process of copying to/from guest memory. This is used to
+    /// detect and recover from page faults that arise from accessing guest memory.
+    pub fn enter_guest_memcpy(&self) {
+        *self.in_guest_copy.borrow_mut() = true;
+    }
+
+    /// Exits this CPU from copying to/from guest memory.
+    pub fn exit_guest_memcpy(&self) {
+        *self.in_guest_copy.borrow_mut() = false;
+    }
+
+    /// Returns true if this CPU is currently copying to/from guest memory.
+    pub fn in_guest_memcpy(&self) -> bool {
+        *self.in_guest_copy.borrow()
     }
 }
 

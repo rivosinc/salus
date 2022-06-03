@@ -276,9 +276,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         let exit = {
             let mut vcpu = vcpu.lock();
 
+            // Activate this vCPU and its address space.
+            let mut active_vcpu = vcpu.activate(&self.vm_pages).unwrap();
+
             // Run until there's an exit we can't handle.
             loop {
-                let exit = vcpu.run_to_exit(&self.vm_pages);
+                let exit = active_vcpu.run_to_exit();
                 match exit {
                     VmCpuExit::Ecall(Some(sbi_msg)) => {
                         match self.handle_ecall(sbi_msg) {
@@ -286,20 +289,21 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                                 // for legacy, leave the a0 and a1 registers as-is.
                             }
                             EcallAction::Unhandled => {
-                                vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
+                                active_vcpu
+                                    .set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
                             }
                             EcallAction::Continue(sbi_ret) => {
-                                vcpu.set_ecall_result(sbi_ret);
+                                active_vcpu.set_ecall_result(sbi_ret);
                             }
                             EcallAction::Break(reason, sbi_ret) => {
-                                vcpu.set_ecall_result(sbi_ret);
+                                active_vcpu.set_ecall_result(sbi_ret);
                                 break reason;
                             }
                         }
                     }
                     VmCpuExit::Ecall(None) => {
                         // Unrecognized ECALL, return an error.
-                        vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
+                        active_vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
                     }
                     VmCpuExit::PageFault(addr) => {
                         if self.handle_guest_fault(addr).is_err() {
@@ -307,7 +311,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                         }
                     }
                     VmCpuExit::DelegatedException(e, stval) => {
-                        vcpu.inject_exception(e, stval);
+                        active_vcpu.inject_exception(e, stval);
                     }
                     VmCpuExit::Other(ref trap_csrs) => {
                         println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);

@@ -3,13 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::global_asm;
-use core::{mem::size_of, ops::Deref};
+use core::{mem::size_of, ops::Deref, ops::DerefMut};
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use memoffset::offset_of;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::GuestStagePageTable;
-use riscv_pages::{GuestPhysAddr, PageOwnerId, PageSize, Pfn, RawAddr, SequentialPages};
-use riscv_regs::{hgatp, hstatus, scounteren, sstatus};
+use riscv_pages::{GuestPhysAddr, PageOwnerId, PageSize, RawAddr, SequentialPages};
+use riscv_regs::{hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
     Readable, Trap, Writeable, CSR,
@@ -19,7 +19,7 @@ use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
 use crate::vm_id::VmId;
-use crate::vm_pages::VmPages;
+use crate::vm_pages::{ActiveVmPages, VmPages};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {
@@ -30,6 +30,7 @@ pub enum Error {
     VmCpuOff,
     VmCpuAlreadyPowered,
     InsufficientVmCpuStorage,
+    WrongAddressSpace,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -253,6 +254,112 @@ pub enum VmCpuExit {
     // TODO: Add other exit causes as needed.
 }
 
+/// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
+pub struct ActiveVmCpu<'vcpu, 'pages, T: GuestStagePageTable> {
+    vcpu: &'vcpu mut VmCpu,
+    _active_pages: ActiveVmPages<'pages, T>,
+}
+
+impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
+    /// Runs this vCPU until it exits.
+    pub fn run_to_exit(&mut self) -> VmCpuExit {
+        // Load the vCPU CSRs. Safe as these don't take effect until V=1.
+        CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
+        CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
+        CSR.vsie.set(self.state.guest_vcpu_csrs.vsie);
+        CSR.vstvec.set(self.state.guest_vcpu_csrs.vstvec);
+        CSR.vsscratch.set(self.state.guest_vcpu_csrs.vsscratch);
+        CSR.vsepc.set(self.state.guest_vcpu_csrs.vsepc);
+        CSR.vscause.set(self.state.guest_vcpu_csrs.vscause);
+        CSR.vstval.set(self.state.guest_vcpu_csrs.vstval);
+        CSR.vsatp.set(self.state.guest_vcpu_csrs.vsatp);
+        if CpuInfo::get().has_sstc() {
+            CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
+        }
+
+        // TODO, HGEIE programinng:
+        //  - Track which guests the host wants interrupts from (by trapping HGEIE accesses from
+        //    VS level) and update HGEIE[2:] appropriately.
+        //  - If this is the host: clear HGEIE[1] on entry; inject SGEI into host VM if we receive
+        //    any SGEI at HS level.
+        //  - If this is a guest: set HGEIE[1] on entry; switch to the host VM for any SGEI that
+        //    occur, injecting an SEI for the host interrupts and SGEI for guest VM interrupts.
+
+        // TODO: Enforce that the vCPU has an assigned interrupt file before running.
+
+        unsafe {
+            // Safe to run the guest as it only touches memory assigned to it by being owned
+            // by its page table.
+            _run_guest(&mut self.state as *mut VmCpuState);
+        }
+
+        // Save off the trap information.
+        self.state.trap_csrs.scause = CSR.scause.get();
+        self.state.trap_csrs.stval = CSR.stval.get();
+        self.state.trap_csrs.htval = CSR.htval.get();
+        self.state.trap_csrs.htinst = CSR.htinst.get();
+
+        // Save the vCPU state.
+        self.state.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
+        self.state.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
+        self.state.guest_vcpu_csrs.vsie = CSR.vsie.get();
+        self.state.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
+        self.state.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
+        self.state.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
+        self.state.guest_vcpu_csrs.vscause = CSR.vscause.get();
+        self.state.guest_vcpu_csrs.vstval = CSR.vstval.get();
+        self.state.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
+        if CpuInfo::get().has_sstc() {
+            self.state.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
+        }
+
+        // Determine the exit cause from the trap CSRs.
+        use Exception::*;
+        match Trap::from_scause(self.state.trap_csrs.scause).unwrap() {
+            Trap::Exception(VirtualSupervisorEnvCall) => {
+                let sbi_msg = SbiMessage::from_regs(&self.state.guest_regs.gprs).ok();
+                self.state.guest_regs.sepc += 4;
+                VmCpuExit::Ecall(sbi_msg)
+            }
+            Trap::Exception(GuestInstructionPageFault)
+            | Trap::Exception(GuestLoadPageFault)
+            | Trap::Exception(GuestStorePageFault) => {
+                let fault_addr = RawAddr::guest(
+                    self.state.trap_csrs.htval << 2 | self.state.trap_csrs.stval & 0x03,
+                    self.guest_id,
+                );
+                VmCpuExit::PageFault(fault_addr)
+            }
+            Trap::Exception(e) => {
+                if e.to_hedeleg_field()
+                    .map_or(false, |f| CSR.hedeleg.matches_any(f))
+                {
+                    // Even if we intended to delegate this exception it might not be set in
+                    // medeleg, in which case firmware may send it our way instead.
+                    VmCpuExit::DelegatedException(e, self.state.trap_csrs.stval)
+                } else {
+                    VmCpuExit::Other(self.state.trap_csrs.clone())
+                }
+            }
+            _ => VmCpuExit::Other(self.state.trap_csrs.clone()),
+        }
+    }
+}
+
+impl<'vcpu, 'pages, T: GuestStagePageTable> Deref for ActiveVmCpu<'vcpu, 'pages, T> {
+    type Target = VmCpu;
+
+    fn deref(&self) -> &VmCpu {
+        self.vcpu
+    }
+}
+
+impl<'vcpu, 'pages, T: GuestStagePageTable> DerefMut for ActiveVmCpu<'vcpu, 'pages, T> {
+    fn deref_mut(&mut self) -> &mut VmCpu {
+        self.vcpu
+    }
+}
+
 /// Represents a single virtual CPU of a VM.
 pub struct VmCpu {
     state: VmCpuState,
@@ -344,8 +451,15 @@ impl VmCpu {
         self.state.guest_regs.sepc = self.state.guest_vcpu_csrs.vstvec;
     }
 
-    /// Programs HGATP to use the 2nd-stage translation tables from `vm_pages`.
-    fn enter_vm_pages<T: GuestStagePageTable>(&mut self, vm_pages: &VmPages<T>) {
+    /// Activates the VM address space in `vm_pages`, returning a reference to it as an
+    /// `ActiveVmPages`.
+    pub fn activate<'vcpu, 'pages, T: GuestStagePageTable>(
+        &'vcpu mut self,
+        vm_pages: &'pages VmPages<T>,
+    ) -> Result<ActiveVmCpu<'vcpu, 'pages, T>> {
+        if self.guest_id != vm_pages.page_owner_id() {
+            return Err(Error::WrongAddressSpace);
+        }
         // Get the VMID to use for this VM's address space on this physical CPU.
         let this_cpu = PerCpu::this_cpu();
         if self.phys_cpu != Some(this_cpu.cpu_id()) {
@@ -360,99 +474,11 @@ impl VmCpu {
             // If VMIDs rolled over next_vmid() will do the necessary flush.
             self.vmid = Some(vmid_tracker.next_vmid());
         }
-        let vmid = self.vmid.unwrap();
-
-        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
-        hgatp.modify(hgatp::vmid.val(vmid.vmid()));
-        hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
-        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
-        CSR.hgatp.set(hgatp.get());
-    }
-
-    /// Runs this vCPU until it exits.
-    pub fn run_to_exit<T: GuestStagePageTable>(&mut self, vm_pages: &VmPages<T>) -> VmCpuExit {
-        self.enter_vm_pages(vm_pages);
-
-        // Load the vCPU CSRs. Safe as these don't take effect until V=1.
-        CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
-        CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
-        CSR.vsie.set(self.state.guest_vcpu_csrs.vsie);
-        CSR.vstvec.set(self.state.guest_vcpu_csrs.vstvec);
-        CSR.vsscratch.set(self.state.guest_vcpu_csrs.vsscratch);
-        CSR.vsepc.set(self.state.guest_vcpu_csrs.vsepc);
-        CSR.vscause.set(self.state.guest_vcpu_csrs.vscause);
-        CSR.vstval.set(self.state.guest_vcpu_csrs.vstval);
-        CSR.vsatp.set(self.state.guest_vcpu_csrs.vsatp);
-        if CpuInfo::get().has_sstc() {
-            CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
-        }
-
-        // TODO, HGEIE programinng:
-        //  - Track which guests the host wants interrupts from (by trapping HGEIE accesses from
-        //    VS level) and update HGEIE[2:] appropriately.
-        //  - If this is the host: clear HGEIE[1] on entry; inject SGEI into host VM if we receive
-        //    any SGEI at HS level.
-        //  - If this is a guest: set HGEIE[1] on entry; switch to the host VM for any SGEI that
-        //    occur, injecting an SEI for the host interrupts and SGEI for guest VM interrupts.
-
-        // TODO: Enforce that the vCPU has an assigned interrupt file before running.
-
-        unsafe {
-            // Safe to run the guest as it only touches memory assigned to it by being owned
-            // by its page table.
-            _run_guest(&mut self.state as *mut VmCpuState);
-        }
-
-        // Save off the trap information.
-        self.state.trap_csrs.scause = CSR.scause.get();
-        self.state.trap_csrs.stval = CSR.stval.get();
-        self.state.trap_csrs.htval = CSR.htval.get();
-        self.state.trap_csrs.htinst = CSR.htinst.get();
-
-        // Save the vCPU state.
-        self.state.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
-        self.state.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
-        self.state.guest_vcpu_csrs.vsie = CSR.vsie.get();
-        self.state.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
-        self.state.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
-        self.state.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
-        self.state.guest_vcpu_csrs.vscause = CSR.vscause.get();
-        self.state.guest_vcpu_csrs.vstval = CSR.vstval.get();
-        self.state.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
-        if CpuInfo::get().has_sstc() {
-            self.state.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
-        }
-
-        // Determine the exit cause from the trap CSRs.
-        use Exception::*;
-        match Trap::from_scause(self.state.trap_csrs.scause).unwrap() {
-            Trap::Exception(VirtualSupervisorEnvCall) => {
-                let sbi_msg = SbiMessage::from_regs(&self.state.guest_regs.gprs).ok();
-                self.state.guest_regs.sepc += 4;
-                VmCpuExit::Ecall(sbi_msg)
-            }
-            Trap::Exception(GuestInstructionPageFault)
-            | Trap::Exception(GuestLoadPageFault)
-            | Trap::Exception(GuestStorePageFault) => {
-                let fault_addr = RawAddr::guest(
-                    self.state.trap_csrs.htval << 2 | self.state.trap_csrs.stval & 0x03,
-                    self.guest_id,
-                );
-                VmCpuExit::PageFault(fault_addr)
-            }
-            Trap::Exception(e) => {
-                if e.to_hedeleg_field()
-                    .map_or(false, |f| CSR.hedeleg.matches_any(f))
-                {
-                    // Even if we intended to delegate this exception it might not be set in
-                    // medeleg, in which case firmware may send it our way instead.
-                    VmCpuExit::DelegatedException(e, self.state.trap_csrs.stval)
-                } else {
-                    VmCpuExit::Other(self.state.trap_csrs.clone())
-                }
-            }
-            _ => VmCpuExit::Other(self.state.trap_csrs.clone()),
-        }
+        let active_pages = vm_pages.enter_with_vmid(self.vmid.unwrap());
+        Ok(ActiveVmCpu {
+            vcpu: self,
+            _active_pages: active_pages,
+        })
     }
 }
 

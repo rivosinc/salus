@@ -2,19 +2,21 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use core::marker::PhantomData;
+use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, PageState};
 use riscv_pages::{
-    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, PhysPage,
+    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, Pfn, PhysPage,
     SequentialPages, SupervisorPageAddr,
 };
+use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
 
 use crate::sha256_measure::Sha256Measure;
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
 use crate::vm_cpu::{VmCpus, VM_CPUS_PAGES};
+use crate::vm_id::VmId;
 
 #[derive(Debug)]
 pub enum Error {
@@ -39,6 +41,27 @@ pub const MIN_PTE_VEC_PAGES: u64 = 1;
 ///
 /// TODO: Expose this to the host via a TEECALL.
 pub const NEW_GUEST_PAGES: u64 = 4 + VM_CPUS_PAGES + MIN_PTE_VEC_PAGES + 1;
+
+/// Represents a reference to the current VM address space. The previous address space is restored
+/// when dropped.
+pub struct ActiveVmPages<'a, T: GuestStagePageTable> {
+    prev_hgatp: u64,
+    vm_pages: &'a VmPages<T>,
+}
+
+impl<'a, T: GuestStagePageTable> Drop for ActiveVmPages<'a, T> {
+    fn drop(&mut self) {
+        CSR.hgatp.set(self.prev_hgatp);
+    }
+}
+
+impl<'a, T: GuestStagePageTable> Deref for ActiveVmPages<'a, T> {
+    type Target = VmPages<T>;
+
+    fn deref(&self) -> &VmPages<T> {
+        self.vm_pages
+    }
+}
 
 /// VmPages is the single management point for memory used by virtual machines.
 ///
@@ -219,6 +242,25 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             Ok(())
         } else {
             Err(Error::PageFaultHandling)
+        }
+    }
+
+    /// Activates the address space represented by this `VmPages`. The address space is exited (and
+    /// the previous one restored) when the returned `ActiveVmPages` is dropped.
+    ///
+    /// The caller must ensure that VMID has been allocated to reference this address space on this
+    /// CPU and that there are no stale translations tagged with VMID referencing other VM address
+    /// spaces in this CPU's TLB.
+    pub fn enter_with_vmid(&self, vmid: VmId) -> ActiveVmPages<T> {
+        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
+        hgatp.modify(hgatp::vmid.val(vmid.vmid()));
+        hgatp.modify(hgatp::ppn.val(Pfn::from(self.root_address()).bits()));
+        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
+        let prev_hgatp = CSR.hgatp.atomic_replace(hgatp.get());
+
+        ActiveVmPages {
+            prev_hgatp,
+            vm_pages: self,
         }
     }
 

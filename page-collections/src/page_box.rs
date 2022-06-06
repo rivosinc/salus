@@ -85,7 +85,9 @@ impl<T> PageBox<T> {
             let page = Page::new(
                 PageAddr::with_size(RawAddr::supervisor(self.0.as_ptr() as u64), self.1).unwrap(),
             );
-            (core::ptr::read(self.0.as_ptr()), page)
+            let data = core::ptr::read(self.0.as_ptr());
+            core::mem::forget(self);
+            (data, page)
         }
     }
 
@@ -95,6 +97,19 @@ impl<T> PageBox<T> {
         // Safe because self owns all this memory and by using 'ManuallyDrop', it will never be
         // freed for reuse.
         unsafe { &mut *core::mem::ManuallyDrop::new(b).0.as_ptr() }
+    }
+
+    /// Creates a `PageBox` from a raw, page-aligned pointer to `T`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `ptr`:
+    ///  - points to a properly initialized `T`
+    ///  - points to a uniquely-owned page of size `page_size`
+    ///  - is aligned to `page_size`
+    pub unsafe fn from_raw(ptr: *mut T, page_size: PageSize) -> PageBox<T> {
+        assert!(page_size.is_aligned(ptr as u64));
+        Self(NonNull::new(ptr).unwrap(), page_size)
     }
 }
 

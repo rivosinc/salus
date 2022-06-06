@@ -346,22 +346,42 @@ pub struct TsmInfo {
     pub tsm_state: TsmState,
     /// Version number of the running TSM.
     pub tsm_version: u32,
-    /// The number of 4kB pages which must be donated to the TSM for creating a new TVM in the
+    /// The number of 4kB pages which must be donated to the TSM for storing TVM state in the
     /// `TvmCreate` TEECALL.
-    pub tvm_create_pages: u64,
+    pub tvm_state_pages: u64,
     /// The maximum number of vCPUs a TVM can support.
     pub tvm_max_vcpus: u64,
     /// The number of bytes per vCPU which must be donated to the TSM when creating a new TVM.
     pub tvm_bytes_per_vcpu: u64,
 }
 
+#[repr(C)]
+pub struct TvmCreateParams {
+    /// The base physical address of the 16kB region that should be used for the TVM's page
+    /// directory. Must be 16kB-aligned.
+    pub tvm_page_directory_addr: u64,
+    /// The base physical address of the region to be used to hold the TVM's global state. Must
+    /// be page-aligned and `TsmInfo::tvm_state_pages` pages in length.
+    pub tvm_state_addr: u64,
+    /// The maximum number of vCPUs that will be created for this TVM. Must be less than or equal
+    /// to `TsmInfo::tvm_max_vcpus`.
+    pub tvm_num_vcpus: u64,
+    /// The base physical address of the region to be used to hold the TVM's vCPU state. Must be
+    /// page-aligned and `TsmInfo::tvm_bytes_per_vcpu` * `tvm_num_vcpus` bytes in length, rounded
+    /// up to the nearest multiple of 4kB.
+    pub tvm_vcpu_addr: u64,
+}
+
 #[derive(Copy, Clone)]
 pub enum TeeFunction {
-    /// Message to create a TVM, contains a u64 address 5 coniguous, 16k-aligned 4k pages.
-    /// The first four pages will be used for the top level page table, the fifth for TEE state
-    /// tracking.
-    /// a6 = 0, a0 = address of pages to use for tracking.
-    TvmCreate(u64),
+    /// Creates a TVM from the parameters in the `TvmCreateParams` structure at physical address
+    /// `params_addr`. Returns a guest ID that can be used to refer to the TVM in TVM management
+    /// TEECALLs.
+    ///
+    /// a6 = 0
+    /// a0 = base physical address of the `TvmCreateParams` structure
+    /// a1 = length of the `TvmCreateParams` structure in bytes
+    TvmCreate { params_addr: u64, len: u64 },
     /// Message to destroy a TVM created with `TvmCreate`.
     /// a6 = 1, a0 = guest id returned from `TvmCreate`.
     TvmDestroy { guest_id: u64 },
@@ -460,7 +480,10 @@ impl TeeFunction {
     pub fn from_regs(args: &[u64]) -> Result<Self> {
         use TeeFunction::*;
         match args[6] {
-            0 => Ok(TvmCreate(args[0])),
+            0 => Ok(TvmCreate {
+                params_addr: args[0],
+                len: args[1],
+            }),
             1 => Ok(TvmDestroy { guest_id: args[0] }),
             2 => Ok(AddPageTablePages {
                 guest_id: args[0],
@@ -513,7 +536,10 @@ impl TeeFunction {
     pub fn a6(&self) -> u64 {
         use TeeFunction::*;
         match self {
-            TvmCreate(_) => 0,
+            TvmCreate {
+                params_addr: _,
+                len: _,
+            } => 0,
             TvmDestroy { guest_id: _ } => 1,
             AddPageTablePages {
                 guest_id: _,
@@ -565,7 +591,10 @@ impl TeeFunction {
     pub fn a0(&self) -> u64 {
         use TeeFunction::*;
         match self {
-            TvmCreate(page_addr) => *page_addr,
+            TvmCreate {
+                params_addr,
+                len: _,
+            } => *params_addr,
             TvmDestroy { guest_id } => *guest_id,
             AddPageTablePages {
                 guest_id,
@@ -614,6 +643,10 @@ impl TeeFunction {
     pub fn a1(&self) -> u64 {
         use TeeFunction::*;
         match self {
+            TvmCreate {
+                params_addr: _,
+                len,
+            } => *len,
             AddPageTablePages {
                 guest_id: _,
                 page_addr,

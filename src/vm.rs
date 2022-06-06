@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::vec::Vec;
+use arrayvec::ArrayVec;
 use core::{alloc::Allocator, mem, slice};
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_collections::page_box::PageBox;
@@ -24,7 +25,7 @@ use crate::print_util::*;
 use crate::sha256_measure::SHA256_DIGEST_BYTES;
 use crate::smp;
 use crate::vm_cpu::{VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
-use crate::vm_pages::{self, ActiveVmPages, VmPages, TVM_CREATE_PAGES};
+use crate::vm_pages::{self, ActiveVmPages, VmPages, TVM_STATE_PAGES};
 use crate::{print, println};
 
 const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
@@ -391,7 +392,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         use TeeFunction::*;
         match tee_func {
             TsmGetInfo { dest_addr, len } => self.get_tsm_info(dest_addr, len, active_pages).into(),
-            TvmCreate(state_page) => self.add_guest(state_page).into(),
+            TvmCreate { params_addr, len } => self.add_guest(params_addr, len, active_pages).into(),
             TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
             AddPageTablePages {
                 guest_id,
@@ -511,7 +512,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         let tsm_info = sbi::TsmInfo {
             tsm_state: sbi::TsmState::TsmReady,
             tsm_version: 0,
-            tvm_create_pages: TVM_CREATE_PAGES,
+            tvm_state_pages: TVM_STATE_PAGES,
             tvm_max_vcpus: MAX_CPUS as u64,
             tvm_bytes_per_vcpu: VM_CPU_BYTES,
         };
@@ -524,21 +525,48 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         Ok(len as u64)
     }
 
-    fn add_guest(&self, donor_pages_addr: u64) -> sbi::Result<u64> {
-        println!("Add guest {:x}", donor_pages_addr);
+    fn add_guest(
+        &self,
+        params_addr: u64,
+        len: u64,
+        active_pages: &ActiveVmPages<T>,
+    ) -> sbi::Result<u64> {
         if self.guests.is_none() {
             return Err(SbiError::InvalidParam); // TODO different error
         }
 
-        let from_page_addr = PageAddr::new(RawAddr::guest(
-            donor_pages_addr,
-            self.vm_pages.page_owner_id(),
-        ))
-        .ok_or(SbiError::InvalidAddress)?;
+        // Read the params from the VM's address space.
+        let params_addr = RawAddr::guest(params_addr, self.vm_pages.page_owner_id());
+        if len < mem::size_of::<sbi::TvmCreateParams>() as u64 {
+            return Err(SbiError::InvalidParam);
+        }
+        let mut param_bytes = [0u8; mem::size_of::<sbi::TvmCreateParams>()];
+        active_pages
+            .copy_from_guest(param_bytes.as_mut_slice(), params_addr)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        // Safety: `param_bytes` points to `size_of::<TvmCreateParams>()` contiguous, initialized
+        // bytes.
+        let params: sbi::TvmCreateParams =
+            unsafe { core::ptr::read_unaligned(param_bytes.as_slice().as_ptr().cast()) };
 
+        // Now create the VM, claiming the pages that the host donated to us.
+        let mut addrs = ArrayVec::<GuestPageAddr, 3>::new();
+        for addr in [
+            params.tvm_page_directory_addr,
+            params.tvm_state_addr,
+            params.tvm_vcpu_addr,
+        ]
+        .into_iter()
+        {
+            addrs.push(
+                PageAddr::new(RawAddr::guest(addr, self.vm_pages.page_owner_id()))
+                    .ok_or(SbiError::InvalidParam)?,
+            );
+        }
+        let num_vcpu_pages = PageSize::num_4k_pages(params.tvm_num_vcpus * VM_CPU_BYTES);
         let (guest_vm, state_page) = self
             .vm_pages
-            .create_guest_vm(from_page_addr)
+            .create_guest_vm(addrs[0], addrs[1], addrs[2], num_vcpu_pages)
             .map_err(|_| SbiError::InvalidParam)?;
         let id = guest_vm.vm_pages.page_owner_id();
 

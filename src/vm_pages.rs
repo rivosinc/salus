@@ -5,7 +5,6 @@
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
-use drivers::MAX_CPUS;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, PageState};
 use riscv_pages::{
@@ -18,7 +17,7 @@ use spin::Mutex;
 use crate::sha256_measure::Sha256Measure;
 use crate::smp::PerCpu;
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
-use crate::vm_cpu::{VmCpus, VM_CPU_BYTES};
+use crate::vm_cpu::VmCpus;
 use crate::vm_id::VmId;
 
 #[derive(Debug)]
@@ -28,7 +27,7 @@ pub enum Error {
     Paging(riscv_page_tables::PageTableError),
     PageFaultHandling, // TODO - individual errors from sv48x4
     SettingOwner(riscv_page_tables::PageTrackingError),
-    // Vm pages must be aligned to 16k to be used for sv48x4 mappings
+    // Page table root must be aligned to 16k to be used for sv48x4 mappings
     UnalignedVmPages(GuestPageAddr),
     UnownedPage(GuestPageAddr),
     UnsupportedPageSize(PageSize),
@@ -41,9 +40,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// The minimum number of pages required to track free page-table pages.
 pub const MIN_PTE_VEC_PAGES: u64 = 1;
 
-/// The base number of pages required to be donated for creating a new VM: 4 pages for the root page
-/// table, pages for the page-table page vector, and one page to hold the VM state itself.
-pub const TVM_CREATE_PAGES: u64 = 4 + MIN_PTE_VEC_PAGES + 1;
+/// The base number of state pages required to be donated for creating a new VM: pages for the
+/// page-table page vector, and one page to hold the VM state itself.
+pub const TVM_STATE_PAGES: u64 = MIN_PTE_VEC_PAGES + 1;
 
 global_asm!(include_str!("guest_mem.S"));
 
@@ -87,7 +86,6 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
 
     /// Copies from the guest physical address in `src` to `dest`. Returns an error if a fault was
     /// encountered while copying.
-    #[allow(dead_code)]
     pub fn copy_from_guest(&self, dest: &mut [u8], src: GuestPhysAddr) -> Result<()> {
         // Safety: _copy_from_guest internally detects and handles an invalid guest physical address
         // in `src`.
@@ -179,46 +177,64 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     }
 }
 
+// Convenience wrapper for invalidating, cleaning, and taking ownership over a contiguous range of
+// pages.
+fn take_and_clean_pages_for<T: GuestStagePageTable>(
+    root: &mut T,
+    addr: GuestPageAddr,
+    num_pages: u64,
+    new_owner: PageOwnerId,
+) -> Result<impl Iterator<Item = Page> + '_> {
+    let phys_pages = root.phys_pages();
+    let taken_pages = root
+        .invalidate_range(addr, num_pages)
+        .map_err(Error::Paging)?
+        .map(CleanPage::from)
+        .map(Page::from)
+        .map(move |p| {
+            phys_pages.set_page_owner(p.addr(), new_owner).unwrap();
+            p
+        });
+    Ok(taken_pages)
+}
+
 impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
-    /// Creates a `GuestRootBuilder` from pages owned by `self`.
-    /// The `GuestRootBuilder` is used to build a guest VM owned by `self`'s root.page_owner_id().
+    /// Creates a new `Vm` using pages donated by `self`. The returned `Vm` is in the initializing
+    /// state, ready for its address space to be constructed.
     pub fn create_guest_vm(
         &self,
-        from_addr: GuestPageAddr,
+        page_root_addr: GuestPageAddr,
+        state_addr: GuestPageAddr,
+        vcpus_addr: GuestPageAddr,
+        num_vcpu_pages: u64,
     ) -> Result<(Vm<T, VmStateInitializing>, Page)> {
-        if from_addr.size() != PageSize::Size4k {
-            return Err(Error::UnsupportedPageSize(from_addr.size()));
-        }
-        if (from_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
-            return Err(Error::UnalignedVmPages(from_addr));
+        if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
+            return Err(Error::UnalignedVmPages(page_root_addr));
         }
         let id = self.phys_pages.add_active_guest().map_err(Error::GuestId)?;
         let mut root = self.root.lock();
-        // TODO: Make the max number of vCPUs configurable at TVM creation time so the host doesn't
-        // have to unconditionally donate enough pages to support MAX_CPUS.
-        let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * MAX_CPUS as u64);
-        let mut clean_pages = root
-            .invalidate_range(from_addr, TVM_CREATE_PAGES + num_vcpu_pages)
-            .map_err(Error::Paging)?
-            .map(CleanPage::from)
-            .map(Page::from)
-            .map(|p| {
-                self.phys_pages.set_page_owner(p.addr(), id).unwrap();
-                p
-            });
 
-        // Can't fail if enough aligned pages are provided(checked above).
-        let guest_root_pages = SequentialPages::from_pages(clean_pages.by_ref().take(4)).unwrap();
+        let guest_root_pages = SequentialPages::from_pages(take_and_clean_pages_for(
+            &mut *root,
+            page_root_addr,
+            4,
+            id,
+        )?)
+        .unwrap();
         let guest_root = T::new(guest_root_pages, id, self.phys_pages.clone()).unwrap();
-        let pte_vec_pages =
-            SequentialPages::from_pages(clean_pages.by_ref().take(MIN_PTE_VEC_PAGES as usize))
-                .unwrap();
-        let state_page = clean_pages.next().unwrap();
-        // TODO: Make the max number of vCPUs configurable at TVM creation time so the host doesn't
-        // have to unconditionally donate enough pages to support MAX_CPUS.
-        let vcpu_pages =
-            SequentialPages::from_pages(clean_pages.by_ref().take(num_vcpu_pages as usize))
-                .unwrap();
+
+        let mut state_pages =
+            take_and_clean_pages_for(&mut *root, state_addr, TVM_STATE_PAGES, id)?;
+        let state_page = state_pages.next().unwrap();
+        let pte_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
+
+        let vcpu_pages = SequentialPages::from_pages(take_and_clean_pages_for(
+            &mut *root,
+            vcpus_addr,
+            num_vcpu_pages,
+            id,
+        )?)
+        .unwrap();
 
         Ok((
             Vm::new(
@@ -240,15 +256,8 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             return Err(Error::UnsupportedPageSize(from_addr.size()));
         }
         let mut root = self.root.lock();
-        let clean_pages = root
-            .invalidate_range(from_addr, count)
-            .map_err(Error::Paging)?
-            .map(CleanPage::from)
-            .map(Page::from);
-        for page in clean_pages {
-            self.phys_pages
-                .set_page_owner(page.addr(), to.page_owner_id())
-                .map_err(Error::SettingOwner)?;
+        let pt_pages = take_and_clean_pages_for(&mut *root, from_addr, count, to.page_owner_id())?;
+        for page in pt_pages {
             to.add_pte_page(page)?;
         }
         Ok(())

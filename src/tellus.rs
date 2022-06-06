@@ -54,6 +54,7 @@ pub fn poweroff() -> ! {
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const PAGE_SIZE_4K: u64 = 4096;
+    const NUM_VCPUS: u64 = 1;
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_GUEST_DATA_PAGES: u64 = 10;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
@@ -93,14 +94,26 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Safety: We trust that the TSM has properly initialized tsm_info_bytes as a TsmInfo structure.
     let tsm_info: sbi::TsmInfo =
         unsafe { core::ptr::read_unaligned(tsm_info_bytes.as_slice().as_ptr().cast()) };
-    let tvm_create_pages = tsm_info.tvm_create_pages
-        + ((tsm_info.tvm_max_vcpus * tsm_info.tvm_bytes_per_vcpu) + PAGE_SIZE_4K - 1)
-            / PAGE_SIZE_4K;
+    let tvm_create_pages = 4
+        + tsm_info.tvm_state_pages
+        + ((NUM_VCPUS * tsm_info.tvm_bytes_per_vcpu) + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
     println!("Donating {} pages for TVM creation", tvm_create_pages);
 
     // Try to create a TEE
     let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCreate(next_page));
+    let tvm_page_directory_addr = next_page;
+    let tvm_state_addr = tvm_page_directory_addr + 4 * PAGE_SIZE_4K;
+    let tvm_vcpu_addr = tvm_state_addr + tsm_info.tvm_state_pages * PAGE_SIZE_4K;
+    let tvm_create_params = sbi::TvmCreateParams {
+        tvm_page_directory_addr,
+        tvm_state_addr,
+        tvm_num_vcpus: NUM_VCPUS,
+        tvm_vcpu_addr,
+    };
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCreate {
+        params_addr: (&tvm_create_params as *const sbi::TvmCreateParams) as u64,
+        len: core::mem::size_of::<sbi::TvmCreateParams>() as u64,
+    });
     let vmid = ecall_send(&msg).expect("Tellus - TvmCreate returned error");
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");
     next_page += PAGE_SIZE_4K * tvm_create_pages;

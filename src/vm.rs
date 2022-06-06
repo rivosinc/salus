@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::vec::Vec;
-use core::{alloc::Allocator, mem};
-use drivers::{CpuId, CpuInfo, ImsicGuestId};
+use core::{alloc::Allocator, mem, slice};
+use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageState};
@@ -23,8 +23,8 @@ use spin::RwLock;
 use crate::print_util::*;
 use crate::sha256_measure::SHA256_DIGEST_BYTES;
 use crate::smp;
-use crate::vm_cpu::{VmCpuExit, VmCpuStatus, VmCpus, VM_CPUS_PAGES};
-use crate::vm_pages::{self, ActiveVmPages, VmPages};
+use crate::vm_cpu::{VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
+use crate::vm_pages::{self, ActiveVmPages, VmPages, TVM_CREATE_PAGES};
 use crate::{print, println};
 
 const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
@@ -390,6 +390,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     fn handle_tee_msg(&self, tee_func: TeeFunction, active_pages: &ActiveVmPages<T>) -> SbiReturn {
         use TeeFunction::*;
         match tee_func {
+            TsmGetInfo { dest_addr, len } => self.get_tsm_info(dest_addr, len, active_pages).into(),
             TvmCreate(state_page) => self.add_guest(state_page).into(),
             TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
             AddPageTablePages {
@@ -493,6 +494,34 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         // if load, set destination register
 
         Ok(())
+    }
+
+    fn get_tsm_info(
+        &self,
+        dest_addr: u64,
+        len: u64,
+        active_pages: &ActiveVmPages<T>,
+    ) -> sbi::Result<u64> {
+        let dest_addr = RawAddr::guest(dest_addr, self.vm_pages.page_owner_id());
+        if len < mem::size_of::<sbi::TsmInfo>() as u64 {
+            return Err(SbiError::InvalidParam);
+        }
+        let len = mem::size_of::<sbi::TsmInfo>();
+        // Since we're the hypervisor we're ready from boot.
+        let tsm_info = sbi::TsmInfo {
+            tsm_state: sbi::TsmState::TsmReady,
+            tsm_version: 0,
+            tvm_create_pages: TVM_CREATE_PAGES,
+            tvm_max_vcpus: MAX_CPUS as u64,
+            tvm_bytes_per_vcpu: VM_CPU_BYTES,
+        };
+        // Safety: &tsm_info points to len bytes of initialized memory.
+        let tsm_info_bytes: &[u8] =
+            unsafe { slice::from_raw_parts((&tsm_info as *const sbi::TsmInfo).cast(), len) };
+        active_pages
+            .copy_to_guest(dest_addr, tsm_info_bytes)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        Ok(len as u64)
     }
 
     fn add_guest(&self, donor_pages_addr: u64) -> sbi::Result<u64> {
@@ -721,7 +750,8 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let guest_tracking_pages = hyp_mem.take_pages(2);
 
         // Pages for the array of vCPUs.
-        let vcpus_pages = hyp_mem.take_pages(VM_CPUS_PAGES as usize);
+        let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * MAX_CPUS as u64);
+        let vcpus_pages = hyp_mem.take_pages(num_vcpu_pages as usize);
 
         // Pages for the array of free page-table pages.
         let num_pte_vec_pages = PageSize::Size4k

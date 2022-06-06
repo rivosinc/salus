@@ -328,6 +328,33 @@ impl TvmCpuRegister {
     }
 }
 
+#[repr(u32)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum TsmState {
+    /// TSM has not been loaded on this platform.
+    TsmNotLoaded = 0,
+    /// TSM has been loaded, but has not yet been initialized.
+    TsmLoaded = 1,
+    /// TSM has been loaded & initialized, and is ready to accept TEECALLs.
+    TsmReady = 2,
+}
+
+#[repr(C)]
+pub struct TsmInfo {
+    /// The current state of the TSM. If the state is not `TsmReady`, the remaining fields are
+    /// invalid and will be initialized to 0.
+    pub tsm_state: TsmState,
+    /// Version number of the running TSM.
+    pub tsm_version: u32,
+    /// The number of 4kB pages which must be donated to the TSM for creating a new TVM in the
+    /// `TvmCreate` TEECALL.
+    pub tvm_create_pages: u64,
+    /// The maximum number of vCPUs a TVM can support.
+    pub tvm_max_vcpus: u64,
+    /// The number of bytes per vCPU which must be donated to the TSM when creating a new TVM.
+    pub tvm_bytes_per_vcpu: u64,
+}
+
 #[derive(Copy, Clone)]
 pub enum TeeFunction {
     /// Message to create a TVM, contains a u64 address 5 coniguous, 16k-aligned 4k pages.
@@ -419,6 +446,13 @@ pub enum TeeFunction {
         register: TvmCpuRegister,
         value: u64,
     },
+    /// Writes up to `len` bytes of the `TsmInfo` structure to the physical address `dest_addr`.
+    /// Returns the number of bytes written.
+    ///
+    /// a6 = 10
+    /// a0 = destination address of the `TsmInfo` structure
+    /// a1 = maximum number of bytes to be written
+    TsmGetInfo { dest_addr: u64, len: u64 },
 }
 
 impl TeeFunction {
@@ -467,6 +501,10 @@ impl TeeFunction {
                 vcpu_id: args[1],
                 register: TvmCpuRegister::from_reg(args[2])?,
                 value: args[3],
+            }),
+            10 => Ok(TsmGetInfo {
+                dest_addr: args[0],
+                len: args[1],
             }),
             _ => Err(Error::InvalidParam),
         }
@@ -517,6 +555,10 @@ impl TeeFunction {
                 register: _,
                 value: _,
             } => 9,
+            TsmGetInfo {
+                dest_addr: _,
+                len: _,
+            } => 10,
         }
     }
 
@@ -565,6 +607,7 @@ impl TeeFunction {
                 register: _,
                 value: _,
             } => *guest_id,
+            TsmGetInfo { dest_addr, len: _ } => *dest_addr,
         }
     }
 
@@ -610,6 +653,7 @@ impl TeeFunction {
                 register: _,
                 value: _,
             } => *vcpu_id,
+            TsmGetInfo { dest_addr: _, len } => *len,
             _ => 0,
         }
     }

@@ -4,11 +4,11 @@
 
 use core::arch::global_asm;
 use core::{mem::size_of, ops::Deref, ops::DerefMut};
-use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
+use drivers::{CpuId, CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::GuestStagePageTable;
-use riscv_pages::{GuestPhysAddr, PageOwnerId, PageSize, RawAddr, SequentialPages};
+use riscv_pages::{GuestPhysAddr, PageOwnerId, RawAddr, SequentialPages};
 use riscv_regs::{hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
@@ -35,10 +35,9 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// The number of 4kB pages required to hold the vCPU state per VM.
-pub const VM_CPUS_PAGES: u64 = PageSize::num_4k_pages(
-    (MAX_CPUS * size_of::<VmCpusInner>() + size_of::<PageVec<VmCpusInner>>()) as u64,
-);
+/// The number of bytes required to hold the state of a single vCPU. We include the overhead for the
+/// `PageVec<>` itself to ensure enough bytes are donated for it as well.
+pub const VM_CPU_BYTES: u64 = (size_of::<VmCpusInner>() + size_of::<PageVec<VmCpusInner>>()) as u64;
 
 /// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
@@ -566,11 +565,12 @@ pub struct VmCpus {
 impl VmCpus {
     /// Creates a new vCPU tracking structure backed by `pages`.
     pub fn new(guest_id: PageOwnerId, pages: SequentialPages) -> Result<Self> {
-        if pages.len() < VM_CPUS_PAGES {
+        let num_vcpus = pages.length_bytes() / VM_CPU_BYTES;
+        if num_vcpus == 0 {
             return Err(Error::InsufficientVmCpuStorage);
         }
         let mut inner = PageVec::from(pages);
-        for _ in 0..MAX_CPUS {
+        for _ in 0..num_vcpus {
             let entry = VmCpusInner {
                 status: RwLock::new(VmCpuStatus::NotPresent),
                 vcpu: Mutex::new(VmCpu::new(guest_id)),

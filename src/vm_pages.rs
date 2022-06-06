@@ -5,6 +5,7 @@
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
+use drivers::MAX_CPUS;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, PageState};
 use riscv_pages::{
@@ -17,7 +18,7 @@ use spin::Mutex;
 use crate::sha256_measure::Sha256Measure;
 use crate::smp::PerCpu;
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
-use crate::vm_cpu::{VmCpus, VM_CPUS_PAGES};
+use crate::vm_cpu::{VmCpus, VM_CPU_BYTES};
 use crate::vm_id::VmId;
 
 #[derive(Debug)]
@@ -40,10 +41,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// The minimum number of pages required to track free page-table pages.
 pub const MIN_PTE_VEC_PAGES: u64 = 1;
 
-/// The number of pages required to be donated for creating a new VM.
-///
-/// TODO: Expose this to the host via a TEECALL.
-pub const NEW_GUEST_PAGES: u64 = 4 + VM_CPUS_PAGES + MIN_PTE_VEC_PAGES + 1;
+/// The base number of pages required to be donated for creating a new VM: 4 pages for the root page
+/// table, pages for the page-table page vector, and one page to hold the VM state itself.
+pub const TVM_CREATE_PAGES: u64 = 4 + MIN_PTE_VEC_PAGES + 1;
 
 global_asm!(include_str!("guest_mem.S"));
 
@@ -194,8 +194,11 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         }
         let id = self.phys_pages.add_active_guest().map_err(Error::GuestId)?;
         let mut root = self.root.lock();
+        // TODO: Make the max number of vCPUs configurable at TVM creation time so the host doesn't
+        // have to unconditionally donate enough pages to support MAX_CPUS.
+        let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * MAX_CPUS as u64);
         let mut clean_pages = root
-            .invalidate_range(from_addr, NEW_GUEST_PAGES)
+            .invalidate_range(from_addr, TVM_CREATE_PAGES + num_vcpu_pages)
             .map_err(Error::Paging)?
             .map(CleanPage::from)
             .map(Page::from)
@@ -214,7 +217,8 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         // TODO: Make the max number of vCPUs configurable at TVM creation time so the host doesn't
         // have to unconditionally donate enough pages to support MAX_CPUS.
         let vcpu_pages =
-            SequentialPages::from_pages(clean_pages.by_ref().take(VM_CPUS_PAGES as usize)).unwrap();
+            SequentialPages::from_pages(clean_pages.by_ref().take(num_vcpu_pages as usize))
+                .unwrap();
 
         Ok((
             Vm::new(

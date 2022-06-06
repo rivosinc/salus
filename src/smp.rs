@@ -176,7 +176,11 @@ pub fn start_secondary_cpus() {
             start_addr: (_secondary_start as *const fn()) as u64,
             opaque: pcpu as u64,
         });
-        ecall_send(&msg).expect("Failed to start CPU {i}");
+        // Safety: Passes one pointer to SBI, that pointer is guaranteed by the linker to be the
+        // code to start secondary CPUs.
+        unsafe {
+            ecall_send(&msg).expect("Failed to start CPU {i}");
+        }
 
         // Synchronize with the CPU coming online. TODO: Timeout?
         let pcpu = unsafe {

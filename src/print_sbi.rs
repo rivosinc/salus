@@ -81,7 +81,11 @@ impl SbiConsoleDriver {
     pub fn write_byte(&self, b: u8) {
         // Uses an SBI message sent via ecall to write byte
         let message = SbiMessage::PutChar(b as u64);
-        ecall_send(&message).unwrap();
+        // Safety: message doesn't contain pointers and the ecall doesn't touch memory so this is
+        // trivially safe.
+        unsafe {
+            ecall_send(&message).unwrap();
+        }
     }
 
     /// Write an entire byte sequence to this UART.

@@ -329,9 +329,10 @@ impl TvmCpuRegister {
 }
 
 #[repr(u32)]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub enum TsmState {
     /// TSM has not been loaded on this platform.
+    #[default]
     TsmNotLoaded = 0,
     /// TSM has been loaded, but has not yet been initialized.
     TsmLoaded = 1,
@@ -340,6 +341,7 @@ pub enum TsmState {
 }
 
 #[repr(C)]
+#[derive(Default)]
 pub struct TsmInfo {
     /// The current state of the TSM. If the state is not `TsmReady`, the remaining fields are
     /// invalid and will be initialized to 0.

@@ -61,7 +61,9 @@ extern "C" fn kernel_init() {
     println!("*****************************************");
     println!("Hello world from Tellus guest            ");
 
-    match ecall_send(&msg) {
+    // Safety: msg contains a unique reference to the measurement page and SBI is safe to write to
+    // that page.
+    match unsafe { ecall_send(&msg) } {
         Err(e) => {
             println!("Guest measurement error {e:?}");
             panic!("Guest measurement call failed");

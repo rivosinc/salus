@@ -18,6 +18,7 @@ use core::alloc::{GlobalAlloc, Layout};
 extern crate alloc;
 
 mod asm;
+mod guest_tracking;
 mod host_vm_loader;
 mod print_util;
 mod smp;

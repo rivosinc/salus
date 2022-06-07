@@ -7,8 +7,6 @@ use arrayvec::ArrayVec;
 use core::{alloc::Allocator, mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
-use page_collections::page_box::PageBox;
-use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageState};
 use riscv_pages::{
     GuestPageAddr, GuestPhysAddr, MemType, Page, PageAddr, PageOwnerId, PageSize, PhysPage,
@@ -21,8 +19,8 @@ use sbi::{
     self, BaseFunction, HartState, MeasurementFunction, SbiMessage, SbiReturn, StateFunction,
     TeeFunction,
 };
-use spin::RwLock;
 
+use crate::guest_tracking::{GuestState, Guests};
 use crate::print_util::*;
 use crate::smp;
 use crate::vm_cpu::{VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
@@ -64,109 +62,17 @@ enum EcallAction {
     Break(VmExitCause, SbiReturn),
 }
 
-struct Guests<T: GuestStagePageTable> {
-    inner: PageVec<PageBox<GuestState<T>>>,
-    phys_pages: PageState,
-}
-
-impl<T: GuestStagePageTable> Guests<T> {
-    fn add(&mut self, guest_state: PageBox<GuestState<T>>) -> sbi::Result<()> {
-        self.inner
-            .try_reserve(1)
-            .map_err(|_| SbiError::InvalidParam)?;
-        self.inner.push(guest_state);
-        Ok(())
-    }
-
-    // Returns the index in to the guest array of the given guest id. If the guest ID isn't valid or
-    // isn't owned by this VM, then return an error.
-    fn get_guest_index(&self, guest_id: u64) -> sbi::Result<usize> {
-        let page_owner_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        self.inner
-            .iter()
-            .enumerate()
-            .find(|(_i, g)| page_owner_id == g.page_owner_id())
-            .map(|(guest_index, _guest)| guest_index)
-            .ok_or(SbiError::InvalidParam)
-    }
-
-    fn remove(&mut self, guest_id: u64) -> sbi::Result<()> {
-        let to_remove = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        self.inner.retain(|g| {
-            if g.page_owner_id() == to_remove {
-                self.phys_pages.rm_active_guest(g.page_owner_id());
-                true
-            } else {
-                false
-            }
-        });
-        Ok(())
-    }
-
-    // Returns a mutable reference to the guest for the given ID if it exists, otherwise None.
-    fn guest_mut(&mut self, guest_id: u64) -> sbi::Result<&mut PageBox<GuestState<T>>> {
-        let guest_index = self.get_guest_index(guest_id)?;
-        self.inner
-            .get_mut(guest_index)
-            .ok_or(SbiError::InvalidParam)
-    }
-
-    // Returns an immutable reference to the guest for the given ID if it exists, otherwise None.
-    fn guest(&self, guest_id: u64) -> sbi::Result<&PageBox<GuestState<T>>> {
-        let guest_index = self.get_guest_index(guest_id)?;
-        self.inner.get(guest_index).ok_or(SbiError::InvalidParam)
-    }
-
-    // Returns the initializing guest if it's present, otherwise None.
-    fn initializing_guest(&self, guest_id: u64) -> sbi::Result<&Vm<T, VmStateInitializing>> {
-        self.guest(guest_id)
-            .and_then(|g| g.as_initializing_vm().ok_or(SbiError::InvalidParam))
-    }
-
-    // Returns the runnable guest if it's present, otherwise None
-    fn running_guest(&self, guest_id: u64) -> sbi::Result<&Vm<T, VmStateFinalized>> {
-        self.guest(guest_id)
-            .and_then(|g| g.as_finalized_vm().ok_or(SbiError::InvalidParam))
-    }
-}
-
-enum GuestState<T: GuestStagePageTable> {
-    Init(Vm<T, VmStateInitializing>),
-    Running(Vm<T, VmStateFinalized>),
-    Temp,
-}
-
-impl<T: GuestStagePageTable> GuestState<T> {
-    fn page_owner_id(&self) -> PageOwnerId {
-        match self {
-            Self::Init(v) => v.vm_pages.page_owner_id(),
-            Self::Running(v) => v.vm_pages.page_owner_id(),
-            Self::Temp => unreachable!(),
-        }
-    }
-
-    fn as_initializing_vm(&self) -> Option<&Vm<T, VmStateInitializing>> {
-        match self {
-            Self::Init(ref v) => Some(v),
-            Self::Running(_) => None,
-            Self::Temp => unreachable!(),
-        }
-    }
-
-    fn as_finalized_vm(&self) -> Option<&Vm<T, VmStateFinalized>> {
-        match self {
-            Self::Init(_) => None,
-            Self::Running(ref v) => Some(v),
-            Self::Temp => unreachable!(),
-        }
-    }
-}
-
 /// A VM that is being run.
 pub struct Vm<T: GuestStagePageTable, S = VmStateFinalized> {
     vcpus: VmCpus,
     vm_pages: VmPages<T, S>,
-    guests: Option<RwLock<Guests<T>>>,
+    guests: Option<Guests<T>>,
+}
+
+impl<T: GuestStagePageTable, S> Vm<T, S> {
+    pub fn page_owner_id(&self) -> PageOwnerId {
+        self.vm_pages.page_owner_id()
+    }
 }
 
 impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
@@ -201,11 +107,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
     /// length zero and capacity limits the number of nested guests.
     fn add_guest_tracking_pages(&mut self, pages: SequentialPages) {
-        let guests = PageVec::from(pages);
-        self.guests = Some(RwLock::new(Guests {
-            inner: guests,
-            phys_pages: self.vm_pages.phys_pages(),
-        }));
+        self.guests = Some(Guests::new(pages, self.vm_pages.phys_pages()));
     }
 
     /// Adds a vCPU to this VM.
@@ -220,7 +122,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     }
 
     /// Completes intialization of the `Vm`, returning it in a finalized state.
-    fn finalize(self) -> Vm<T, VmStateFinalized> {
+    pub fn finalize(self) -> Vm<T, VmStateFinalized> {
         Vm {
             vcpus: self.vcpus,
             vm_pages: self.vm_pages.finalize(),
@@ -581,35 +483,35 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             .map_err(|_| SbiError::InvalidParam)?;
         let id = guest_vm.vm_pages.page_owner_id();
 
-        // create a boxpage for builder state and add it to the list of vms.
-        let guest_state: PageBox<GuestState<T>> =
-            PageBox::new_with(GuestState::Init(guest_vm), state_page);
-
-        let mut guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.write();
-        guests.add(guest_state)?;
+        let guest_state = GuestState::new(guest_vm, state_page);
+        self.guests
+            .as_ref()
+            .unwrap()
+            .add(guest_state)
+            .map_err(|_| SbiError::Failed)?;
 
         Ok(id.raw())
     }
 
     fn destroy_guest(&self, guest_id: u64) -> sbi::Result<u64> {
-        let mut guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.write();
-        guests.remove(guest_id)?;
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        self.guests
+            .as_ref()
+            .and_then(|g| g.remove(guest_id).ok())
+            .ok_or(SbiError::InvalidParam)?;
         Ok(0)
     }
 
     // converts the given guest from init to running
     fn guest_finalize(&self, guest_id: u64) -> sbi::Result<u64> {
-        let mut guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.write();
-        guests.guest_mut(guest_id).map(|g| {
-            let mut temp = GuestState::Temp;
-            core::mem::swap(&mut **g, &mut temp);
-            let mut running = match temp {
-                GuestState::Init(v) => GuestState::Running(v.finalize()),
-                t => t,
-            };
-            core::mem::swap(&mut **g, &mut running);
-        })?;
-        let guest_vm = guests.running_guest(guest_id)?;
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        let guest = self
+            .guests
+            .as_ref()
+            .and_then(|g| g.finalize(guest_id).ok())
+            .ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest.as_finalized_vm().unwrap();
+
         // Power on vCPU0 initially. Remaining vCPUs will get powered on by the VM itself via
         // HSM SBI calls.
         //
@@ -620,8 +522,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 
     /// Adds a vCPU with `vcpu_id` to a guest VM.
     fn guest_add_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
-        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-        let guest_vm = guests.initializing_guest(guest_id)?;
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        let guest = self
+            .guests
+            .as_ref()
+            .and_then(|g| g.get(guest_id))
+            .ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
         guest_vm.add_vcpu(vcpu_id)?;
         Ok(0)
     }
@@ -634,16 +541,26 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         register: sbi::TvmCpuRegister,
         value: u64,
     ) -> sbi::Result<u64> {
-        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-        let guest_vm = guests.initializing_guest(guest_id)?;
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        let guest = self
+            .guests
+            .as_ref()
+            .and_then(|g| g.get(guest_id))
+            .ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
         guest_vm.set_vcpu_reg(vcpu_id, register, value)?;
         Ok(0)
     }
 
     /// Runs a guest VM's vCPU.
     fn guest_run_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
-        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-        let guest_vm = guests.running_guest(guest_id)?;
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        let guest = self
+            .guests
+            .as_ref()
+            .and_then(|g| g.get(guest_id))
+            .ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest.as_finalized_vm().ok_or(SbiError::InvalidParam)?;
         guest_vm.run_vcpu(vcpu_id)?;
         Ok(0) // TODO: Return the exit reason to the host.
     }
@@ -658,8 +575,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
 
-        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-        let guest_vm = guests.initializing_guest(guest_id)?;
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        let guest = self
+            .guests
+            .as_ref()
+            .and_then(|g| g.get(guest_id))
+            .ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
         self.vm_pages
             .add_pte_pages_builder(from_page_addr, num_pages, &guest_vm.vm_pages)
             .map_err(|e| {
@@ -675,9 +597,14 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         let from_page_addr = PageAddr::new(RawAddr::guest(gpa, self.vm_pages.page_owner_id()))
             .ok_or(SbiError::InvalidAddress)?;
 
-        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        let guest = self
+            .guests
+            .as_ref()
+            .and_then(|g| g.get(guest_id))
+            .ok_or(SbiError::InvalidParam)?;
         // TODO: Enforce that pages can't be removed while the guest is alive.
-        let guest_vm = guests.running_guest(guest_id)?;
+        let guest_vm = guest.as_finalized_vm().ok_or(SbiError::InvalidParam)?;
         guest_vm
             .vm_pages
             .remove_4k_pages(from_page_addr, num_pages)
@@ -709,8 +636,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         let from_page_addr =
             PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
-        let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-        let guest_vm = guests.initializing_guest(guest_id)?;
+        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+        let guest = self
+            .guests
+            .as_ref()
+            .and_then(|g| g.get(guest_id))
+            .ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
         let to_page_addr =
             PageAddr::new(RawAddr::guest(to_addr, guest_vm.vm_pages.page_owner_id()))
                 .ok_or(SbiError::InvalidAddress)?;
@@ -748,17 +680,22 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             // measurements for self.
             self.vm_pages.get_measurement(&mut bytes)
         } else {
-            let guests = self.guests.as_ref().ok_or(SbiError::InvalidParam)?.read();
-            let _ = guests.get_guest_index(guest_id)?;
-            if let Ok(running_guest) = guests.running_guest(guest_id) {
-                running_guest.vm_pages.get_measurement(&mut bytes)
+            let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+            let guest = self
+                .guests
+                .as_ref()
+                .and_then(|g| g.get(guest_id))
+                .ok_or(SbiError::InvalidParam)?;
+            let result = if let Some(vm) = guest.as_finalized_vm() {
+                vm.vm_pages.get_measurement(&mut bytes)
             } else {
-                guests
-                    .initializing_guest(guest_id)
+                guest
+                    .as_initializing_vm()
                     .unwrap()
                     .vm_pages
                     .get_measurement(&mut bytes)
-            }
+            };
+            result
         }
         .map_err(|_| SbiError::Failed)?;
 

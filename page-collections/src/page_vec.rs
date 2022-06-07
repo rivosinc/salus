@@ -88,6 +88,10 @@ impl<T> PageVec<T> {
         self.0.retain(f)
     }
 
+    pub fn remove(&mut self, index: usize) -> T {
+        self.0.remove(index)
+    }
+
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
     }

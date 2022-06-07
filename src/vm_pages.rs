@@ -29,7 +29,6 @@ pub enum Error {
     SettingOwner(riscv_page_tables::PageTrackingError),
     // Page table root must be aligned to 16k to be used for sv48x4 mappings
     UnalignedVmPages(GuestPageAddr),
-    UnownedPage(GuestPageAddr),
     UnsupportedPageSize(PageSize),
     MeasurementBufferTooSmall,
     AddressOverflow,
@@ -289,29 +288,6 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
                 to.add_measured_4k_page(guest_addr, page)?;
             } else {
                 to.add_4k_page(guest_addr, page)?;
-            }
-        }
-        Ok(count)
-    }
-
-    /// Remove pages owned and return them to the previous owner.
-    pub fn remove_4k_pages(&self, from_addr: GuestPageAddr, count: u64) -> Result<u64> {
-        if from_addr.size() != PageSize::Size4k {
-            return Err(Error::UnsupportedPageSize(from_addr.size()));
-        }
-        let mut root = self.root.lock();
-        let clean_pages = root
-            .unmap_range(from_addr, count)
-            .map_err(Error::Paging)?
-            .map(CleanPage::from)
-            .map(Page::from);
-        for (page, guest_addr) in clean_pages.zip(from_addr.iter_from()) {
-            let owner = self
-                .phys_pages
-                .pop_owner(page.addr())
-                .map_err(|_| Error::UnownedPage(guest_addr))?;
-            if owner != self.page_owner_id {
-                return Err(Error::UnownedPage(guest_addr));
             }
         }
         Ok(count)

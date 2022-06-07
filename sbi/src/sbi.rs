@@ -422,18 +422,6 @@ pub enum TeeFunction {
     /// a0 = guest id
     /// a1 = vCPU id
     TvmCpuRun { guest_id: u64, vcpu_id: u64 },
-    /// Removes pages that were previously added with `AddPages`.
-    /// a6 = 6
-    /// a0 = guest id,
-    /// a1 = guest address to unmap
-    /// a2 = address to remap the pages to in the requestor
-    /// a3 = number of pages
-    RemovePages {
-        guest_id: u64,
-        gpa: u64,
-        remap_addr: u64, // TODO should we track this locally?
-        num_pages: u64,
-    },
     /// Copies the measurements for the specified guest to the physical address `dest_addr`.
     /// The measurement version and type must be set to 1 for now.
     /// a6 = 7
@@ -505,12 +493,6 @@ impl TeeFunction {
                 guest_id: args[0],
                 vcpu_id: args[1],
             }),
-            6 => Ok(RemovePages {
-                guest_id: args[0],
-                gpa: args[1],
-                remap_addr: args[2],
-                num_pages: args[3],
-            }),
             7 => Ok(GetGuestMeasurement {
                 measurement_version: args[0],
                 measurement_type: args[1],
@@ -561,12 +543,6 @@ impl TeeFunction {
                 guest_id: _,
                 vcpu_id: _,
             } => 5,
-            RemovePages {
-                guest_id: _,
-                gpa: _,
-                remap_addr: _,
-                num_pages: _,
-            } => 6,
             GetGuestMeasurement {
                 measurement_type: _,
                 measurement_version: _,
@@ -616,12 +592,6 @@ impl TeeFunction {
                 guest_id,
                 vcpu_id: _,
             } => *guest_id,
-            RemovePages {
-                guest_id,
-                gpa: _,
-                remap_addr: _,
-                num_pages: _,
-            } => *guest_id,
             GetGuestMeasurement {
                 measurement_version,
                 measurement_type: _,
@@ -666,12 +636,6 @@ impl TeeFunction {
                 guest_id: _,
                 vcpu_id,
             } => *vcpu_id,
-            RemovePages {
-                guest_id: _,
-                gpa,
-                remap_addr: _,
-                num_pages: _,
-            } => *gpa,
             GetGuestMeasurement {
                 measurement_version: _,
                 measurement_type,
@@ -709,12 +673,6 @@ impl TeeFunction {
                 gpa: _,
                 measure_preserve: _,
             } => *page_type,
-            RemovePages {
-                guest_id: _,
-                gpa: _,
-                remap_addr,
-                num_pages: _,
-            } => *remap_addr,
             GetGuestMeasurement {
                 measurement_version: _,
                 measurement_type: _,
@@ -741,12 +699,6 @@ impl TeeFunction {
                 num_pages,
                 gpa: _,
                 measure_preserve: _,
-            } => *num_pages,
-            RemovePages {
-                guest_id: _,
-                gpa: _,
-                remap_addr: _,
-                num_pages,
             } => *num_pages,
             GetGuestMeasurement {
                 measurement_version: _,

@@ -253,18 +253,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         Ok(_) => println!("Tellus - Run success"),
     }
 
-    let num_remove_pages = NUM_GUEST_DATA_PAGES;
-    let msg = SbiMessage::Tee(sbi::TeeFunction::RemovePages {
-        guest_id: vmid,
-        gpa: USABLE_RAM_START_ADDRESS + num_remove_pages * PAGE_SIZE_4K,
-        remap_addr: first_guest_page,
-        num_pages: NUM_GUEST_DATA_PAGES,
-    });
-    // Safety: destroying a VM doesn't write to memory that's accessible from the host.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - RemovePages returned error");
-    }
-
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmDestroy { guest_id: vmid });
     // Safety: destroying a VM doesn't write to memory that's accessible from the host.
     unsafe {

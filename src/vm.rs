@@ -342,12 +342,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             } => self
                 .guest_set_vcpu_reg(guest_id, vcpu_id, register, value)
                 .into(),
-            RemovePages {
-                guest_id,
-                gpa,
-                remap_addr: _, // TODO - remove
-                num_pages,
-            } => self.guest_rm_pages(guest_id, gpa, num_pages).into(),
             GetGuestMeasurement {
                 measurement_version,
                 measurement_type,
@@ -590,28 +584,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             })?;
 
         Ok(0)
-    }
-
-    fn guest_rm_pages(&self, guest_id: u64, gpa: u64, num_pages: u64) -> sbi::Result<u64> {
-        println!("Salus - Rm pages {guest_id:x} gpa:{gpa:x} num_pages:{num_pages}",);
-        let from_page_addr = PageAddr::new(RawAddr::guest(gpa, self.vm_pages.page_owner_id()))
-            .ok_or(SbiError::InvalidAddress)?;
-
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        let guest = self
-            .guests
-            .as_ref()
-            .and_then(|g| g.get(guest_id))
-            .ok_or(SbiError::InvalidParam)?;
-        // TODO: Enforce that pages can't be removed while the guest is alive.
-        let guest_vm = guest.as_finalized_vm().ok_or(SbiError::InvalidParam)?;
-        guest_vm
-            .vm_pages
-            .remove_4k_pages(from_page_addr, num_pages)
-            .map_err(|e| {
-                println!("Salus - remove_4k_pages error {e:?}");
-                SbiError::InvalidAddress
-            })
     }
 
     /// page_type: 0 => 4K, 1=> 2M, 2=> 1G, 3=512G

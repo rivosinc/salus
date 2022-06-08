@@ -27,3 +27,8 @@ format-code:
     - rustup target add riscv64gc-unknown-none-elf
     - rustup component add rustfmt
     - cargo fmt -- --check
+
+test-code:
+  stage: test
+  script:
+    - cargo test --target x86_64-unknown-linux-gnu --workspace --exclude test_workloads --lib

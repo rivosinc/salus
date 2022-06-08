@@ -5,6 +5,7 @@
 use sbi::Result as SbiResult;
 use sbi::SbiMessage;
 
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use core::arch::asm;
 
 /// Send an ecall to the firmware or hypervisor.
@@ -18,6 +19,7 @@ use core::arch::asm;
 ///
 /// In addition the caller is placing trust in the firmware or hypervisor to maintain the promises
 /// of the interface w.r.t. reading and writing only within the provided bounds.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub unsafe fn ecall_send(msg: &SbiMessage) -> SbiResult<u64> {
     // normally error code
     let mut a0;
@@ -29,4 +31,10 @@ pub unsafe fn ecall_send(msg: &SbiMessage) -> SbiResult<u64> {
                 in("a6")msg.a6(), in("a7") msg.a7(), options(nostack));
 
     msg.result(a0, a1)
+}
+
+// Make ecalls panic in tests as there isn't an SBI interface beneath the tests.
+#[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
+pub unsafe fn ecall_send(_msg: &SbiMessage) -> SbiResult<u64> {
+    panic!("Test attempted ecall");
 }

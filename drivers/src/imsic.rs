@@ -10,7 +10,9 @@ use riscv_pages::{
     DeviceMemType, GuestPhysAddr, MemType, PageAddr, PageSize, PhysPage, RawAddr,
     SupervisorPageAddr,
 };
-use riscv_regs::{sie, stopei, Readable, Writeable, CSR};
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+use riscv_regs::Readable;
+use riscv_regs::{sie, stopei, Writeable, CSR};
 use spin::{Mutex, Once};
 
 use crate::{CpuId, CpuInfo, MAX_CPUS};

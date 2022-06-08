@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Low-level TLB management operations.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use core::arch::asm;
 
 /// Executes an SFENCE.VMA instruction.
@@ -12,6 +13,7 @@ use core::arch::asm;
 ///
 /// If 'asid' is not None only translations using the specified ASID are invalidated, otherwise
 /// translations for all ASIDs are invalidated.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn sfence_vma(vaddr: Option<u64>, asid: Option<u64>) {
     match (vaddr, asid) {
         // Safety: SFENCE.VMA's behavior is well-defined and its only side effect is to invalidate
@@ -38,6 +40,7 @@ pub fn sfence_vma(vaddr: Option<u64>, asid: Option<u64>) {
 ///
 /// If 'vmid' is not None only 2nd-stage translations using the specified VMID are invalidated,
 /// otherwise translations for all VMIDs are invalidated.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn hfence_gvma(gaddr: Option<u64>, vmid: Option<u64>) {
     // LLVM 14.x doesn't support hypervisor instruction mnemonics :(
     //
@@ -63,3 +66,9 @@ pub fn hfence_gvma(gaddr: Option<u64>, vmid: Option<u64>) {
         },
     }
 }
+
+// Make fence instructions a no-op for testing.
+#[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
+pub fn sfence_vma(_vaddr: Option<u64>, _asid: Option<u64>) {}
+#[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
+pub fn hfence_gvma(_gaddr: Option<u64>, _vmid: Option<u64>) {}

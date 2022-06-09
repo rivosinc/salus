@@ -7,7 +7,7 @@ use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, PageTracker};
+use riscv_page_tables::{GuestStagePageTable, PageState, PageTracker};
 use riscv_pages::{
     CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, Pfn, PhysPage,
     SequentialPages, SupervisorPageAddr,
@@ -183,6 +183,7 @@ fn take_and_clean_pages_for<T: GuestStagePageTable>(
     addr: GuestPageAddr,
     num_pages: u64,
     new_owner: PageOwnerId,
+    new_state: PageState,
 ) -> Result<impl Iterator<Item = Page> + '_> {
     let page_tracker = root.page_tracker();
     let taken_pages = root
@@ -191,7 +192,11 @@ fn take_and_clean_pages_for<T: GuestStagePageTable>(
         .map(CleanPage::from)
         .map(Page::from)
         .map(move |p| {
-            page_tracker.set_page_owner(p.addr(), new_owner).unwrap();
+            // Unwrap ok here since we know the pages are valid and were previously mapped.
+            page_tracker.convert_page(p.addr()).unwrap();
+            page_tracker
+                .assign_page(p.addr(), new_owner, new_state)
+                .unwrap();
             p
         });
     Ok(taken_pages)
@@ -221,12 +226,18 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             page_root_addr,
             4,
             id,
+            PageState::VmState,
         )?)
         .unwrap();
         let guest_root = T::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
 
-        let mut state_pages =
-            take_and_clean_pages_for(&mut *root, state_addr, TVM_STATE_PAGES, id)?;
+        let mut state_pages = take_and_clean_pages_for(
+            &mut *root,
+            state_addr,
+            TVM_STATE_PAGES,
+            id,
+            PageState::VmState,
+        )?;
         let state_page = state_pages.next().unwrap();
         let pte_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
 
@@ -235,6 +246,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             vcpus_addr,
             num_vcpu_pages,
             id,
+            PageState::VmState,
         )?)
         .unwrap();
 
@@ -255,7 +267,13 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         to: &VmPages<T, VmStateInitializing>,
     ) -> Result<()> {
         let mut root = self.root.lock();
-        let pt_pages = take_and_clean_pages_for(&mut *root, from_addr, count, to.page_owner_id())?;
+        let pt_pages = take_and_clean_pages_for(
+            &mut *root,
+            from_addr,
+            count,
+            to.page_owner_id(),
+            PageState::VmState,
+        )?;
         for page in pt_pages {
             to.add_pte_page(page)?;
         }
@@ -279,7 +297,10 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         for (unmapped_page, guest_addr) in unmapped_pages.zip(to_addr.iter_from()) {
             let page = unmapped_page.to_page();
             self.page_tracker
-                .set_page_owner(page.addr(), to.page_owner_id())
+                .convert_page(page.addr())
+                .map_err(Error::SettingOwner)?;
+            self.page_tracker
+                .assign_page(page.addr(), to.page_owner_id(), PageState::Mapped)
                 .map_err(Error::SettingOwner)?;
             if measure_preserve {
                 to.add_measured_4k_page(guest_addr, page)?;

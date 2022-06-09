@@ -10,6 +10,7 @@ use riscv_pages::{
     SequentialPages, SupervisorPageAddr, SupervisorVirt, UnmappedPhysPage,
 };
 
+use crate::page_info::PageState;
 use crate::page_tracking::PageTracker;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 
@@ -28,6 +29,8 @@ pub enum Error {
     PageSizeNotSupported(PageSize),
     MappingExists,
     PageTypeMismatch,
+    PageNotMappable,
+    PageNotUnmappable,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -522,11 +525,14 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
         if page_size.is_huge() {
             return Err(Error::PageSizeNotSupported(page_size));
         }
-        if self.page_tracker().owner(spa) != Some(self.page_owner_id()) {
+        if self.page_tracker().owner(spa) != Ok(self.page_owner_id()) {
             return Err(Error::PageNotOwned);
         }
-        if self.page_tracker().mem_type(spa) != Some(P::mem_type()) {
+        if self.page_tracker().mem_type(spa) != Ok(P::mem_type()) {
             return Err(Error::PageTypeMismatch);
+        }
+        if self.page_tracker().state(spa) != Ok(PageState::Mapped) {
+            return Err(Error::PageNotMappable);
         }
 
         let mut table = PageTable::from_root(self);
@@ -554,8 +560,11 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
         }
         // Unwrap ok, must be a leaf entry.
         let spa = entry.page_addr().unwrap();
-        if page_tracker.mem_type(spa) != Some(mem_type) {
+        if page_tracker.mem_type(spa) != Ok(mem_type) {
             return Err(Error::PageTypeMismatch);
+        }
+        if page_tracker.state(spa) != Ok(PageState::Mapped) {
+            return Err(Error::PageNotUnmappable);
         }
         Ok(entry)
     }

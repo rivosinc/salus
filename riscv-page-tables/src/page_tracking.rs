@@ -13,11 +13,11 @@ use riscv_pages::{
     MemType, Page, PageOwnerId, PageSize, PhysPage, SequentialPages, SupervisorPageAddr,
 };
 
-use crate::page_info::PageMap;
+use crate::page_info::{PageInfo, PageMap, PageState};
 use crate::HwMemMap;
 
 /// Errors related to managing physical page information.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Error {
     /// Too many guests started by the host at once.
     GuestOverflow,
@@ -33,6 +33,14 @@ pub enum Error {
     UnownedPage,
     /// Attempt to modify the owner of a reserved page.
     ReservedPage,
+    /// The page is not in a state where it can be converted.
+    PageNotConvertable,
+    /// The page is not in a state where it can be assigned.
+    PageNotAssignable,
+    /// The page cannot be mapped back into the owner's address space.
+    PageNotReclaimable,
+    /// Attempt to intiate an invalid page state transition.
+    InvalidStateTransition,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -45,39 +53,16 @@ struct PageTrackerInner {
 }
 
 impl PageTrackerInner {
-    // pops any owners that have exited.
-    // Remove owners of the page that have since terminated. This is done lazily as needed to
-    // prevent a long running operation on guest exit.
-    fn pop_exited_owners(&mut self, addr: SupervisorPageAddr) {
-        if let Some(info) = self.pages.get_mut(addr) {
-            info.pop_owners_while(|id| !self.active_guests.contains(id));
-        }
+    fn get_mut(&mut self, addr: SupervisorPageAddr) -> Result<&mut PageInfo> {
+        let page = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
+        page.pop_owners_while(|id| !self.active_guests.contains(id));
+        Ok(page)
     }
 
-    // Pop the current owner returning the page to the previous owner. Returns the removed owner ID.
-    fn pop_owner_internal(&mut self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
-        let page_info = self.pages.get_mut(addr).unwrap();
-        page_info.pop_owner()
-    }
-
-    // Sets the owner of the page at `addr` to `owner`
-    fn set_page_owner(&mut self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
-        self.pop_exited_owners(addr);
-
-        let page_info = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
-        page_info.push_owner(owner)
-    }
-
-    // Returns the current owner of the the page ad `addr`.
-    fn owner(&self, addr: SupervisorPageAddr) -> Option<PageOwnerId> {
-        let info = self.pages.get(addr)?;
-        info.find_owner(|id| self.active_guests.contains(id))
-    }
-
-    // Returns the type of memory the page represents.
-    fn mem_type(&self, addr: SupervisorPageAddr) -> Option<MemType> {
-        let info = self.pages.get(addr)?;
-        Some(info.mem_type())
+    fn get(&mut self, addr: SupervisorPageAddr) -> Result<&PageInfo> {
+        let page = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
+        page.pop_owners_while(|id| !self.active_guests.contains(id));
+        Ok(page)
     }
 }
 
@@ -156,27 +141,57 @@ impl PageTracker {
     }
 
     /// Sets the owner of the page at the given `addr` to `owner`.
-    pub fn set_page_owner(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
+    pub fn assign_page(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        new_state: PageState,
+    ) -> Result<()> {
         let mut page_tracker = self.inner.lock();
-        page_tracker.set_page_owner(addr, owner)
+        let page = page_tracker.get_mut(addr)?;
+        page.push_owner(owner, new_state)
     }
 
     /// Removes the current owner of the page at `addr` and returns it.
-    pub fn pop_owner(&self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
+    pub fn release_page(&self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
         let mut page_tracker = self.inner.lock();
-        page_tracker.pop_owner_internal(addr)
+        let page = page_tracker.get_mut(addr)?;
+        page.pop_owner()
+    }
+
+    /// Marks the page as being converted so that it can be used for child VMs.
+    pub fn convert_page(&self, addr: SupervisorPageAddr) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let page = page_tracker.get_mut(addr)?;
+        page.convert()
+    }
+
+    /// Reclaims the converted, but unassigned, page as a mappable page.
+    pub fn reclaim_page(&self, addr: SupervisorPageAddr) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let page = page_tracker.get_mut(addr)?;
+        page.reclaim()
     }
 
     /// Returns the current owner of the page.
-    pub fn owner(&self, addr: SupervisorPageAddr) -> Option<PageOwnerId> {
-        let page_tracker = self.inner.lock();
-        page_tracker.owner(addr)
+    pub fn owner(&self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
+        let mut page_tracker = self.inner.lock();
+        let page = page_tracker.get(addr)?;
+        page.owner().ok_or(Error::UnownedPage)
     }
 
     /// Returns the type of memory the page represents.
-    pub fn mem_type(&self, addr: SupervisorPageAddr) -> Option<MemType> {
-        let page_tracker = self.inner.lock();
-        page_tracker.mem_type(addr)
+    pub fn mem_type(&self, addr: SupervisorPageAddr) -> Result<MemType> {
+        let mut page_tracker = self.inner.lock();
+        let page = page_tracker.get(addr)?;
+        Ok(page.mem_type())
+    }
+
+    /// Returns the current state of the page.
+    pub fn state(&self, addr: SupervisorPageAddr) -> Result<PageState> {
+        let mut page_tracker = self.inner.lock();
+        let page = page_tracker.get(addr)?;
+        Ok(page.state())
     }
 }
 
@@ -231,7 +246,7 @@ impl<A: Allocator> HypPageAlloc<A> {
                 self.pages
                     .get_mut(page)
                     .unwrap()
-                    .push_owner(PageOwnerId::hypervisor())
+                    .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
                     .unwrap();
             }
 
@@ -272,7 +287,7 @@ impl<A: Allocator> HypPageAlloc<A> {
         self.pages
             .get_mut(self.next_page)
             .unwrap()
-            .push_owner(PageOwnerId::hypervisor())
+            .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
             .expect("Failed to take ownership");
 
         let page = unsafe {
@@ -323,7 +338,9 @@ impl<A: Allocator> HypPageAlloc<A> {
             if let Some(page_info) = self.pages.get_mut(page) {
                 if page_info.is_free() {
                     // OK to unwrap as this struct is new and must have space for one owner.
-                    page_info.push_owner(PageOwnerId::hypervisor()).unwrap();
+                    page_info
+                        .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
+                        .unwrap();
                 }
             }
         }

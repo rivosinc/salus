@@ -51,6 +51,7 @@ pub mod tlb;
 pub use hw_mem_map::Error as MemMapError;
 pub use hw_mem_map::Result as MemMapResult;
 pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemRegionType, HwReservedMemType};
+pub use page_info::PageState;
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
 pub use page_table::{FirstStagePageTable, GuestStagePageTable, PlatformPageTable};
@@ -129,7 +130,11 @@ mod tests {
                 slice[0] = 0xdeadbeef;
             }
             assert!(page_tracker
-                .set_page_owner(page.addr(), guest_page_table.page_owner_id())
+                .assign_page(
+                    page.addr(),
+                    guest_page_table.page_owner_id(),
+                    PageState::Mapped
+                )
                 .is_ok());
             assert!(guest_page_table
                 .map_page(gpa, page, &mut || pte_pages.next())
@@ -172,7 +177,11 @@ mod tests {
                 slice[0] = 0xdeadbeef;
             }
             assert!(page_tracker
-                .set_page_owner(page.addr(), guest_page_table.page_owner_id())
+                .assign_page(
+                    page.addr(),
+                    guest_page_table.page_owner_id(),
+                    PageState::Mapped
+                )
                 .is_ok());
             assert!(guest_page_table
                 .map_page(gpa, page, &mut || pte_pages.next())

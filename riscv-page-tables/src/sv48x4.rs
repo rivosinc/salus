@@ -152,10 +152,14 @@ impl PlatformPageTable for Sv48x4 {
             }
             // Unwrap ok, this must be a 4kB page.
             let addr = PageAddr::from_pfn(pte.pfn(), level.leaf_page_size()).unwrap();
-            if page_tracker.owner(addr) != Some(owner)
-                || page_tracker.mem_type(addr) != Some(MemType::Ram)
+            if page_tracker.owner(addr) != Ok(owner)
+                || page_tracker.mem_type(addr) != Ok(MemType::Ram)
             {
                 // We shouldn't be faulting in MMIO or pages we don't own.
+                return false;
+            }
+            if page_tracker.reclaim_page(addr).is_err() {
+                // We couldn't put the page back into the Mapped state.
                 return false;
             }
             // Zero the page before mapping it back to this VM.

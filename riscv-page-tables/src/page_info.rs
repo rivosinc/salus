@@ -16,8 +16,8 @@ use crate::{HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, Pag
 type PageOwnerVec = ArrayVec<PageOwnerId, MAX_PAGE_OWNERS>;
 
 /// `PageState` holds the current ownership status of a page.
-#[derive(Clone, Debug)]
-enum PageState {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageState {
     /// Not present, reserved, or otherwise not usable.
     Reserved,
 
@@ -25,9 +25,16 @@ enum PageState {
     /// be reserved, or owned by the hypervisor / VMs.
     Free,
 
-    /// Page is owned by the hypervisor or a VM. Does not necessarily imply the page is mapped
-    /// by the owning VM (e.g. may be used to build the VM's G-stage page-tables).
-    Owned,
+    /// Page is mapped into the address space of the current owner.
+    Mapped,
+
+    /// Page is used to store hypervisor-internal state for the current owner, e.g. to back per-VM
+    /// data structures or as a page-table page for the VM.
+    VmState,
+
+    /// Page has been converted by the current owner for use in a child VM, but has not yet been
+    /// assigned to its new owner.
+    Converted,
 }
 
 /// The maximum length for an ownership chain. Enough for the host VM to assign to a guest VM
@@ -61,7 +68,7 @@ impl PageInfo {
         owners.push(PageOwnerId::hypervisor());
         Self {
             mem_type: MemType::Ram,
-            state: PageState::Owned,
+            state: PageState::Converted,
             owners,
         }
     }
@@ -81,17 +88,23 @@ impl PageInfo {
         owners.push(PageOwnerId::hypervisor());
         Self {
             mem_type: MemType::Mmio(dev_type),
-            state: PageState::Owned,
+            state: PageState::Converted,
             owners,
         }
     }
 
     /// Returns the current owner, if it exists.
     pub fn owner(&self) -> Option<PageOwnerId> {
+        use PageState::*;
         match self.state {
-            PageState::Owned => Some(self.owners[self.owners.len() - 1]),
+            Converted | Mapped | VmState => Some(self.owners[self.owners.len() - 1]),
             _ => None,
         }
+    }
+
+    /// Returns the page's current state.
+    pub fn state(&self) -> PageState {
+        self.state
     }
 
     /// Returns if the page is free.
@@ -111,16 +124,19 @@ impl PageInfo {
 
     /// Pops the current owner if there is one, returning the page to the previous owner.
     pub fn pop_owner(&mut self) -> PageTrackingResult<PageOwnerId> {
+        use PageState::*;
         match self.state {
-            PageState::Owned => {
+            Mapped | VmState | Converted => {
                 if self.owners.len() == 1 {
                     Err(PageTrackingError::OwnerUnderflow) // Can't pop the last owner.
                 } else {
-                    Ok(self.owners.pop().expect("PageOwnerVec can't be empty"))
+                    let owner = self.owners.pop().expect("PageOwnerVec can't be empty");
+                    self.state = Converted;
+                    Ok(owner)
                 }
             }
-            PageState::Reserved => Err(PageTrackingError::ReservedPage),
-            PageState::Free => Err(PageTrackingError::UnownedPage),
+            Reserved => Err(PageTrackingError::ReservedPage),
+            Free => Err(PageTrackingError::UnownedPage),
         }
     }
 
@@ -136,35 +152,65 @@ impl PageInfo {
         }
     }
 
-    /// Finds the first owner for which `check` returns true.
-    pub fn find_owner<F>(&self, check: F) -> Option<PageOwnerId>
-    where
-        F: Fn(&PageOwnerId) -> bool,
-    {
+    /// Sets the current owner of the page while maintaining a "chain of custody" so the previous
+    /// owner is known when the new owner abandons the page.
+    pub fn push_owner(
+        &mut self,
+        owner: PageOwnerId,
+        new_state: PageState,
+    ) -> PageTrackingResult<()> {
+        use PageState::*;
+        if !matches!(new_state, Mapped | VmState | Converted) {
+            // Going back to free/reserved isn't allowed.
+            return Err(PageTrackingError::InvalidStateTransition);
+        }
         match self.state {
-            PageState::Owned => {
-                // We go in reverse to start at the top of the ownership stack.
-                self.owners.iter().rev().find(|&o| check(o)).copied()
+            Free => {
+                self.owners.push(owner);
+                self.state = new_state;
+                Ok(())
             }
-            _ => None,
+            Converted => {
+                if matches!(new_state, Converted) {
+                    // A page converted by a VM can't immediately become a converted page in a child
+                    // VM.
+                    return Err(PageTrackingError::InvalidStateTransition);
+                }
+                self.owners
+                    .try_push(owner)
+                    .map_err(|_| PageTrackingError::OwnerOverflow)?;
+                self.state = new_state;
+                Ok(())
+            }
+            VmState | Mapped | Reserved => Err(PageTrackingError::PageNotAssignable),
         }
     }
 
-    /// Sets the current owner of the page while maintaining a "chain of custody" so the previous
-    /// owner is known when the new owner abandons the page.
-    pub fn push_owner(&mut self, owner: PageOwnerId) -> PageTrackingResult<()> {
+    /// Transitions the page to the Converted state so that it may be assigned for use with a
+    /// child VM.
+    pub fn convert(&mut self) -> PageTrackingResult<()> {
+        // We can only donate pages that were mapped.
+        //
+        // TODO: Intermediate states for unmap & invalidate.
+        use PageState::*;
         match self.state {
-            PageState::Owned => self
-                .owners
-                .try_push(owner)
-                .map_err(|_| PageTrackingError::OwnerOverflow),
-            PageState::Free => {
-                self.owners.push(owner);
-                self.state = PageState::Owned;
+            Mapped => {
+                self.state = Converted;
                 Ok(())
             }
-            PageState::Reserved => Err(PageTrackingError::ReservedPage),
+            _ => Err(PageTrackingError::PageNotConvertable),
         }
+    }
+
+    /// Transitions the page to the Mapped state back from the Converted state so that it can
+    /// be mapped back into the owner.
+    pub fn reclaim(&mut self) -> PageTrackingResult<()> {
+        use PageState::*;
+        if !matches!(self.state, Converted) {
+            return Err(PageTrackingError::PageNotReclaimable);
+        }
+        self.state = Mapped;
+        Ok(())
     }
 }
 
@@ -510,15 +556,23 @@ mod tests {
     fn page_ownership() {
         let mut page = PageInfo::new();
         assert!(page.is_free());
-        assert!(page.push_owner(PageOwnerId::hypervisor()).is_ok());
-        assert!(page.push_owner(PageOwnerId::host()).is_ok());
+        assert!(page
+            .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
+            .is_ok());
+        assert!(page
+            .push_owner(PageOwnerId::host(), PageState::Mapped)
+            .is_ok());
         assert_eq!(page.owner().unwrap(), PageOwnerId::host());
+        assert!(page.convert().is_ok());
+        assert_eq!(page.state(), PageState::Converted);
         assert_eq!(page.pop_owner().unwrap(), PageOwnerId::host());
         assert!(page.pop_owner().is_err());
         assert!(!page.is_free());
 
         let mut page = PageInfo::new_reserved();
         assert!(!page.is_free());
-        assert!(page.push_owner(PageOwnerId::hypervisor()).is_err());
+        assert!(page
+            .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
+            .is_err());
     }
 }

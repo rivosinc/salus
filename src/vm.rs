@@ -7,7 +7,7 @@ use arrayvec::ArrayVec;
 use core::{alloc::Allocator, mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
-use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageTracker};
+use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageState, PageTracker};
 use riscv_pages::{
     GuestPageAddr, GuestPhysAddr, MemType, Page, PageAddr, PageOwnerId, PageSize, PhysPage,
     RawAddr, SequentialPages,
@@ -684,6 +684,16 @@ pub struct HostVm<T: GuestStagePageTable, S = VmStateFinalized> {
     inner: Vm<T, S>,
 }
 
+fn to_host_assigned_pages(pages: SequentialPages, page_tracker: &PageTracker) -> SequentialPages {
+    SequentialPages::from_pages(pages.into_iter().map(|p| {
+        page_tracker
+            .assign_page(p.addr(), PageOwnerId::host(), PageState::VmState)
+            .unwrap();
+        p
+    }))
+    .unwrap()
+}
+
 impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     /// Creates an initializing host VM with an expected guest physical address space size of
     /// `host_gpa_size` from the hypervisor page allocator. Returns the remaining free pages
@@ -708,16 +718,25 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let pte_vec_pages = hyp_mem.take_pages(num_pte_vec_pages as usize);
 
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
-        let root = T::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
-        let vm_pages = VmPages::new(root, pte_vec_pages);
+        let root = T::new(
+            to_host_assigned_pages(root_table_pages, &page_tracker),
+            PageOwnerId::host(),
+            page_tracker.clone(),
+        )
+        .unwrap();
+        let vm_pages = VmPages::new(root, to_host_assigned_pages(pte_vec_pages, &page_tracker));
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();
         }
         let mut vm = Vm::new(
             vm_pages,
-            VmCpus::new(PageOwnerId::host(), vcpus_pages).unwrap(),
+            VmCpus::new(
+                PageOwnerId::host(),
+                to_host_assigned_pages(vcpus_pages, &page_tracker),
+            )
+            .unwrap(),
         );
-        vm.add_guest_tracking_pages(guest_tracking_pages);
+        vm.add_guest_tracking_pages(to_host_assigned_pages(guest_tracking_pages, &page_tracker));
 
         let cpu_info = CpuInfo::get();
         for i in 0..cpu_info.num_cpus() {
@@ -751,7 +770,11 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
                 page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
             );
             page_tracker
-                .set_page_owner(page.addr(), self.inner.vm_pages.page_owner_id())
+                .assign_page(
+                    page.addr(),
+                    self.inner.vm_pages.page_owner_id(),
+                    PageState::Mapped,
+                )
                 .unwrap();
             self.inner
                 .vm_pages
@@ -778,7 +801,11 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
                 );
             }
             page_tracker
-                .set_page_owner(page.addr(), self.inner.vm_pages.page_owner_id())
+                .assign_page(
+                    page.addr(),
+                    self.inner.vm_pages.page_owner_id(),
+                    PageState::Mapped,
+                )
                 .unwrap();
             self.inner.vm_pages.add_4k_page(vm_addr, page).unwrap();
         }

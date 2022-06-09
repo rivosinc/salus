@@ -10,7 +10,7 @@ use riscv_pages::{
     SequentialPages, SupervisorPageAddr, SupervisorVirt, UnmappedPhysPage,
 };
 
-use crate::page_tracking::PageState;
+use crate::page_tracking::PageTracker;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 
 pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
@@ -349,10 +349,10 @@ pub trait PlatformPageTable: Sized {
 
     /// Creates a new page table root from the provided `pages` that must be at least
     /// `root_level().table_pages()` in length and aligned to `T::TOP_LEVEL_ALIGN`.
-    fn new(pages: SequentialPages, owner: PageOwnerId, phys_pages: PageState) -> Result<Self>;
+    fn new(pages: SequentialPages, owner: PageOwnerId, page_tracker: PageTracker) -> Result<Self>;
 
     /// Returns an ref to the systems physical pages map.
-    fn phys_pages(&self) -> PageState;
+    fn page_tracker(&self) -> PageTracker;
 
     /// Returns the owner Id for this page table.
     fn page_owner_id(&self) -> PageOwnerId;
@@ -508,10 +508,10 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
         if spa.size().is_huge() {
             return Err(Error::PageSizeNotSupported(spa.size()));
         }
-        if self.phys_pages().owner(spa) != Some(self.page_owner_id()) {
+        if self.page_tracker().owner(spa) != Some(self.page_owner_id()) {
             return Err(Error::PageNotOwned);
         }
-        if self.phys_pages().mem_type(spa) != Some(P::mem_type()) {
+        if self.page_tracker().mem_type(spa) != Some(P::mem_type()) {
             return Err(Error::PageTypeMismatch);
         }
 
@@ -533,14 +533,14 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
         vaddr: RawAddr<Self::MappedAddressSpace>,
         mem_type: MemType,
     ) -> Result<ValidTableEntryMut<Self>> {
-        let phys_pages = self.phys_pages();
+        let page_tracker = self.page_tracker();
         let entry = self.walk_to_leaf(vaddr).ok_or(Error::PageNotOwned)?;
         if !entry.level().is_leaf() {
             return Err(Error::PageSizeNotSupported(entry.level().leaf_page_size()));
         }
         // Unwrap ok, must be a leaf entry.
         let spa = entry.page_addr().unwrap();
-        if phys_pages.mem_type(spa) != Some(mem_type) {
+        if page_tracker.mem_type(spa) != Some(mem_type) {
             return Err(Error::PageTypeMismatch);
         }
         Ok(entry)

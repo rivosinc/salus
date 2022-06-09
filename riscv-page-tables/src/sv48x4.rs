@@ -6,7 +6,7 @@ use riscv_pages::*;
 
 use crate::page_table::Result;
 use crate::page_table::*;
-use crate::page_tracking::PageState;
+use crate::page_tracking::PageTracker;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sv48x4Level {
@@ -71,7 +71,7 @@ impl PageTableLevel for Sv48x4Level {
 pub struct Sv48x4 {
     root: SequentialPages,
     owner: PageOwnerId,
-    phys_pages: PageState,
+    page_tracker: PageTracker,
 }
 
 impl GuestStagePageTable for Sv48x4 {
@@ -102,7 +102,7 @@ impl PlatformPageTable for Sv48x4 {
         num_l1_pages + num_l2_pages + num_l3_pages + num_l4_pages
     }
 
-    fn new(root: SequentialPages, owner: PageOwnerId, phys_pages: PageState) -> Result<Self> {
+    fn new(root: SequentialPages, owner: PageOwnerId, page_tracker: PageTracker) -> Result<Self> {
         // TODO: Verify ownership of root PT pages.
         if root.page_size().is_huge() {
             return Err(Error::PageSizeNotSupported(root.page_size()));
@@ -116,12 +116,12 @@ impl PlatformPageTable for Sv48x4 {
         Ok(Self {
             root,
             owner,
-            phys_pages,
+            page_tracker,
         })
     }
 
-    fn phys_pages(&self) -> PageState {
-        self.phys_pages.clone()
+    fn page_tracker(&self) -> PageTracker {
+        self.page_tracker.clone()
     }
 
     fn invalidate_page<P: PhysPage>(
@@ -142,8 +142,8 @@ impl PlatformPageTable for Sv48x4 {
 
     fn do_fault(&mut self, gpa: RawAddr<Self::MappedAddressSpace>) -> bool {
         // avoid double self borrow, by cloning the pages, each layer borrows self, so the borrow
-        // checked can't tell that phys_pages is only borrowed once.
-        let phys_pages = self.phys_pages.clone();
+        // checked can't tell that page_tracker is only borrowed once.
+        let page_tracker = self.page_tracker.clone();
         let owner = self.owner;
         if let Some(TableEntryMut::Invalid(pte, level)) = self.walk_until_invalid(gpa) {
             if !level.is_leaf() {
@@ -152,8 +152,8 @@ impl PlatformPageTable for Sv48x4 {
             }
             // Unwrap ok, this must be a 4kB page.
             let addr = PageAddr::from_pfn(pte.pfn(), level.leaf_page_size()).unwrap();
-            if phys_pages.owner(addr) != Some(owner)
-                || phys_pages.mem_type(addr) != Some(MemType::Ram)
+            if page_tracker.owner(addr) != Some(owner)
+                || page_tracker.mem_type(addr) != Some(MemType::Ram)
             {
                 // We shouldn't be faulting in MMIO or pages we don't own.
                 return false;

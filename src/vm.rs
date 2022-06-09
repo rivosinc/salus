@@ -7,7 +7,7 @@ use arrayvec::ArrayVec;
 use core::{alloc::Allocator, mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
-use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageState};
+use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageTracker};
 use riscv_pages::{
     GuestPageAddr, GuestPhysAddr, MemType, Page, PageAddr, PageOwnerId, PageSize, PhysPage,
     RawAddr, SequentialPages,
@@ -107,7 +107,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
     /// length zero and capacity limits the number of nested guests.
     fn add_guest_tracking_pages(&mut self, pages: SequentialPages) {
-        self.guests = Some(Guests::new(pages, self.vm_pages.phys_pages()));
+        self.guests = Some(Guests::new(pages, self.vm_pages.page_tracker()));
     }
 
     /// Adds a vCPU to this VM.
@@ -707,8 +707,8 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             / (PageSize::Size4k as u64);
         let pte_vec_pages = hyp_mem.take_pages(num_pte_vec_pages as usize);
 
-        let (phys_pages, host_pages) = PageState::from(hyp_mem, T::TOP_LEVEL_ALIGN);
-        let root = T::new(root_table_pages, PageOwnerId::host(), phys_pages).unwrap();
+        let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
+        let root = T::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
         let vm_pages = VmPages::new(root, pte_vec_pages);
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();
@@ -743,14 +743,14 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     where
         I: Iterator<Item = Page>,
     {
-        let phys_pages = self.inner.vm_pages.phys_pages();
+        let page_tracker = self.inner.vm_pages.page_tracker();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(vm_addr.size(), page.addr().size());
             assert_eq!(
                 vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
                 page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
             );
-            phys_pages
+            page_tracker
                 .set_page_owner(page.addr(), self.inner.vm_pages.page_owner_id())
                 .unwrap();
             self.inner
@@ -767,7 +767,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         I: Iterator<Item = P>,
         P: PhysPage,
     {
-        let phys_pages = self.inner.vm_pages.phys_pages();
+        let page_tracker = self.inner.vm_pages.page_tracker();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(vm_addr.size(), page.addr().size());
             if P::mem_type() == MemType::Ram {
@@ -777,7 +777,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
                     page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
                 );
             }
-            phys_pages
+            page_tracker
                 .set_page_owner(page.addr(), self.inner.vm_pages.page_owner_id())
                 .unwrap();
             self.inner.vm_pages.add_4k_page(vm_addr, page).unwrap();

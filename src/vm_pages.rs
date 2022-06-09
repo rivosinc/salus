@@ -7,7 +7,7 @@ use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, PageState};
+use riscv_page_tables::{GuestStagePageTable, PageTracker};
 use riscv_pages::{
     CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, Pfn, PhysPage,
     SequentialPages, SupervisorPageAddr,
@@ -138,7 +138,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
 /// machines.
 pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     page_owner_id: PageOwnerId,
-    phys_pages: PageState,
+    page_tracker: PageTracker,
     // Locking order: `root` -> `measurement` -> `pte_pages`
     root: Mutex<T>,
     measurement: Mutex<Sha256Measure>,
@@ -171,8 +171,8 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     }
 
     /// Returns the global page tracking structure.
-    pub fn phys_pages(&self) -> PageState {
-        self.phys_pages.clone()
+    pub fn page_tracker(&self) -> PageTracker {
+        self.page_tracker.clone()
     }
 }
 
@@ -184,14 +184,14 @@ fn take_and_clean_pages_for<T: GuestStagePageTable>(
     num_pages: u64,
     new_owner: PageOwnerId,
 ) -> Result<impl Iterator<Item = Page> + '_> {
-    let phys_pages = root.phys_pages();
+    let page_tracker = root.page_tracker();
     let taken_pages = root
         .invalidate_range(addr, num_pages)
         .map_err(Error::Paging)?
         .map(CleanPage::from)
         .map(Page::from)
         .map(move |p| {
-            phys_pages.set_page_owner(p.addr(), new_owner).unwrap();
+            page_tracker.set_page_owner(p.addr(), new_owner).unwrap();
             p
         });
     Ok(taken_pages)
@@ -210,7 +210,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedVmPages(page_root_addr));
         }
-        let id = self.phys_pages.add_active_guest().map_err(Error::GuestId)?;
+        let id = self.page_tracker.add_active_guest().map_err(Error::GuestId)?;
         let mut root = self.root.lock();
 
         let guest_root_pages = SequentialPages::from_pages(take_and_clean_pages_for(
@@ -220,7 +220,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             id,
         )?)
         .unwrap();
-        let guest_root = T::new(guest_root_pages, id, self.phys_pages.clone()).unwrap();
+        let guest_root = T::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
 
         let mut state_pages =
             take_and_clean_pages_for(&mut *root, state_addr, TVM_STATE_PAGES, id)?;
@@ -281,7 +281,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             .map_err(Error::Paging)?;
         for (unmapped_page, guest_addr) in unmapped_pages.zip(to_addr.iter_from()) {
             let page = unmapped_page.to_page();
-            self.phys_pages
+            self.page_tracker
                 .set_page_owner(page.addr(), to.page_owner_id())
                 .map_err(Error::SettingOwner)?;
             if measure_preserve {
@@ -329,7 +329,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     pub fn new(root: T, pte_vec_pages: SequentialPages) -> Self {
         Self {
             page_owner_id: root.page_owner_id(),
-            phys_pages: root.phys_pages(),
+            page_tracker: root.page_tracker(),
             root: Mutex::new(root),
             measurement: Mutex::new(Sha256Measure::new()),
             pte_pages: Mutex::new(PageVec::from(pte_vec_pages)),
@@ -378,7 +378,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     pub fn finalize(self) -> VmPages<T, VmStateFinalized> {
         VmPages {
             page_owner_id: self.page_owner_id,
-            phys_pages: self.phys_pages,
+            page_tracker: self.page_tracker,
             root: self.root,
             measurement: self.measurement,
             pte_pages: self.pte_pages,

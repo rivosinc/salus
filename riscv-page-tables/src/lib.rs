@@ -11,17 +11,17 @@
 //! - `Sv48x4`, `Sv48` etc are top level page table structures used to manipulate address
 //! translation and protection.
 //! - `PageTable` provides a generic implementation of a single level of multi-level translation.
-//! - `PageState` - Contains information about active VMs (page owners), manages allocation of
+//! - `PageTracker` - Contains information about active VMs (page owners), manages allocation of
 //! unique owner IDs, and per-page state such as current and previous owner. This is system-wide
 //! state updated whenever a page owner changes or a VM starts or stops.
 //! - `PageMap` - Per-page state (tracks the owner).
 //! - `HypPageAlloc` - Initial manager of physical memory. The hypervisor allocates pages from
-//! here to store local state. It's turned in to a `PageState` and a pool of ram for the host VM.
+//! here to store local state. It's turned in to a `PageTracker` and a pool of ram for the host VM.
 //! - `HwMemMap` - Map of system memory, used to determine address ranges to create `Page`s from.
 //!
 //! ## Initialization
 //!
-//! `HwMemMap` -> `HypPageAlloc` ---> `PageState`
+//! `HwMemMap` -> `HypPageAlloc` ---> `PageTracker`
 //!                                 \
 //!                                  -------> `SequentialPages`
 //!
@@ -56,7 +56,7 @@ pub use page_table::Result as PageTableResult;
 pub use page_table::{FirstStagePageTable, GuestStagePageTable, PlatformPageTable};
 pub use page_tracking::Error as PageTrackingError;
 pub use page_tracking::Result as PageTrackingResult;
-pub use page_tracking::{HypPageAlloc, PageState};
+pub use page_tracking::{HypPageAlloc, PageTracker};
 pub use sv48::Sv48;
 pub use sv48x4::Sv48x4;
 
@@ -78,7 +78,7 @@ mod tests {
     use super::sv48x4::Sv48x4;
     use super::*;
 
-    fn stub_sys_memory() -> (PageState, Vec<SequentialPages, Global>) {
+    fn stub_sys_memory() -> (PageTracker, Vec<SequentialPages, Global>) {
         const ONE_MEG: usize = 1024 * 1024;
         const MEM_ALIGN: usize = 2 * ONE_MEG;
         const MEM_SIZE: usize = 256 * ONE_MEG;
@@ -98,21 +98,21 @@ mod tests {
                 .build()
         };
         let hyp_mem = HypPageAlloc::new(hw_map, Global);
-        let (phys_pages, host_mem) = PageState::from(hyp_mem, Sv48x4::TOP_LEVEL_ALIGN);
+        let (page_tracker, host_mem) = PageTracker::from(hyp_mem, Sv48x4::TOP_LEVEL_ALIGN);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
-        (phys_pages, host_mem)
+        (page_tracker, host_mem)
     }
 
     #[test]
     fn map_and_unmap_sv48x4() {
-        let (phys_pages, host_mem) = stub_sys_memory();
+        let (page_tracker, host_mem) = stub_sys_memory();
 
         let mut host_pages = host_mem.into_iter().flatten();
         let seq_pages = SequentialPages::from_pages(host_pages.by_ref().take(4)).unwrap();
-        let id = phys_pages.add_active_guest().unwrap();
+        let id = page_tracker.add_active_guest().unwrap();
         let mut guest_page_table =
-            Sv48x4::new(seq_pages, id, phys_pages.clone()).expect("creating sv48x4");
+            Sv48x4::new(seq_pages, id, page_tracker.clone()).expect("creating sv48x4");
 
         let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
@@ -128,7 +128,7 @@ mod tests {
                 );
                 slice[0] = 0xdeadbeef;
             }
-            assert!(phys_pages
+            assert!(page_tracker
                 .set_page_owner(page.addr(), guest_page_table.page_owner_id())
                 .is_ok());
             assert!(guest_page_table
@@ -149,13 +149,13 @@ mod tests {
 
     #[test]
     fn map_and_unmap_sv48() {
-        let (phys_pages, host_mem) = stub_sys_memory();
+        let (page_tracker, host_mem) = stub_sys_memory();
 
         let mut host_pages = host_mem.into_iter().flatten();
         let seq_pages = SequentialPages::from_pages(host_pages.by_ref().take(1)).unwrap();
-        let id = phys_pages.add_active_guest().unwrap();
+        let id = page_tracker.add_active_guest().unwrap();
         let mut guest_page_table =
-            Sv48::new(seq_pages, id, phys_pages.clone()).expect("creating sv48");
+            Sv48::new(seq_pages, id, page_tracker.clone()).expect("creating sv48");
 
         let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
@@ -171,7 +171,7 @@ mod tests {
                 );
                 slice[0] = 0xdeadbeef;
             }
-            assert!(phys_pages
+            assert!(page_tracker
                 .set_page_owner(page.addr(), guest_page_table.page_owner_id())
                 .is_ok());
             assert!(guest_page_table

@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 use page_collections::page_arc::PageArc;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, PageState};
+use riscv_page_tables::{GuestStagePageTable, PageTracker};
 use riscv_pages::{Page, PageOwnerId, SequentialPages};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
@@ -148,15 +148,15 @@ impl<T: GuestStagePageTable> GuestState<T> {
 /// Tracks the guest VMs for a host VM.
 pub struct Guests<T: GuestStagePageTable> {
     guests: Mutex<PageVec<GuestState<T>>>,
-    phys_pages: PageState,
+    page_tracker: PageTracker,
 }
 
 impl<T: GuestStagePageTable> Guests<T> {
     /// Creates a new `Guests` using `vec_pages` as storage.
-    pub fn new(vec_pages: SequentialPages, phys_pages: PageState) -> Self {
+    pub fn new(vec_pages: SequentialPages, page_tracker: PageTracker) -> Self {
         Self {
             guests: Mutex::new(PageVec::from(vec_pages)),
-            phys_pages,
+            page_tracker,
         }
     }
 
@@ -189,7 +189,7 @@ impl<T: GuestStagePageTable> Guests<T> {
         if PageArc::ref_count(&guest.inner) != 1 {
             return Err(Error::GuestInUse);
         }
-        self.phys_pages.rm_active_guest(id);
+        self.page_tracker.rm_active_guest(id);
         guests.remove(index);
         Ok(())
     }

@@ -37,14 +37,14 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-// Inner struct that is wrapped in a mutex by `PageState`.
-struct PageStateInner {
+// Inner struct that is wrapped in a mutex by `PageTracker`.
+struct PageTrackerInner {
     next_owner_id: u64,
     active_guests: PageVec<PageOwnerId>,
     pages: PageMap,
 }
 
-impl PageStateInner {
+impl PageTrackerInner {
     // pops any owners that have exited.
     // Remove owners of the page that have since terminated. This is done lazily as needed to
     // prevent a long running operation on guest exit.
@@ -85,12 +85,12 @@ impl PageStateInner {
 /// other compontents that need access to page state. Once created, there is no way to free the
 /// backing page list. That page list is needed for the lifetime of the system.
 #[derive(Clone)]
-pub struct PageState {
-    inner: &'static Mutex<PageStateInner>,
+pub struct PageTracker {
+    inner: &'static Mutex<PageTrackerInner>,
 }
 
-impl PageState {
-    /// Creates a new PageState representing all pages in the system and returns all pages that are
+impl PageTracker {
+    /// Creates a new PageTracker representing all pages in the system and returns all pages that are
     /// available for the primary host to use, starting at the next `host_alignment`-aligned chunk.
     pub fn from<A: Allocator>(
         mut hyp_mem: HypPageAlloc<A>,
@@ -113,7 +113,7 @@ impl PageState {
         let (page_map, host_pages) = hyp_mem.drain();
 
         let mutex_box = PageBox::new_with(
-            Mutex::new(PageStateInner {
+            Mutex::new(PageTrackerInner {
                 // Start at two for owners as host and hypervisor reserve 0 and 1.
                 next_owner_id: 2,
                 active_guests,
@@ -132,51 +132,51 @@ impl PageState {
 
     /// Adds a new guest to the system, giving it the next ID.
     pub fn add_active_guest(&self) -> Result<PageOwnerId> {
-        let mut phys_pages = self.inner.lock();
+        let mut page_tracker = self.inner.lock();
         // unwrap is fine as next_owner_id is guaranteed to be valid.
-        let id = PageOwnerId::new(phys_pages.next_owner_id).unwrap();
+        let id = PageOwnerId::new(page_tracker.next_owner_id).unwrap();
         // TODO handle very rare roll over cleaner.
-        phys_pages.next_owner_id = phys_pages
+        page_tracker.next_owner_id = page_tracker
             .next_owner_id
             .checked_add(1)
             .ok_or(Error::IdOverflow)?;
 
-        phys_pages
+        page_tracker
             .active_guests
             .try_reserve(1)
             .map_err(|_| Error::GuestOverflow)?;
-        phys_pages.active_guests.push(id);
+        page_tracker.active_guests.push(id);
         Ok(id)
     }
 
     /// Removes an active guest previously added by `add_active_guest`.
     pub fn rm_active_guest(&self, remove_id: PageOwnerId) {
-        let mut phys_pages = self.inner.lock();
-        phys_pages.active_guests.retain(|&id| id != remove_id);
+        let mut page_tracker = self.inner.lock();
+        page_tracker.active_guests.retain(|&id| id != remove_id);
     }
 
     /// Sets the owner of the page at the given `addr` to `owner`.
     pub fn set_page_owner(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
-        let mut phys_pages = self.inner.lock();
-        phys_pages.set_page_owner(addr, owner)
+        let mut page_tracker = self.inner.lock();
+        page_tracker.set_page_owner(addr, owner)
     }
 
     /// Removes the current owner of the page at `addr` and returns it.
     pub fn pop_owner(&self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
-        let mut phys_pages = self.inner.lock();
-        phys_pages.pop_owner_internal(addr)
+        let mut page_tracker = self.inner.lock();
+        page_tracker.pop_owner_internal(addr)
     }
 
     /// Returns the current owner of the page.
     pub fn owner(&self, addr: SupervisorPageAddr) -> Option<PageOwnerId> {
-        let phys_pages = self.inner.lock();
-        phys_pages.owner(addr)
+        let page_tracker = self.inner.lock();
+        page_tracker.owner(addr)
     }
 
     /// Returns the type of memory the page represents.
     pub fn mem_type(&self, addr: SupervisorPageAddr) -> Option<MemType> {
-        let phys_pages = self.inner.lock();
-        phys_pages.mem_type(addr)
+        let page_tracker = self.inner.lock();
+        page_tracker.mem_type(addr)
     }
 }
 
@@ -390,10 +390,10 @@ mod tests {
         hyp_mem
     }
 
-    fn stub_phys_pages() -> (PageState, Vec<SequentialPages, Global>) {
+    fn stub_page_tracker() -> (PageTracker, Vec<SequentialPages, Global>) {
         let hyp_mem = stub_hyp_mem();
-        let (phys_pages, host_mem) = PageState::from(hyp_mem, PageSize::Size4k as u64);
-        (phys_pages, host_mem)
+        let (page_tracker, host_mem) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
+        (page_tracker, host_mem)
     }
 
     #[test]
@@ -458,16 +458,16 @@ mod tests {
     }
 
     #[test]
-    fn drop_one_phys_pages_ref() {
-        let (phys_pages, _host_mem) = stub_phys_pages();
+    fn drop_one_page_tracker_ref() {
+        let (page_tracker, _host_mem) = stub_page_tracker();
         let new_id = {
-            let c = phys_pages.clone();
+            let c = page_tracker.clone();
             c.add_active_guest().unwrap()
         };
-        assert_eq!(phys_pages.inner.lock().active_guests.len(), 2);
+        assert_eq!(page_tracker.inner.lock().active_guests.len(), 2);
 
-        phys_pages.rm_active_guest(new_id);
+        page_tracker.rm_active_guest(new_id);
 
-        assert_eq!(phys_pages.inner.lock().active_guests.len(), 1);
+        assert_eq!(page_tracker.inner.lock().active_guests.len(), 1);
     }
 }

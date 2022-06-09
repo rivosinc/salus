@@ -428,26 +428,6 @@ pub trait PlatformPageTable: Sized {
         Ok(UnmappedPhysPage::new(page))
     }
 
-    /// Returns an iterator to unmapped pages for the given range.
-    /// Guarantees that the full range of pages can be unmapped.
-    fn unmap_range<P: PhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        num_pages: u64,
-    ) -> Result<UnmapIter<Self, P>> {
-        if addr.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(addr.size()));
-        }
-        if addr.iter_from().take(num_pages as usize).all(|a| {
-            self.get_4k_leaf_with_type(RawAddr::from(a), P::mem_type())
-                .is_ok()
-        }) {
-            Ok(UnmapIter::new(self, addr, num_pages))
-        } else {
-            Err(Error::PageNotOwned)
-        }
-    }
-
     /// Returns an iterator to invalidated pages for the given range.
     /// Guarantees that the full range of pages can be unmapped.
     fn invalidate_range<P: PhysPage>(
@@ -568,39 +548,6 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
 }
 
 impl<T: PlatformPageTable> PlatformPageTableHelpers for T {}
-
-pub struct UnmapIter<'a, T: PlatformPageTable, P: PhysPage> {
-    owner: &'a mut T,
-    curr: PageAddr<T::MappedAddressSpace>,
-    count: u64,
-    phantom: PhantomData<P>,
-}
-
-impl<'a, T: PlatformPageTable, P: PhysPage> UnmapIter<'a, T, P> {
-    pub fn new(owner: &'a mut T, curr: PageAddr<T::MappedAddressSpace>, count: u64) -> Self {
-        Self {
-            owner,
-            curr,
-            count,
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl<'a, T: PlatformPageTable, P: PhysPage> Iterator for UnmapIter<'a, T, P> {
-    type Item = UnmappedPhysPage<P>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.count == 0 {
-            return None;
-        }
-
-        let this_page = self.curr;
-        self.curr = self.curr.checked_add_pages(1).unwrap();
-        self.count -= 1;
-        self.owner.unmap_page(this_page).ok()
-    }
-}
 
 pub struct InvalidateIter<'a, T: PlatformPageTable, P: PhysPage> {
     owner: &'a mut T,

@@ -15,9 +15,9 @@ use crate::{HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, Pag
 /// for the page.
 type PageOwnerVec = ArrayVec<PageOwnerId, MAX_PAGE_OWNERS>;
 
-/// `PageOwnership` holds the current ownership status of a page.
+/// `PageState` holds the current ownership status of a page.
 #[derive(Clone, Debug)]
-enum PageOwnership {
+enum PageState {
     /// Not present, reserved, or otherwise not usable.
     Reserved,
 
@@ -27,7 +27,7 @@ enum PageOwnership {
 
     /// Page is owned by the hypervisor or a VM. Does not necessarily imply the page is mapped
     /// by the owning VM (e.g. may be used to build the VM's G-stage page-tables).
-    Owned(PageOwnerVec),
+    Owned,
 }
 
 /// The maximum length for an ownership chain. Enough for the host VM to assign to a guest VM
@@ -41,7 +41,8 @@ const MAX_PAGE_OWNERS: usize = 3;
 #[derive(Clone, Debug)]
 pub struct PageInfo {
     mem_type: MemType,
-    ownership: PageOwnership,
+    state: PageState,
+    owners: PageOwnerVec,
 }
 
 impl PageInfo {
@@ -49,7 +50,8 @@ impl PageInfo {
     pub fn new() -> Self {
         Self {
             mem_type: MemType::Ram,
-            ownership: PageOwnership::Free,
+            state: PageState::Free,
+            owners: PageOwnerVec::new(),
         }
     }
 
@@ -59,7 +61,8 @@ impl PageInfo {
         owners.push(PageOwnerId::hypervisor());
         Self {
             mem_type: MemType::Ram,
-            ownership: PageOwnership::Owned(owners),
+            state: PageState::Owned,
+            owners,
         }
     }
 
@@ -67,7 +70,8 @@ impl PageInfo {
     pub fn new_reserved() -> Self {
         Self {
             mem_type: MemType::Ram,
-            ownership: PageOwnership::Reserved,
+            state: PageState::Reserved,
+            owners: PageOwnerVec::new(),
         }
     }
 
@@ -77,26 +81,27 @@ impl PageInfo {
         owners.push(PageOwnerId::hypervisor());
         Self {
             mem_type: MemType::Mmio(dev_type),
-            ownership: PageOwnership::Owned(owners),
+            state: PageState::Owned,
+            owners,
         }
     }
 
     /// Returns the current owner, if it exists.
     pub fn owner(&self) -> Option<PageOwnerId> {
-        match self.ownership {
-            PageOwnership::Owned(ref owners) => Some(owners[owners.len() - 1]),
+        match self.state {
+            PageState::Owned => Some(self.owners[self.owners.len() - 1]),
             _ => None,
         }
     }
 
     /// Returns if the page is free.
     pub fn is_free(&self) -> bool {
-        matches!(self.ownership, PageOwnership::Free)
+        matches!(self.state, PageState::Free)
     }
 
     /// Returns if the page is marked reserved.
     pub fn is_reserved(&self) -> bool {
-        matches!(self.ownership, PageOwnership::Reserved)
+        matches!(self.state, PageState::Reserved)
     }
 
     /// Returns the page type.
@@ -106,16 +111,16 @@ impl PageInfo {
 
     /// Pops the current owner if there is one, returning the page to the previous owner.
     pub fn pop_owner(&mut self) -> PageTrackingResult<PageOwnerId> {
-        match self.ownership {
-            PageOwnership::Owned(ref mut owners) => {
-                if owners.len() == 1 {
-                    Err(PageTrackingError::OwnerOverflow) // Can't pop the last owner.
+        match self.state {
+            PageState::Owned => {
+                if self.owners.len() == 1 {
+                    Err(PageTrackingError::OwnerUnderflow) // Can't pop the last owner.
                 } else {
-                    Ok(owners.pop().expect("PageOwnerVec can't be empty"))
+                    Ok(self.owners.pop().expect("PageOwnerVec can't be empty"))
                 }
             }
-            PageOwnership::Reserved => Err(PageTrackingError::ReservedPage),
-            PageOwnership::Free => Err(PageTrackingError::UnownedPage),
+            PageState::Reserved => Err(PageTrackingError::ReservedPage),
+            PageState::Free => Err(PageTrackingError::UnownedPage),
         }
     }
 
@@ -136,10 +141,10 @@ impl PageInfo {
     where
         F: Fn(&PageOwnerId) -> bool,
     {
-        match self.ownership {
-            PageOwnership::Owned(ref owners) => {
+        match self.state {
+            PageState::Owned => {
                 // We go in reverse to start at the top of the ownership stack.
-                owners.iter().rev().find(|&o| check(o)).copied()
+                self.owners.iter().rev().find(|&o| check(o)).copied()
             }
             _ => None,
         }
@@ -148,27 +153,24 @@ impl PageInfo {
     /// Sets the current owner of the page while maintaining a "chain of custody" so the previous
     /// owner is known when the new owner abandons the page.
     pub fn push_owner(&mut self, owner: PageOwnerId) -> PageTrackingResult<()> {
-        match self.ownership {
-            PageOwnership::Owned(ref mut owners) => owners
+        match self.state {
+            PageState::Owned => self
+                .owners
                 .try_push(owner)
                 .map_err(|_| PageTrackingError::OwnerOverflow),
-            PageOwnership::Free => {
-                let mut owners = PageOwnerVec::new();
-                owners.push(owner);
-                self.ownership = PageOwnership::Owned(owners);
+            PageState::Free => {
+                self.owners.push(owner);
+                self.state = PageState::Owned;
                 Ok(())
             }
-            PageOwnership::Reserved => Err(PageTrackingError::ReservedPage),
+            PageState::Reserved => Err(PageTrackingError::ReservedPage),
         }
     }
 }
 
 impl Default for PageInfo {
     fn default() -> Self {
-        Self {
-            mem_type: MemType::Ram,
-            ownership: PageOwnership::Free,
-        }
+        Self::new()
     }
 }
 

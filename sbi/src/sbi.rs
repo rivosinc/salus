@@ -374,6 +374,29 @@ pub struct TvmCreateParams {
     pub tvm_vcpu_addr: u64,
 }
 
+#[repr(u64)]
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
+pub enum TsmPageType {
+    #[default]
+    Page4k = 0,
+    Page2M = 1,
+    Page1G = 2,
+    Page512G = 3,
+}
+
+impl TsmPageType {
+    pub fn from_reg(reg: u64) -> Result<Self> {
+        use TsmPageType::*;
+        match reg {
+            0 => Ok(Page4k),
+            1 => Ok(Page2M),
+            2 => Ok(Page1G),
+            3 => Ok(Page512G),
+            _ => Err(Error::InvalidParam),
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub enum TeeFunction {
     /// Creates a TVM from the parameters in the `TvmCreateParams` structure at physical address
@@ -396,22 +419,39 @@ pub enum TeeFunction {
         page_addr: u64,
         num_pages: u64,
     },
-    /// Message from the host to add page(s) to a TVM it created with `TvmCreate`.
-    /// a6 = 3,
-    /// a0 = guest_id,
-    /// a1 = address of the first page,
-    /// a2 = page_type: 0 => 4k, 1=> 2M, 2=> 1G, 3=512G, Others: reserved
+    /// Maps `num_pages` zero-filled pages starting at physical address `page_addr` into the
+    /// specified guest's address space at `guest_addr`.
+    ///
+    /// a6 = 3
+    /// a0 = guest_id
+    /// a1 = physical address of the pages to insert
+    /// a2 = page size
     /// a3 = number of pages
-    /// a4 = Guest Address
-    /// a4 = if non-zero don't zero pages before passing to the guest(only allowed before starting
-    /// the guest, pages will be added to measurement of the guest.)
-    AddPages {
+    /// a4 = guest physical address
+    TvmAddZeroPages {
         guest_id: u64,
         page_addr: u64,
-        page_type: u64,
+        page_type: TsmPageType,
         num_pages: u64,
-        gpa: u64,
-        measure_preserve: bool,
+        guest_addr: u64,
+    },
+    /// Copies `num_pages` pages from `src_addr` to `dest_addr`, then measures and maps the
+    /// pages at `dest_addr` into the specified guest's address space at `guest_addr`.
+    ///
+    /// a6 = 11
+    /// a0 = guest_id
+    /// a1 = physical address of the pages to copy from
+    /// a2 = physical address of the pages to insert
+    /// a3 = page size
+    /// a4 = number of pages
+    /// a5 = guest physical address
+    TvmAddMeasuredPages {
+        guest_id: u64,
+        src_addr: u64,
+        dest_addr: u64,
+        page_type: TsmPageType,
+        num_pages: u64,
+        guest_addr: u64,
     },
     /// Moves a VM from the initializing state to the Runnable state
     /// a6 = 4
@@ -480,13 +520,12 @@ impl TeeFunction {
                 page_addr: args[1],
                 num_pages: args[2],
             }),
-            3 => Ok(AddPages {
+            3 => Ok(TvmAddZeroPages {
                 guest_id: args[0],
                 page_addr: args[1],
-                page_type: args[2],
+                page_type: TsmPageType::from_reg(args[2])?,
                 num_pages: args[3],
-                gpa: args[4],
-                measure_preserve: args[5] == 0,
+                guest_addr: args[4],
             }),
             4 => Ok(Finalize { guest_id: args[0] }),
             5 => Ok(TvmCpuRun {
@@ -513,6 +552,14 @@ impl TeeFunction {
                 dest_addr: args[0],
                 len: args[1],
             }),
+            11 => Ok(TvmAddMeasuredPages {
+                guest_id: args[0],
+                src_addr: args[1],
+                dest_addr: args[2],
+                page_type: TsmPageType::from_reg(args[3])?,
+                num_pages: args[4],
+                guest_addr: args[5],
+            }),
             _ => Err(Error::InvalidParam),
         }
     }
@@ -530,13 +577,12 @@ impl TeeFunction {
                 page_addr: _,
                 num_pages: _,
             } => 2,
-            AddPages {
+            TvmAddZeroPages {
                 guest_id: _,
                 page_addr: _,
                 page_type: _,
                 num_pages: _,
-                gpa: _,
-                measure_preserve: _,
+                guest_addr: _,
             } => 3,
             Finalize { guest_id: _ } => 4,
             TvmCpuRun {
@@ -563,6 +609,14 @@ impl TeeFunction {
                 dest_addr: _,
                 len: _,
             } => 10,
+            TvmAddMeasuredPages {
+                guest_id: _,
+                src_addr: _,
+                dest_addr: _,
+                page_type: _,
+                num_pages: _,
+                guest_addr: _,
+            } => 11,
         }
     }
 
@@ -579,13 +633,12 @@ impl TeeFunction {
                 page_addr: _,
                 num_pages: _,
             } => *guest_id,
-            AddPages {
+            TvmAddZeroPages {
                 guest_id,
                 page_addr: _,
                 page_type: _,
                 num_pages: _,
-                gpa: _,
-                measure_preserve: _,
+                guest_addr: _,
             } => *guest_id,
             Finalize { guest_id } => *guest_id,
             TvmCpuRun {
@@ -609,6 +662,14 @@ impl TeeFunction {
                 value: _,
             } => *guest_id,
             TsmGetInfo { dest_addr, len: _ } => *dest_addr,
+            TvmAddMeasuredPages {
+                guest_id,
+                src_addr: _,
+                dest_addr: _,
+                page_type: _,
+                num_pages: _,
+                guest_addr: _,
+            } => *guest_id,
         }
     }
 
@@ -624,13 +685,12 @@ impl TeeFunction {
                 page_addr,
                 num_pages: _,
             } => *page_addr,
-            AddPages {
+            TvmAddZeroPages {
                 guest_id: _,
                 page_addr,
                 page_type: _,
                 num_pages: _,
-                gpa: _,
-                measure_preserve: _,
+                guest_addr: _,
             } => *page_addr,
             TvmCpuRun {
                 guest_id: _,
@@ -653,6 +713,14 @@ impl TeeFunction {
                 value: _,
             } => *vcpu_id,
             TsmGetInfo { dest_addr: _, len } => *len,
+            TvmAddMeasuredPages {
+                guest_id: _,
+                src_addr,
+                dest_addr: _,
+                page_type: _,
+                num_pages: _,
+                guest_addr: _,
+            } => *src_addr,
             _ => 0,
         }
     }
@@ -665,14 +733,13 @@ impl TeeFunction {
                 page_addr: _,
                 num_pages,
             } => *num_pages,
-            AddPages {
+            TvmAddZeroPages {
                 guest_id: _,
                 page_addr: _,
                 page_type,
                 num_pages: _,
-                gpa: _,
-                measure_preserve: _,
-            } => *page_type,
+                guest_addr: _,
+            } => *page_type as u64,
             GetGuestMeasurement {
                 measurement_version: _,
                 measurement_type: _,
@@ -685,6 +752,14 @@ impl TeeFunction {
                 register,
                 value: _,
             } => *register as u64,
+            TvmAddMeasuredPages {
+                guest_id: _,
+                src_addr: _,
+                dest_addr,
+                page_type: _,
+                num_pages: _,
+                guest_addr: _,
+            } => *dest_addr,
             _ => 0,
         }
     }
@@ -692,13 +767,12 @@ impl TeeFunction {
     pub fn a3(&self) -> u64 {
         use TeeFunction::*;
         match self {
-            AddPages {
+            TvmAddZeroPages {
                 guest_id: _,
                 page_addr: _,
                 page_type: _,
                 num_pages,
-                gpa: _,
-                measure_preserve: _,
+                guest_addr: _,
             } => *num_pages,
             GetGuestMeasurement {
                 measurement_version: _,
@@ -712,6 +786,14 @@ impl TeeFunction {
                 register: _,
                 value,
             } => *value,
+            TvmAddMeasuredPages {
+                guest_id: _,
+                src_addr: _,
+                dest_addr: _,
+                page_type,
+                num_pages: _,
+                guest_addr: _,
+            } => *page_type as u64,
             _ => 0,
         }
     }
@@ -719,14 +801,21 @@ impl TeeFunction {
     pub fn a4(&self) -> u64 {
         use TeeFunction::*;
         match self {
-            AddPages {
+            TvmAddZeroPages {
                 guest_id: _,
                 page_addr: _,
                 page_type: _,
                 num_pages: _,
-                gpa,
-                measure_preserve: _,
-            } => *gpa,
+                guest_addr,
+            } => *guest_addr,
+            TvmAddMeasuredPages {
+                guest_id: _,
+                src_addr: _,
+                dest_addr: _,
+                page_type: _,
+                num_pages,
+                guest_addr: _,
+            } => *num_pages,
             _ => 0,
         }
     }
@@ -734,20 +823,14 @@ impl TeeFunction {
     pub fn a5(&self) -> u64 {
         use TeeFunction::*;
         match self {
-            AddPages {
+            TvmAddMeasuredPages {
                 guest_id: _,
-                page_addr: _,
+                src_addr: _,
+                dest_addr: _,
                 page_type: _,
                 num_pages: _,
-                gpa: _,
-                measure_preserve,
-            } => {
-                if *measure_preserve {
-                    1
-                } else {
-                    0
-                }
-            }
+                guest_addr,
+            } => *guest_addr,
             _ => 0,
         }
     }

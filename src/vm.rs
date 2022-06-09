@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::vec::Vec;
-use arrayvec::ArrayVec;
 use core::{alloc::Allocator, mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
@@ -72,6 +71,12 @@ pub struct Vm<T: GuestStagePageTable, S = VmStateFinalized> {
 impl<T: GuestStagePageTable, S> Vm<T, S> {
     pub fn page_owner_id(&self) -> PageOwnerId {
         self.vm_pages.page_owner_id()
+    }
+
+    /// Convenience function to turn a raw u64 from an SBI call to a `GuestPageAddr`.
+    fn guest_addr_from_raw(&self, guest_addr: u64) -> sbi::Result<GuestPageAddr> {
+        PageAddr::new(RawAddr::guest(guest_addr, self.page_owner_id()))
+            .ok_or(SbiError::InvalidParam)
     }
 }
 
@@ -314,21 +319,31 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             } => self
                 .guest_add_page_table_pages(guest_id, page_addr, num_pages)
                 .into(),
-            AddPages {
+            TvmAddZeroPages {
                 guest_id,
                 page_addr,
                 page_type,
                 num_pages,
-                gpa,
-                measure_preserve,
+                guest_addr,
             } => self
-                .guest_add_pages(
+                .guest_add_zero_pages(guest_id, page_addr, page_type, num_pages, guest_addr)
+                .into(),
+            TvmAddMeasuredPages {
+                guest_id,
+                src_addr,
+                dest_addr,
+                page_type,
+                num_pages,
+                guest_addr,
+            } => self
+                .guest_add_measured_pages(
                     guest_id,
-                    page_addr,
+                    src_addr,
+                    dest_addr,
                     page_type,
                     num_pages,
-                    gpa,
-                    measure_preserve,
+                    guest_addr,
+                    active_pages,
                 )
                 .into(),
             Finalize { guest_id } => self.guest_finalize(guest_id).into(),
@@ -457,25 +472,15 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             unsafe { core::ptr::read_unaligned(param_bytes.as_slice().as_ptr().cast()) };
 
         // Now create the VM, claiming the pages that the host donated to us.
-        let mut addrs = ArrayVec::<GuestPageAddr, 3>::new();
-        for addr in [
-            params.tvm_page_directory_addr,
-            params.tvm_state_addr,
-            params.tvm_vcpu_addr,
-        ]
-        .into_iter()
-        {
-            addrs.push(
-                PageAddr::new(RawAddr::guest(addr, self.vm_pages.page_owner_id()))
-                    .ok_or(SbiError::InvalidParam)?,
-            );
-        }
+        let page_root_addr = self.guest_addr_from_raw(params.tvm_page_directory_addr)?;
+        let state_addr = self.guest_addr_from_raw(params.tvm_state_addr)?;
+        let vcpu_addr = self.guest_addr_from_raw(params.tvm_vcpu_addr)?;
         let num_vcpu_pages = PageSize::num_4k_pages(params.tvm_num_vcpus * VM_CPU_BYTES);
         let (guest_vm, state_page) = self
             .vm_pages
-            .create_guest_vm(addrs[0], addrs[1], addrs[2], num_vcpu_pages)
+            .create_guest_vm(page_root_addr, state_addr, vcpu_addr, num_vcpu_pages)
             .map_err(|_| SbiError::InvalidParam)?;
-        let id = guest_vm.vm_pages.page_owner_id();
+        let id = guest_vm.page_owner_id();
 
         let guest_state = GuestState::new(guest_vm, state_page);
         self.guests
@@ -514,14 +519,20 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         Ok(0)
     }
 
-    /// Adds a vCPU with `vcpu_id` to a guest VM.
-    fn guest_add_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
+    /// Retrieves the guest VM with the ID `guest_id`.
+    fn guest_by_id(&self, guest_id: u64) -> sbi::Result<GuestState<T>> {
         let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
         let guest = self
             .guests
             .as_ref()
             .and_then(|g| g.get(guest_id))
             .ok_or(SbiError::InvalidParam)?;
+        Ok(guest)
+    }
+
+    /// Adds a vCPU with `vcpu_id` to a guest VM.
+    fn guest_add_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
+        let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
         guest_vm.add_vcpu(vcpu_id)?;
         Ok(0)
@@ -535,12 +546,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         register: sbi::TvmCpuRegister,
         value: u64,
     ) -> sbi::Result<u64> {
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        let guest = self
-            .guests
-            .as_ref()
-            .and_then(|g| g.get(guest_id))
-            .ok_or(SbiError::InvalidParam)?;
+        let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
         guest_vm.set_vcpu_reg(vcpu_id, register, value)?;
         Ok(0)
@@ -548,12 +554,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 
     /// Runs a guest VM's vCPU.
     fn guest_run_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        let guest = self
-            .guests
-            .as_ref()
-            .and_then(|g| g.get(guest_id))
-            .ok_or(SbiError::InvalidParam)?;
+        let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest.as_finalized_vm().ok_or(SbiError::InvalidParam)?;
         guest_vm.run_vcpu(vcpu_id)?;
         Ok(0) // TODO: Return the exit reason to the host.
@@ -565,16 +566,8 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         from_addr: u64,
         num_pages: u64,
     ) -> sbi::Result<u64> {
-        let from_page_addr =
-            PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
-                .ok_or(SbiError::InvalidAddress)?;
-
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        let guest = self
-            .guests
-            .as_ref()
-            .and_then(|g| g.get(guest_id))
-            .ok_or(SbiError::InvalidParam)?;
+        let from_page_addr = self.guest_addr_from_raw(from_addr)?;
+        let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
         self.vm_pages
             .add_pte_pages_builder(from_page_addr, num_pages, &guest_vm.vm_pages)
@@ -586,45 +579,60 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         Ok(0)
     }
 
-    /// page_type: 0 => 4K, 1=> 2M, 2=> 1G, 3=512G
-    fn guest_add_pages(
+    fn guest_add_zero_pages(
         &self,
         guest_id: u64,
-        from_addr: u64,
-        page_type: u64,
+        page_addr: u64,
+        page_type: sbi::TsmPageType,
         num_pages: u64,
-        to_addr: u64,
-        measure_preserve: bool,
+        guest_addr: u64,
     ) -> sbi::Result<u64> {
-        println!(
-            "Add pages {from_addr:x} page_type:{page_type} num_pages:{num_pages} to_addr:{to_addr:x}",
-        );
-        if page_type != 0 {
+        if page_type != sbi::TsmPageType::Page4k {
             // TODO - support huge pages.
             // TODO - need to break up mappings if given address that's part of a huge page.
             return Err(SbiError::InvalidParam);
         }
 
-        let from_page_addr =
-            PageAddr::new(RawAddr::guest(from_addr, self.vm_pages.page_owner_id()))
-                .ok_or(SbiError::InvalidAddress)?;
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
-        let guest = self
-            .guests
-            .as_ref()
-            .and_then(|g| g.get(guest_id))
-            .ok_or(SbiError::InvalidParam)?;
+        let from_page_addr = self.guest_addr_from_raw(page_addr)?;
+        let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
-        let to_page_addr =
-            PageAddr::new(RawAddr::guest(to_addr, guest_vm.vm_pages.page_owner_id()))
-                .ok_or(SbiError::InvalidAddress)?;
+        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         self.vm_pages
-            .add_4k_pages_builder(
+            .add_zero_pages_builder(from_page_addr, num_pages, &guest_vm.vm_pages, to_page_addr)
+            .map_err(|_| SbiError::InvalidParam)?;
+
+        Ok(num_pages)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn guest_add_measured_pages(
+        &self,
+        guest_id: u64,
+        src_addr: u64,
+        dest_addr: u64,
+        page_type: sbi::TsmPageType,
+        num_pages: u64,
+        guest_addr: u64,
+        active_pages: &ActiveVmPages<T>,
+    ) -> sbi::Result<u64> {
+        if page_type != sbi::TsmPageType::Page4k {
+            // TODO - support huge pages.
+            // TODO - need to break up mappings if given address that's part of a huge page.
+            return Err(SbiError::InvalidParam);
+        }
+
+        let src_page_addr = self.guest_addr_from_raw(src_addr)?;
+        let from_page_addr = self.guest_addr_from_raw(dest_addr)?;
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
+        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        active_pages
+            .copy_and_add_data_pages_builder(
+                src_page_addr,
                 from_page_addr,
                 num_pages,
                 &guest_vm.vm_pages,
                 to_page_addr,
-                measure_preserve,
             )
             .map_err(|_| SbiError::InvalidParam)?;
 

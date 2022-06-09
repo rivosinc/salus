@@ -148,22 +148,27 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         |=========================================
     */
 
-    let first_guest_page = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
     let measurement_page_addr = next_page;
+    next_page += PAGE_SIZE_4K;
+
+    let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
+    let donated_pages_base = next_page;
     // Add data pages
-    let msg = SbiMessage::Tee(sbi::TeeFunction::AddPages {
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddMeasuredPages {
         guest_id: vmid,
-        page_addr: first_guest_page,
-        page_type: 0,
+        src_addr: guest_image_base,
+        dest_addr: next_page,
+        page_type: sbi::TsmPageType::Page4k,
         num_pages: NUM_GUEST_DATA_PAGES,
-        gpa: USABLE_RAM_START_ADDRESS,
-        measure_preserve: false,
+        guest_addr: USABLE_RAM_START_ADDRESS,
     });
-    // Safety: `AddPages` donates the pages pointed to by `tvm_create_params` to SBI. This is
-    // safe because those pages are not used by this program.
+    // Safety: `TvmAddMeasuredPages` donates the pages pointed to by `dest_addr` to the TSM and
+    // reads the pages pointed to by `src_addr`. This is safe because those pages are not used by
+    // this program.
     unsafe {
-        ecall_send(&msg).expect("Tellus - AddPages returned error");
+        ecall_send(&msg).expect("Tellus - TvmAddMeasuredPages returned error");
     }
+    next_page += PAGE_SIZE_4K * NUM_GUEST_DATA_PAGES;
 
     let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {
         measurement_version: 1,
@@ -206,13 +211,12 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Add zeroed (non-measured) pages
     // TODO: Make sure that these guest pages are actually zero
-    let msg = SbiMessage::Tee(sbi::TeeFunction::AddPages {
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddZeroPages {
         guest_id: vmid,
-        page_addr: first_guest_page + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
-        page_type: 0,
+        page_addr: next_page,
+        page_type: sbi::TsmPageType::Page4k,
         num_pages: NUM_GUEST_ZERO_PAGES,
-        gpa: USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
-        measure_preserve: true,
+        guest_addr: USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
     });
     // Safety: `AddPages` donates the pages pointed to by `tvm_create_params` to SBI. This is
     // safe because those pages are not used by this program.
@@ -261,7 +265,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // check that guest pages have been cleared
     for i in 0u64..(NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) / 8 {
-        let m = (first_guest_page + i) as *const u64;
+        let m = (donated_pages_base + i) as *const u64;
         unsafe {
             if core::ptr::read_volatile(m) != 0 {
                 panic!("Tellus - Read back non-zero at qword offset {i:x} after exiting from TVM!");

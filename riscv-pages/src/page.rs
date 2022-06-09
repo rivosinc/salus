@@ -399,6 +399,13 @@ impl Page {
         // guaranteed to be within the size of the page
         unsafe { slice::from_raw_parts(base_ptr, self.size as usize) }
     }
+
+    /// Returns the contents of the page as a mutable slice of bytes.
+    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
+        let base_ptr = self.addr.bits() as *mut u8;
+        // Safety: same as as_bytes().
+        unsafe { slice::from_raw_parts_mut(base_ptr, self.size as usize) }
+    }
 }
 
 impl PhysPage for Page {

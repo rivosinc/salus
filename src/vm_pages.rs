@@ -127,6 +127,38 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         }
         Ok(())
     }
+
+    pub fn copy_and_add_data_pages_builder(
+        &self,
+        src_addr: GuestPageAddr,
+        from_addr: GuestPageAddr,
+        count: u64,
+        to: &VmPages<T, VmStateInitializing>,
+        to_addr: GuestPageAddr,
+    ) -> Result<u64> {
+        let mut root = self.root.lock();
+        let pages = root
+            .invalidate_range::<Page>(from_addr, PageSize::Size4k, count)
+            .map_err(Error::Paging)?
+            .map(move |unmapped| {
+                // We don't care about clearing the contents of these pages since we're going to
+                // overwrite them anyway.
+                let p = unmapped.to_page();
+                // Unwrap ok here since we know the pages are valid and were previously mapped.
+                self.page_tracker.convert_page(p.addr()).unwrap();
+                p
+            });
+        for (mut page, (src_addr, to_addr)) in
+            pages.zip(src_addr.iter_from().zip(to_addr.iter_from()))
+        {
+            self.page_tracker
+                .assign_page(page.addr(), to.page_owner_id(), PageState::Mapped)
+                .map_err(Error::SettingOwner)?;
+            self.copy_from_guest(page.as_mut_bytes(), src_addr.into())?;
+            to.add_measured_4k_page(to_addr, page)?;
+        }
+        Ok(count)
+    }
 }
 
 /// VmPages is the single management point for memory used by virtual machines.
@@ -280,33 +312,24 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         Ok(())
     }
 
-    /// Add data pages to the given builder
-    // TODO add other page sizes
-    pub fn add_4k_pages_builder(
+    /// Adds zero-filled pages to the given guest.
+    pub fn add_zero_pages_builder(
         &self,
         from_addr: GuestPageAddr,
         count: u64,
         to: &VmPages<T, VmStateInitializing>,
         to_addr: GuestPageAddr,
-        measure_preserve: bool,
     ) -> Result<u64> {
         let mut root = self.root.lock();
-        let unmapped_pages = root
-            .invalidate_range::<Page>(from_addr, PageSize::Size4k, count)
-            .map_err(Error::Paging)?;
-        for (unmapped_page, guest_addr) in unmapped_pages.zip(to_addr.iter_from()) {
-            let page = unmapped_page.to_page();
-            self.page_tracker
-                .convert_page(page.addr())
-                .map_err(Error::SettingOwner)?;
-            self.page_tracker
-                .assign_page(page.addr(), to.page_owner_id(), PageState::Mapped)
-                .map_err(Error::SettingOwner)?;
-            if measure_preserve {
-                to.add_measured_4k_page(guest_addr, page)?;
-            } else {
-                to.add_4k_page(guest_addr, page)?;
-            }
+        let pages = take_and_clean_pages_for(
+            &mut *root,
+            from_addr,
+            count,
+            to.page_owner_id(),
+            PageState::Mapped,
+        )?;
+        for (page, guest_addr) in pages.zip(to_addr.iter_from()) {
+            to.add_4k_page(guest_addr, page)?;
         }
         Ok(count)
     }

@@ -12,6 +12,7 @@ use crate::page::{Page, PageSize, PhysPage, SupervisorPageAddr};
 #[derive(Debug)]
 pub struct SequentialPages {
     addr: SupervisorPageAddr,
+    page_size: PageSize,
     count: u64,
 }
 
@@ -23,10 +24,10 @@ pub enum Error<I: Iterator<Item = Page>> {
     Overflow(I),
 }
 
-/// An error resulting from trying to create a `SequentialPages` from a range of pages with
-/// mismatched sizes.
+/// An error resulting from trying to create a `SequentialPages` from a range of pages that are not
+/// aligned to the requested size.
 #[derive(Clone, Copy, Debug)]
-pub struct PageSizeMismatch;
+pub struct UnalignedPages;
 
 impl SequentialPages {
     /// Creates a `SequentialPages` form the passed iterator.
@@ -43,19 +44,23 @@ impl SequentialPages {
         let first_page = page_iter.next().ok_or(Error::Empty)?;
 
         let addr = first_page.addr();
+        let page_size = first_page.size();
 
         let mut last_addr = addr;
-        let mut seq = Self { addr, count: 1 };
+        let mut seq = Self {
+            addr,
+            page_size,
+            count: 1,
+        };
         while let Some(page) = page_iter.next() {
-            let this_addr = page.addr();
-            if this_addr.size() != last_addr.size() {
+            if page.size() != page_size {
                 return Err(Error::NonUniformSize(
                     seq.into_iter()
                         .chain(core::iter::once(page))
                         .chain(page_iter),
                 ));
             }
-            let next_addr = match last_addr.checked_add_pages(1) {
+            let next_addr = match last_addr.checked_add_pages_with_size(1, page_size) {
                 Some(a) => a,
                 None => {
                     return Err(Error::Overflow(
@@ -65,14 +70,14 @@ impl SequentialPages {
                     ))
                 }
             };
-            if this_addr != next_addr {
+            if page.addr() != next_addr {
                 return Err(Error::NonContiguous(
                     seq.into_iter()
                         .chain(core::iter::once(page))
                         .chain(page_iter),
                 ));
             }
-            last_addr = this_addr;
+            last_addr = page.addr();
             seq.count += 1;
         }
 
@@ -98,24 +103,35 @@ impl SequentialPages {
     /// Returns the length of the contiguous memory region formed by the owned pages.
     pub fn length_bytes(&self) -> u64 {
         // Guaranteed not to overflow by the constructor.
-        self.addr.size() as u64 * self.count
+        self.page_size as u64 * self.count
     }
 
     /// Returns the size of the backing pages.
     pub fn page_size(&self) -> PageSize {
-        self.addr.size()
+        self.page_size
     }
 
     /// Returns `SequentialPages` for the memory range provided.
     /// # Safety
     /// The range's ownership is given to `SequentialPages`, the caller must uniquely own that
     /// memory.
-    pub unsafe fn from_mem_range(addr: SupervisorPageAddr, count: u64) -> Self {
-        Self { addr, count }
+    pub unsafe fn from_mem_range(
+        addr: SupervisorPageAddr,
+        page_size: PageSize,
+        count: u64,
+    ) -> Result<Self, UnalignedPages> {
+        if !addr.is_aligned(page_size) {
+            return Err(UnalignedPages);
+        }
+        Ok(Self {
+            addr,
+            page_size,
+            count,
+        })
     }
 
-    /// Returns `SequentialPages` for the page range [start, end). The pages must be of the same
-    /// size.
+    /// Returns `SequentialPages` for the page range [start, end) with size `page_size`. Both
+    /// start and end must be aligned to the requested size.
     ///
     /// # Safety
     /// The range's ownership is given to `SequentialPages`, the caller must uniquely own that
@@ -123,13 +139,15 @@ impl SequentialPages {
     pub unsafe fn from_page_range(
         start: SupervisorPageAddr,
         end: SupervisorPageAddr,
-    ) -> Result<Self, PageSizeMismatch> {
-        if start.size() != end.size() {
-            return Err(PageSizeMismatch);
+        page_size: PageSize,
+    ) -> Result<Self, UnalignedPages> {
+        if !start.is_aligned(page_size) || !end.is_aligned(page_size) {
+            return Err(UnalignedPages);
         }
         Ok(Self {
             addr: start,
-            count: end.bits().checked_sub(start.bits()).unwrap() / start.size() as u64,
+            page_size,
+            count: end.bits().checked_sub(start.bits()).unwrap() / page_size as u64,
         })
     }
 }
@@ -138,6 +156,7 @@ impl From<Page> for SequentialPages {
     fn from(p: Page) -> Self {
         Self {
             addr: p.addr(),
+            page_size: p.size(),
             count: 1,
         }
     }
@@ -157,11 +176,15 @@ impl Iterator for SeqPageIter {
             return None;
         }
         let addr = self.pages.addr;
-        self.pages.addr = self.pages.addr.checked_add_pages(1).unwrap();
+        self.pages.addr = self
+            .pages
+            .addr
+            .checked_add_pages_with_size(1, self.pages.page_size)
+            .unwrap();
         self.pages.count -= 1;
         // Safe because `pages` owns the memory, which can be converted to pages because it is owned
         // and aligned.
-        unsafe { Some(Page::new(addr)) }
+        unsafe { Some(Page::new_with_size(addr, self.pages.page_size)) }
     }
 }
 
@@ -254,7 +277,12 @@ mod tests {
     fn unsafe_range() {
         // Not safe, but this is a test
         let seq = unsafe {
-            SequentialPages::from_mem_range(PageAddr::new(RawAddr::supervisor(0x1000)).unwrap(), 4)
+            SequentialPages::from_mem_range(
+                PageAddr::new(RawAddr::supervisor(0x1000)).unwrap(),
+                PageSize::Size4k,
+                4,
+            )
+            .unwrap()
         };
         let mut pages = seq.into_iter();
         assert_eq!(0x1000, pages.next().unwrap().addr().bits());

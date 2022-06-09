@@ -59,10 +59,10 @@ impl<T> PageBox<T> {
         assert!(!ptr.is_null()); // Explicitly ban pages at zero address.
         unsafe {
             // Safe as the memory is totally owned and T fits in this page.
-            assert!(core::mem::size_of::<T>() <= page.addr().size() as usize);
+            assert!(core::mem::size_of::<T>() <= page.size() as usize);
             core::ptr::write(ptr, data);
         }
-        Self(NonNull::new(ptr).unwrap(), page.addr().size())
+        Self(NonNull::new(ptr).unwrap(), page.size())
     }
 
     /// Consumes the `PageBox` and returns the page that was used to hold the data.
@@ -71,8 +71,9 @@ impl<T> PageBox<T> {
         // data is aligned and owned so can be dropped.
         unsafe {
             core::ptr::drop_in_place(self.0.as_ptr());
-            Page::new(
-                PageAddr::with_size(RawAddr::supervisor(self.0.as_ptr() as u64), self.1).unwrap(),
+            Page::new_with_size(
+                PageAddr::new(RawAddr::supervisor(self.0.as_ptr() as u64)).unwrap(),
+                self.1,
             )
         }
     }
@@ -82,8 +83,9 @@ impl<T> PageBox<T> {
         unsafe {
             // Safe because self must have ownership of the page it was built with and the contained
             // data is aligned and owned so can be read with ptr::read.
-            let page = Page::new(
-                PageAddr::with_size(RawAddr::supervisor(self.0.as_ptr() as u64), self.1).unwrap(),
+            let page = Page::new_with_size(
+                PageAddr::new(RawAddr::supervisor(self.0.as_ptr() as u64)).unwrap(),
+                self.1,
             );
             let data = core::ptr::read(self.0.as_ptr());
             core::mem::forget(self);

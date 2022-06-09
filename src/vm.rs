@@ -745,7 +745,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     {
         let page_tracker = self.inner.vm_pages.page_tracker();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(vm_addr.size(), page.addr().size());
+            assert_eq!(page.size(), PageSize::Size4k);
             assert_eq!(
                 vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
                 page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
@@ -769,7 +769,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     {
         let page_tracker = self.inner.vm_pages.page_tracker();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(vm_addr.size(), page.addr().size());
+            assert_eq!(page.size(), PageSize::Size4k);
             if P::mem_type() == MemType::Ram {
                 // GPA -> SPA mappings need to match T::TOP_LEVEL_ALIGN alignment for RAM pages.
                 assert_eq!(

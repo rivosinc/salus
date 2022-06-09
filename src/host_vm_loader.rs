@@ -279,7 +279,8 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         let num_kernel_pages = self.kernel.size() / PageSize::Size4k as u64;
         let kernel_pages = unsafe {
             // Safe because HwMemMap reserved this region.
-            SequentialPages::from_mem_range(self.kernel.base().get_4k_addr(), num_kernel_pages)
+            SequentialPages::from_mem_range(self.kernel.base(), PageSize::Size4k, num_kernel_pages)
+                .unwrap()
         };
         self.vm
             .add_measured_pages(current_gpa, kernel_pages.into_iter());
@@ -297,7 +298,8 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             let num_initramfs_pages = r.size() / PageSize::Size4k as u64;
             let initramfs_pages = unsafe {
                 // Safe because HwMemMap reserved this region.
-                SequentialPages::from_mem_range(r.base().get_4k_addr(), num_initramfs_pages)
+                SequentialPages::from_mem_range(r.base(), PageSize::Size4k, num_initramfs_pages)
+                    .unwrap()
             };
             self.vm
                 .add_measured_pages(current_gpa, initramfs_pages.into_iter());

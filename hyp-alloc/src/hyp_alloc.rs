@@ -83,9 +83,11 @@ impl HypAlloc {
         unsafe {
             // Safe since this allocator must own this range of pages.
             SequentialPages::from_mem_range(
-                PageAddr::with_size(RawAddr::supervisor(base), inner.page_size).unwrap(),
+                PageAddr::with_alignment(RawAddr::supervisor(base), inner.page_size).unwrap(),
+                inner.page_size,
                 num_pages,
             )
+            .unwrap()
         }
     }
 }
@@ -133,7 +135,7 @@ mod tests {
         let num_pages = (MEM_SIZE as u64) / PageSize::Size4k as u64;
         let pages = unsafe {
             // Not safe - just a test
-            SequentialPages::from_mem_range(start_page, num_pages)
+            SequentialPages::from_mem_range(start_page, PageSize::Size4k, num_pages).unwrap()
         };
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);

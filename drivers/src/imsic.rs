@@ -85,18 +85,22 @@ pub struct ImsicGuestPage {
 }
 
 impl PhysPage for ImsicGuestPage {
-    /// Creates a new `ImsicGuestPage` at the given 4kB page address.
+    /// Creates a new `ImsicGuestPage` at the given page-aligned address. IMSIC pages are always 4kB.
     ///
     /// # Safety
     ///
     /// The caller must ensure `addr` refers to a uniquely owned IMSIC guest interrupt file.
-    unsafe fn new(addr: SupervisorPageAddr) -> Self {
-        assert_eq!(addr.size(), PageSize::Size4k);
+    unsafe fn new_with_size(addr: SupervisorPageAddr, size: PageSize) -> Self {
+        assert_eq!(size, PageSize::Size4k);
         Self { addr }
     }
 
     fn addr(&self) -> SupervisorPageAddr {
         self.addr
+    }
+
+    fn size(&self) -> PageSize {
+        PageSize::Size4k
     }
 
     fn mem_type() -> MemType {

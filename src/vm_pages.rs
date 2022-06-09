@@ -186,7 +186,7 @@ fn take_and_clean_pages_for<T: GuestStagePageTable>(
 ) -> Result<impl Iterator<Item = Page> + '_> {
     let page_tracker = root.page_tracker();
     let taken_pages = root
-        .invalidate_range(addr, num_pages)
+        .invalidate_range(addr, PageSize::Size4k, num_pages)
         .map_err(Error::Paging)?
         .map(CleanPage::from)
         .map(Page::from)
@@ -210,7 +210,10 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedVmPages(page_root_addr));
         }
-        let id = self.page_tracker.add_active_guest().map_err(Error::GuestId)?;
+        let id = self
+            .page_tracker
+            .add_active_guest()
+            .map_err(Error::GuestId)?;
         let mut root = self.root.lock();
 
         let guest_root_pages = SequentialPages::from_pages(take_and_clean_pages_for(
@@ -251,9 +254,6 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         count: u64,
         to: &VmPages<T, VmStateInitializing>,
     ) -> Result<()> {
-        if from_addr.size() != PageSize::Size4k {
-            return Err(Error::UnsupportedPageSize(from_addr.size()));
-        }
         let mut root = self.root.lock();
         let pt_pages = take_and_clean_pages_for(&mut *root, from_addr, count, to.page_owner_id())?;
         for page in pt_pages {
@@ -272,12 +272,9 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         to_addr: GuestPageAddr,
         measure_preserve: bool,
     ) -> Result<u64> {
-        if from_addr.size() != PageSize::Size4k {
-            return Err(Error::UnsupportedPageSize(from_addr.size()));
-        }
         let mut root = self.root.lock();
         let unmapped_pages = root
-            .invalidate_range::<Page>(from_addr, count)
+            .invalidate_range::<Page>(from_addr, PageSize::Size4k, count)
             .map_err(Error::Paging)?;
         for (unmapped_page, guest_addr) in unmapped_pages.zip(to_addr.iter_from()) {
             let page = unmapped_page.to_page();

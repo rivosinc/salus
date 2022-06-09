@@ -124,7 +124,7 @@ mod tests {
                 // Not safe - just a test
                 let slice = slice::from_raw_parts_mut(
                     page.addr().bits() as *mut u64,
-                    page.addr().size() as usize / mem::size_of::<u64>(),
+                    page.size() as usize / mem::size_of::<u64>(),
                 );
                 slice[0] = 0xdeadbeef;
             }
@@ -167,7 +167,7 @@ mod tests {
                 // Not safe - just a test
                 let slice = slice::from_raw_parts_mut(
                     page.addr().bits() as *mut u64,
-                    page.addr().size() as usize / mem::size_of::<u64>(),
+                    page.size() as usize / mem::size_of::<u64>(),
                 );
                 slice[0] = 0xdeadbeef;
             }

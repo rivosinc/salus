@@ -132,7 +132,7 @@ impl HwMemRegion {
     /// Returns the 4kB page-aligned base adddress of the region.
     pub fn end(&self) -> SupervisorPageAddr {
         // Unwrap ok because `size` must be a mutliple of the page size.
-        let pages = self.size / self.base.size() as u64;
+        let pages = self.size / PageSize::Size4k as u64;
         self.base.checked_add_pages(pages).unwrap()
     }
 }

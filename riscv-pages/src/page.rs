@@ -120,7 +120,6 @@ impl<AS: AddressSpace> PartialOrd for RawAddr<AS> {
 #[derive(Copy, Clone, Debug)]
 pub struct PageAddr<AS: AddressSpace> {
     addr: RawAddr<AS>,
-    size: PageSize,
 }
 
 pub type SupervisorPageAddr = PageAddr<SupervisorPhys>;
@@ -130,52 +129,38 @@ impl<AS: AddressSpace> PageAddr<AS> {
     /// Creates a 4kB-aligned `PageAddr` from a `RawAddr`, returning `None` if the address isn't
     /// aligned.
     pub fn new(addr: RawAddr<AS>) -> Option<Self> {
-        Self::with_size(addr, PageSize::Size4k)
+        Self::with_alignment(addr, PageSize::Size4k)
     }
 
     /// Creates a `PageAddr` from a `RawAddr`, returns `None` if the address isn't aligned to the
     /// requested page size.
-    pub fn with_size(addr: RawAddr<AS>, size: PageSize) -> Option<Self> {
-        if size.is_aligned(addr.bits()) {
-            Some(PageAddr { addr, size })
+    pub fn with_alignment(addr: RawAddr<AS>, alignment: PageSize) -> Option<Self> {
+        if alignment.is_aligned(addr.bits()) {
+            Some(PageAddr { addr })
         } else {
             None
         }
     }
 
     /// Creates a `PageAddr` from a `Pfn`.
-    pub fn from_pfn(pfn: Pfn<AS>, size: PageSize) -> Option<Self> {
+    pub fn from_pfn(pfn: Pfn<AS>, alignment: PageSize) -> Option<Self> {
         let phys_addr = RawAddr(pfn.0 << PFN_SHIFT, pfn.1);
-        Self::with_size(phys_addr, size)
+        Self::with_alignment(phys_addr, alignment)
     }
 
     /// Creates a `PageAddr` from a `RawAddr`, rounding up to the nearest multiple of the page
     /// size.
-    pub fn with_round_up(addr: RawAddr<AS>, size: PageSize) -> Self {
+    pub fn with_round_up(addr: RawAddr<AS>, alignment: PageSize) -> Self {
         Self {
-            addr: RawAddr::new(size.round_up(addr.bits()), addr.address_space()),
-            size,
+            addr: RawAddr::new(alignment.round_up(addr.bits()), addr.address_space()),
         }
     }
 
     /// Same as above, but rounding down to the nearest multiple of the page size.
-    pub fn with_round_down(addr: RawAddr<AS>, size: PageSize) -> Self {
+    pub fn with_round_down(addr: RawAddr<AS>, alignment: PageSize) -> Self {
         Self {
-            addr: RawAddr::new(size.round_down(addr.bits()), addr.address_space()),
-            size,
+            addr: RawAddr::new(alignment.round_down(addr.bits()), addr.address_space()),
         }
-    }
-
-    /// Returns the page size to which this address is guaranteed to be aligned.
-    pub fn size(&self) -> PageSize {
-        self.size
-    }
-
-    /// Returns the first 4k page address. This is OK because all page sizes must be a multiple of
-    /// 4k.
-    pub fn get_4k_addr(&self) -> PageAddr<AS> {
-        // Unwrap is OK as all pages are 4k aligned.
-        PageAddr::new(self.addr).unwrap()
     }
 
     /// Gets the raw bits of the page address.
@@ -183,9 +168,19 @@ impl<AS: AddressSpace> PageAddr<AS> {
         self.addr.0
     }
 
-    /// Moves to the next page address.
+    /// Returns if this address is aligned to the given page size.
+    pub fn is_aligned(&self, alignment: PageSize) -> bool {
+        alignment.is_aligned(self.addr.0)
+    }
+
+    /// Iterates from this address in 4kB chunks.
     pub fn iter_from(&self) -> PageAddrIter<AS> {
-        PageAddrIter::new(*self)
+        PageAddrIter::new(*self, PageSize::Size4k).unwrap()
+    }
+
+    /// Iterates from this address in `page_size` chunks, if this address is properly aligned.
+    pub fn iter_from_with_size(&self, page_size: PageSize) -> Option<PageAddrIter<AS>> {
+        PageAddrIter::new(*self, page_size)
     }
 
     /// Gets the pfn of the page address.
@@ -193,11 +188,16 @@ impl<AS: AddressSpace> PageAddr<AS> {
         Pfn::new((self.addr.0 >> PFN_SHIFT) & PFN_MASK, self.addr.1)
     }
 
-    /// Adds n pages to the current address.
+    /// Adds `n` 4kB pages to the current address.
     pub fn checked_add_pages(&self, n: u64) -> Option<Self> {
-        n.checked_mul(self.size as u64)
+        self.checked_add_pages_with_size(n, PageSize::Size4k)
+    }
+
+    /// Adds `n` `page_size`-sized pages to the current address if the address is properly aligned.
+    pub fn checked_add_pages_with_size(&self, n: u64, page_size: PageSize) -> Option<Self> {
+        n.checked_mul(page_size as u64)
             .and_then(|inc| self.addr.checked_increment(inc))
-            .and_then(|addr| Self::with_size(addr, self.size))
+            .and_then(|addr| Self::with_alignment(addr, page_size))
     }
 
     /// Gets the index of the page in the system (the linear page count from address 0).
@@ -221,11 +221,16 @@ impl<AS: AddressSpace> PartialOrd for PageAddr<AS> {
 /// Generate page addresses for the given size. 4096, 8192, 12288, ... until the end of u64's range
 pub struct PageAddrIter<AS: AddressSpace> {
     next: Option<PageAddr<AS>>,
+    increment: PageSize,
 }
 
 impl<AS: AddressSpace> PageAddrIter<AS> {
-    pub fn new(start: PageAddr<AS>) -> Self {
-        Self { next: Some(start) }
+    pub fn new(start: PageAddr<AS>, increment: PageSize) -> Option<Self> {
+        let next = PageAddr::with_alignment(RawAddr::from(start), increment)?;
+        Some(Self {
+            next: Some(next),
+            increment,
+        })
     }
 }
 
@@ -235,7 +240,7 @@ impl<AS: AddressSpace> Iterator for PageAddrIter<AS> {
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.next;
         if let Some(n) = self.next {
-            self.next = n.checked_add_pages(1);
+            self.next = n.checked_add_pages_with_size(1, self.increment);
         }
         next
     }
@@ -296,15 +301,25 @@ impl<AS: AddressSpace> From<PageAddr<AS>> for Pfn<AS> {
 
 /// Trait representing a page in the physical address space. The page may be backed by RAM, or
 /// a device (for MMIO).
-pub trait PhysPage {
-    /// Creates a new `PhysPage` at the specified address.
+pub trait PhysPage: Sized {
+    /// Creates a new 4kB `PhysPage` at the specified address.
     ///
     /// # Safety
     ///
     /// The caller must guarantee that the page referenced by `addr` is uniquely owned and not
     /// mapped into the address space of any VMs. Furthermore, the backing memory must be of the
     /// same type as this `PhysPage` is intended to represent (e.g. ordinary RAM for `Page`).
-    unsafe fn new(addr: SupervisorPageAddr) -> Self;
+    unsafe fn new(addr: SupervisorPageAddr) -> Self {
+        Self::new_with_size(addr, PageSize::Size4k)
+    }
+
+    /// Creates a new `PhysPage` with `size` page size at the specified address. Panics if `addr`
+    /// is not aligned to `size`.
+    ///
+    /// # Safety
+    ///
+    /// See new().
+    unsafe fn new_with_size(addr: SupervisorPageAddr, size: PageSize) -> Self;
 
     /// Returns the base address of this page.
     fn addr(&self) -> SupervisorPageAddr;
@@ -313,9 +328,7 @@ pub trait PhysPage {
     fn mem_type() -> MemType;
 
     /// Returns the page size of this page.
-    fn size(&self) -> PageSize {
-        self.addr().size()
-    }
+    fn size(&self) -> PageSize;
 
     /// Returns the page frame number (PFN) of this page.
     fn pfn(&self) -> SupervisorPfn {
@@ -330,6 +343,7 @@ pub trait PhysPage {
 /// back to be uniquely owned by a `Page` here in the hypervisor.
 pub struct Page {
     addr: SupervisorPageAddr,
+    size: PageSize,
 }
 
 impl Page {
@@ -347,6 +361,7 @@ impl Page {
         };
         let page = Self {
             addr: PageAddr::new(RawAddr::supervisor(aligned_ptr as u64)).unwrap(),
+            size: PageSize::Size4k,
         };
         std::mem::forget(mem);
         page
@@ -355,7 +370,7 @@ impl Page {
     /// Returns the u64 at the given index in the page.
     pub fn get_u64(&self, index: usize) -> Option<u64> {
         let offset = index * core::mem::size_of::<u64>();
-        if offset >= self.addr.size() as usize {
+        if offset >= self.size as usize {
             None
         } else {
             let address = self.addr.bits() + offset as u64;
@@ -382,7 +397,7 @@ impl Page {
         // Safe because the borrow cannot outlive the lifetime
         // of the underlying page, and the upper bound is
         // guaranteed to be within the size of the page
-        unsafe { slice::from_raw_parts(base_ptr, self.addr.size() as usize) }
+        unsafe { slice::from_raw_parts(base_ptr, self.size as usize) }
     }
 }
 
@@ -392,12 +407,17 @@ impl PhysPage for Page {
     /// # Safety
     ///
     /// See PhysPage::new(). `addr` must refer to a page of ordinary, idempotent system RAM.
-    unsafe fn new(addr: SupervisorPageAddr) -> Self {
-        Self { addr }
+    unsafe fn new_with_size(addr: SupervisorPageAddr, size: PageSize) -> Self {
+        assert!(addr.is_aligned(size));
+        Self { addr, size }
     }
 
     fn addr(&self) -> SupervisorPageAddr {
         self.addr
+    }
+
+    fn size(&self) -> PageSize {
+        self.size
     }
 
     fn mem_type() -> MemType {
@@ -412,7 +432,7 @@ impl From<UnmappedPage> for CleanPage {
     fn from(p: UnmappedPage) -> CleanPage {
         unsafe {
             // Safe because page owns all the memory at its address.
-            core::ptr::write_bytes(p.0.addr.bits() as *mut u8, 0, p.0.addr.size() as usize);
+            core::ptr::write_bytes(p.0.addr.bits() as *mut u8, 0, p.0.size() as usize);
         }
         CleanPage(p.0)
     }
@@ -449,26 +469,30 @@ mod tests {
         assert!(SupervisorPageAddr::new(RawAddr::supervisor(0x01)).is_none());
         assert!(SupervisorPageAddr::new(RawAddr::supervisor(0x1000)).is_some());
         assert!(
-            SupervisorPageAddr::with_size(RawAddr::supervisor(0x1000), PageSize::Size2M).is_none()
-        );
-        assert!(
-            SupervisorPageAddr::with_size(RawAddr::supervisor(0x20_0000), PageSize::Size2M)
-                .is_some()
-        );
-        assert!(
-            SupervisorPageAddr::with_size(RawAddr::supervisor(0x20_0000), PageSize::Size1G)
+            SupervisorPageAddr::with_alignment(RawAddr::supervisor(0x1000), PageSize::Size2M)
                 .is_none()
         );
-        assert!(
-            SupervisorPageAddr::with_size(RawAddr::supervisor(0x4000_0000), PageSize::Size1G)
-                .is_some()
-        );
-        assert!(SupervisorPageAddr::with_size(
+        assert!(SupervisorPageAddr::with_alignment(
+            RawAddr::supervisor(0x20_0000),
+            PageSize::Size2M
+        )
+        .is_some());
+        assert!(SupervisorPageAddr::with_alignment(
+            RawAddr::supervisor(0x20_0000),
+            PageSize::Size1G
+        )
+        .is_none());
+        assert!(SupervisorPageAddr::with_alignment(
+            RawAddr::supervisor(0x4000_0000),
+            PageSize::Size1G
+        )
+        .is_some());
+        assert!(SupervisorPageAddr::with_alignment(
             RawAddr::supervisor(0x4000_0000),
             PageSize::Size512G
         )
         .is_none());
-        assert!(SupervisorPageAddr::with_size(
+        assert!(SupervisorPageAddr::with_alignment(
             RawAddr::supervisor(0x80_0000_0000),
             PageSize::Size512G
         )
@@ -505,13 +529,13 @@ mod tests {
             Some(PageAddr::new(RawAddr::supervisor(12288)).unwrap())
         );
 
-        let addr_m = PageAddr::with_size(RawAddr::supervisor(0), PageSize::Size2M).unwrap();
-        let mut addrs = addr_m.iter_from();
+        let addr_m = PageAddr::with_alignment(RawAddr::supervisor(0), PageSize::Size2M).unwrap();
+        let mut addrs = addr_m.iter_from_with_size(PageSize::Size2M).unwrap();
         assert_eq!(addrs.next(), Some(addr_m));
         assert_eq!(
             addrs.next(),
             Some(
-                PageAddr::with_size(RawAddr::supervisor(1024 * 1024 * 2), PageSize::Size2M)
+                PageAddr::with_alignment(RawAddr::supervisor(1024 * 1024 * 2), PageSize::Size2M)
                     .unwrap()
             )
         );
@@ -524,12 +548,12 @@ mod tests {
         assert_eq!(addrs.next(), Some(addr4k));
         assert_eq!(addrs.next(), None);
 
-        let addr_m = PageAddr::with_size(
+        let addr_m = PageAddr::with_alignment(
             RawAddr::supervisor(0_u64.wrapping_sub(1024 * 1024 * 2)),
             PageSize::Size2M,
         )
         .unwrap();
-        let mut addrs = addr_m.iter_from();
+        let mut addrs = addr_m.iter_from_with_size(PageSize::Size2M).unwrap();
         assert_eq!(addrs.next(), Some(addr_m));
         assert_eq!(addrs.next(), None);
     }

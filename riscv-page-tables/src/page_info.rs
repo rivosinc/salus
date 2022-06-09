@@ -205,11 +205,14 @@ impl PageMap {
             .regions()
             .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= page_map_size)
             .expect("No free space for PageMap");
-        let page_map_base = page_map_region.base().get_4k_addr();
+        let page_map_base = page_map_region.base();
 
         // Safe to create pages from this memory as `HwMemMap` guarantees that this range is
-        // valid and free to use.
-        let seq_pages = unsafe { SequentialPages::from_mem_range(page_map_base, page_map_pages) };
+        // valid and free to use. Safe to unwrap since pages are always 4kB-aligned.
+        let seq_pages = unsafe {
+            SequentialPages::from_mem_range(page_map_base, PageSize::Size4k, page_map_pages)
+                .unwrap()
+        };
         let struct_pages = PageVec::from(seq_pages);
 
         // Reserve the memory consumed by the pagemap itself.
@@ -254,7 +257,7 @@ impl PageMap {
             page_map_index: 0,
         };
         for r in mem_map.regions() {
-            let base = r.base().get_4k_addr();
+            let base = r.base();
             if current_entry.base_pfn + current_entry.num_pages != base.index() {
                 let next_entry = SparseMapEntry {
                     base_pfn: base.index(),
@@ -265,7 +268,7 @@ impl PageMap {
                 current_entry = next_entry;
             }
 
-            let end = r.end().get_4k_addr();
+            let end = r.end();
             for _ in base.iter_from().take_while(|&a| a != end) {
                 match r.region_type() {
                     HwMemRegionType::Available => {
@@ -295,28 +298,18 @@ impl PageMap {
 
     /// Returns a reference to the `PageInfo` struct for the 4k page at `addr`.
     pub fn get(&self, addr: SupervisorPageAddr) -> Option<&PageInfo> {
-        // TODO: Support ownership tracking of huge-pages.
-        if addr.size().is_huge() {
-            return None;
-        }
         let index = self.get_map_index(addr)?;
         self.pages.get(index)
     }
 
     /// Returns a mutable reference to the `PageInfo` struct for the 4k page at `addr`.
     pub fn get_mut(&mut self, addr: SupervisorPageAddr) -> Option<&mut PageInfo> {
-        if addr.size().is_huge() {
-            return None;
-        }
         let index = self.get_map_index(addr)?;
         self.pages.get_mut(index)
     }
 
     /// Returns the number of pages after the page at `addr`
     pub fn num_after(&self, addr: SupervisorPageAddr) -> Option<usize> {
-        if addr.size().is_huge() {
-            return None;
-        }
         let index = self.get_map_index(addr)?;
         self.pages.len().checked_sub(index)
     }
@@ -346,9 +339,6 @@ pub struct PageMapIter<'a> {
 impl<'a> PageMapIter<'a> {
     /// Creates a new iterator from `page_map` starting at `start_addr`.
     pub fn new(page_map: &'a PageMap, start_addr: SupervisorPageAddr) -> Option<Self> {
-        if start_addr.size().is_huge() {
-            return None;
-        }
         let (cur_sparse_entry, entry) = page_map.sparse_map.iter().enumerate().find(|(_, s)| {
             s.base_pfn <= start_addr.index() && start_addr.index() < s.base_pfn + s.num_pages
         })?;

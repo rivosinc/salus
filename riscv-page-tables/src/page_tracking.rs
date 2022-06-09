@@ -196,7 +196,7 @@ impl<A: Allocator> HypPageAlloc<A> {
     /// physical memory can be used by the machine.
     pub fn new(mem_map: HwMemMap, alloc: A) -> Self {
         // Unwrap here (and below) since we can't continue if there isn't any free memory.
-        let first_page = mem_map.regions().next().unwrap().base().get_4k_addr();
+        let first_page = mem_map.regions().next().unwrap().base();
         let page_map = PageMap::build_from(mem_map);
         let first_avail_page = page_map
             .iter_from(first_page)
@@ -238,8 +238,9 @@ impl<A: Allocator> HypPageAlloc<A> {
             // Safe to create this range as they were previously free and we just took
             // ownership.
             let range = unsafe {
-                // Unwrap ok; we're guaranteed to be working with 4kB pages.
-                SequentialPages::from_page_range(self.next_page, last_page).unwrap()
+                // Unwrap ok; pages are always 4kB-aligned.
+                SequentialPages::from_page_range(self.next_page, last_page, PageSize::Size4k)
+                    .unwrap()
             };
             ranges.push(range);
 
@@ -339,8 +340,8 @@ impl<A: Allocator> HypPageAlloc<A> {
         unsafe {
             // It's safe to create a page range of the memory that `self` forfeited ownership of
             // above and the new `SequentialPages` is now the unique owner. Ok to unwrap here simce
-            // all pages we're working with are 4kB.
-            SequentialPages::from_page_range(first_page, last_page).unwrap()
+            // all pages are trivially aligned to 4kB.
+            SequentialPages::from_page_range(first_page, last_page, PageSize::Size4k).unwrap()
         }
     }
 

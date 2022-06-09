@@ -181,9 +181,11 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
     let pages = unsafe {
         // Safe since this region of memory was free in the memory map.
         SequentialPages::from_mem_range(
-            heap_base.get_4k_addr(),
+            heap_base,
+            PageSize::Size4k,
             HEAP_SIZE / PageSize::Size4k as u64,
         )
+        .unwrap()
     };
     HypAlloc::from_pages(pages)
 }

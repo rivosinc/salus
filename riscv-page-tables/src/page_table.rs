@@ -139,12 +139,12 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     /// same type as `P`.
     pub unsafe fn take_page<P: PhysPage>(self) -> Option<P> {
         let addr = self.page_addr()?;
-        if let ValidTableEntryMut::Leaf(pte, _) = self {
+        if let ValidTableEntryMut::Leaf(pte, level) = self {
             // The page is guaranteed to be owned by this page table (and by extension the
             // root `PlatformPageTable`), so the safety requirements of `P::new()` are partially
             // met. It's up to the caller of `take_page()` to ensure the page is of the correct
             // type.
-            let page = P::new(addr);
+            let page = P::new_with_size(addr, level.leaf_page_size());
             pte.clear();
             Some(page)
         } else {
@@ -160,9 +160,9 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     /// See the safety requirements for `take_page()`.
     pub unsafe fn invalidate_page<P: PhysPage>(self) -> Option<P> {
         let addr = self.page_addr()?;
-        if let ValidTableEntryMut::Leaf(pte, _) = self {
+        if let ValidTableEntryMut::Leaf(pte, level) = self {
             // See comments above in `take_page()`.
-            let page = P::new(addr);
+            let page = P::new_with_size(addr, level.leaf_page_size());
             pte.invalidate();
             Some(page)
         } else {
@@ -241,7 +241,7 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
         if entry.valid() {
             return Err(Error::MappingExists);
         }
-        assert_eq!(spa.size(), level.leaf_page_size());
+        assert!(spa.is_aligned(level.leaf_page_size()));
 
         let status = {
             let mut s = PteFieldBits::leaf_with_perms(perms);
@@ -385,7 +385,13 @@ pub trait PlatformPageTable: Sized {
         page_to_map: P,
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
     ) -> Result<()> {
-        self.do_map_page::<P>(addr, page_to_map.addr(), PteLeafPerms::RWX, get_pte_page)
+        self.do_map_page::<P>(
+            addr,
+            page_to_map.addr(),
+            page_to_map.size(),
+            PteLeafPerms::RWX,
+            get_pte_page,
+        )
     }
 
     /// Same as `map_page()`, but also extends `data_measure` with the address and contents of the
@@ -397,7 +403,13 @@ pub trait PlatformPageTable: Sized {
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
         data_measure: &mut dyn DataMeasure,
     ) -> Result<()> {
-        self.do_map_page::<Page>(addr, page_to_map.addr(), PteLeafPerms::RWX, get_pte_page)?;
+        self.do_map_page::<Page>(
+            addr,
+            page_to_map.addr(),
+            page_to_map.size(),
+            PteLeafPerms::RWX,
+            get_pte_page,
+        )?;
         data_measure.add_page(addr.bits(), page_to_map.as_bytes());
         Ok(())
     }
@@ -433,10 +445,11 @@ pub trait PlatformPageTable: Sized {
     fn invalidate_range<P: PhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
+        page_size: PageSize,
         num_pages: u64,
     ) -> Result<InvalidateIter<Self, P>> {
-        if addr.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(addr.size()));
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
         }
         if addr.iter_from().take(num_pages as usize).all(|a| {
             self.get_4k_leaf_with_type(RawAddr::from(a), P::mem_type())
@@ -502,11 +515,12 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
         &mut self,
         vaddr: PageAddr<Self::MappedAddressSpace>,
         spa: SupervisorPageAddr,
+        page_size: PageSize,
         perms: PteLeafPerms,
         get_pte_page: &mut dyn FnMut() -> Option<Page>,
     ) -> Result<()> {
-        if spa.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(spa.size()));
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
         }
         if self.page_tracker().owner(spa) != Some(self.page_owner_id()) {
             return Err(Error::PageNotOwned);
@@ -516,7 +530,7 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
         }
 
         let mut table = PageTable::from_root(self);
-        while table.level().leaf_page_size() != spa.size() {
+        while table.level().leaf_page_size() != page_size {
             table = table.next_level_or_fill_fn(RawAddr::from(vaddr), get_pte_page)?;
         }
         unsafe {

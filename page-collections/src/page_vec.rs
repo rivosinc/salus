@@ -62,9 +62,11 @@ impl<T> PageVec<T> {
             // Safe to create `SequentialPages` from the contained vec as the constructor of PageVec
             // guarantees the owned pages originated from `SequentialPages` so must be valid.
             SequentialPages::from_mem_range(
-                PageAddr::with_size(RawAddr::supervisor(self.0.as_ptr() as u64), self.1).unwrap(),
+                PageAddr::new(RawAddr::supervisor(self.0.as_ptr() as u64)).unwrap(),
+                self.1,
                 vec_page_count as u64,
             )
+            .unwrap()
         }
     }
 
@@ -125,7 +127,7 @@ impl<T> From<SequentialPages> for PageVec<T> {
                     0,
                     capacity,
                 )),
-                pages.base().size(),
+                pages.page_size(),
             )
         }
     }

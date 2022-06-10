@@ -309,6 +309,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             TsmGetInfo { dest_addr, len } => self.get_tsm_info(dest_addr, len, active_pages).into(),
             TvmCreate { params_addr, len } => self.add_guest(params_addr, len, active_pages).into(),
             TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
+            TsmConvertPages { .. } | TsmReclaimPages { .. } => {
+                SbiReturn::from(sbi::Error::NotSupported)
+            }
             AddPageTablePages {
                 guest_id,
                 page_addr,

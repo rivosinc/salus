@@ -359,18 +359,18 @@ pub struct TsmInfo {
 
 #[repr(C)]
 pub struct TvmCreateParams {
-    /// The base physical address of the 16kB region that should be used for the TVM's page
-    /// directory. Must be 16kB-aligned.
+    /// The base physical address of the 16kB confidential memory region that should be used for the
+    /// TVM's page directory. Must be 16kB-aligned.
     pub tvm_page_directory_addr: u64,
-    /// The base physical address of the region to be used to hold the TVM's global state. Must
-    /// be page-aligned and `TsmInfo::tvm_state_pages` pages in length.
+    /// The base physical address of the confidential memory region to be used to hold the TVM's
+    /// global state. Must be page-aligned and `TsmInfo::tvm_state_pages` pages in length.
     pub tvm_state_addr: u64,
     /// The maximum number of vCPUs that will be created for this TVM. Must be less than or equal
     /// to `TsmInfo::tvm_max_vcpus`.
     pub tvm_num_vcpus: u64,
-    /// The base physical address of the region to be used to hold the TVM's vCPU state. Must be
-    /// page-aligned and `TsmInfo::tvm_bytes_per_vcpu` * `tvm_num_vcpus` bytes in length, rounded
-    /// up to the nearest multiple of 4kB.
+    /// The base physical address of the confidential memory region to be used to hold the TVM's
+    /// vCPU state. Must be page-aligned and `TsmInfo::tvm_bytes_per_vcpu` * `tvm_num_vcpus` bytes
+    /// in length, rounded up to the nearest multiple of 4kB.
     pub tvm_vcpu_addr: u64,
 }
 
@@ -399,9 +399,9 @@ impl TsmPageType {
 
 #[derive(Copy, Clone)]
 pub enum TeeFunction {
-    /// Creates a TVM from the parameters in the `TvmCreateParams` structure at physical address
-    /// `params_addr`. Returns a guest ID that can be used to refer to the TVM in TVM management
-    /// TEECALLs.
+    /// Creates a TVM from the parameters in the `TvmCreateParams` structure at the non-confidential
+    /// physical address `params_addr`. Returns a guest ID that can be used to refer to the TVM in
+    /// TVM management TEECALLs.
     ///
     /// a6 = 0
     /// a0 = base physical address of the `TvmCreateParams` structure
@@ -410,8 +410,9 @@ pub enum TeeFunction {
     /// Message to destroy a TVM created with `TvmCreate`.
     /// a6 = 1, a0 = guest id returned from `TvmCreate`.
     TvmDestroy { guest_id: u64 },
-    /// Message from the host to add page tables pages to a TVM it created with `TvmCreate`. Pages
-    /// must be added to the page table before mappings for more memory can be made. These must be
+    /// Adds `num_pages` 4kB pages of confidential memory starting at `page_addr` to the page-table
+    /// page pool for the specified guest.
+    ///
     /// 4k Pages.
     /// a6 = 2, a0 = guest_id, a1 = address of the first page, and a2 = number of pages
     AddPageTablePages {
@@ -419,7 +420,7 @@ pub enum TeeFunction {
         page_addr: u64,
         num_pages: u64,
     },
-    /// Maps `num_pages` zero-filled pages starting at physical address `page_addr` into the
+    /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
     /// specified guest's address space at `guest_addr`.
     ///
     /// a6 = 3
@@ -435,8 +436,9 @@ pub enum TeeFunction {
         num_pages: u64,
         guest_addr: u64,
     },
-    /// Copies `num_pages` pages from `src_addr` to `dest_addr`, then measures and maps the
-    /// pages at `dest_addr` into the specified guest's address space at `guest_addr`.
+    /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
+    /// memory at `dest_addr`, then measures and maps the pages at `dest_addr` into the specified
+    /// guest's address space at `guest_addr`.
     ///
     /// a6 = 11
     /// a0 = guest_id
@@ -462,8 +464,9 @@ pub enum TeeFunction {
     /// a0 = guest id
     /// a1 = vCPU id
     TvmCpuRun { guest_id: u64, vcpu_id: u64 },
-    /// Copies the measurements for the specified guest to the physical address `dest_addr`.
-    /// The measurement version and type must be set to 1 for now.
+    /// Copies the measurements for the specified guest to the non-confidential physical address
+    /// `dest_addr`. The measurement version and type must be set to 1 for now.
+    ///
     /// a6 = 7
     /// a0 = measurement version
     /// a1 = measurement type
@@ -496,13 +499,37 @@ pub enum TeeFunction {
         register: TvmCpuRegister,
         value: u64,
     },
-    /// Writes up to `len` bytes of the `TsmInfo` structure to the physical address `dest_addr`.
-    /// Returns the number of bytes written.
+    /// Writes up to `len` bytes of the `TsmInfo` structure to the non-confidential physical address
+    /// `dest_addr`. Returns the number of bytes written.
     ///
     /// a6 = 10
     /// a0 = destination address of the `TsmInfo` structure
     /// a1 = maximum number of bytes to be written
     TsmGetInfo { dest_addr: u64, len: u64 },
+    /// Converts `num_pages` of non-confidential memory starting at `page_addr`. After conversion
+    /// the pages may be assigned to TVMs.
+    ///
+    /// a6 = 12
+    /// a0 = base address of pages to convert
+    /// a1 = page size
+    /// a2 = number of pages
+    TsmConvertPages {
+        page_addr: u64,
+        page_type: TsmPageType,
+        num_pages: u64,
+    },
+    /// Reclaims `num_pages` of confidential memory starting at `page_addr`. The pages must not
+    /// be currently assigned to an active TVM.
+    ///
+    /// a6 = 13
+    /// a0 = base address of pages to reclaim
+    /// a1 = page size
+    /// a2 = number of pages
+    TsmReclaimPages {
+        page_addr: u64,
+        page_type: TsmPageType,
+        num_pages: u64,
+    },
 }
 
 impl TeeFunction {
@@ -559,6 +586,16 @@ impl TeeFunction {
                 page_type: TsmPageType::from_reg(args[3])?,
                 num_pages: args[4],
                 guest_addr: args[5],
+            }),
+            12 => Ok(TsmConvertPages {
+                page_addr: args[0],
+                page_type: TsmPageType::from_reg(args[1])?,
+                num_pages: args[2],
+            }),
+            13 => Ok(TsmReclaimPages {
+                page_addr: args[0],
+                page_type: TsmPageType::from_reg(args[1])?,
+                num_pages: args[2],
             }),
             _ => Err(Error::InvalidParam),
         }
@@ -617,6 +654,16 @@ impl TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => 11,
+            TsmConvertPages {
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
+            } => 12,
+            TsmReclaimPages {
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
+            } => 13,
         }
     }
 
@@ -670,6 +717,16 @@ impl TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *guest_id,
+            TsmConvertPages {
+                page_addr,
+                page_type: _,
+                num_pages: _,
+            } => *page_addr,
+            TsmReclaimPages {
+                page_addr,
+                page_type: _,
+                num_pages: _,
+            } => *page_addr,
         }
     }
 
@@ -721,6 +778,16 @@ impl TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *src_addr,
+            TsmConvertPages {
+                page_addr: _,
+                page_type,
+                num_pages: _,
+            } => *page_type as u64,
+            TsmReclaimPages {
+                page_addr: _,
+                page_type,
+                num_pages: _,
+            } => *page_type as u64,
             _ => 0,
         }
     }
@@ -760,6 +827,16 @@ impl TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *dest_addr,
+            TsmConvertPages {
+                page_addr: _,
+                page_type: _,
+                num_pages,
+            } => *num_pages,
+            TsmReclaimPages {
+                page_addr: _,
+                page_type: _,
+                num_pages,
+            } => *num_pages,
             _ => 0,
         }
     }

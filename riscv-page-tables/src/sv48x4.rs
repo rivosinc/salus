@@ -69,7 +69,7 @@ impl PageTableLevel for Sv48x4Level {
 
 /// An Sv48x4 set of mappings for second stage translation.
 pub struct Sv48x4 {
-    root: SequentialPages,
+    root: SequentialPages<InternalClean>,
     owner: PageOwnerId,
     page_tracker: PageTracker,
 }
@@ -102,7 +102,11 @@ impl PlatformPageTable for Sv48x4 {
         num_l1_pages + num_l2_pages + num_l3_pages + num_l4_pages
     }
 
-    fn new(root: SequentialPages, owner: PageOwnerId, page_tracker: PageTracker) -> Result<Self> {
+    fn new(
+        root: SequentialPages<InternalClean>,
+        owner: PageOwnerId,
+        page_tracker: PageTracker,
+    ) -> Result<Self> {
         // TODO: Verify ownership of root PT pages.
         if root.page_size().is_huge() {
             return Err(Error::PageSizeNotSupported(root.page_size()));
@@ -124,18 +128,6 @@ impl PlatformPageTable for Sv48x4 {
         self.page_tracker.clone()
     }
 
-    fn invalidate_page<P: PhysPage>(
-        &mut self,
-        gpa: PageAddr<Self::MappedAddressSpace>,
-    ) -> Result<UnmappedPhysPage<P>> {
-        let entry = self.get_4k_leaf_with_type(RawAddr::from(gpa), P::mem_type())?;
-        let page = unsafe {
-            // Safe since we've verified the typing of the page.
-            entry.invalidate_page().unwrap()
-        };
-        Ok(UnmappedPhysPage::new(page))
-    }
-
     fn get_root_address(&self) -> SupervisorPageAddr {
         self.root.base()
     }
@@ -152,21 +144,14 @@ impl PlatformPageTable for Sv48x4 {
             }
             // Unwrap ok, this must be a 4kB page.
             let addr = PageAddr::from_pfn(pte.pfn(), level.leaf_page_size()).unwrap();
-            if page_tracker.owner(addr) != Ok(owner)
-                || page_tracker.mem_type(addr) != Ok(MemType::Ram)
-            {
-                // We shouldn't be faulting in MMIO or pages we don't own.
-                return false;
-            }
-            if page_tracker.reclaim_page(addr).is_err() {
-                // We couldn't put the page back into the Mapped state.
-                return false;
-            }
-            // Zero the page before mapping it back to this VM.
-            unsafe {
-                // Safe since we've verified ownership and typing of this page.
-                core::ptr::write_bytes(addr.bits() as *mut u8, 0, level.leaf_page_size() as usize);
-            }
+            let page: Page<ConvertedDirty> = match page_tracker.get_converted_page(addr, owner) {
+                Ok(p) => p,
+                Err(_) => {
+                    // We don't own the page, or it's not reclaimable.
+                    return false;
+                }
+            };
+            page_tracker.reclaim_page(page.clean()).unwrap();
             pte.mark_valid();
             true
         } else {

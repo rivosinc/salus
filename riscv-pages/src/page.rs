@@ -2,9 +2,11 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use core::marker::PhantomData;
 /// Represents pages of memory.
 use core::slice;
 
+use crate::state::*;
 use crate::{AddressSpace, GuestPhys, MemType, PageOwnerId, SupervisorPhys, SupervisorVirt};
 
 // PFN constants, currently sv48x4 hard-coded
@@ -246,24 +248,6 @@ impl<AS: AddressSpace> Iterator for PageAddrIter<AS> {
     }
 }
 
-/// A page that was unmapped from the guest.
-pub struct UnmappedPhysPage<P: PhysPage>(P);
-
-impl<P: PhysPage> UnmappedPhysPage<P> {
-    /// Creates a new `UnmappedPhysPage` wrapping the given page.
-    pub fn new(page: P) -> Self {
-        Self(page)
-    }
-
-    /// Returns the wrapped `PhysPage`. Note that the page retains any contents it had when it was
-    /// mapped.
-    pub fn to_page(self) -> P {
-        self.0
-    }
-}
-
-pub type UnmappedPage = UnmappedPhysPage<Page>;
-
 /// The page number of a page.
 #[derive(Copy, Clone)]
 pub struct Pfn<AS: AddressSpace>(u64, AS);
@@ -336,37 +320,74 @@ pub trait PhysPage: Sized {
     }
 }
 
+/// Trait representing a page that can be cleaned to transform from a dirty to clean state.
+pub trait CleanablePhysPage: PhysPage {
+    /// The destination page type of the clean() operation.
+    type CleanPage: PhysPage;
+
+    /// Consumes the page, cleaning it and returning it in a cleaned state.
+    fn clean(self) -> Self::CleanPage;
+}
+
+/// Trait representing a page that can be initialized.
+pub trait InitializablePhysPage: PhysPage {
+    type InitializedPage: PhysPage;
+    type DirtyPage: PhysPage;
+
+    /// Consumes the page and attempts to initialize it by calling `func` with a mutable slice of
+    /// this page's bytes. Returns the page in an intialized state upon success, or as a dirty
+    /// page upon failure.
+    fn try_initialize<F, E>(self, func: F) -> Result<Self::InitializedPage, (E, Self::DirtyPage)>
+    where
+        F: Fn(&mut [u8]) -> Result<(), E>;
+
+    /// Converts the page to an initialized page. The caller is responsible for initializing the
+    /// contents of the page to a known state.
+    fn to_initialized_page(self) -> Self::InitializedPage;
+}
+
+/// Trait representing a page that can be mapped into a VM's address space.
+pub trait MappablePhysPage<M: MeasureRequirement>: PhysPage {}
+
+/// Trait representing a converted page that can be assigned to a child VM. Pages transition from
+/// converted to assignable by cleaning or initializing the converted page.
+pub trait AssignablePhysPage<M: MeasureRequirement>: PhysPage {
+    /// The page type representing an assignable page that has been assigned as a mapped page
+    /// in a child VM.
+    type MappablePage: MappablePhysPage<M>;
+}
+
+/// Trait representing the default state of a converted, but unassigned, page.
+pub trait ConvertedPhysPage: PhysPage {}
+
+/// Trait representing a page that has been invalidated in a VM. Invalidated pages are created
+/// by unmapping a previously-mapped page in a VM's address space.
+pub trait InvalidatedPhysPage: PhysPage {
+    /// The page type representing an invalidated page that has been converted so that it can
+    /// be further assigned to a child VM.
+    type ConvertedPage: ConvertedPhysPage;
+}
+
+/// Trait representing a converted page that is eligible to be reclaimed by the owner. Pages
+/// transition from converted to reclaimable once they have been cleaned.
+pub trait ReclaimablePhysPage: PhysPage {
+    /// The page type representing a page that has been reclaimed as a mappable page in the
+    /// owning VM. Pages must be clean to be mapped back into the owner.
+    type MappablePage: MappablePhysPage<MeasureOptional>;
+}
+
 /// Base type representing a page of RAM.
 ///
 /// `Page` is a key abstraction; it owns all memory of the backing page.
 /// This guarantee allows the memory within pages to be assigned to virtual machines, and the taken
 /// back to be uniquely owned by a `Page` here in the hypervisor.
-pub struct Page {
+pub struct Page<S: State> {
     addr: SupervisorPageAddr,
     size: PageSize,
+    state: PhantomData<S>,
 }
 
-impl Page {
-    /// Test-only function that creates a page by allocating extra memory for alignement, then
-    /// leaking all the memory. While technically "safe" it does leak all that memory so use with
-    /// caution.
-    #[cfg(test)]
-    pub fn new_in_test() -> Self {
-        let mem = vec![0u8; 8192];
-        let ptr = mem.as_ptr();
-        let aligned_ptr = unsafe {
-            // Safe because it's only a test and the above allocation guarantees that the result is
-            // still a valid pointer.
-            ptr.add(ptr.align_offset(4096))
-        };
-        let page = Self {
-            addr: PageAddr::new(RawAddr::supervisor(aligned_ptr as u64)).unwrap(),
-            size: PageSize::Size4k,
-        };
-        std::mem::forget(mem);
-        page
-    }
-
+impl<S: State> Page<S> {
     /// Returns the u64 at the given index in the page.
     pub fn get_u64(&self, index: usize) -> Option<u64> {
         let offset = index * core::mem::size_of::<u64>();
@@ -384,7 +405,7 @@ impl Page {
     }
 
     /// Returns an iterator across all u64 values contained in the page.
-    pub fn u64_iter(&self) -> U64Iter {
+    pub fn u64_iter(&self) -> U64Iter<S> {
         U64Iter {
             page: self,
             index: 0,
@@ -399,16 +420,32 @@ impl Page {
         // guaranteed to be within the size of the page
         unsafe { slice::from_raw_parts(base_ptr, self.size as usize) }
     }
+}
 
-    /// Returns the contents of the page as a mutable slice of bytes.
-    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
-        let base_ptr = self.addr.bits() as *mut u8;
-        // Safety: same as as_bytes().
-        unsafe { slice::from_raw_parts_mut(base_ptr, self.size as usize) }
+impl Page<InternalClean> {
+    /// Test-only function that creates a page by allocating extra memory for alignement, then
+    /// leaking all the memory. While technically "safe" it does leak all that memory so use with
+    /// caution.
+    #[cfg(test)]
+    pub fn new_in_test() -> Self {
+        let mem = vec![0u8; 8192];
+        let ptr = mem.as_ptr();
+        let aligned_ptr = unsafe {
+            // Safe because it's only a test and the above allocation guarantees that the result is
+            // still a valid pointer.
+            ptr.add(ptr.align_offset(4096))
+        };
+        let page = Self {
+            addr: PageAddr::new(RawAddr::supervisor(aligned_ptr as u64)).unwrap(),
+            size: PageSize::Size4k,
+            state: PhantomData,
+        };
+        std::mem::forget(mem);
+        page
     }
 }
 
-impl PhysPage for Page {
+impl<S: State> PhysPage for Page<S> {
     /// Creates a new `Page` representing a page of ordinary RAM at `addr`.
     ///
     /// # Safety
@@ -416,7 +453,11 @@ impl PhysPage for Page {
     /// See PhysPage::new(). `addr` must refer to a page of ordinary, idempotent system RAM.
     unsafe fn new_with_size(addr: SupervisorPageAddr, size: PageSize) -> Self {
         assert!(addr.is_aligned(size));
-        Self { addr, size }
+        Self {
+            addr,
+            size,
+            state: PhantomData,
+        }
     }
 
     fn addr(&self) -> SupervisorPageAddr {
@@ -432,31 +473,84 @@ impl PhysPage for Page {
     }
 }
 
-/// A page that was unmapped from the guest and cleared of all guest data.
-pub struct CleanPage(Page);
+impl<S: Cleanable> CleanablePhysPage for Page<S> {
+    type CleanPage = Page<S::Cleaned>;
 
-impl From<UnmappedPage> for CleanPage {
-    fn from(p: UnmappedPage) -> CleanPage {
+    fn clean(self) -> Self::CleanPage {
         unsafe {
             // Safe because page owns all the memory at its address.
-            core::ptr::write_bytes(p.0.addr.bits() as *mut u8, 0, p.0.size() as usize);
+            core::ptr::write_bytes(self.addr.bits() as *mut u8, 0, self.size as usize);
         }
-        CleanPage(p.0)
+        Page {
+            addr: self.addr,
+            size: self.size,
+            state: PhantomData,
+        }
     }
 }
 
-impl From<CleanPage> for Page {
-    fn from(p: CleanPage) -> Page {
-        p.0
+impl<S: Initializable> InitializablePhysPage for Page<S> {
+    type InitializedPage = Page<ConvertedInitialized>;
+    type DirtyPage = Page<ConvertedDirty>;
+
+    fn try_initialize<F, E>(self, func: F) -> Result<Self::InitializedPage, (E, Self::DirtyPage)>
+    where
+        F: Fn(&mut [u8]) -> Result<(), E>,
+    {
+        let base_ptr = self.addr.bits() as *mut u8;
+        // Safety: same as Page::as_bytes();
+        let bytes = unsafe { slice::from_raw_parts_mut(base_ptr, self.size as usize) };
+        func(bytes)
+            .map_err(|e| {
+                (
+                    e,
+                    Page {
+                        addr: self.addr,
+                        size: self.size,
+                        state: PhantomData,
+                    },
+                )
+            })
+            .map(|_| Page {
+                addr: self.addr,
+                size: self.size,
+                state: PhantomData,
+            })
+    }
+
+    fn to_initialized_page(self) -> Self::InitializedPage {
+        Page {
+            addr: self.addr,
+            size: self.size,
+            state: PhantomData,
+        }
     }
 }
 
-pub struct U64Iter<'a> {
-    page: &'a Page,
+impl<S: Mappable<M>, M: MeasureRequirement> MappablePhysPage<M> for Page<S> {}
+
+impl<S: Assignable<M>, M: MeasureRequirement> AssignablePhysPage<M> for Page<S> {
+    type MappablePage = Page<S::Mappable>;
+}
+
+// Converted pages are considered dirty until they're cleaned or initialized.
+impl ConvertedPhysPage for Page<ConvertedDirty> {}
+
+impl InvalidatedPhysPage for Page<Invalidated> {
+    type ConvertedPage = Page<ConvertedDirty>;
+}
+
+// Pages are only reclaimable if they're clean.
+impl ReclaimablePhysPage for Page<ConvertedClean> {
+    type MappablePage = Page<MappableClean>;
+}
+
+pub struct U64Iter<'a, S: State> {
+    page: &'a Page<S>,
     index: usize,
 }
 
-impl<'a> Iterator for U64Iter<'a> {
+impl<'a, S: State> Iterator for U64Iter<'a, S> {
     type Item = u64;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -611,7 +705,7 @@ mod tests {
 
         // Safe the above allocation guarantees that the result is
         // still a valid pointer.
-        let page = unsafe { Page::new(addr) };
+        let page: Page<ConvertedDirty> = unsafe { Page::new(addr) };
 
         assert!(page.as_bytes().last().unwrap() == &0xAA);
     }

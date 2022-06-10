@@ -3,21 +3,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::fmt;
+use core::marker::PhantomData;
 
-use crate::page::{Page, PageSize, PhysPage, SupervisorPageAddr};
+use crate::page::{CleanablePhysPage, Page, PageSize, PhysPage, SupervisorPageAddr};
+use crate::state::*;
 
-/// `SequentialPages` holds a range of consecutive pages of the same size. Each page's address is one
-/// page after the previous. This forms a contiguous area of memory suitable for holding an array or
-/// other linear data.
+/// `SequentialPages` holds a range of consecutive pages of the same size and state. Each page's
+/// address is one page after the previous. This forms a contiguous area of memory suitable for
+/// holding an array or other linear data.
 #[derive(Debug)]
-pub struct SequentialPages {
+pub struct SequentialPages<S: State> {
     addr: SupervisorPageAddr,
     page_size: PageSize,
     count: u64,
+    state: PhantomData<S>,
 }
 
 /// An error resulting from trying to convert an iterator of pages to `SequentialPages`.
-pub enum Error<I: Iterator<Item = Page>> {
+pub enum Error<S: State, I: Iterator<Item = Page<S>>> {
     Empty,
     NonContiguous(I),
     NonUniformSize(I),
@@ -29,15 +32,14 @@ pub enum Error<I: Iterator<Item = Page>> {
 #[derive(Clone, Copy, Debug)]
 pub struct UnalignedPages;
 
-impl SequentialPages {
+impl<S: State> SequentialPages<S> {
     /// Creates a `SequentialPages` form the passed iterator.
     ///
     /// If the passed pages are not consecutive, an Error will be returned holding an iterator to
     /// the passed in pages so they don't leak.
-    /// If passed an empty iterator Err(None) will be returned.
-    pub fn from_pages<T>(pages: T) -> Result<Self, Error<impl Iterator<Item = Page>>>
+    pub fn from_pages<T>(pages: T) -> Result<Self, Error<S, impl Iterator<Item = Page<S>>>>
     where
-        T: IntoIterator<Item = Page>,
+        T: IntoIterator<Item = Page<S>>,
     {
         let mut page_iter = pages.into_iter();
 
@@ -51,6 +53,7 @@ impl SequentialPages {
             addr,
             page_size,
             count: 1,
+            state: PhantomData,
         };
         while let Some(page) = page_iter.next() {
             if page.size() != page_size {
@@ -127,6 +130,7 @@ impl SequentialPages {
             addr,
             page_size,
             count,
+            state: PhantomData,
         })
     }
 
@@ -148,28 +152,37 @@ impl SequentialPages {
             addr: start,
             page_size,
             count: end.bits().checked_sub(start.bits()).unwrap() / page_size as u64,
+            state: PhantomData,
         })
     }
 }
 
-impl From<Page> for SequentialPages {
-    fn from(p: Page) -> Self {
+impl<S: Cleanable> SequentialPages<S> {
+    /// Consumes this range of pages, returning them in a cleaned state.
+    pub fn clean(self) -> SequentialPages<S::Cleaned> {
+        SequentialPages::from_pages(self.into_iter().map(|p| p.clean())).unwrap()
+    }
+}
+
+impl<S: State> From<Page<S>> for SequentialPages<S> {
+    fn from(p: Page<S>) -> Self {
         Self {
             addr: p.addr(),
             page_size: p.size(),
             count: 1,
+            state: PhantomData,
         }
     }
 }
 
 /// An iterator of the individual pages previously used to build a `SequentialPages` struct.
 /// Used to reclaim the pages from `SequentialPages`, returned from `SequentialPages::into_iter`.
-pub struct SeqPageIter {
-    pages: SequentialPages,
+pub struct SeqPageIter<S: State> {
+    pages: SequentialPages<S>,
 }
 
-impl Iterator for SeqPageIter {
-    type Item = Page;
+impl<S: State> Iterator for SeqPageIter<S> {
+    type Item = Page<S>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.pages.count == 0 {
@@ -188,15 +201,15 @@ impl Iterator for SeqPageIter {
     }
 }
 
-impl IntoIterator for SequentialPages {
-    type Item = Page;
-    type IntoIter = SeqPageIter;
+impl<S: State> IntoIterator for SequentialPages<S> {
+    type Item = Page<S>;
+    type IntoIter = SeqPageIter<S>;
     fn into_iter(self) -> Self::IntoIter {
         SeqPageIter { pages: self }
     }
 }
 
-impl<I: Iterator<Item = Page>> fmt::Debug for Error<I> {
+impl<S: State, I: Iterator<Item = Page<S>>> fmt::Debug for Error<S, I> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             Error::Empty => f.debug_struct("Empty").finish(),
@@ -214,7 +227,7 @@ mod tests {
 
     #[test]
     fn create_success() {
-        let pages = unsafe {
+        let pages: [Page<ConvertedDirty>; 4] = unsafe {
             // Not safe, but memory won't be touched in the test...
             [
                 Page::new(PageAddr::new(RawAddr::supervisor(0x1000)).unwrap()),
@@ -229,7 +242,7 @@ mod tests {
 
     #[test]
     fn create_failure() {
-        let pages = unsafe {
+        let pages: [Page<ConvertedDirty>; 4] = unsafe {
             // Not safe, but memory won't be touched in the test...
             [
                 Page::new(PageAddr::new(RawAddr::supervisor(0x1000)).unwrap()),
@@ -252,7 +265,7 @@ mod tests {
 
     #[test]
     fn create_fail_empty() {
-        let pages: [Page; 0] = [];
+        let pages: [Page<ConvertedDirty>; 0] = [];
         let result = SequentialPages::from_pages(pages);
         match result {
             Ok(_) => panic!("didn't fail with empty pages"),
@@ -263,7 +276,7 @@ mod tests {
 
     #[test]
     fn from_single() {
-        let p = unsafe {
+        let p: Page<ConvertedDirty> = unsafe {
             // Not safe, Just a test.
             Page::new(PageAddr::new(RawAddr::supervisor(0x1000)).unwrap())
         };
@@ -276,7 +289,7 @@ mod tests {
     #[test]
     fn unsafe_range() {
         // Not safe, but this is a test
-        let seq = unsafe {
+        let seq: SequentialPages<ConvertedDirty> = unsafe {
             SequentialPages::from_mem_range(
                 PageAddr::new(RawAddr::supervisor(0x1000)).unwrap(),
                 PageSize::Size4k,

@@ -7,7 +7,7 @@ use core::fmt::{self, Display};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
-use riscv_pages::{Page, PageAddr, PageSize, PhysPage, RawAddr};
+use riscv_pages::{InternalClean, InternalDirty, Page, PageAddr, PageSize, PhysPage, RawAddr};
 
 /// A PageBox is a Box-like container that holds a backing page filled with the given type.
 /// Because Salus borrows pages from the host for data it is necessary to track the backing pages
@@ -30,14 +30,14 @@ use riscv_pages::{Page, PageAddr, PageSize, PhysPage, RawAddr};
 ///
 /// ```rust
 /// use page_collections::page_box::PageBox;
-/// use riscv_pages::Page;
+/// use riscv_pages::{Page, InternalClean, InternalDirty};
 ///
 /// struct TestData {
 ///     a: u64,
 ///     b: u64,
 /// }
 ///
-/// fn add_in_box(a:u64, b:u64, backing_page: Page) -> (u64, Page) {
+/// fn add_in_box(a:u64, b:u64, backing_page: Page<InternalClean>) -> (u64, Page<InternalDirty>) {
 ///     let boxxed_data = PageBox::new_with(
 ///         TestData {a, b},
 ///         backing_page,
@@ -54,7 +54,7 @@ impl<T> PageBox<T> {
     /// Creates a `PageBox` that wraps the given data using `page` to store it.
     /// To avoid leaking the page, the returned `PageBox` must have its page reclaimed with
     /// `to_page` instead of being dropped.
-    pub fn new_with(data: T, page: Page) -> Self {
+    pub fn new_with(data: T, page: Page<InternalClean>) -> Self {
         let ptr = page.addr().bits() as *mut T;
         assert!(!ptr.is_null()); // Explicitly ban pages at zero address.
         unsafe {
@@ -66,7 +66,7 @@ impl<T> PageBox<T> {
     }
 
     /// Consumes the `PageBox` and returns the page that was used to hold the data.
-    pub fn to_page(self) -> Page {
+    pub fn to_page(self) -> Page<InternalDirty> {
         // Safe because self must have ownership of the page it was built with and the contained
         // data is aligned and owned so can be dropped.
         unsafe {
@@ -79,7 +79,7 @@ impl<T> PageBox<T> {
     }
 
     /// Returns the contained data and the page that was used to hold it.
-    pub fn into_inner(self) -> (T, Page) {
+    pub fn into_inner(self) -> (T, Page<InternalDirty>) {
         unsafe {
             // Safe because self must have ownership of the page it was built with and the contained
             // data is aligned and owned so can be read with ptr::read.

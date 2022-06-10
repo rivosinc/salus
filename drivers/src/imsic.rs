@@ -3,13 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::{ArrayString, ArrayVec};
-use core::{alloc::Allocator, fmt};
+use core::{alloc::Allocator, fmt, marker::PhantomData};
 use device_tree::{DeviceTree, DeviceTreeResult};
 use riscv_page_tables::HwMemMap;
-use riscv_pages::{
-    DeviceMemType, GuestPhysAddr, MemType, PageAddr, PageSize, PhysPage, RawAddr,
-    SupervisorPageAddr,
-};
+use riscv_pages::*;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use riscv_regs::Readable;
 use riscv_regs::{sie, stopei, Writeable, CSR};
@@ -80,11 +77,12 @@ impl ImsicInterruptId {
 }
 
 /// A `PhysPage` implementation representing an IMSIC guest interrupt file page.
-pub struct ImsicGuestPage {
+pub struct ImsicGuestPage<S: State> {
     addr: SupervisorPageAddr,
+    state: PhantomData<S>,
 }
 
-impl PhysPage for ImsicGuestPage {
+impl<S: State> PhysPage for ImsicGuestPage<S> {
     /// Creates a new `ImsicGuestPage` at the given page-aligned address. IMSIC pages are always 4kB.
     ///
     /// # Safety
@@ -92,7 +90,10 @@ impl PhysPage for ImsicGuestPage {
     /// The caller must ensure `addr` refers to a uniquely owned IMSIC guest interrupt file.
     unsafe fn new_with_size(addr: SupervisorPageAddr, size: PageSize) -> Self {
         assert_eq!(size, PageSize::Size4k);
-        Self { addr }
+        Self {
+            addr,
+            state: PhantomData,
+        }
     }
 
     fn addr(&self) -> SupervisorPageAddr {
@@ -106,6 +107,19 @@ impl PhysPage for ImsicGuestPage {
     fn mem_type() -> MemType {
         MemType::Mmio(DeviceMemType::Imsic)
     }
+}
+
+// IMSIC interrupt file pages retain no state so they are always considered "clean".
+impl MappablePhysPage<MeasureOptional> for ImsicGuestPage<MappableClean> {}
+impl AssignablePhysPage<MeasureOptional> for ImsicGuestPage<ConvertedClean> {
+    type MappablePage = ImsicGuestPage<MappableClean>;
+}
+impl ConvertedPhysPage for ImsicGuestPage<ConvertedClean> {}
+impl InvalidatedPhysPage for ImsicGuestPage<Invalidated> {
+    type ConvertedPage = ImsicGuestPage<ConvertedClean>;
+}
+impl ReclaimablePhysPage for ImsicGuestPage<ConvertedClean> {
+    type MappablePage = ImsicGuestPage<MappableClean>;
 }
 
 /// Represents an IMSIC guest interrupt file ID for use in reading/writing VGEIN, HGEIE, etc.
@@ -175,7 +189,10 @@ impl ImsicCpuState {
         self.base_addr
     }
 
-    fn take_guest_file(&mut self, guest_id: ImsicGuestId) -> Result<ImsicGuestPage> {
+    fn take_guest_file(
+        &mut self,
+        guest_id: ImsicGuestId,
+    ) -> Result<ImsicGuestPage<ConvertedClean>> {
         let index = guest_id.to_raw_index();
         let state = self
             .guest_files
@@ -194,7 +211,7 @@ impl ImsicCpuState {
         Ok(page)
     }
 
-    fn put_guest_file(&mut self, page: ImsicGuestPage) -> Result<()> {
+    fn put_guest_file(&mut self, page: ImsicGuestPage<ConvertedClean>) -> Result<()> {
         let guest_id = page
             .pfn()
             .bits()
@@ -497,14 +514,18 @@ impl Imsic {
 
     /// Allocates a guest interrupt file on the specified CPU, returning an `ImsicGuestPage`
     /// representing ownership of that file upon success.
-    pub fn take_guest_file(&self, cpu: CpuId, guest_id: ImsicGuestId) -> Result<ImsicGuestPage> {
+    pub fn take_guest_file(
+        &self,
+        cpu: CpuId,
+        guest_id: ImsicGuestId,
+    ) -> Result<ImsicGuestPage<ConvertedClean>> {
         let mut imsic = self.inner.lock();
         let pcpu = imsic.get_cpu_mut(cpu).ok_or(Error::InvalidCpu(cpu))?;
         pcpu.take_guest_file(guest_id)
     }
 
     /// Releases the guest interrupt file represented by `page` on the given CPU.
-    pub fn put_guest_file(&self, cpu: CpuId, page: ImsicGuestPage) -> Result<()> {
+    pub fn put_guest_file(&self, cpu: CpuId, page: ImsicGuestPage<ConvertedClean>) -> Result<()> {
         let mut imsic = self.inner.lock();
         let pcpu = imsic.get_cpu_mut(cpu).ok_or(Error::InvalidCpu(cpu))?;
         pcpu.put_guest_file(page)

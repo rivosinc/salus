@@ -8,7 +8,7 @@ use core::mem::{self, ManuallyDrop};
 use core::ops::{Index, IndexMut};
 use core::slice::SliceIndex;
 
-use riscv_pages::{PageAddr, PageSize, RawAddr, SequentialPages};
+use riscv_pages::{InternalClean, InternalDirty, PageAddr, PageSize, RawAddr, SequentialPages};
 
 /// Similar to Vec but backed by an integer number of pre-allocated pages.
 /// Used to avoid having an allocator but allow using a Vec for simple storage.
@@ -22,11 +22,11 @@ use riscv_pages::{PageAddr, PageSize, RawAddr, SequentialPages};
 ///
 /// ```rust
 /// use page_collections::page_vec::PageVec;
-/// use riscv_pages::{SequentialPages, Page, PageSize};
+/// use riscv_pages::{SequentialPages, Page, PageSize, InternalClean, InternalDirty};
 /// use core::result::Result;
 ///
-/// fn sum_in_page<I>(vals: I, pages: SequentialPages)
-///     -> Result<(u64, SequentialPages), ()>
+/// fn sum_in_page<I>(vals: I, pages: SequentialPages<InternalClean>)
+///     -> Result<(u64, SequentialPages<InternalDirty>), ()>
 /// where
 ///     I: IntoIterator<Item = u64>,
 /// {
@@ -54,7 +54,7 @@ impl<T> PageVec<T> {
     /// If multiple pages back the Vec, they are returned in a new Vec contained in `MultiPage`.
     /// In the MultiPage case, the resultant vec should itself be passed to `to_pages` after being
     /// emptied.
-    pub fn to_pages(mut self) -> SequentialPages {
+    pub fn to_pages(mut self) -> SequentialPages<InternalDirty> {
         let page_size = self.1 as usize;
         self.clear(); // Ensures destructors of any T's still owned are called.
         let vec_page_count = (self.capacity() * mem::size_of::<T>() + page_size - 1) / page_size;
@@ -114,8 +114,8 @@ impl<T> PageVec<T> {
     }
 }
 
-impl<T> From<SequentialPages> for PageVec<T> {
-    fn from(pages: SequentialPages) -> Self {
+impl<T> From<SequentialPages<InternalClean>> for PageVec<T> {
+    fn from(pages: SequentialPages<InternalClean>) -> Self {
         let capacity_bytes = pages.length_bytes() as usize;
         let capacity = capacity_bytes / mem::size_of::<T>();
         // Safe because the memory is page-aligned, fully owned, and contiguous(guaranteed by

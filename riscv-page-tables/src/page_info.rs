@@ -4,10 +4,7 @@
 
 use arrayvec::ArrayVec;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{
-    DeviceMemType, MemType, PageOwnerId, PageSize, Pfn, RawAddr, SequentialPages,
-    SupervisorPageAddr,
-};
+use riscv_pages::*;
 
 use crate::{HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, PageTrackingResult};
 
@@ -257,11 +254,11 @@ impl PageMap {
 
         // Safe to create pages from this memory as `HwMemMap` guarantees that this range is
         // valid and free to use. Safe to unwrap since pages are always 4kB-aligned.
-        let seq_pages = unsafe {
+        let seq_pages: SequentialPages<InternalDirty> = unsafe {
             SequentialPages::from_mem_range(page_map_base, PageSize::Size4k, page_map_pages)
                 .unwrap()
         };
-        let struct_pages = PageVec::from(seq_pages);
+        let struct_pages = PageVec::from(seq_pages.clean());
 
         // Reserve the memory consumed by the pagemap itself.
         mem_map

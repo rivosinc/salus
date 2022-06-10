@@ -5,10 +5,7 @@
 use core::marker::PhantomData;
 
 use data_measure::data_measure::DataMeasure;
-use riscv_pages::{
-    AddressSpace, GuestPhys, MemType, Page, PageAddr, PageOwnerId, PageSize, PhysPage, RawAddr,
-    SequentialPages, SupervisorPageAddr, SupervisorVirt, UnmappedPhysPage,
-};
+use riscv_pages::*;
 
 use crate::page_info::PageState;
 use crate::page_tracking::PageTracker;
@@ -18,11 +15,11 @@ pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 
 #[derive(Debug)]
 pub enum Error {
-    InsufficientPages(SequentialPages),
+    InsufficientPages(SequentialPages<InternalClean>),
     InsufficientPtePages,
     InvalidOffset,
     LeafEntryNotTable,
-    MisalignedPages(SequentialPages),
+    MisalignedPages(SequentialPages<InternalClean>),
     OutOfBounds,
     PageNotOwned,
     TableEntryNotLeaf,
@@ -140,7 +137,7 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     ///
     /// The caller must guarantee that this page table entry points to a page of memory of the
     /// same type as `P`.
-    pub unsafe fn take_page<P: PhysPage>(self) -> Option<P> {
+    pub unsafe fn take_page<P: InvalidatedPhysPage>(self) -> Option<P> {
         let addr = self.page_addr()?;
         if let ValidTableEntryMut::Leaf(pte, level) = self {
             // The page is guaranteed to be owned by this page table (and by extension the
@@ -161,7 +158,7 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     /// # Safety
     ///
     /// See the safety requirements for `take_page()`.
-    pub unsafe fn invalidate_page<P: PhysPage>(self) -> Option<P> {
+    pub unsafe fn invalidate_page<P: InvalidatedPhysPage>(self) -> Option<P> {
         let addr = self.page_addr()?;
         if let ValidTableEntryMut::Leaf(pte, level) = self {
             // See comments above in `take_page()`.
@@ -274,7 +271,7 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
     pub fn next_level_or_fill_fn(
         &mut self,
         addr: RawAddr<T::MappedAddressSpace>,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
+        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<PageTable<'a, T>> {
         let v = match self.entry_for_addr_mut(addr) {
             TableEntryMut::Valid(v) => v,
@@ -352,7 +349,11 @@ pub trait PlatformPageTable: Sized {
 
     /// Creates a new page table root from the provided `pages` that must be at least
     /// `root_level().table_pages()` in length and aligned to `T::TOP_LEVEL_ALIGN`.
-    fn new(pages: SequentialPages, owner: PageOwnerId, page_tracker: PageTracker) -> Result<Self>;
+    fn new(
+        pages: SequentialPages<InternalClean>,
+        owner: PageOwnerId,
+        page_tracker: PageTracker,
+    ) -> Result<Self>;
 
     /// Returns an ref to the systems physical pages map.
     fn page_tracker(&self) -> PageTracker;
@@ -382,13 +383,13 @@ pub trait PlatformPageTable: Sized {
     /// pages if necessary.
     ///
     /// TODO: Page permissions.
-    fn map_page<P: PhysPage>(
+    fn map_page<P: MappablePhysPage<MeasureOptional>>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
         page_to_map: P,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
+        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<()> {
-        self.do_map_page::<P>(
+        self.do_map_page(
             addr,
             page_to_map.addr(),
             page_to_map.size(),
@@ -399,14 +400,14 @@ pub trait PlatformPageTable: Sized {
 
     /// Same as `map_page()`, but also extends `data_measure` with the address and contents of the
     /// page to be mapped.
-    fn map_page_with_measurement(
+    fn map_page_with_measurement<S: Mappable<M>, M: MeasureRequirement>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
-        page_to_map: Page,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
+        page_to_map: Page<S>,
+        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
         data_measure: &mut dyn DataMeasure,
     ) -> Result<()> {
-        self.do_map_page::<Page>(
+        self.do_map_page(
             addr,
             page_to_map.addr(),
             page_to_map.size(),
@@ -418,34 +419,34 @@ pub trait PlatformPageTable: Sized {
     }
 
     /// Invalidates and clears the PTE mapping `addr`, returning the mapped host page.
-    fn unmap_page<P: PhysPage>(
+    fn unmap_page<P: InvalidatedPhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
-    ) -> Result<UnmappedPhysPage<P>> {
+    ) -> Result<P> {
         let entry = self.get_4k_leaf_with_type(RawAddr::from(addr), P::mem_type())?;
         let page = unsafe {
             // Safe since we've verified the typing of the page.
             entry.take_page().unwrap()
         };
-        Ok(UnmappedPhysPage::new(page))
+        Ok(page)
     }
 
     /// Like `unmap_page` but leaves the PFN in the PTE intact.
-    fn invalidate_page<P: PhysPage>(
+    fn invalidate_page<P: InvalidatedPhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
-    ) -> Result<UnmappedPhysPage<P>> {
+    ) -> Result<P> {
         let entry = self.get_4k_leaf_with_type(RawAddr::from(addr), P::mem_type())?;
         let page = unsafe {
             // Safe since we've verified the typing of the page.
             entry.invalidate_page().unwrap()
         };
-        Ok(UnmappedPhysPage::new(page))
+        Ok(page)
     }
 
     /// Returns an iterator to invalidated pages for the given range.
     /// Guarantees that the full range of pages can be unmapped.
-    fn invalidate_range<P: PhysPage>(
+    fn invalidate_range<P: InvalidatedPhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
         page_size: PageSize,
@@ -514,27 +515,17 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     /// Checks the ownership and typing of the page at `page_addr` and then creates a translation
     /// for `vaddr` to `spa` with the given permissions, filling in any intermediate page tables
     /// using `get_pte_page` as necessary.
-    fn do_map_page<P: PhysPage>(
+    fn do_map_page(
         &mut self,
         vaddr: PageAddr<Self::MappedAddressSpace>,
         spa: SupervisorPageAddr,
         page_size: PageSize,
         perms: PteLeafPerms,
-        get_pte_page: &mut dyn FnMut() -> Option<Page>,
+        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<()> {
         if page_size.is_huge() {
             return Err(Error::PageSizeNotSupported(page_size));
         }
-        if self.page_tracker().owner(spa) != Ok(self.page_owner_id()) {
-            return Err(Error::PageNotOwned);
-        }
-        if self.page_tracker().mem_type(spa) != Ok(P::mem_type()) {
-            return Err(Error::PageTypeMismatch);
-        }
-        if self.page_tracker().state(spa) != Ok(PageState::Mapped) {
-            return Err(Error::PageNotMappable);
-        }
-
         let mut table = PageTable::from_root(self);
         while table.level().leaf_page_size() != page_size {
             table = table.next_level_or_fill_fn(RawAddr::from(vaddr), get_pte_page)?;
@@ -572,14 +563,14 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
 
 impl<T: PlatformPageTable> PlatformPageTableHelpers for T {}
 
-pub struct InvalidateIter<'a, T: PlatformPageTable, P: PhysPage> {
+pub struct InvalidateIter<'a, T: PlatformPageTable, P: InvalidatedPhysPage> {
     owner: &'a mut T,
     curr: PageAddr<T::MappedAddressSpace>,
     count: u64,
     phantom: PhantomData<P>,
 }
 
-impl<'a, T: PlatformPageTable, P: PhysPage> InvalidateIter<'a, T, P> {
+impl<'a, T: PlatformPageTable, P: InvalidatedPhysPage> InvalidateIter<'a, T, P> {
     pub fn new(owner: &'a mut T, curr: PageAddr<T::MappedAddressSpace>, count: u64) -> Self {
         Self {
             owner,
@@ -590,8 +581,8 @@ impl<'a, T: PlatformPageTable, P: PhysPage> InvalidateIter<'a, T, P> {
     }
 }
 
-impl<'a, T: PlatformPageTable, P: PhysPage> Iterator for InvalidateIter<'a, T, P> {
-    type Item = UnmappedPhysPage<P>;
+impl<'a, T: PlatformPageTable, P: InvalidatedPhysPage> Iterator for InvalidateIter<'a, T, P> {
+    type Item = P;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == 0 {

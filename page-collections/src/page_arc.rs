@@ -8,7 +8,7 @@ use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use riscv_pages::{Page, PageSize, PhysPage};
+use riscv_pages::{InternalClean, Page, PageSize, PhysPage};
 
 use crate::page_box::PageBox;
 
@@ -33,7 +33,7 @@ impl<T> PageArc<T> {
     /// To avoid leaking the page, the returned `PageArc` must have its page reclaimed by first
     /// turning it into a uniquely-owned `PageBox` with `try_unwrap()` and then consuming the
     /// `PageBox` with `PageBox::to_page()`.
-    pub fn new_with(data: T, page: Page) -> Self {
+    pub fn new_with(data: T, page: Page<InternalClean>) -> Self {
         let ptr = page.addr().bits() as *mut PageArcInner<T>;
         assert!(!ptr.is_null()); // Explicitly ban pages at zero address.
         let inner = PageArcInner {
@@ -164,7 +164,7 @@ mod tests {
     use alloc::vec;
     use riscv_pages::{PageAddr, RawAddr};
 
-    fn stub_page() -> Page {
+    fn stub_page() -> Page<InternalClean> {
         let mem = vec![0u8; PageSize::Size4k as usize * 2];
         let aligned_addr = PageSize::Size4k.round_up(mem.as_ptr() as u64);
         // This is not safe, but it's only for a test and mem isn't touched until backing_page is

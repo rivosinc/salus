@@ -8,7 +8,7 @@ use drivers::{CpuId, CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::GuestStagePageTable;
-use riscv_pages::{GuestPhysAddr, PageOwnerId, RawAddr, SequentialPages};
+use riscv_pages::{GuestPhysAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages};
 use riscv_regs::{hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
@@ -564,7 +564,7 @@ pub struct VmCpus {
 
 impl VmCpus {
     /// Creates a new vCPU tracking structure backed by `pages`.
-    pub fn new(guest_id: PageOwnerId, pages: SequentialPages) -> Result<Self> {
+    pub fn new(guest_id: PageOwnerId, pages: SequentialPages<InternalClean>) -> Result<Self> {
         let num_vcpus = pages.length_bytes() / VM_CPU_BYTES;
         if num_vcpus == 0 {
             return Err(Error::InsufficientVmCpuStorage);

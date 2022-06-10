@@ -7,7 +7,7 @@ use core::ops::Deref;
 use page_collections::page_arc::PageArc;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{GuestStagePageTable, PageTracker};
-use riscv_pages::{Page, PageOwnerId, SequentialPages};
+use riscv_pages::{InternalClean, Page, PageOwnerId, SequentialPages};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
@@ -113,7 +113,7 @@ impl<T: GuestStagePageTable> Clone for GuestState<T> {
 
 impl<T: GuestStagePageTable> GuestState<T> {
     /// Creates a new initializing `GuestState` from `vm`, using `page` as storage.
-    pub fn new(vm: Vm<T, VmStateInitializing>, page: Page) -> Self {
+    pub fn new(vm: Vm<T, VmStateInitializing>, page: Page<InternalClean>) -> Self {
         Self {
             inner: PageArc::new_with(RwLock::new(GuestStateInner::Init(vm)), page),
         }
@@ -153,7 +153,7 @@ pub struct Guests<T: GuestStagePageTable> {
 
 impl<T: GuestStagePageTable> Guests<T> {
     /// Creates a new `Guests` using `vec_pages` as storage.
-    pub fn new(vec_pages: SequentialPages, page_tracker: PageTracker) -> Self {
+    pub fn new(vec_pages: SequentialPages<InternalClean>, page_tracker: PageTracker) -> Self {
         Self {
             guests: Mutex::new(PageVec::from(vec_pages)),
             page_tracker,

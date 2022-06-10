@@ -59,7 +59,7 @@ impl PageTableLevel for Sv48Level {
 
 /// An Sv48 set of mappings for address translation.
 pub struct Sv48 {
-    root: SequentialPages,
+    root: SequentialPages<InternalClean>,
     owner: PageOwnerId,
     page_tracker: PageTracker,
 }
@@ -91,7 +91,11 @@ impl PlatformPageTable for Sv48 {
         num_l1_pages + num_l2_pages + num_l3_pages + num_l4_pages
     }
 
-    fn new(root: SequentialPages, owner: PageOwnerId, page_tracker: PageTracker) -> Result<Self> {
+    fn new(
+        root: SequentialPages<InternalClean>,
+        owner: PageOwnerId,
+        page_tracker: PageTracker,
+    ) -> Result<Self> {
         // TODO: Verify ownership of root PT pages.
         if root.page_size().is_huge() {
             return Err(Error::PageSizeNotSupported(root.page_size()));

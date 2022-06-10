@@ -16,11 +16,10 @@ mod memory_type;
 mod page;
 mod page_owner_id;
 mod sequential_pages;
+mod state;
 
 pub use memory_type::{DeviceMemType, MemType};
-pub use page::{
-    CleanPage, GuestPageAddr, GuestPfn, GuestPhysAddr, Page, PageAddr, PageSize, Pfn, PhysPage,
-    RawAddr, SupervisorPageAddr, SupervisorPfn, SupervisorPhysAddr, UnmappedPage, UnmappedPhysPage,
-};
+pub use page::*;
 pub use page_owner_id::{AddressSpace, GuestPhys, PageOwnerId, SupervisorPhys, SupervisorVirt};
 pub use sequential_pages::{Error as SequentialPagesError, SeqPageIter, SequentialPages};
+pub use state::*;

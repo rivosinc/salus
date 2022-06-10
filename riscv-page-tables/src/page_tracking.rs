@@ -9,9 +9,7 @@ use alloc::vec::Vec;
 use core::alloc::Allocator;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
-use riscv_pages::{
-    MemType, Page, PageOwnerId, PageSize, PhysPage, SequentialPages, SupervisorPageAddr,
-};
+use riscv_pages::*;
 
 use crate::page_info::{PageInfo, PageMap, PageState};
 use crate::HwMemMap;
@@ -41,6 +39,10 @@ pub enum Error {
     PageNotReclaimable,
     /// Attempt to intiate an invalid page state transition.
     InvalidStateTransition,
+    /// The page does not match the expected ownership.
+    OwnerMismatch,
+    /// The page does not match the expected memory type.
+    PageTypeMismatch,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -80,15 +82,19 @@ impl PageTracker {
     pub fn from<A: Allocator>(
         mut hyp_mem: HypPageAlloc<A>,
         host_alignment: u64,
-    ) -> (Self, Vec<SequentialPages, A>) {
+    ) -> (Self, Vec<SequentialPages<ConvertedClean>, A>) {
         // TODO - hard coded to two pages worth of guests. - really dumb if page size is 1G
-        let mut active_guests = PageVec::from(hyp_mem.take_pages(2));
+        let mut active_guests = PageVec::from(hyp_mem.take_pages_for_host_state(2));
         active_guests.push(PageOwnerId::host());
 
-        let state_storage_page = hyp_mem.next_page();
+        let state_storage_page = hyp_mem
+            .take_pages_for_host_state(1)
+            .into_iter()
+            .next()
+            .unwrap();
 
         // Discard a host_alignment sized chunk to align ourselves.
-        let _ = hyp_mem.take_pages_with_alignment(
+        let _ = hyp_mem.take_pages(
             (host_alignment / PageSize::Size4k as u64)
                 .try_into()
                 .unwrap(),
@@ -140,37 +146,85 @@ impl PageTracker {
         page_tracker.active_guests.retain(|&id| id != remove_id);
     }
 
-    /// Sets the owner of the page at the given `addr` to `owner`.
-    pub fn assign_page(
+    /// Assigns `page` as a mapped page for `owner`, returning a page that can then be mapped into
+    /// a page table.
+    pub fn assign_page_for_mapping<P, M>(
+        &self,
+        page: P,
+        owner: PageOwnerId,
+    ) -> Result<P::MappablePage>
+    where
+        P: AssignablePhysPage<M>,
+        M: MeasureRequirement,
+    {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(page.addr()).unwrap();
+        info.push_owner(owner, PageState::Mapped)?;
+        // Safe since we own the page and have updated its state.
+        Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
+    }
+
+    /// Assigns `page` as an internal state page for `owner`, returning a page that is eligible to
+    /// be used with various internal collection types (e.g. `PageBox<>`).
+    pub fn assign_page_for_internal_state(
+        &self,
+        page: Page<ConvertedClean>,
+        owner: PageOwnerId,
+    ) -> Result<Page<InternalClean>> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(page.addr()).unwrap();
+        info.push_owner(owner, PageState::VmState)?;
+        // Safe since we own the page and have updated its state.
+        Ok(unsafe { Page::new_with_size(page.addr(), page.size()) })
+    }
+
+    // TODO: Explicit release of pages back to the previous owner. Currently all releasing is done
+    // lazily.
+
+    /// Marks the page as being converted so that it can be used for child VMs.
+    pub fn convert_page<P: InvalidatedPhysPage>(&self, page: P) -> Result<P::ConvertedPage> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(page.addr()).unwrap();
+        info.convert()?;
+        // Safe since we own the page and have verified that it can be donated.
+        Ok(unsafe { P::ConvertedPage::new_with_size(page.addr(), page.size()) })
+    }
+
+    /// Returns the converted page at `addr` if it is unassigned and owned by `owner`.
+    ///
+    /// TODO: For now, all transitions from "converted" to "assigned" are done atomically under
+    /// the page table lock. If that changes, we need to mark the page as "locked" here to avoid
+    /// another thread for concurrently getting a reference to the same page.
+    pub(crate) fn get_converted_page<P: ConvertedPhysPage>(
         &self,
         addr: SupervisorPageAddr,
         owner: PageOwnerId,
-        new_state: PageState,
-    ) -> Result<()> {
+    ) -> Result<P> {
         let mut page_tracker = self.inner.lock();
-        let page = page_tracker.get_mut(addr)?;
-        page.push_owner(owner, new_state)
+        let info = page_tracker.get_mut(addr)?;
+        if info.owner() != Some(owner) {
+            return Err(Error::OwnerMismatch);
+        }
+        if info.mem_type() != P::mem_type() {
+            return Err(Error::PageTypeMismatch);
+        }
+        if info.state() != PageState::Converted {
+            return Err(Error::PageNotAssignable);
+        }
+        // Safe since we've verified ownership and typing of the page.
+        //
+        // TODO: Page size
+        Ok(unsafe { P::new(addr) })
     }
 
-    /// Removes the current owner of the page at `addr` and returns it.
-    pub fn release_page(&self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
+    /// Reclaims the converted, but unassigned, `page` back to a mapped page for the current owner.
+    /// Returns a page that can then be mapped in a page table.
+    pub(crate) fn reclaim_page<P: ReclaimablePhysPage>(&self, page: P) -> Result<P::MappablePage> {
         let mut page_tracker = self.inner.lock();
-        let page = page_tracker.get_mut(addr)?;
-        page.pop_owner()
-    }
-
-    /// Marks the page as being converted so that it can be used for child VMs.
-    pub fn convert_page(&self, addr: SupervisorPageAddr) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let page = page_tracker.get_mut(addr)?;
-        page.convert()
-    }
-
-    /// Reclaims the converted, but unassigned, page as a mappable page.
-    pub fn reclaim_page(&self, addr: SupervisorPageAddr) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let page = page_tracker.get_mut(addr)?;
-        page.reclaim()
+        let info = page_tracker.get_mut(page.addr()).unwrap();
+        info.reclaim()?;
+        // Safe since we own the page and have verified that it can be reclaimed.
+        Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
 
     /// Returns the current owner of the page.
@@ -228,7 +282,7 @@ impl<A: Allocator> HypPageAlloc<A> {
 
     /// Takes ownership of the remaining free pages in the system page map and adds them to 'ranges'.
     /// It also returns the global page info structs as `PageMap`.
-    pub fn drain(mut self) -> (PageMap, Vec<SequentialPages, A>) {
+    pub fn drain(mut self) -> (PageMap, Vec<SequentialPages<ConvertedClean>, A>) {
         let mut ranges = Vec::new_in(self.alloc);
         while self.pages.get(self.next_page).is_some() {
             // Find the last page in this contiguous range.
@@ -252,12 +306,12 @@ impl<A: Allocator> HypPageAlloc<A> {
 
             // Safe to create this range as they were previously free and we just took
             // ownership.
-            let range = unsafe {
+            let dirty_range: SequentialPages<ConvertedDirty> = unsafe {
                 // Unwrap ok; pages are always 4kB-aligned.
                 SequentialPages::from_page_range(self.next_page, last_page, PageSize::Size4k)
                     .unwrap()
             };
-            ranges.push(range);
+            ranges.push(dirty_range.clean());
 
             // Skip until the next free page or we reach the end of memory.
             self.next_page = last_page
@@ -279,39 +333,12 @@ impl<A: Allocator> HypPageAlloc<A> {
         self.pages.num_after(self.next_page).unwrap() as u64
     }
 
-    /// Returns the next 4k page for the hypervisor to use.
-    /// Asserts if out of memory. If there aren't enough pages to set up hypervisor state, there is
-    /// no point in continuing.
-    pub fn next_page(&mut self) -> Page {
-        // OK to unwrap as next_page is guaranteed to be in range.
-        self.pages
-            .get_mut(self.next_page)
-            .unwrap()
-            .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
-            .expect("Failed to take ownership");
-
-        let page = unsafe {
-            // Safe to create a page here since `next_page` was previously free, implying that we
-            // had unique ownership of the page and that it is an ordinary RAM page.
-            Page::new(self.next_page)
-        };
-        // unwrap here because if physical memory runs out before setting up basic hypervisor
-        // structures, the system can't continue.
-        self.next_page = self
-            .pages
-            .iter_from(self.next_page)
-            .unwrap()
-            .find(|p| p.page.is_free())
-            .unwrap()
-            .addr;
-        page
-    }
-
-    /// Takes `count` contiguous Pages with the requested alignment from the system map. Sets
-    /// the hypervisor as the owner of the pages, and any pages consumed up until that point,
+    /// Takes and cleans `count` contiguous Pages with the requested alignment from the system map.
+    /// Sets the hypervisor as the owner of the pages, and any pages consumed up until that point,
     /// in the system page map. Allows passing ranges of pages around without a mutable
-    /// reference to the global owners list. Panics if there are not `count` pages available.
-    pub fn take_pages_with_alignment(&mut self, count: usize, align: u64) -> SequentialPages {
+    /// reference to the global owners list. Panics if there are not `count` pages available. The
+    /// returned pages are eligible to be mapped into the host's address space.
+    pub fn take_pages(&mut self, count: usize, align: u64) -> SequentialPages<ConvertedClean> {
         // Helper to test whether a contiguous range of `count` pages is free and aligned.
         let range_is_free_and_aligned = |start: SupervisorPageAddr| {
             let end = start.checked_add_pages(count as u64).unwrap();
@@ -354,25 +381,36 @@ impl<A: Allocator> HypPageAlloc<A> {
             .unwrap()
             .addr;
 
-        unsafe {
+        let dirty_pages: SequentialPages<ConvertedDirty> = unsafe {
             // It's safe to create a page range of the memory that `self` forfeited ownership of
             // above and the new `SequentialPages` is now the unique owner. Ok to unwrap here simce
             // all pages are trivially aligned to 4kB.
             SequentialPages::from_page_range(first_page, last_page, PageSize::Size4k).unwrap()
-        }
+        };
+        dirty_pages.clean()
     }
 
-    /// Same as above, but without any alignment requirements.
-    pub fn take_pages(&mut self, count: usize) -> SequentialPages {
-        self.take_pages_with_alignment(count, PageSize::Size4k as u64)
+    /// Same as above, but the returned pages are assigned for internal use.
+    pub fn take_pages_for_host_state_with_alignment(
+        &mut self,
+        count: usize,
+        align: u64,
+    ) -> SequentialPages<InternalClean> {
+        let assignable_pages = self.take_pages(count, align);
+        SequentialPages::from_pages(assignable_pages.into_iter().map(|p| {
+            let page_info = self.pages.get_mut(p.addr()).unwrap();
+            page_info
+                .push_owner(PageOwnerId::host(), PageState::VmState)
+                .unwrap();
+            // Safety: We uniquely own this memory and we've updated its state in page_info.
+            unsafe { Page::<InternalClean>::new(p.addr()) }
+        }))
+        .unwrap()
     }
-}
 
-impl<A: Allocator> Iterator for HypPageAlloc<A> {
-    type Item = Page;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(self.next_page())
+    /// Same as above, but with no alignment requirement.
+    pub fn take_pages_for_host_state(&mut self, count: usize) -> SequentialPages<InternalClean> {
+        self.take_pages_for_host_state_with_alignment(count, PageSize::Size4k as u64)
     }
 }
 
@@ -408,7 +446,7 @@ mod tests {
         hyp_mem
     }
 
-    fn stub_page_tracker() -> (PageTracker, Vec<SequentialPages, Global>) {
+    fn stub_page_tracker() -> (PageTracker, Vec<SequentialPages<ConvertedClean>, Global>) {
         let hyp_mem = stub_hyp_mem();
         let (page_tracker, host_mem) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
         (page_tracker, host_mem)
@@ -417,30 +455,17 @@ mod tests {
     #[test]
     fn hyp_mem_take_pages() {
         let mut hyp_mem = stub_hyp_mem();
-        let first = hyp_mem.next_page();
-        let mut taken = hyp_mem.take_pages(2).into_iter();
-        let after_taken = hyp_mem.next_page();
-
-        assert_eq!(
-            after_taken.addr().bits(),
-            first.addr().bits() + (PageSize::Size4k as u64 * 3)
-        );
-        assert_eq!(
-            taken.next().unwrap().addr().bits(),
-            first.addr().bits() + PageSize::Size4k as u64
-        );
-        assert_eq!(
-            taken.next().unwrap().addr().bits(),
-            first.addr().bits() + (PageSize::Size4k as u64 * 2)
-        );
-    }
-
-    #[test]
-    fn hyp_mem_take_by_ref() {
-        let mut hyp_mem = stub_hyp_mem();
-        let first = hyp_mem.next_page();
-        let mut taken = hyp_mem.by_ref().take_pages(2).into_iter();
-        let after_taken = hyp_mem.next_page();
+        let first = hyp_mem
+            .take_pages(1, PageSize::Size4k as u64)
+            .into_iter()
+            .next()
+            .unwrap();
+        let mut taken = hyp_mem.take_pages(2, PageSize::Size4k as u64).into_iter();
+        let after_taken = hyp_mem
+            .take_pages(1, PageSize::Size4k as u64)
+            .into_iter()
+            .next()
+            .unwrap();
 
         assert_eq!(
             after_taken.addr().bits(),
@@ -459,7 +484,7 @@ mod tests {
     #[test]
     fn hyp_mem_take_aligned() {
         let mut hyp_mem = stub_hyp_mem();
-        let range = hyp_mem.take_pages_with_alignment(4, 16 * 1024);
+        let range = hyp_mem.take_pages(4, 16 * 1024);
         assert_eq!(range.base().bits() & (16 * 1024 - 1), 0);
     }
 

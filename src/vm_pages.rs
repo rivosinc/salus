@@ -7,11 +7,8 @@ use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, PageState, PageTracker};
-use riscv_pages::{
-    CleanPage, GuestPageAddr, GuestPhysAddr, Page, PageOwnerId, PageSize, Pfn, PhysPage,
-    SequentialPages, SupervisorPageAddr,
-};
+use riscv_page_tables::{GuestStagePageTable, PageTracker};
+use riscv_pages::*;
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
 
@@ -137,25 +134,25 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let mut root = self.root.lock();
-        let pages = root
-            .invalidate_range::<Page>(from_addr, PageSize::Size4k, count)
+        let dirty_pages = root
+            .invalidate_range::<Page<Invalidated>>(from_addr, PageSize::Size4k, count)
             .map_err(Error::Paging)?
-            .map(move |unmapped| {
-                // We don't care about clearing the contents of these pages since we're going to
-                // overwrite them anyway.
-                let p = unmapped.to_page();
+            .map(move |invalidated| {
                 // Unwrap ok here since we know the pages are valid and were previously mapped.
-                self.page_tracker.convert_page(p.addr()).unwrap();
-                p
+                self.page_tracker.convert_page(invalidated).unwrap()
             });
-        for (mut page, (src_addr, to_addr)) in
-            pages.zip(src_addr.iter_from().zip(to_addr.iter_from()))
+        let new_owner = to.page_owner_id();
+        for (dirty, (src_addr, to_addr)) in
+            dirty_pages.zip(src_addr.iter_from().zip(to_addr.iter_from()))
         {
-            self.page_tracker
-                .assign_page(page.addr(), to.page_owner_id(), PageState::Mapped)
+            let initialized = dirty
+                .try_initialize(|bytes| self.copy_from_guest(bytes, src_addr.into()))
+                .map_err(|(e, _)| e)?;
+            let mappable = self
+                .page_tracker
+                .assign_page_for_mapping(initialized, new_owner)
                 .map_err(Error::SettingOwner)?;
-            self.copy_from_guest(page.as_mut_bytes(), src_addr.into())?;
-            to.add_measured_4k_page(to_addr, page)?;
+            to.add_measured_4k_page(to_addr, mappable)?;
         }
         Ok(count)
     }
@@ -174,7 +171,7 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     // Locking order: `root` -> `measurement` -> `pte_pages`
     root: Mutex<T>,
     measurement: Mutex<Sha256Measure>,
-    pte_pages: Mutex<PageVec<Page>>,
+    pte_pages: Mutex<PageVec<Page<InternalClean>>>,
     phantom: PhantomData<S>,
 }
 
@@ -208,28 +205,24 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     }
 }
 
-// Convenience wrapper for invalidating, cleaning, and taking ownership over a contiguous range of
-// pages.
-fn take_and_clean_pages_for<T: GuestStagePageTable>(
+// Convenience wrapper for invalidating and donating pages.
+fn donate_state_pages_for<T: GuestStagePageTable>(
     root: &mut T,
     addr: GuestPageAddr,
     num_pages: u64,
     new_owner: PageOwnerId,
-    new_state: PageState,
-) -> Result<impl Iterator<Item = Page> + '_> {
+) -> Result<impl Iterator<Item = Page<InternalClean>> + '_> {
     let page_tracker = root.page_tracker();
     let taken_pages = root
-        .invalidate_range(addr, PageSize::Size4k, num_pages)
+        .invalidate_range::<Page<Invalidated>>(addr, PageSize::Size4k, num_pages)
         .map_err(Error::Paging)?
-        .map(CleanPage::from)
-        .map(Page::from)
-        .map(move |p| {
+        .map(move |invalidated| {
             // Unwrap ok here since we know the pages are valid and were previously mapped.
-            page_tracker.convert_page(p.addr()).unwrap();
+            let cleaned = page_tracker.convert_page(invalidated).unwrap().clean();
+            // TODO: This unwrap could fail if we overflow. Handle errors here more gracefully.
             page_tracker
-                .assign_page(p.addr(), new_owner, new_state)
-                .unwrap();
-            p
+                .assign_page_for_internal_state(cleaned, new_owner)
+                .unwrap()
         });
     Ok(taken_pages)
 }
@@ -243,7 +236,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         state_addr: GuestPageAddr,
         vcpus_addr: GuestPageAddr,
         num_vcpu_pages: u64,
-    ) -> Result<(Vm<T, VmStateInitializing>, Page)> {
+    ) -> Result<(Vm<T, VmStateInitializing>, Page<InternalClean>)> {
         if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedVmPages(page_root_addr));
         }
@@ -253,32 +246,20 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             .map_err(Error::GuestId)?;
         let mut root = self.root.lock();
 
-        let guest_root_pages = SequentialPages::from_pages(take_and_clean_pages_for(
-            &mut *root,
-            page_root_addr,
-            4,
-            id,
-            PageState::VmState,
-        )?)
-        .unwrap();
+        let guest_root_pages =
+            SequentialPages::from_pages(donate_state_pages_for(&mut *root, page_root_addr, 4, id)?)
+                .unwrap();
         let guest_root = T::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
 
-        let mut state_pages = take_and_clean_pages_for(
-            &mut *root,
-            state_addr,
-            TVM_STATE_PAGES,
-            id,
-            PageState::VmState,
-        )?;
+        let mut state_pages = donate_state_pages_for(&mut *root, state_addr, TVM_STATE_PAGES, id)?;
         let state_page = state_pages.next().unwrap();
         let pte_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
 
-        let vcpu_pages = SequentialPages::from_pages(take_and_clean_pages_for(
+        let vcpu_pages = SequentialPages::from_pages(donate_state_pages_for(
             &mut *root,
             vcpus_addr,
             num_vcpu_pages,
             id,
-            PageState::VmState,
         )?)
         .unwrap();
 
@@ -299,13 +280,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         to: &VmPages<T, VmStateInitializing>,
     ) -> Result<()> {
         let mut root = self.root.lock();
-        let pt_pages = take_and_clean_pages_for(
-            &mut *root,
-            from_addr,
-            count,
-            to.page_owner_id(),
-            PageState::VmState,
-        )?;
+        let pt_pages = donate_state_pages_for(&mut *root, from_addr, count, to.page_owner_id())?;
         for page in pt_pages {
             to.add_pte_page(page)?;
         }
@@ -321,15 +296,20 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let mut root = self.root.lock();
-        let pages = take_and_clean_pages_for(
-            &mut *root,
-            from_addr,
-            count,
-            to.page_owner_id(),
-            PageState::Mapped,
-        )?;
+        let pages = root
+            .invalidate_range::<Page<Invalidated>>(from_addr, PageSize::Size4k, count)
+            .map_err(Error::Paging)?
+            .map(move |invalidated| {
+                // Unwrap ok here since we know the pages are valid and were previously mapped.
+                self.page_tracker.convert_page(invalidated).unwrap().clean()
+            });
+        let new_owner = to.page_owner_id();
         for (page, guest_addr) in pages.zip(to_addr.iter_from()) {
-            to.add_4k_page(guest_addr, page)?;
+            let mappable = self
+                .page_tracker
+                .assign_page_for_mapping(page, new_owner)
+                .map_err(Error::SettingOwner)?;
+            to.add_4k_page(guest_addr, mappable)?;
         }
         Ok(count)
     }
@@ -367,7 +347,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     /// Creates a new `VmPages` from the given root page table, using `pte_vec_page` for a vector
     /// of page-table pages.
-    pub fn new(root: T, pte_vec_pages: SequentialPages) -> Self {
+    pub fn new(root: T, pte_vec_pages: SequentialPages<InternalClean>) -> Self {
         Self {
             page_owner_id: root.page_owner_id(),
             page_tracker: root.page_tracker(),
@@ -380,7 +360,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
 
     /// Add a page to be used for building the guest's page tables.
     /// Currently only supports 4k pages.
-    pub fn add_pte_page(&self, page: Page) -> Result<()> {
+    pub fn add_pte_page(&self, page: Page<InternalClean>) -> Result<()> {
         if page.size() != PageSize::Size4k {
             return Err(Error::UnsupportedPageSize(page.size()));
         }
@@ -393,7 +373,11 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     }
 
     /// Maps a page into the guest's address space and measures it.
-    pub fn add_measured_4k_page(&self, to_addr: GuestPageAddr, page: Page) -> Result<()> {
+    pub fn add_measured_4k_page<S, M>(&self, to_addr: GuestPageAddr, page: Page<S>) -> Result<()>
+    where
+        S: Mappable<M>,
+        M: MeasureRequirement,
+    {
         if page.size() != PageSize::Size4k {
             return Err(Error::UnsupportedPageSize(page.size()));
         }
@@ -405,7 +389,10 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     }
 
     /// Maps an unmeasured page into the guest's address space.
-    pub fn add_4k_page<P: PhysPage>(&self, to_addr: GuestPageAddr, page: P) -> Result<()> {
+    pub fn add_4k_page<P>(&self, to_addr: GuestPageAddr, page: P) -> Result<()>
+    where
+        P: MappablePhysPage<MeasureOptional>,
+    {
         if page.size() != PageSize::Size4k {
             return Err(Error::UnsupportedPageSize(page.size()));
         }

@@ -5,7 +5,7 @@
 use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use core::slice;
-use riscv_pages::{PageAddr, PageSize, RawAddr, SequentialPages};
+use riscv_pages::{InternalClean, InternalDirty, PageAddr, PageSize, RawAddr, SequentialPages};
 use spin::Mutex;
 
 struct HypAllocInner {
@@ -61,7 +61,7 @@ pub struct HypAlloc {
 
 impl HypAlloc {
     /// Creates an allocator from a range of pages which will be used as storage for the allocator.
-    pub fn from_pages(pages: SequentialPages) -> Self {
+    pub fn from_pages(pages: SequentialPages<InternalClean>) -> Self {
         let inner = HypAllocInner {
             mem: NonNull::slice_from_raw_parts(
                 NonNull::new(pages.base().bits() as *mut u8).unwrap(),
@@ -76,7 +76,7 @@ impl HypAlloc {
     }
 
     /// Destroys the allocator and returns the pages which were used as storage.
-    pub fn to_pages(self) -> SequentialPages {
+    pub fn to_pages(self) -> SequentialPages<InternalDirty> {
         let inner = self.inner.lock();
         let base = inner.mem.as_mut_ptr() as u64;
         let num_pages = (inner.mem.len() as u64) / inner.page_size as u64;

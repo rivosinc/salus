@@ -8,7 +8,7 @@ use core::{alloc::Allocator, fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
 use drivers::{CpuId, CpuInfo, Imsic, ImsicGuestId};
 use riscv_page_tables::{GuestStagePageTable, HwMemRegion, HypPageAlloc};
-use riscv_pages::{GuestPhysAddr, PageAddr, PageOwnerId, PageSize, RawAddr, SequentialPages};
+use riscv_pages::*;
 
 use crate::print_util::*;
 use crate::println;
@@ -128,6 +128,11 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
     }
 }
 
+enum FdtPages {
+    Clean(SequentialPages<ConvertedClean>),
+    Initialized(SequentialPages<ConvertedInitialized>),
+}
+
 /// Loader for the host VM.
 ///
 /// Given the hypervisor's device tree and the host kernel & initramfs image, build a device-tree
@@ -142,8 +147,8 @@ pub struct HostVmLoader<T: GuestStagePageTable, A: Allocator + Clone> {
     kernel: HwMemRegion,
     initramfs: Option<HwMemRegion>,
     vm: HostVm<T, VmStateInitializing>,
-    fdt_pages: SequentialPages,
-    zero_pages: Vec<SequentialPages, A>,
+    fdt_pages: FdtPages,
+    zero_pages: Vec<SequentialPages<ConvertedClean>, A>,
     guest_ram_base: GuestPhysAddr,
 }
 
@@ -166,8 +171,8 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             ((size as u64) + T::TOP_LEVEL_ALIGN - 1) & !(T::TOP_LEVEL_ALIGN - 1)
         };
         let num_fdt_pages = fdt_size / PageSize::Size4k as u64;
-        let fdt_pages = page_alloc
-            .take_pages_with_alignment(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
+        let fdt_pages =
+            page_alloc.take_pages(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
 
         let (zero_pages, vm) = HostVm::from_hyp_mem(page_alloc, guest_phys_size);
 
@@ -176,7 +181,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             kernel,
             initramfs,
             vm,
-            fdt_pages,
+            fdt_pages: FdtPages::Clean(fdt_pages),
             zero_pages,
             guest_ram_base,
         }
@@ -184,17 +189,22 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
 
     /// Builds a device tree for the host VM, flattening it to a range of pages that will be
     /// mapped into the address space in `build_address_space()`.
-    pub fn build_device_tree(self) -> Self {
+    pub fn build_device_tree(mut self) -> Self {
+        let fdt_pages = match self.fdt_pages {
+            FdtPages::Clean(pages) => pages,
+            _ => panic!("Device tree already written"),
+        };
+
         // Now that the hypervisor is done claiming memory, determine the actual size of the host's
         // address space.
         let ram_size = self
             .zero_pages
             .iter()
             .fold(0, |acc, r| acc + r.length_bytes())
-            + self.fdt_pages.length_bytes()
+            + fdt_pages.length_bytes()
             + self.kernel.size()
             + self.initramfs.map(|r| r.size()).unwrap_or(0);
-        assert!(ram_size >= FDT_OFFSET + self.fdt_pages.length_bytes());
+        assert!(ram_size >= FDT_OFFSET + fdt_pages.length_bytes());
 
         // Construct a stripped-down device-tree for the host VM.
         //
@@ -225,15 +235,19 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
 
         // Serialize the device-tree.
         let dt_writer = DeviceTreeSerializer::new(&host_dt);
-        assert!(dt_writer.output_size() <= self.fdt_pages.length_bytes().try_into().unwrap());
+        assert!(dt_writer.output_size() <= fdt_pages.length_bytes().try_into().unwrap());
         let fdt_slice = unsafe {
             // Safe because we own these pages.
             slice::from_raw_parts_mut(
-                self.fdt_pages.base().bits() as *mut u8,
-                self.fdt_pages.length_bytes().try_into().unwrap(),
+                fdt_pages.base().bits() as *mut u8,
+                fdt_pages.length_bytes().try_into().unwrap(),
             )
         };
         dt_writer.write_to(fdt_slice);
+        let fdt_pages =
+            SequentialPages::from_pages(fdt_pages.into_iter().map(|p| p.to_initialized_page()))
+                .unwrap();
+        self.fdt_pages = FdtPages::Initialized(fdt_pages);
         self
     }
 
@@ -277,7 +291,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
         let num_kernel_pages = self.kernel.size() / PageSize::Size4k as u64;
-        let kernel_pages = unsafe {
+        let kernel_pages: SequentialPages<ConvertedInitialized> = unsafe {
             // Safe because HwMemMap reserved this region.
             SequentialPages::from_mem_range(self.kernel.base(), PageSize::Size4k, num_kernel_pages)
                 .unwrap()
@@ -296,7 +310,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
             let num_initramfs_pages = r.size() / PageSize::Size4k as u64;
-            let initramfs_pages = unsafe {
+            let initramfs_pages: SequentialPages<ConvertedInitialized> = unsafe {
                 // Safe because HwMemMap reserved this region.
                 SequentialPages::from_mem_range(r.base(), PageSize::Size4k, num_initramfs_pages)
                     .unwrap()
@@ -314,9 +328,13 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         );
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
-        let num_fdt_pages = self.fdt_pages.len();
+        let fdt_pages = match self.fdt_pages {
+            FdtPages::Initialized(pages) => pages,
+            _ => panic!("FDT pages not initialized"),
+        };
+        let num_fdt_pages = fdt_pages.len();
         self.vm
-            .add_measured_pages(current_gpa, self.fdt_pages.into_iter());
+            .add_measured_pages(current_gpa, fdt_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
         self.vm.add_pages(current_gpa, zero_pages_iter);

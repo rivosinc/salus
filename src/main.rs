@@ -178,7 +178,7 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
             HEAP_SIZE,
         )
         .unwrap();
-    let pages = unsafe {
+    let pages: SequentialPages<InternalDirty> = unsafe {
         // Safe since this region of memory was free in the memory map.
         SequentialPages::from_mem_range(
             heap_base,
@@ -187,7 +187,7 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
         )
         .unwrap()
     };
-    HypAlloc::from_pages(pages)
+    HypAlloc::from_pages(pages.clean())
 }
 
 /// Initialize (H)S-level CSRs to a reasonable state.

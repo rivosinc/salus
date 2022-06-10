@@ -305,6 +305,25 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
         self.props.iter_mut()
     }
 
+    /// Returns true if this node is marked as disabled.
+    pub fn disabled(&self) -> bool {
+        self.props()
+            .any(|p| p.name() == "status" && p.value_str().unwrap_or("") == "disabled")
+    }
+
+    /// Returns true if any of the provided compatible strings matches this node.
+    pub fn compatible<I>(&self, compat_strings: I) -> bool
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        compat_strings.into_iter().any(|compat_str| {
+            self.props()
+                .filter(|p| p.name() == "compatible")
+                .any(|p| p.value_str().unwrap_or("").contains(compat_str.as_ref()))
+        })
+    }
+
     fn set_id(&mut self, id: NodeId<A>) {
         self.id = Some(id);
     }

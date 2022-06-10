@@ -344,13 +344,7 @@ impl Imsic {
         // have its status set to "disabled" by firmware.
         let imsic_node = dt
             .iter()
-            .find(|n| {
-                n.props().any(|p| {
-                    p.name() == "compatible" && p.value_str().unwrap_or("").contains("riscv,imsics")
-                }) && !n
-                    .props()
-                    .any(|p| p.name() == "status" && p.value_str().unwrap_or("") == "disabled")
-            })
+            .find(|n| n.compatible(["riscv,imsics"]) && !n.disabled())
             .expect("No IMSIC node in deivce-tree");
 
         // There must be a parent interrupt for each CPU.

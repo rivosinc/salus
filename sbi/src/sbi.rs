@@ -506,8 +506,9 @@ pub enum TeeFunction {
     /// a0 = destination address of the `TsmInfo` structure
     /// a1 = maximum number of bytes to be written
     TsmGetInfo { dest_addr: u64, len: u64 },
-    /// Converts `num_pages` of non-confidential memory starting at `page_addr`. After conversion
-    /// the pages may be assigned to TVMs.
+    /// Converts `num_pages` of non-confidential memory starting at `page_addr`. The converted pages
+    /// remain non-confidential, and thus may not be assinged for use by a child TVM, until the
+    /// fence procedure, described below, has been completed.
     ///
     /// a6 = 12
     /// a0 = base address of pages to convert
@@ -530,6 +531,20 @@ pub enum TeeFunction {
         page_type: TsmPageType,
         num_pages: u64,
     },
+    /// Initiates a TLB invalidation sequence for all pages marked for conversion via calls to
+    /// `TsmConvertPages` between the previous `TsmInitiateFence` and now. The TLB invalidation
+    /// sequence is completed when `TsmLocalFence` has been invoked on all other CPUs, after which
+    /// the pages covered by the invalidation sequence are considered to be fully converted &
+    /// confidential, and may be assigned for use by child TVMs. An error is returned if a TLB
+    /// invalidation sequence is already in progress.
+    ///
+    /// a6 = 14
+    TsmInitiateFence,
+    /// Invalidates TLB entries for all pages pending conversion by an in-progress TLB invalidation
+    /// operation on the local CPU.
+    ///
+    /// a6 = 15
+    TsmLocalFence,
 }
 
 impl TeeFunction {
@@ -597,6 +612,8 @@ impl TeeFunction {
                 page_type: TsmPageType::from_reg(args[1])?,
                 num_pages: args[2],
             }),
+            14 => Ok(TsmInitiateFence),
+            15 => Ok(TsmLocalFence),
             _ => Err(Error::InvalidParam),
         }
     }
@@ -664,6 +681,8 @@ impl TeeFunction {
                 page_type: _,
                 num_pages: _,
             } => 13,
+            TsmInitiateFence => 14,
+            TsmLocalFence => 15,
         }
     }
 
@@ -727,6 +746,7 @@ impl TeeFunction {
                 page_type: _,
                 num_pages: _,
             } => *page_addr,
+            _ => 0,
         }
     }
 

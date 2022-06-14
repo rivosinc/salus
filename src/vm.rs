@@ -319,6 +319,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 page_type,
                 num_pages,
             } => self.reclaim_pages(page_addr, page_type, num_pages).into(),
+            TsmInitiateFence | TsmLocalFence => SbiReturn::from(sbi::Error::NotSupported),
             AddPageTablePages {
                 guest_id,
                 page_addr,

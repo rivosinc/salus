@@ -49,6 +49,28 @@ pub fn poweroff() -> ! {
     abort()
 }
 
+fn convert_pages(addr: u64, num_pages: u64) {
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmConvertPages {
+        page_addr: addr,
+        page_type: sbi::TsmPageType::Page4k,
+        num_pages: num_pages,
+    });
+    // Safety: The passed-in pages are unmapped and we do not access them again until they're
+    // reclaimed.
+    unsafe { ecall_send(&msg).expect("TsmConvertPages failed") };
+}
+
+fn reclaim_pages(addr: u64, num_pages: u64) {
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmReclaimPages {
+        page_addr: addr,
+        page_type: sbi::TsmPageType::Page4k,
+        num_pages: num_pages,
+    });
+    // Safety: The referenced pages are made accessible again, which is safe since we haven't
+    // done anything with them since they were converted.
+    unsafe { ecall_send(&msg).expect("TsmReclaimPages failed") };
+}
+
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
@@ -93,8 +115,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         + ((NUM_VCPUS * tsm_info.tvm_bytes_per_vcpu) + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
     println!("Donating {} pages for TVM creation", tvm_create_pages);
 
-    // Try to create a TEE
+    // Donate the pages necessary to create the TVM.
     let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
+    convert_pages(next_page, tvm_create_pages);
+
+    // Now create the TVM.
     let tvm_page_directory_addr = next_page;
     let tvm_state_addr = tvm_page_directory_addr + 4 * PAGE_SIZE_4K;
     let tvm_vcpu_addr = tvm_state_addr + tsm_info.tvm_state_pages * PAGE_SIZE_4K;
@@ -108,20 +133,20 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         params_addr: (&tvm_create_params as *const sbi::TvmCreateParams) as u64,
         len: core::mem::size_of::<sbi::TvmCreateParams>() as u64,
     });
-    // Safety: `TvmCreate` donates the pages pointed to by `tvm_create_params` to SBI. This is safe
-    // because those pages are not used by this program.
+    // Safety: We trust the TSM to only read up to `len` bytes of the `TvmCreateParams` structure
+    // pointed to by `params_addr.
     let vmid = unsafe { ecall_send(&msg).expect("Tellus - TvmCreate returned error") };
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");
     next_page += PAGE_SIZE_4K * tvm_create_pages;
 
     // Add pages for the page table
+    convert_pages(next_page, NUM_TEE_PTE_PAGES);
     let msg = SbiMessage::Tee(sbi::TeeFunction::AddPageTablePages {
         guest_id: vmid,
         page_addr: next_page,
         num_pages: NUM_TEE_PTE_PAGES,
     });
-    // Safety: `AddPageTablePages` donates the pages pointed to by `tvm_create_params` to SBI. This
-    // is safe because those pages are not used by this program.
+    // Safety: `AddPageTablePages` only accesses pages that have been previously converted.
     unsafe { ecall_send(&msg).expect("Tellus - AddPageTablePages returned error") };
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
@@ -154,6 +179,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
     let donated_pages_base = next_page;
     // Add data pages
+    convert_pages(next_page, NUM_GUEST_DATA_PAGES);
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddMeasuredPages {
         guest_id: vmid,
         src_addr: guest_image_base,
@@ -162,7 +188,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         num_pages: NUM_GUEST_DATA_PAGES,
         guest_addr: USABLE_RAM_START_ADDRESS,
     });
-    // Safety: `TvmAddMeasuredPages` donates the pages pointed to by `dest_addr` to the TSM and
+    // Safety: `TvmAddMeasuredPages` only writes pages that have already been converted, and only
     // reads the pages pointed to by `src_addr`. This is safe because those pages are not used by
     // this program.
     unsafe {
@@ -211,6 +237,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Add zeroed (non-measured) pages
     // TODO: Make sure that these guest pages are actually zero
+    convert_pages(next_page, NUM_GUEST_ZERO_PAGES);
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddZeroPages {
         guest_id: vmid,
         page_addr: next_page,
@@ -218,8 +245,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         num_pages: NUM_GUEST_ZERO_PAGES,
         guest_addr: USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
     });
-    // Safety: `AddPages` donates the pages pointed to by `tvm_create_params` to SBI. This is
-    // safe because those pages are not used by this program.
+    // Safety: `TvmAddZeroPages` only touches pages that we've already converted.
     unsafe {
         ecall_send(&msg).expect("Tellus - AddPages Zeroed returned error");
     }
@@ -263,8 +289,12 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         ecall_send(&msg).expect("Tellus - TvmDestroy returned error");
     }
 
-    // check that guest pages have been cleared
-    for i in 0u64..(NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) / 8 {
+    // Check that we can reclaim previously-converted pages and that they have been cleared.
+    reclaim_pages(
+        donated_pages_base,
+        NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES,
+    );
+    for i in 0u64..((NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K) / 8 {
         let m = (donated_pages_base + i) as *const u64;
         unsafe {
             if core::ptr::read_volatile(m) != 0 {

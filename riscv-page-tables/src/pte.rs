@@ -79,6 +79,7 @@ impl Pte {
     }
 
     /// Marks the entry as valid
+    #[allow(dead_code)]
     pub fn mark_valid(&mut self) {
         self.0 |= PteFieldBit::Valid.mask();
     }

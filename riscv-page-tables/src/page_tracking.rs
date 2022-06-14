@@ -39,10 +39,6 @@ pub enum Error {
     PageNotReclaimable,
     /// Attempt to intiate an invalid page state transition.
     InvalidStateTransition,
-    /// The page does not match the expected ownership.
-    OwnerMismatch,
-    /// The page does not match the expected memory type.
-    PageTypeMismatch,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -190,36 +186,9 @@ impl PageTracker {
         Ok(unsafe { P::ConvertedPage::new_with_size(page.addr(), page.size()) })
     }
 
-    /// Returns the converted page at `addr` if it is unassigned and owned by `owner`.
-    ///
-    /// TODO: For now, all transitions from "converted" to "assigned" are done atomically under
-    /// the page table lock. If that changes, we need to mark the page as "locked" here to avoid
-    /// another thread for concurrently getting a reference to the same page.
-    pub(crate) fn get_converted_page<P: ConvertedPhysPage>(
-        &self,
-        addr: SupervisorPageAddr,
-        owner: PageOwnerId,
-    ) -> Result<P> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr)?;
-        if info.owner() != Some(owner) {
-            return Err(Error::OwnerMismatch);
-        }
-        if info.mem_type() != P::mem_type() {
-            return Err(Error::PageTypeMismatch);
-        }
-        if info.state() != PageState::Converted {
-            return Err(Error::PageNotAssignable);
-        }
-        // Safe since we've verified ownership and typing of the page.
-        //
-        // TODO: Page size
-        Ok(unsafe { P::new(addr) })
-    }
-
     /// Reclaims the converted, but unassigned, `page` back to a mapped page for the current owner.
     /// Returns a page that can then be mapped in a page table.
-    pub(crate) fn reclaim_page<P: ReclaimablePhysPage>(&self, page: P) -> Result<P::MappablePage> {
+    pub fn reclaim_page<P: ReclaimablePhysPage>(&self, page: P) -> Result<P::MappablePage> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr()).unwrap();
         info.reclaim()?;
@@ -227,25 +196,39 @@ impl PageTracker {
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
 
-    /// Returns the current owner of the page.
-    pub fn owner(&self, addr: SupervisorPageAddr) -> Result<PageOwnerId> {
+    /// Returns true if and only if `addr` is a "Mapped" page owned by `owner` with type `mem_type`.
+    pub(crate) fn is_mapped_page(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        mem_type: MemType,
+    ) -> bool {
         let mut page_tracker = self.inner.lock();
-        let page = page_tracker.get(addr)?;
-        page.owner().ok_or(Error::UnownedPage)
+        if let Ok(info) = page_tracker.get(addr) {
+            info.owner() == Some(owner)
+                && info.mem_type() == mem_type
+                && info.state() == PageState::Mapped
+        } else {
+            false
+        }
     }
 
-    /// Returns the type of memory the page represents.
-    pub fn mem_type(&self, addr: SupervisorPageAddr) -> Result<MemType> {
+    /// Returns true if and only if `addr` is a "Converted" page owned by `owner` with type
+    /// `mem_type`.
+    pub(crate) fn is_converted_page(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        mem_type: MemType,
+    ) -> bool {
         let mut page_tracker = self.inner.lock();
-        let page = page_tracker.get(addr)?;
-        Ok(page.mem_type())
-    }
-
-    /// Returns the current state of the page.
-    pub fn state(&self, addr: SupervisorPageAddr) -> Result<PageState> {
-        let mut page_tracker = self.inner.lock();
-        let page = page_tracker.get(addr)?;
-        Ok(page.state())
+        if let Ok(info) = page_tracker.get(addr) {
+            info.owner() == Some(owner)
+                && info.mem_type() == mem_type
+                && info.state() == PageState::Converted
+        } else {
+            false
+        }
     }
 }
 

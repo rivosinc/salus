@@ -309,9 +309,16 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             TsmGetInfo { dest_addr, len } => self.get_tsm_info(dest_addr, len, active_pages).into(),
             TvmCreate { params_addr, len } => self.add_guest(params_addr, len, active_pages).into(),
             TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
-            TsmConvertPages { .. } | TsmReclaimPages { .. } => {
-                SbiReturn::from(sbi::Error::NotSupported)
-            }
+            TsmConvertPages {
+                page_addr,
+                page_type,
+                num_pages,
+            } => self.convert_pages(page_addr, page_type, num_pages).into(),
+            TsmReclaimPages {
+                page_addr,
+                page_type,
+                num_pages,
+            } => self.reclaim_pages(page_addr, page_type, num_pages).into(),
             AddPageTablePages {
                 guest_id,
                 page_addr,
@@ -445,6 +452,42 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             .copy_to_guest(dest_addr, tsm_info_bytes)
             .map_err(|_| SbiError::InvalidAddress)?;
         Ok(len as u64)
+    }
+
+    /// Converts `num_pages` starting at guest physical address `page_addr` to confidential memory.
+    fn convert_pages(
+        &self,
+        page_addr: u64,
+        page_type: sbi::TsmPageType,
+        num_pages: u64,
+    ) -> sbi::Result<u64> {
+        if page_type != sbi::TsmPageType::Page4k {
+            // TODO: Support converting hugepages.
+            return Err(SbiError::InvalidParam);
+        }
+        let page_addr = self.guest_addr_from_raw(page_addr)?;
+        self.vm_pages
+            .convert_pages(page_addr, num_pages)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        Ok(num_pages)
+    }
+
+    /// Reclaims `num_pages` of confidential memory starting at guest physical address `page_addr`.
+    fn reclaim_pages(
+        &self,
+        page_addr: u64,
+        page_type: sbi::TsmPageType,
+        num_pages: u64,
+    ) -> sbi::Result<u64> {
+        if page_type != sbi::TsmPageType::Page4k {
+            // TODO: Support converting hugepages.
+            return Err(SbiError::InvalidParam);
+        }
+        let page_addr = self.guest_addr_from_raw(page_addr)?;
+        self.vm_pages
+            .reclaim_pages(page_addr, num_pages)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        Ok(num_pages)
     }
 
     fn add_guest(

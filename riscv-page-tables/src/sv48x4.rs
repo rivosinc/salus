@@ -132,30 +132,7 @@ impl PlatformPageTable for Sv48x4 {
         self.root.base()
     }
 
-    fn do_fault(&mut self, gpa: RawAddr<Self::MappedAddressSpace>) -> bool {
-        // avoid double self borrow, by cloning the pages, each layer borrows self, so the borrow
-        // checked can't tell that page_tracker is only borrowed once.
-        let page_tracker = self.page_tracker.clone();
-        let owner = self.owner;
-        if let Some(TableEntryMut::Invalid(pte, level)) = self.walk_until_invalid(gpa) {
-            if !level.is_leaf() {
-                // We don't support huge pages right now so we shouldn't be faulting them in.
-                return false;
-            }
-            // Unwrap ok, this must be a 4kB page.
-            let addr = PageAddr::from_pfn(pte.pfn(), level.leaf_page_size()).unwrap();
-            let page: Page<ConvertedDirty> = match page_tracker.get_converted_page(addr, owner) {
-                Ok(p) => p,
-                Err(_) => {
-                    // We don't own the page, or it's not reclaimable.
-                    return false;
-                }
-            };
-            page_tracker.reclaim_page(page.clean()).unwrap();
-            pte.mark_valid();
-            true
-        } else {
-            false
-        }
+    fn do_fault(&mut self, _gpa: RawAddr<Self::MappedAddressSpace>) -> bool {
+        false
     }
 }

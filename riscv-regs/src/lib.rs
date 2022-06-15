@@ -4,6 +4,7 @@
 
 #![no_std]
 #![feature(asm_const)]
+#![allow(missing_docs)]
 
 //! Crate for handling RV64 registers.
 //! inst - auto-generated register definitions

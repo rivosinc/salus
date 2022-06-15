@@ -7,33 +7,23 @@
 //! For each extension, a function enum is defined to contain the SBI function data.
 #![no_std]
 
+mod consts;
+pub use consts::*;
+
 use riscv_regs::{GeneralPurposeRegisters, GprIndex};
-
-pub const EXT_PUT_CHAR: u64 = 0x01;
-pub const EXT_BASE: u64 = 0x10;
-pub const EXT_HART_STATE: u64 = 0x48534D;
-pub const EXT_RESET: u64 = 0x53525354;
-pub const EXT_TEE: u64 = 0x544545;
-pub const EXT_MEASUREMENT: u64 = 0x5464545;
-
-/// Error constants from the sbi [spec](https://github.com/riscv-non-isa/riscv-sbi-doc/releases)
-pub const SBI_SUCCESS: i64 = 0;
-pub const SBI_ERR_FAILED: i64 = -1;
-pub const SBI_ERR_NOT_SUPPORTED: i64 = -2;
-pub const SBI_ERR_INVALID_PARAM: i64 = -3;
-pub const SBI_ERR_DENIED: i64 = -4;
-pub const SBI_ERR_INVALID_ADDRESS: i64 = -5;
-pub const SBI_ERR_ALREADY_AVAILABLE: i64 = -6;
-pub const SBI_ERR_ALREADY_STARTED: i64 = -7;
-pub const SBI_ERR_ALREADY_STOPPED: i64 = -8;
 
 /// Errors passed over the SBI protocol
 #[derive(Debug)]
 pub enum Error {
+    /// Address passed is invalid.
     InvalidAddress,
+    /// Parameter passed isn't valid.
     InvalidParam,
+    /// Generic failure in execution of the SBI call.
     Failed,
+    /// Extension and function are valid, but not supported by this implementation.
     NotSupported,
+    /// Extension of function are not known.
     UnknownSbiExtension,
 }
 
@@ -62,22 +52,78 @@ impl Error {
     }
 }
 
+/// Holds the result of a TEE operation.
 pub type Result<T> = core::result::Result<T, Error>;
+
+/// A Trait for an SbiFunction. Implementers use this trait to specify how to parse from and
+/// serialize into the a0-a7 registers used to make SBI calls.
+pub trait SbiFunction {
+    /// Returns the `u64` value that should be stored in register a6 before making the ecall for
+    /// this function.
+    fn a6(&self) -> u64 {
+        0
+    }
+    /// Returns the `u64` value that should be stored in register a5 before making the ecall for
+    /// this function.
+    fn a5(&self) -> u64 {
+        0
+    }
+    /// Returns the `u64` value that should be stored in register a4 before making the ecall for
+    /// this function.
+    fn a4(&self) -> u64 {
+        0
+    }
+    /// Returns the `u64` value that should be stored in register a3 before making the ecall for
+    /// this function.
+    fn a3(&self) -> u64 {
+        0
+    }
+    /// Returns the `u64` value that should be stored in register a2 before making the ecall for
+    /// this function.
+    fn a2(&self) -> u64 {
+        0
+    }
+    /// Returns the `u64` value that should be stored in register a1 before making the ecall for
+    /// this function.
+    fn a1(&self) -> u64 {
+        0
+    }
+    /// Returns the `u64` value that should be stored in register a0 before making the ecall for
+    /// this function.
+    fn a0(&self) -> u64 {
+        0
+    }
+    /// Returns a result parsed from the a0 and a1 return value registers.
+    fn result(&self, a0: u64, a1: u64) -> Result<u64> {
+        match a0 {
+            0 => Ok(a1),
+            e => Err(Error::from_code(e as i64)),
+        }
+    }
+}
 
 /// Functions defined for the Base extension
 #[derive(Clone, Copy)]
 pub enum BaseFunction {
+    /// Returns the implemented version of the SBI standard.
     GetSpecificationVersion,
+    /// Returns the ID of the SBI implementation.
     GetImplementationID,
+    /// Returns the version of this SBI implementation.
     GetImplementationVersion,
+    /// Checks if the given SBI extension is supported.
     ProbeSbiExtension(u64),
+    /// Returns the vendor that produced this machine(`mvendorid`).
     GetMachineVendorID,
+    /// Returns the architecture implementation ID this machine(`marchid`).
     GetMachineArchitectureID,
+    /// Returns the implementation ID of this machine(`mimpid`).
     GetMachineImplementationID,
 }
 
 impl BaseFunction {
-    pub fn from_regs(args: &[u64]) -> Result<Self> {
+    /// Attempts to parse `Self` from the passed in `a0-a7`.
+    fn from_regs(args: &[u64]) -> Result<Self> {
         use BaseFunction::*;
 
         match args[6] {
@@ -91,8 +137,10 @@ impl BaseFunction {
             _ => Err(Error::InvalidParam),
         }
     }
+}
 
-    pub fn a6(&self) -> u64 {
+impl SbiFunction for BaseFunction {
+    fn a6(&self) -> u64 {
         use BaseFunction::*;
         match self {
             GetSpecificationVersion => 0,
@@ -105,7 +153,7 @@ impl BaseFunction {
         }
     }
 
-    pub fn a0(&self) -> u64 {
+    fn a0(&self) -> u64 {
         use BaseFunction::*;
         match self {
             ProbeSbiExtension(ext) => *ext,
@@ -117,18 +165,29 @@ impl BaseFunction {
 /// Functions defined for the State extension
 #[derive(Clone, Copy)]
 pub enum StateFunction {
+    /// Starts the given hart.
     HartStart {
+        /// a0 - hart id to start.
         hart_id: u64,
+        /// a1 - address to start the hart.
         start_addr: u64,
+        /// a2 - value to be set in a1 when starting the hart.
         opaque: u64,
     },
+    /// Stops the current hart.
     HartStop,
+    /// Returns the status of the given hart.
     HartStatus {
+        /// a0 - ID of the hart to check.
         hart_id: u64,
     },
+    /// Requests that the calling hart be suspended.
     HartSuspend {
+        /// a0 - Specifies the type of suspend to initiate.
         suspend_type: u32,
+        /// a1 - The address to jump to on resume.
         resume_addr: u64,
+        /// a2 - An opaque value to load in a1 when resuming the hart.
         opaque: u64,
     },
 }
@@ -136,16 +195,26 @@ pub enum StateFunction {
 /// Return value for the HartStatus SBI call.
 #[repr(u64)]
 pub enum HartState {
+    /// The hart is physically powered-up and executing normally.
     Started = 0,
+    /// The hart is not executing in supervisor-mode or any lower privilege mode.
     Stopped = 1,
+    /// Some other hart has requested to start, operation still in progress.
     StartPending = 2,
+    /// Some other hart has requested to stop, operation still in progress.
     StopPending = 3,
+    /// This hart is in a platform specific suspend (or low power) state.
     Suspended = 4,
+    /// The hart has requested to put itself in a platform specific low power state, in progress.
     SuspendPending = 5,
+    /// An interrupt or platform specific hardware event has caused the hart to resume normal
+    /// execution. Resuming is ongoing.
+    ResumePending = 6,
 }
 
 impl StateFunction {
-    pub fn from_regs(args: &[u64]) -> Result<Self> {
+    /// Attempts to parse `Self` from the passed in `a0-a7`.
+    fn from_regs(args: &[u64]) -> Result<Self> {
         use StateFunction::*;
         match args[6] {
             0 => Ok(HartStart {
@@ -163,8 +232,10 @@ impl StateFunction {
             _ => Err(Error::InvalidParam),
         }
     }
+}
 
-    pub fn a6(&self) -> u64 {
+impl SbiFunction for StateFunction {
+    fn a6(&self) -> u64 {
         use StateFunction::*;
         match self {
             HartStart { .. } => 0,
@@ -174,7 +245,7 @@ impl StateFunction {
         }
     }
 
-    pub fn a0(&self) -> u64 {
+    fn a0(&self) -> u64 {
         use StateFunction::*;
         match self {
             HartStart {
@@ -192,7 +263,7 @@ impl StateFunction {
         }
     }
 
-    pub fn a1(&self) -> u64 {
+    fn a1(&self) -> u64 {
         use StateFunction::*;
         match self {
             HartStart {
@@ -209,7 +280,7 @@ impl StateFunction {
         }
     }
 
-    pub fn a2(&self) -> u64 {
+    fn a2(&self) -> u64 {
         use StateFunction::*;
         match self {
             HartStart {
@@ -227,23 +298,32 @@ impl StateFunction {
     }
 }
 
-/// Funcions for the Reset extension
+/// Functions for the Reset extension
 #[derive(Copy, Clone)]
 pub enum ResetFunction {
+    /// Performs a system reset.
     Reset {
+        /// Determines the type of reset to perform.
         reset_type: ResetType,
+        /// Represents the reason for system reset.
         reason: ResetReason,
     },
 }
 
+/// The types of reset a supervisor can request.
 #[derive(Copy, Clone)]
 pub enum ResetType {
+    /// Powers down the system.
     Shutdown,
+    /// Powers down, then reboots.
     ColdReset,
+    /// Reboots, doesn't power down.
     WarmReset,
 }
 
 impl ResetType {
+    // Creates a reset type from the a0 register value or returns an error if no mapping is
+    // known for the given value.
     fn from_reg(a0: u64) -> Result<Self> {
         use ResetType::*;
         Ok(match a0 {
@@ -255,13 +335,18 @@ impl ResetType {
     }
 }
 
+/// Reasons why a supervisor requests a reset.
 #[derive(Copy, Clone)]
 pub enum ResetReason {
+    /// Used for normal resets.
     NoReason,
+    /// Used when the system has failed.
     SystemFailure,
 }
 
 impl ResetReason {
+    // Creates a reset reason from the a1 register value or returns an error if no mapping is
+    // known for the given value.
     fn from_reg(a1: u64) -> Result<Self> {
         use ResetReason::*;
         Ok(match a1 {
@@ -273,26 +358,32 @@ impl ResetReason {
 }
 
 impl ResetFunction {
+    /// Creates an operation to shutdown the machine.
     pub fn shutdown() -> Self {
         ResetFunction::Reset {
             reset_type: ResetType::Shutdown,
             reason: ResetReason::NoReason,
         }
     }
+}
 
-    fn from_regs(a6: u64, a0: u64, a1: u64) -> Result<Self> {
+impl ResetFunction {
+    /// Attempts to parse `Self` from the passed in `a0-a7`.
+    fn from_regs(args: &[u64]) -> Result<Self> {
         use ResetFunction::*;
 
-        Ok(match a6 {
+        Ok(match args[6] {
             0 => Reset {
-                reset_type: ResetType::from_reg(a0)?,
-                reason: ResetReason::from_reg(a1)?,
+                reset_type: ResetType::from_reg(args[0])?,
+                reason: ResetReason::from_reg(args[1])?,
             },
             _ => return Err(Error::InvalidParam),
         })
     }
+}
 
-    fn get_a0(&self) -> u64 {
+impl SbiFunction for ResetFunction {
+    fn a0(&self) -> u64 {
         match self {
             ResetFunction::Reset {
                 reset_type: _,
@@ -301,7 +392,7 @@ impl ResetFunction {
         }
     }
 
-    fn get_a1(&self) -> u64 {
+    fn a1(&self) -> u64 {
         match self {
             ResetFunction::Reset {
                 reset_type,
@@ -311,15 +402,19 @@ impl ResetFunction {
     }
 }
 
+/// List of registers that can be set prior to starting a confidential VM.
 #[repr(u64)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum TvmCpuRegister {
+    /// Program Counter.
     Pc = 0,
+    /// A1 - commonly used for a device tree pointer.
     A1 = 1,
 }
 
 impl TvmCpuRegister {
-    pub fn from_reg(a2: u64) -> Result<Self> {
+    // Returns the cpu register specified by the index or an error if the index is out of range.
+    fn from_reg(a2: u64) -> Result<Self> {
         match a2 {
             0 => Ok(TvmCpuRegister::Pc),
             1 => Ok(TvmCpuRegister::A1),
@@ -328,6 +423,7 @@ impl TvmCpuRegister {
     }
 }
 
+/// Provides the state of the confidential VM supervisor.
 #[repr(u32)]
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub enum TsmState {
@@ -340,6 +436,8 @@ pub enum TsmState {
     TsmReady = 2,
 }
 
+/// Information returned from the system about the entity that manages confidential VMs and
+/// confidential memory isolation.
 #[repr(C)]
 #[derive(Default)]
 pub struct TsmInfo {
@@ -357,6 +455,7 @@ pub struct TsmInfo {
     pub tvm_bytes_per_vcpu: u64,
 }
 
+/// Parameters used for creating a new confidential VM.
 #[repr(C)]
 pub struct TvmCreateParams {
     /// The base physical address of the 16kB confidential memory region that should be used for the
@@ -374,17 +473,24 @@ pub struct TvmCreateParams {
     pub tvm_vcpu_addr: u64,
 }
 
+/// Types of pages allowed to used for creating or managing confidential VMs.
 #[repr(u64)]
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub enum TsmPageType {
     #[default]
+    /// Standard 4k pages.
     Page4k = 0,
+    /// 2 Megabyte pages.
     Page2M = 1,
+    /// 1 Gigabyte pages.
     Page1G = 2,
+    /// 512 Gigabyte pages.
     Page512G = 3,
 }
 
 impl TsmPageType {
+    /// Attempts to create a page type from the given u64 register value. Returns an error if the
+    /// value is greater than 3(512GB).
     pub fn from_reg(reg: u64) -> Result<Self> {
         use TsmPageType::*;
         match reg {
@@ -397,6 +503,7 @@ impl TsmPageType {
     }
 }
 
+/// Functions provided by the TEE extension.
 #[derive(Copy, Clone)]
 pub enum TeeFunction {
     /// Creates a TVM from the parameters in the `TvmCreateParams` structure at the non-confidential
@@ -404,36 +511,45 @@ pub enum TeeFunction {
     /// TVM management TEECALLs.
     ///
     /// a6 = 0
-    /// a0 = base physical address of the `TvmCreateParams` structure
-    /// a1 = length of the `TvmCreateParams` structure in bytes
-    TvmCreate { params_addr: u64, len: u64 },
+    TvmCreate {
+        /// a0 = base physical address of the `TvmCreateParams` structure
+        params_addr: u64,
+        /// a1 = length of the `TvmCreateParams` structure in bytes
+        len: u64,
+    },
     /// Message to destroy a TVM created with `TvmCreate`.
-    /// a6 = 1, a0 = guest id returned from `TvmCreate`.
-    TvmDestroy { guest_id: u64 },
+    /// a6 = 1
+    TvmDestroy {
+        /// a0 = guest id returned from `TvmCreate`.
+        guest_id: u64,
+    },
     /// Adds `num_pages` 4kB pages of confidential memory starting at `page_addr` to the page-table
     /// page pool for the specified guest.
     ///
     /// 4k Pages.
-    /// a6 = 2, a0 = guest_id, a1 = address of the first page, and a2 = number of pages
+    /// a6 = 2
     AddPageTablePages {
+        /// a0 = guest_id
         guest_id: u64,
+        /// a1 = address of the first page
         page_addr: u64,
+        /// a2 = number of pages
         num_pages: u64,
     },
     /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
     /// specified guest's address space at `guest_addr`.
     ///
     /// a6 = 3
-    /// a0 = guest_id
-    /// a1 = physical address of the pages to insert
-    /// a2 = page size
-    /// a3 = number of pages
-    /// a4 = guest physical address
     TvmAddZeroPages {
+        /// a0 = guest_id
         guest_id: u64,
+        /// a1 = physical address of the pages to insert
         page_addr: u64,
+        /// a2 = page size
         page_type: TsmPageType,
+        /// a3 = number of pages
         num_pages: u64,
+        /// a4 = guest physical address
         guest_addr: u64,
     },
     /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
@@ -441,94 +557,105 @@ pub enum TeeFunction {
     /// guest's address space at `guest_addr`.
     ///
     /// a6 = 11
-    /// a0 = guest_id
-    /// a1 = physical address of the pages to copy from
-    /// a2 = physical address of the pages to insert
-    /// a3 = page size
-    /// a4 = number of pages
-    /// a5 = guest physical address
     TvmAddMeasuredPages {
+        /// a0 = guest_id
         guest_id: u64,
+        /// a1 = physical address of the pages to copy from
         src_addr: u64,
+        /// a2 = physical address of the pages to insert
         dest_addr: u64,
+        /// a3 = page size
         page_type: TsmPageType,
+        /// a4 = number of pages
         num_pages: u64,
+        /// a5 = guest physical address
         guest_addr: u64,
     },
     /// Moves a VM from the initializing state to the Runnable state
     /// a6 = 4
-    /// a0 = guest id
-    Finalize { guest_id: u64 },
+    Finalize {
+        /// a0 = guest id
+        guest_id: u64,
+    },
     /// Runs the given vCPU in the TVM
     /// a6 = 5
-    /// a0 = guest id
-    /// a1 = vCPU id
-    TvmCpuRun { guest_id: u64, vcpu_id: u64 },
+    TvmCpuRun {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = vCPU id
+        vcpu_id: u64,
+    },
     /// Copies the measurements for the specified guest to the non-confidential physical address
     /// `dest_addr`. The measurement version and type must be set to 1 for now.
     ///
     /// a6 = 7
-    /// a0 = measurement version
-    /// a1 = measurement type
-    /// a2 = dest_addr
-    /// a3 = guest id
     GetGuestMeasurement {
+        /// a0 = measurement version
         measurement_version: u64,
+        /// a1 = measurement type
         measurement_type: u64,
+        /// a2 = dest_addr
         dest_addr: u64,
+        /// a3 = guest id
         guest_id: u64,
     },
     /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`. vCPUs may not be added after the TVM
     /// is finalized.
     ///
     /// a6 = 8
-    /// a0 = guest id
-    /// a1 = vCPU id
-    TvmCpuCreate { guest_id: u64, vcpu_id: u64 },
+    TvmCpuCreate {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = vCPU id
+        vcpu_id: u64,
+    },
     /// Sets the register identified by `register` to `value` in the vCPU with ID `vcpu_id`. vCPU
     /// register state may not be modified after the TVM is finalized.
     ///
     /// a6 = 9
-    /// a0 = guest id
-    /// a1 = vCPU id
-    /// a2 = register id
-    /// a3 = register value
     TvmCpuSetRegister {
+        /// a0 = guest id
         guest_id: u64,
+        /// a1 = vCPU id
         vcpu_id: u64,
+        /// a2 = register id
         register: TvmCpuRegister,
+        /// a3 = register value
         value: u64,
     },
     /// Writes up to `len` bytes of the `TsmInfo` structure to the non-confidential physical address
     /// `dest_addr`. Returns the number of bytes written.
     ///
     /// a6 = 10
-    /// a0 = destination address of the `TsmInfo` structure
-    /// a1 = maximum number of bytes to be written
-    TsmGetInfo { dest_addr: u64, len: u64 },
+    TsmGetInfo {
+        /// a0 = destination address of the `TsmInfo` structure
+        dest_addr: u64,
+        /// a1 = maximum number of bytes to be written
+        len: u64,
+    },
     /// Converts `num_pages` of non-confidential memory starting at `page_addr`. The converted pages
     /// remain non-confidential, and thus may not be assinged for use by a child TVM, until the
     /// fence procedure, described below, has been completed.
     ///
     /// a6 = 12
-    /// a0 = base address of pages to convert
-    /// a1 = page size
-    /// a2 = number of pages
     TsmConvertPages {
+        /// a0 = base address of pages to convert
         page_addr: u64,
+        /// a1 = page size
         page_type: TsmPageType,
+        /// a2 = number of pages
         num_pages: u64,
     },
     /// Reclaims `num_pages` of confidential memory starting at `page_addr`. The pages must not
     /// be currently assigned to an active TVM.
     ///
     /// a6 = 13
-    /// a0 = base address of pages to reclaim
-    /// a1 = page size
-    /// a2 = number of pages
     TsmReclaimPages {
+        /// a0 = base address of pages to reclaim
         page_addr: u64,
+        /// a1 = page size
         page_type: TsmPageType,
+        /// a2 = number of pages
         num_pages: u64,
     },
     /// Initiates a TLB invalidation sequence for all pages marked for conversion via calls to
@@ -548,8 +675,8 @@ pub enum TeeFunction {
 }
 
 impl TeeFunction {
-    // Takes registers a0-6 as the input.
-    pub fn from_regs(args: &[u64]) -> Result<Self> {
+    /// Attempts to parse `Self` from the passed in `a0-a7`.
+    fn from_regs(args: &[u64]) -> Result<Self> {
         use TeeFunction::*;
         match args[6] {
             0 => Ok(TvmCreate {
@@ -617,8 +744,10 @@ impl TeeFunction {
             _ => Err(Error::InvalidParam),
         }
     }
+}
 
-    pub fn a6(&self) -> u64 {
+impl SbiFunction for TeeFunction {
+    fn a6(&self) -> u64 {
         use TeeFunction::*;
         match self {
             TvmCreate {
@@ -686,7 +815,7 @@ impl TeeFunction {
         }
     }
 
-    pub fn a0(&self) -> u64 {
+    fn a0(&self) -> u64 {
         use TeeFunction::*;
         match self {
             TvmCreate {
@@ -750,7 +879,7 @@ impl TeeFunction {
         }
     }
 
-    pub fn a1(&self) -> u64 {
+    fn a1(&self) -> u64 {
         use TeeFunction::*;
         match self {
             TvmCreate {
@@ -812,7 +941,7 @@ impl TeeFunction {
         }
     }
 
-    pub fn a2(&self) -> u64 {
+    fn a2(&self) -> u64 {
         use TeeFunction::*;
         match self {
             AddPageTablePages {
@@ -861,7 +990,7 @@ impl TeeFunction {
         }
     }
 
-    pub fn a3(&self) -> u64 {
+    fn a3(&self) -> u64 {
         use TeeFunction::*;
         match self {
             TvmAddZeroPages {
@@ -895,7 +1024,7 @@ impl TeeFunction {
         }
     }
 
-    pub fn a4(&self) -> u64 {
+    fn a4(&self) -> u64 {
         use TeeFunction::*;
         match self {
             TvmAddZeroPages {
@@ -917,7 +1046,7 @@ impl TeeFunction {
         }
     }
 
-    pub fn a5(&self) -> u64 {
+    fn a5(&self) -> u64 {
         use TeeFunction::*;
         match self {
             TvmAddMeasuredPages {
@@ -931,34 +1060,27 @@ impl TeeFunction {
             _ => 0,
         }
     }
-
-    pub fn result(&self, a0: u64, a1: u64) -> Result<u64> {
-        // TODO - Does it need function-specific returns?
-        match a0 {
-            0 => Ok(a1),
-            e => Err(Error::from_code(e as i64)),
-        }
-    }
 }
 
+/// Functions provided by the measurement extension.
 #[derive(Copy, Clone)]
 pub enum MeasurementFunction {
     /// Copies the measurements for the current VM to the (guest) physical address in `dest_addr`.
     /// The measurement version and type must be set to 1 for now.
     /// a6 = 0
-    /// a0 = measurement version
-    /// a1 = measurement type
-    /// a2 = dest_addr
     GetSelfMeasurement {
+        /// a0 = measurement version
         measurement_version: u64,
+        /// a1 = measurement type
         measurement_type: u64,
+        /// a2 = dest_addr
         dest_addr: u64,
     },
 }
 
 impl MeasurementFunction {
-    // Takes registers a0-6 as the input.
-    pub fn from_regs(args: &[u64]) -> Result<Self> {
+    /// Attempts to parse `Self` from the passed in `a0-a7`.
+    fn from_regs(args: &[u64]) -> Result<Self> {
         use MeasurementFunction::*;
         match args[6] {
             0 => Ok(GetSelfMeasurement {
@@ -969,8 +1091,10 @@ impl MeasurementFunction {
             _ => Err(Error::InvalidParam),
         }
     }
+}
 
-    pub fn a6(&self) -> u64 {
+impl SbiFunction for MeasurementFunction {
+    fn a6(&self) -> u64 {
         use MeasurementFunction::*;
         match self {
             GetSelfMeasurement {
@@ -981,7 +1105,7 @@ impl MeasurementFunction {
         }
     }
 
-    pub fn a0(&self) -> u64 {
+    fn a0(&self) -> u64 {
         use MeasurementFunction::*;
         match self {
             GetSelfMeasurement {
@@ -992,7 +1116,7 @@ impl MeasurementFunction {
         }
     }
 
-    pub fn a1(&self) -> u64 {
+    fn a1(&self) -> u64 {
         use MeasurementFunction::*;
         match self {
             GetSelfMeasurement {
@@ -1003,7 +1127,7 @@ impl MeasurementFunction {
         }
     }
 
-    pub fn a2(&self) -> u64 {
+    fn a2(&self) -> u64 {
         use MeasurementFunction::*;
         match self {
             GetSelfMeasurement {
@@ -1013,22 +1137,19 @@ impl MeasurementFunction {
             } => *dest_addr,
         }
     }
-
-    pub fn result(&self, a0: u64, a1: u64) -> Result<u64> {
-        match a0 {
-            0 => Ok(a1),
-            e => Err(Error::from_code(e as i64)),
-        }
-    }
 }
 
+/// The values returned from an SBI function call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SbiReturn {
+    /// The error code (0 for success).
     pub error_code: i64,
+    /// The return value if the operation is successful.
     pub return_value: u64,
 }
 
 impl SbiReturn {
+    /// Returns an `SbiReturn` that indicates success.
     pub fn success(return_value: u64) -> Self {
         Self {
             error_code: SBI_SUCCESS,
@@ -1058,11 +1179,17 @@ impl From<Error> for SbiReturn {
 /// SBI Message used to invoke the specified SBI extension in the firmware.
 #[derive(Clone, Copy)]
 pub enum SbiMessage {
+    /// The base SBI extension functions.
     Base(BaseFunction),
+    /// The legacy PutChar extension.
     PutChar(u64),
+    /// The extension for getting/setting the state of CPUs.
     HartState(StateFunction),
+    /// Handles system reset.
     Reset(ResetFunction),
+    /// Provides capabilities for starting confidential virtual machines.
     Tee(TeeFunction),
+    /// Allows acquiring measurement of the system that booted the running code.
     Measurement(MeasurementFunction),
 }
 
@@ -1076,8 +1203,7 @@ impl SbiMessage {
             EXT_PUT_CHAR => Ok(SbiMessage::PutChar(gprs.reg(A0))),
             EXT_BASE => BaseFunction::from_regs(gprs.a_regs()).map(SbiMessage::Base),
             EXT_HART_STATE => StateFunction::from_regs(gprs.a_regs()).map(SbiMessage::HartState),
-            EXT_RESET => ResetFunction::from_regs(gprs.reg(A6), gprs.reg(A0), gprs.reg(A1))
-                .map(SbiMessage::Reset),
+            EXT_RESET => ResetFunction::from_regs(gprs.a_regs()).map(SbiMessage::Reset),
             EXT_TEE => TeeFunction::from_regs(gprs.a_regs()).map(SbiMessage::Tee),
             EXT_MEASUREMENT => {
                 MeasurementFunction::from_regs(gprs.a_regs()).map(SbiMessage::Measurement)
@@ -1147,7 +1273,7 @@ impl SbiMessage {
     /// Returns the register value for this `SbiMessage`.
     pub fn a1(&self) -> u64 {
         match self {
-            SbiMessage::Reset(r) => r.get_a1(),
+            SbiMessage::Reset(r) => r.a1(),
             SbiMessage::HartState(f) => f.a1(),
             SbiMessage::Tee(f) => f.a1(),
             SbiMessage::Measurement(f) => f.a1(),
@@ -1158,7 +1284,7 @@ impl SbiMessage {
     /// Returns the register value for this `SbiMessage`.
     pub fn a0(&self) -> u64 {
         match self {
-            SbiMessage::Reset(r) => r.get_a0(),
+            SbiMessage::Reset(r) => r.a0(),
             SbiMessage::PutChar(c) => *c,
             SbiMessage::HartState(f) => f.a0(),
             SbiMessage::Tee(f) => f.a0(),

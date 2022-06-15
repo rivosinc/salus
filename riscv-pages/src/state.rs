@@ -25,6 +25,7 @@ pub trait Mappable<M: MeasureRequirement>: State {}
 /// Trait for states in which a `PhysPage` can be assigned for use by a child VM, either as a
 /// mappable page or as an internal state page.
 pub trait Assignable<M: MeasureRequirement>: State {
+    /// The type of page that can be mapped to the guest, either cleaned or measured.
     type Mappable: Mappable<M>;
 }
 
@@ -34,6 +35,7 @@ pub trait InternalData: State {}
 
 /// Trait for states in which a `PhysPage` can be transformed into a clean state.
 pub trait Cleanable: State {
+    /// The page state that results from cleaning this `Cleanable` page.
     type Cleaned: State;
 }
 

@@ -15,12 +15,17 @@ const PFN_SHIFT: u64 = 12;
 const PFN_BITS: u64 = 44;
 const PFN_MASK: u64 = (1 << PFN_BITS) - 1;
 
+/// The page sizes supported by Risc-V.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PageSize {
+    /// Page
     Size4k = 4 * 1024,
+    /// Mega
     Size2M = 2 * 1024 * 1024,
+    /// Giga
     Size1G = 1024 * 1024 * 1024,
+    /// Tera
     Size512G = 512 * 1024 * 1024 * 1024,
 }
 
@@ -56,6 +61,7 @@ impl PageSize {
 pub struct RawAddr<AS: AddressSpace>(u64, AS);
 
 impl<AS: AddressSpace> RawAddr<AS> {
+    /// Creates a `RawAddr` at `addr` in the given `address_space`.
     pub fn new(addr: u64, address_space: AS) -> Self {
         Self(addr, address_space)
     }
@@ -79,25 +85,32 @@ impl<AS: AddressSpace> RawAddr<AS> {
 }
 
 impl RawAddr<SupervisorPhys> {
+    /// Creates a `RawAddr` in the `SupervisorPhys` address space.
+    /// Short for `RawAddr::new(addr, SupervisorPhys)`.
     pub fn supervisor(addr: u64) -> Self {
         Self(addr, SupervisorPhys)
     }
 }
 
 impl RawAddr<SupervisorVirt> {
+    /// Creates a `RawAddr` in the `SupervisorVirt` address space.
+    /// Short for `RawAddr::new(addr, SupervisorVirt)`.
     pub fn supervisor_virt(addr: u64) -> Self {
         Self(addr, SupervisorVirt)
     }
 }
 
 impl RawAddr<GuestPhys> {
+    /// Creates a `RawAddr` in the `GuestPhys` address space of the VM provided by `PageOwnerId`.
+    /// Short for `RawAddr::new(addr, GuestPhys::new(id))`.
     pub fn guest(addr: u64, id: PageOwnerId) -> Self {
         Self(addr, GuestPhys::new(id))
     }
 }
 
-/// Convenience type aliases for supervisor-physical and guest-physical addresses.
+/// Convenience type alias for supervisor-physical addresses.
 pub type SupervisorPhysAddr = RawAddr<SupervisorPhys>;
+/// Convenience type alias for guest-physical addresses.
 pub type GuestPhysAddr = RawAddr<GuestPhys>;
 
 impl<AS: AddressSpace> From<PageAddr<AS>> for RawAddr<AS> {
@@ -124,7 +137,9 @@ pub struct PageAddr<AS: AddressSpace> {
     addr: RawAddr<AS>,
 }
 
+/// A page-aligned address in the `SupervisorPhys` address space.
 pub type SupervisorPageAddr = PageAddr<SupervisorPhys>;
+/// A page-aligned address in a `GuestPhys` address space.
 pub type GuestPageAddr = PageAddr<GuestPhys>;
 
 impl<AS: AddressSpace> PageAddr<AS> {
@@ -227,6 +242,21 @@ pub struct PageAddrIter<AS: AddressSpace> {
 }
 
 impl<AS: AddressSpace> PageAddrIter<AS> {
+    /// Creates a new `PageAddrIter` starting at the page `start` and incrementing by the size given
+    /// in `increment`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use riscv_pages::{PageAddr, PageAddrIter, PageSize, RawAddr};
+    /// let start = PageAddr::new(RawAddr::supervisor(0x8000_0000)).ok_or(())?;
+    /// let mut addr_iter = PageAddrIter::new(start, PageSize::Size4k).ok_or(())?;
+    /// assert_eq!(Some(start), addr_iter.next());
+    /// assert_eq!(
+    ///     Some(start.checked_add_pages(1).ok_or(())?),
+    ///     addr_iter.next()
+    /// );
+    /// # Ok::<(), ()>(())
+    /// ```
     pub fn new(start: PageAddr<AS>, increment: PageSize) -> Option<Self> {
         let next = PageAddr::with_alignment(RawAddr::from(start), increment)?;
         Some(Self {
@@ -253,6 +283,8 @@ impl<AS: AddressSpace> Iterator for PageAddrIter<AS> {
 pub struct Pfn<AS: AddressSpace>(u64, AS);
 
 impl<AS: AddressSpace> Pfn<AS> {
+    /// Creates a new `Pfn` from the given raw u64.
+    /// `bits` should be the frame number of a page in the given `address_space`.
     pub fn new(bits: u64, address_space: AS) -> Self {
         Pfn(bits, address_space)
     }
@@ -262,6 +294,7 @@ impl<AS: AddressSpace> Pfn<AS> {
         self.0
     }
 
+    /// Returns the address space that this `Pfn` refers to.
     pub fn address_space(&self) -> AS {
         self.1
     }
@@ -274,7 +307,9 @@ impl Pfn<SupervisorPhys> {
     }
 }
 
+/// A page frame number in the supervisor's physical address space.
 pub type SupervisorPfn = Pfn<SupervisorPhys>;
+/// A page frame number in a guest's physical address space.
 pub type GuestPfn = Pfn<GuestPhys>;
 
 impl<AS: AddressSpace> From<PageAddr<AS>> for Pfn<AS> {
@@ -331,7 +366,10 @@ pub trait CleanablePhysPage: PhysPage {
 
 /// Trait representing a page that can be initialized.
 pub trait InitializablePhysPage: PhysPage {
+    /// The type of page created by initializing this `InitializablePhysPage`.
     type InitializedPage: PhysPage;
+    /// The type of page created if initializing this `InitializablePhysPage` fails and it is left
+    /// in a dirty state.
     type DirtyPage: PhysPage;
 
     /// Consumes the page and attempts to initialize it by calling `func` with a mutable slice of
@@ -545,6 +583,7 @@ impl ReclaimablePhysPage for Page<ConvertedClean> {
     type MappablePage = Page<MappableClean>;
 }
 
+/// An iterator of the 64-bit words contained in a page.
 pub struct U64Iter<'a, S: State> {
     page: &'a Page<S>,
     index: usize,

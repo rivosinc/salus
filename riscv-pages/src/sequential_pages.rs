@@ -21,9 +21,13 @@ pub struct SequentialPages<S: State> {
 
 /// An error resulting from trying to convert an iterator of pages to `SequentialPages`.
 pub enum Error<S: State, I: Iterator<Item = Page<S>>> {
+    /// There were zero pages in the list of pages given to create `Self`.
     Empty,
+    /// Pages in the initialization page list were not contiguous.
     NonContiguous(I),
+    /// Pages in the initialization page list were of different page sizes (4k and 2M for example).
     NonUniformSize(I),
+    /// The sequence of pages would overflow the address space.
     Overflow(I),
 }
 

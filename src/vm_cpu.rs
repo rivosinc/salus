@@ -7,7 +7,7 @@ use core::{mem::size_of, ops::Deref, ops::DerefMut};
 use drivers::{CpuId, CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::GuestStagePageTable;
+use riscv_page_tables::{GuestStagePageTable, TlbVersion};
 use riscv_pages::{GuestPhysAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages};
 use riscv_regs::{hstatus, scounteren, sstatus};
 use riscv_regs::{
@@ -364,11 +364,19 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> DerefMut for ActiveVmCpu<'vcpu, 'pag
     }
 }
 
+/// Used to store any per-physical-CPU state for a virtual CPU of a VM.
+struct CurrentCpu {
+    cpu: CpuId,
+    vmid: VmId,
+    tlb_version: TlbVersion,
+}
+
 /// Represents a single virtual CPU of a VM.
 pub struct VmCpu {
     state: VmCpuState,
-    phys_cpu: Option<CpuId>,
-    vmid: Option<VmId>,
+    current_cpu: Option<CurrentCpu>,
+    // TODO: interrupt_file should really be part of CurrentCpu, but we have no way to migrate it
+    // at present.
     interrupt_file: Option<ImsicGuestId>,
     guest_id: PageOwnerId,
 }
@@ -396,8 +404,7 @@ impl VmCpu {
 
         Self {
             state,
-            phys_cpu: None,
-            vmid: None,
+            current_cpu: None,
             interrupt_file: None,
             guest_id,
         }
@@ -466,19 +473,36 @@ impl VmCpu {
         }
         // Get the VMID to use for this VM's address space on this physical CPU.
         let this_cpu = PerCpu::this_cpu();
-        if self.phys_cpu != Some(this_cpu.cpu_id()) {
-            // If we've changed CPUs, then any existing VMID is invalid.
+        if let Some(ref c) = self.current_cpu && c.cpu != this_cpu.cpu_id() {
+            // If we've changed CPUs, then any per-CPU state is invalid.
             //
             // TODO: Migration between physical CPUs needs to be done explicitly via TEECALL.
-            self.vmid = None;
-            self.phys_cpu = Some(this_cpu.cpu_id());
+            self.current_cpu = None;
         }
         let mut vmid_tracker = this_cpu.vmid_tracker_mut();
-        if self.vmid.map(|id| id.version()) != Some(vmid_tracker.current_version()) {
-            // If VMIDs rolled over next_vmid() will do the necessary flush.
-            self.vmid = Some(vmid_tracker.next_vmid());
+        // If VMIDs rolled over next_vmid() will do the necessary flush.
+        let vmid = self
+            .current_cpu
+            .as_ref()
+            .filter(|c| c.vmid.version() == vmid_tracker.current_version())
+            .map_or_else(|| vmid_tracker.next_vmid(), |c| c.vmid);
+        let prev_tlb_version = self.current_cpu.as_ref().map(|c| c.tlb_version);
+
+        // enter_with_vmid() will fence if prev_tlb_version is stale.
+        let active_pages = vm_pages.enter_with_vmid(vmid, prev_tlb_version);
+
+        // Update our per-CPU state in case VMID or TLB version changed.
+        if let Some(ref mut c) = self.current_cpu {
+            c.vmid = vmid;
+            c.tlb_version = active_pages.tlb_version();
+        } else {
+            self.current_cpu = Some(CurrentCpu {
+                cpu: this_cpu.cpu_id(),
+                vmid,
+                tlb_version: active_pages.tlb_version(),
+            });
         }
-        let active_pages = vm_pages.enter_with_vmid(self.vmid.unwrap());
+
         Ok(ActiveVmCpu {
             vcpu: self,
             active_pages,

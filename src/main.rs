@@ -10,7 +10,8 @@
     alloc_error_handler,
     lang_items,
     asm_const,
-    const_ptr_offset_from
+    const_ptr_offset_from,
+    let_chains
 )]
 
 use core::alloc::{GlobalAlloc, Layout};

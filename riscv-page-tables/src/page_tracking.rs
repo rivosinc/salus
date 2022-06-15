@@ -12,7 +12,7 @@ use page_collections::page_vec::PageVec;
 use riscv_pages::*;
 
 use crate::page_info::{PageInfo, PageMap, PageState};
-use crate::HwMemMap;
+use crate::{HwMemMap, TlbVersion};
 
 /// Errors related to managing physical page information.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,7 +32,7 @@ pub enum Error {
     /// Attempt to modify the owner of a reserved page.
     ReservedPage,
     /// The page is not in a state where it can be converted.
-    PageNotConvertable,
+    PageNotConvertible,
     /// The page is not in a state where it can be assigned.
     PageNotAssignable,
     /// The page cannot be mapped back into the owner's address space.
@@ -177,13 +177,15 @@ impl PageTracker {
     // TODO: Explicit release of pages back to the previous owner. Currently all releasing is done
     // lazily.
 
-    /// Marks the page as being converted so that it can be used for child VMs.
-    pub fn convert_page<P: InvalidatedPhysPage>(&self, page: P) -> Result<P::ConvertedPage> {
+    /// Marks the invalidated page as having started conversion at `tlb_version`.
+    pub fn convert_page<P: InvalidatedPhysPage>(
+        &self,
+        page: P,
+        tlb_version: TlbVersion,
+    ) -> Result<()> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.convert()?;
-        // Safe since we own the page and have verified that it can be donated.
-        Ok(unsafe { P::ConvertedPage::new_with_size(page.addr(), page.size()) })
+        info.begin_conversion(tlb_version)
     }
 
     /// Reclaims the converted, but unassigned, `page` back to a mapped page for the current owner.
@@ -194,6 +196,30 @@ impl PageTracker {
         info.reclaim()?;
         // Safe since we own the page and have verified that it can be reclaimed.
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
+    }
+
+    /// Returns the Converted page at `addr` if it's unassigned and owned by `owner`. Completes
+    /// conversion if the page was Converting at a TLB version older than `tlb_version`.
+    pub(crate) fn get_converted_page<P: ConvertedPhysPage>(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        tlb_version: TlbVersion,
+    ) -> Result<P> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr)?;
+        if info.owner() != Some(owner)
+            || info.mem_type() != P::mem_type()
+            || (info.state() != PageState::Converted
+                && info.complete_conversion(tlb_version).is_err())
+        {
+            return Err(Error::PageNotConvertible);
+        }
+        // Safe since we've verified ownership and typing of the page, and that it is converted
+        // as of `tlb_version`.
+        //
+        // TODO: Page size
+        Ok(unsafe { P::new(addr) })
     }
 
     /// Returns true if and only if `addr` is a "Mapped" page owned by `owner` with type `mem_type`.
@@ -213,19 +239,21 @@ impl PageTracker {
         }
     }
 
-    /// Returns true if and only if `addr` is a "Converted" page owned by `owner` with type
-    /// `mem_type`.
+    /// Returns true if and only if `addr` is a page owned by `owner` with type `mem_type` and
+    /// was converted at a TLB version older than `tlb_version`.
     pub(crate) fn is_converted_page(
         &self,
         addr: SupervisorPageAddr,
         owner: PageOwnerId,
         mem_type: MemType,
+        tlb_version: TlbVersion,
     ) -> bool {
         let mut page_tracker = self.inner.lock();
         if let Ok(info) = page_tracker.get(addr) {
+            // We lazily update the
             info.owner() == Some(owner)
                 && info.mem_type() == mem_type
-                && info.state() == PageState::Converted
+                && (info.state() == PageState::Converted || info.is_convertible(tlb_version))
         } else {
             false
         }

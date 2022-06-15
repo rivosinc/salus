@@ -7,7 +7,7 @@ use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, PageTracker};
+use riscv_page_tables::{tlb, GuestStagePageTable, PageTracker, TlbVersion};
 use riscv_pages::*;
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
@@ -30,6 +30,9 @@ pub enum Error {
     NonContiguousPages,
     MeasurementBufferTooSmall,
     AddressOverflow,
+    TlbCountUnderflow,
+    InvalidTlbVersion,
+    TlbFenceInProgress,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -49,16 +52,123 @@ extern "C" {
     fn _copy_from_guest(dest: *mut u8, src_gpa: u64, len: usize) -> usize;
 }
 
+/// A TLB version + reference count pair, used to track if a given TLB version is currently active.
+#[derive(Clone, Default, Debug)]
+struct RefCountedTlbVersion {
+    version: TlbVersion,
+    count: u64,
+}
+
+impl RefCountedTlbVersion {
+    /// Creates a new reference counter for `version`.
+    fn new(version: TlbVersion) -> Self {
+        Self { version, count: 0 }
+    }
+
+    /// Returns the inner version number.
+    fn version(&self) -> TlbVersion {
+        self.version
+    }
+
+    /// Returns the reference count for this version.
+    fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// Increments the reference count for this version.
+    fn get(&mut self) {
+        self.count += 1;
+    }
+
+    /// Decrements the reference count for this version.
+    fn put(&mut self) -> Result<()> {
+        self.count = self.count.checked_sub(1).ok_or(Error::TlbCountUnderflow)?;
+        Ok(())
+    }
+}
+
+struct TlbTrackerInner {
+    current: RefCountedTlbVersion,
+    prev: Option<RefCountedTlbVersion>,
+}
+
+/// Tracker for TLB versioning. Used to track which TLB versions are active in an `ActiveVmPages`
+/// and coordinate increments of the TLB version when requested via a fence operation.
+struct TlbTracker {
+    inner: Mutex<TlbTrackerInner>,
+}
+
+impl TlbTracker {
+    /// Creates a new `TlbTracker` with no references.
+    fn new() -> Self {
+        let inner = TlbTrackerInner {
+            current: RefCountedTlbVersion::default(),
+            prev: None,
+        };
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    /// Returns the current TLB version of this tracker.
+    fn current(&self) -> TlbVersion {
+        self.inner.lock().current.version
+    }
+
+    /// Attempts to increment the current TLB version. The TLB version can only be incremented if
+    /// there are no outstanding references to versions other than the current version.
+    fn increment(&self) -> Result<()> {
+        let mut inner = self.inner.lock();
+        if inner.prev.as_ref().filter(|v| v.count() != 0).is_none() {
+            // We're only ok to proceed with an increment if there's no references to the previous
+            // TLB version.
+            let next = inner.current.version().increment();
+            inner.prev = Some(inner.current.clone());
+            inner.current = RefCountedTlbVersion::new(next);
+            Ok(())
+        } else {
+            Err(Error::TlbFenceInProgress)
+        }
+    }
+
+    /// Acquires a reference to the current TLB version.
+    fn get_version(&self) -> TlbVersion {
+        let mut inner = self.inner.lock();
+        inner.current.get();
+        inner.current.version()
+    }
+
+    /// Drops a reference to the given TLB version.
+    fn put_version(&self, version: TlbVersion) -> Result<()> {
+        let mut inner = self.inner.lock();
+        if inner.current.version() == version {
+            inner.current.put()
+        } else if let Some(prev) = inner.prev.as_mut().filter(|v| v.version() == version) {
+            prev.put()
+        } else {
+            Err(Error::InvalidTlbVersion)
+        }
+    }
+}
+
 /// Represents a reference to the current VM address space. The previous address space is restored
 /// when dropped. Used to directly access a guest's memory.
 pub struct ActiveVmPages<'a, T: GuestStagePageTable> {
     prev_hgatp: u64,
+    tlb_version: TlbVersion,
     vm_pages: &'a VmPages<T>,
 }
 
 impl<'a, T: GuestStagePageTable> Drop for ActiveVmPages<'a, T> {
     fn drop(&mut self) {
         CSR.hgatp.set(self.prev_hgatp);
+
+        // Unwrap ok since tlb_tracker won't increment the version while there are outstanding
+        // references.
+        self.vm_pages
+            .tlb_tracker
+            .put_version(self.tlb_version)
+            .unwrap();
     }
 }
 
@@ -71,6 +181,39 @@ impl<'a, T: GuestStagePageTable> Deref for ActiveVmPages<'a, T> {
 }
 
 impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
+    fn new(vm_pages: &'a VmPages<T>, vmid: VmId, prev_tlb_version: Option<TlbVersion>) -> Self {
+        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
+        hgatp.modify(hgatp::vmid.val(vmid.vmid()));
+        hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
+        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
+        let prev_hgatp = CSR.hgatp.atomic_replace(hgatp.get());
+
+        let tlb_version = vm_pages.tlb_tracker.get_version();
+        // Fence if this VMID was previously running on this CPU with an old TLB version.
+        if let Some(v) = prev_tlb_version && v < tlb_version {
+            // We flush all translations for this VMID since we don't have an efficient way to
+            // track which pages need fencing. Even if we let the user provide the range to be
+            // fenced it would require reverse-mapping the address so we could update that it was
+            // fenced in PageTracker, which is almost certainly more expensive than just flushing
+            // everything to begin with.
+            //
+            // TODO: Keep a list of pages in VmPages that are pending conversion so that we can
+            // do more fine-grained invalidation.
+            tlb::hfence_gvma(None, Some(vmid.vmid()));
+        }
+
+        Self {
+            prev_hgatp,
+            tlb_version,
+            vm_pages,
+        }
+    }
+
+    /// Returns the TLB version at which this ActiveVmPages was entered.
+    pub fn tlb_version(&self) -> TlbVersion {
+        self.tlb_version
+    }
+
     /// Copies from `src` to the guest physical address in `dest`. Returns an error if a fault was
     /// encountered while copying.
     pub fn copy_to_guest(&self, dest: GuestPhysAddr, src: &[u8]) -> Result<()> {
@@ -135,8 +278,16 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let mut root = self.root.lock();
+        // We use the TLB version of the underlying VmPages rather than the version at which we
+        // were entered since it may be stale.
+        let version = self.tlb_tracker.current();
         let converted_pages = root
-            .get_converted_range::<Page<ConvertedDirty>>(from_addr, PageSize::Size4k, count)
+            .get_converted_range::<Page<ConvertedDirty>>(
+                from_addr,
+                PageSize::Size4k,
+                count,
+                version,
+            )
             .map_err(Error::Paging)?;
         let new_owner = to.page_owner_id();
         for (dirty, (src_addr, to_addr)) in
@@ -165,6 +316,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
 pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     page_owner_id: PageOwnerId,
     page_tracker: PageTracker,
+    tlb_tracker: TlbTracker,
     // Locking order: `root` -> `measurement` -> `pte_pages`
     root: Mutex<T>,
     measurement: Mutex<Sha256Measure>,
@@ -209,12 +361,10 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         let invalidated_pages = root
             .invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
             .map_err(Error::Paging)?;
+        let version = self.tlb_tracker.current();
         for p in invalidated_pages {
-            // TODO: Pages should enter an intermediate "converting" or "fencing" state until TLB
-            // flush is completed.
-            //
             // Unwrap ok since the page was just invalidated.
-            self.page_tracker.convert_page(p).unwrap();
+            self.page_tracker.convert_page(p, version).unwrap();
         }
         Ok(())
     }
@@ -222,10 +372,12 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
     /// Reclaims `num_pages` of confidential memory starting at guest physical address `page_addr`.
     pub fn reclaim_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
         let mut root = self.root.lock();
+        let version = self.tlb_tracker.current();
         let mut pte_pages = self.pte_pages.lock();
         for addr in page_addr.iter_from().take(num_pages as usize) {
+            // TODO: Support reclaim of converted pages that haven't yet been fenced.
             let converted = root
-                .get_converted_page::<Page<ConvertedDirty>>(addr)
+                .get_converted_page::<Page<ConvertedDirty>>(addr, version)
                 .map_err(Error::Paging)?;
             // Unwrap ok since we know that it's a converted page.
             let mappable = self.page_tracker.reclaim_page(converted.clean()).unwrap();
@@ -237,6 +389,11 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         Ok(())
     }
 
+    /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.
+    pub fn initiate_fence(&self) -> Result<()> {
+        self.tlb_tracker.increment()
+    }
+
     /// Assigns `num_pages` of confidential memory starting at `addr` as internal state pages for
     /// `new_owner`, returning the pages as a `SequentialPages` if they are contiguous.
     fn get_state_pages_for(
@@ -246,8 +403,9 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         new_owner: PageOwnerId,
     ) -> Result<SequentialPages<InternalClean>> {
         let mut root = self.root.lock();
+        let version = self.tlb_tracker.current();
         let assigned_pages = root
-            .get_converted_range::<Page<ConvertedDirty>>(addr, PageSize::Size4k, num_pages)
+            .get_converted_range::<Page<ConvertedDirty>>(addr, PageSize::Size4k, num_pages, version)
             .map_err(Error::Paging)?
             .map(|converted| {
                 // TODO: This unwrap could fail if we overflow. Handle errors here more gracefully.
@@ -317,8 +475,14 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let mut root = self.root.lock();
+        let version = self.tlb_tracker.current();
         let pages = root
-            .get_converted_range::<Page<ConvertedDirty>>(from_addr, PageSize::Size4k, count)
+            .get_converted_range::<Page<ConvertedDirty>>(
+                from_addr,
+                PageSize::Size4k,
+                count,
+                version,
+            )
             .map_err(Error::Paging)?
             .map(|dirty| dirty.clean());
         let new_owner = to.page_owner_id();
@@ -343,22 +507,18 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
     }
 
     /// Activates the address space represented by this `VmPages`. The address space is exited (and
-    /// the previous one restored) when the returned `ActiveVmPages` is dropped.
+    /// the previous one restored) when the returned `ActiveVmPages` is dropped. Flushes TLB entries
+    /// for the given VMID if it was previously active with a stale TLB version on this CPU.
     ///
     /// The caller must ensure that VMID has been allocated to reference this address space on this
     /// CPU and that there are no stale translations tagged with VMID referencing other VM address
     /// spaces in this CPU's TLB.
-    pub fn enter_with_vmid(&self, vmid: VmId) -> ActiveVmPages<T> {
-        let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
-        hgatp.modify(hgatp::vmid.val(vmid.vmid()));
-        hgatp.modify(hgatp::ppn.val(Pfn::from(self.root_address()).bits()));
-        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
-        let prev_hgatp = CSR.hgatp.atomic_replace(hgatp.get());
-
-        ActiveVmPages {
-            prev_hgatp,
-            vm_pages: self,
-        }
+    pub fn enter_with_vmid(
+        &self,
+        vmid: VmId,
+        prev_tlb_version: Option<TlbVersion>,
+    ) -> ActiveVmPages<T> {
+        ActiveVmPages::new(self, vmid, prev_tlb_version)
     }
 }
 
@@ -369,6 +529,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         Self {
             page_owner_id: root.page_owner_id(),
             page_tracker: root.page_tracker(),
+            tlb_tracker: TlbTracker::new(),
             root: Mutex::new(root),
             measurement: Mutex::new(Sha256Measure::new()),
             pte_pages: Mutex::new(PageVec::from(pte_vec_pages)),
@@ -425,6 +586,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         VmPages {
             page_owner_id: self.page_owner_id,
             page_tracker: self.page_tracker,
+            tlb_tracker: self.tlb_tracker,
             root: self.root,
             measurement: self.measurement,
             pte_pages: self.pte_pages,

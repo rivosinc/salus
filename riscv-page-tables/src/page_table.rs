@@ -9,6 +9,7 @@ use riscv_pages::*;
 
 use crate::page_tracking::PageTracker;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
+use crate::TlbVersion;
 
 pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 
@@ -461,13 +462,15 @@ pub trait PlatformPageTable: Sized {
     fn get_converted_page<P: ConvertedPhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
+        tlb_version: TlbVersion,
     ) -> Result<P> {
-        let entry = self.get_converted_4k_leaf(RawAddr::from(addr), P::mem_type())?;
-        let page = unsafe {
-            // Safe since we've verified the typing & ownership of the page, and that it has been
-            // converted.
-            P::new(entry.page_addr().unwrap())
-        };
+        let page_tracker = self.page_tracker();
+        let id = self.page_owner_id();
+        let entry = self.get_converted_4k_leaf(RawAddr::from(addr), P::mem_type(), tlb_version)?;
+        // Unwrap ok since we've already verified that this page is owned and converted.
+        let page = page_tracker
+            .get_converted_page(entry.page_addr().unwrap(), id, tlb_version)
+            .unwrap();
         Ok(page)
     }
 
@@ -492,22 +495,24 @@ pub trait PlatformPageTable: Sized {
         }
     }
 
-    /// Returns an iterator to the converted pages that were previously mapped in this page table.
-    /// Guarantees that the full range of pages are converted pages.
+    /// Returns an iterator to the converted pages that were previously mapped in this page table
+    /// if they were invalidated a TLB version older than `tlb_version`. Guarantees that the full
+    /// range of pages are converted pages.
     fn get_converted_range<P: ConvertedPhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
         page_size: PageSize,
         num_pages: u64,
+        tlb_version: TlbVersion,
     ) -> Result<ConvertedPageIter<Self, P>> {
         if page_size.is_huge() {
             return Err(Error::PageSizeNotSupported(page_size));
         }
         if addr.iter_from().take(num_pages as usize).all(|a| {
-            self.get_converted_4k_leaf(RawAddr::from(a), P::mem_type())
+            self.get_converted_4k_leaf(RawAddr::from(a), P::mem_type(), tlb_version)
                 .is_ok()
         }) {
-            Ok(ConvertedPageIter::new(self, addr, num_pages))
+            Ok(ConvertedPageIter::new(self, addr, num_pages, tlb_version))
         } else {
             Err(Error::PageNotUnmappable)
         }
@@ -607,11 +612,12 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     }
 
     /// Returns the invalid 4kB leaf PTE mapping `vaddr` if the PFN the PTE references is a
-    /// converted page.
+    /// page that was converted at a TLB version older than `tlb_version`.
     fn get_converted_4k_leaf(
         &mut self,
         vaddr: RawAddr<Self::MappedAddressSpace>,
         mem_type: MemType,
+        tlb_version: TlbVersion,
     ) -> Result<TableEntryMut<Self>> {
         let page_tracker = self.page_tracker();
         let owner = self.page_owner_id();
@@ -622,7 +628,7 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
             return Err(Error::PageSizeNotSupported(entry.level().leaf_page_size()));
         }
         let paddr = entry.page_addr().ok_or(Error::PageNotConverted)?;
-        if !page_tracker.is_converted_page(paddr, owner, mem_type) {
+        if !page_tracker.is_converted_page(paddr, owner, mem_type, tlb_version) {
             return Err(Error::PageNotConverted);
         }
         Ok(entry)
@@ -668,15 +674,22 @@ pub struct ConvertedPageIter<'a, T: PlatformPageTable, P: ConvertedPhysPage> {
     owner: &'a mut T,
     curr: PageAddr<T::MappedAddressSpace>,
     count: u64,
+    tlb_version: TlbVersion,
     phantom: PhantomData<P>,
 }
 
 impl<'a, T: PlatformPageTable, P: ConvertedPhysPage> ConvertedPageIter<'a, T, P> {
-    pub fn new(owner: &'a mut T, curr: PageAddr<T::MappedAddressSpace>, count: u64) -> Self {
+    pub fn new(
+        owner: &'a mut T,
+        curr: PageAddr<T::MappedAddressSpace>,
+        count: u64,
+        tlb_version: TlbVersion,
+    ) -> Self {
         Self {
             owner,
             curr,
             count,
+            tlb_version,
             phantom: PhantomData,
         }
     }
@@ -693,6 +706,8 @@ impl<'a, T: PlatformPageTable, P: ConvertedPhysPage> Iterator for ConvertedPageI
         let this_page = self.curr;
         self.curr = self.curr.checked_add_pages(1).unwrap();
         self.count -= 1;
-        self.owner.get_converted_page(this_page).ok()
+        self.owner
+            .get_converted_page(this_page, self.tlb_version)
+            .ok()
     }
 }

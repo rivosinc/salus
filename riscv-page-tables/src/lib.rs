@@ -60,6 +60,7 @@ pub use page_tracking::Result as PageTrackingResult;
 pub use page_tracking::{HypPageAlloc, PageTracker};
 pub use sv48::Sv48;
 pub use sv48x4::Sv48x4;
+pub use tlb::TlbVersion;
 
 pub mod pte;
 
@@ -149,23 +150,19 @@ mod tests {
                 .map_page(gpa, mappable, &mut || pte_pages.next())
                 .is_ok());
         }
-        let dirty_page = page_tracker
-            .convert_page(
-                guest_page_table
-                    .unmap_page::<Page<Invalidated>>(gpa_base)
-                    .unwrap(),
-            )
+        let version = TlbVersion::new();
+        guest_page_table
+            .invalidate_range::<Page<Invalidated>>(gpa_base, PageSize::Size4k, 2)
+            .unwrap()
+            .for_each(|invalidated| page_tracker.convert_page(invalidated, version).unwrap());
+        let version = version.increment();
+        let mut converted_pages = guest_page_table
+            .get_converted_range::<Page<ConvertedDirty>>(gpa_base, PageSize::Size4k, 2, version)
             .unwrap();
+        let dirty_page = converted_pages.next().unwrap();
         assert_eq!(dirty_page.addr(), page_addrs[0]);
         assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
-        let clean_page = page_tracker
-            .convert_page(
-                guest_page_table
-                    .unmap_page::<Page<Invalidated>>(gpa_base.checked_add_pages(1).unwrap())
-                    .unwrap(),
-            )
-            .unwrap()
-            .clean();
+        let clean_page = converted_pages.next().unwrap().clean();
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
     }
@@ -199,23 +196,19 @@ mod tests {
                 .map_page(gpa, mappable, &mut || pte_pages.next())
                 .is_ok());
         }
-        let dirty_page = page_tracker
-            .convert_page(
-                guest_page_table
-                    .unmap_page::<Page<Invalidated>>(gpa_base)
-                    .unwrap(),
-            )
+        let version = TlbVersion::new();
+        guest_page_table
+            .invalidate_range::<Page<Invalidated>>(gpa_base, PageSize::Size4k, 2)
+            .unwrap()
+            .for_each(|invalidated| page_tracker.convert_page(invalidated, version).unwrap());
+        let version = version.increment();
+        let mut converted_pages = guest_page_table
+            .get_converted_range::<Page<ConvertedDirty>>(gpa_base, PageSize::Size4k, 2, version)
             .unwrap();
+        let dirty_page = converted_pages.next().unwrap();
         assert_eq!(dirty_page.addr(), page_addrs[0]);
         assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
-        let clean_page = page_tracker
-            .convert_page(
-                guest_page_table
-                    .unmap_page::<Page<Invalidated>>(gpa_base.checked_add_pages(1).unwrap())
-                    .unwrap(),
-            )
-            .unwrap()
-            .clean();
+        let clean_page = converted_pages.next().unwrap().clean();
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
     }

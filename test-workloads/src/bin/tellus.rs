@@ -58,6 +58,13 @@ fn convert_pages(addr: u64, num_pages: u64) {
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
     // reclaimed.
     unsafe { ecall_send(&msg).expect("TsmConvertPages failed") };
+
+    // Fence the pages we just converted.
+    //
+    // TODO: Boot secondary CPUs and test the invalidation flow with multiple CPUs.
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmInitiateFence);
+    // Safety: TsmInitiateFence doesn't read or write any memory we have access to.
+    unsafe { ecall_send(&msg).expect("TsmInitiateFence failed") };
 }
 
 fn reclaim_pages(addr: u64, num_pages: u64) {

@@ -6,7 +6,9 @@ use arrayvec::ArrayVec;
 use page_collections::page_vec::PageVec;
 use riscv_pages::*;
 
-use crate::{HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, PageTrackingResult};
+use crate::{
+    HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, PageTrackingResult, TlbVersion,
+};
 
 /// Tracks the owners of a page. Ownership is nested in order to establish a "chain-of-custody"
 /// for the page.
@@ -29,8 +31,11 @@ pub enum PageState {
     /// data structures or as a page-table page for the VM.
     VmState,
 
-    /// Page has been converted by the current owner for use in a child VM, but has not yet been
-    /// assigned to its new owner.
+    /// Page has been invalidated and started the conversion operation at the given TLB version.
+    Converting(TlbVersion),
+
+    /// Page has completed the conversion operation and is eligible for use in a child VM or to
+    /// be reclaimed.
     Converted,
 }
 
@@ -94,7 +99,9 @@ impl PageInfo {
     pub fn owner(&self) -> Option<PageOwnerId> {
         use PageState::*;
         match self.state {
-            Converted | Mapped | VmState => Some(self.owners[self.owners.len() - 1]),
+            Converting(_) | Converted | Mapped | VmState => {
+                Some(self.owners[self.owners.len() - 1])
+            }
             _ => None,
         }
     }
@@ -123,7 +130,7 @@ impl PageInfo {
     pub fn pop_owner(&mut self) -> PageTrackingResult<PageOwnerId> {
         use PageState::*;
         match self.state {
-            Mapped | VmState | Converted => {
+            Mapped | VmState | Converted | Converting(_) => {
                 if self.owners.len() == 1 {
                     Err(PageTrackingError::OwnerUnderflow) // Can't pop the last owner.
                 } else {
@@ -158,7 +165,8 @@ impl PageInfo {
     ) -> PageTrackingResult<()> {
         use PageState::*;
         if !matches!(new_state, Mapped | VmState | Converted) {
-            // Going back to free/reserved isn't allowed.
+            // Going back to free/reserved isn't allowed, nor does it make sense for a page to
+            // immediately enter the "Converting" state.
             return Err(PageTrackingError::InvalidStateTransition);
         }
         match self.state {
@@ -179,31 +187,55 @@ impl PageInfo {
                 self.state = new_state;
                 Ok(())
             }
-            VmState | Mapped | Reserved => Err(PageTrackingError::PageNotAssignable),
+            VmState | Mapped | Reserved | Converting(_) => {
+                Err(PageTrackingError::PageNotAssignable)
+            }
         }
     }
 
-    /// Transitions the page to the Converted state so that it may be assigned for use with a
-    /// child VM.
-    pub fn convert(&mut self) -> PageTrackingResult<()> {
-        // We can only donate pages that were mapped.
-        //
-        // TODO: Intermediate states for unmap & invalidate.
+    /// Transitions the page to Converting at `tlb_version` if it is currently Mapped.
+    pub fn begin_conversion(&mut self, tlb_version: TlbVersion) -> PageTrackingResult<()> {
         use PageState::*;
         match self.state {
             Mapped => {
-                self.state = Converted;
+                self.state = Converting(tlb_version);
                 Ok(())
             }
-            _ => Err(PageTrackingError::PageNotConvertable),
+            _ => Err(PageTrackingError::PageNotConvertible),
         }
     }
 
-    /// Transitions the page to the Mapped state back from the Converted state so that it can
-    /// be mapped back into the owner.
+    /// Transitions the page to Converted if it is Converting with a TLB version older than
+    /// `tlb_version`. After the page is converted it may be assigned to child VMs.
+    pub fn complete_conversion(&mut self, tlb_version: TlbVersion) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            Converting(version) => {
+                if version < tlb_version {
+                    self.state = Converted;
+                    Ok(())
+                } else {
+                    Err(PageTrackingError::PageNotConvertible)
+                }
+            }
+            _ => Err(PageTrackingError::PageNotConvertible),
+        }
+    }
+
+    /// Returns if the page is Converting and can complete conversion at the given `tlb_version`.
+    pub fn is_convertible(&self, tlb_version: TlbVersion) -> bool {
+        use PageState::*;
+        match self.state {
+            Converting(version) => version < tlb_version,
+            _ => false,
+        }
+    }
+
+    /// Transitions the page to the Mapped state back from the Converting or Converted state so that
+    /// it can be mapped back into the owner.
     pub fn reclaim(&mut self) -> PageTrackingResult<()> {
         use PageState::*;
-        if !matches!(self.state, Converted) {
+        if !matches!(self.state, Converted | Converting(_)) {
             return Err(PageTrackingError::PageNotReclaimable);
         }
         self.state = Mapped;
@@ -560,7 +592,12 @@ mod tests {
             .push_owner(PageOwnerId::host(), PageState::Mapped)
             .is_ok());
         assert_eq!(page.owner().unwrap(), PageOwnerId::host());
-        assert!(page.convert().is_ok());
+        let version = TlbVersion::new();
+        assert!(page.begin_conversion(version).is_ok());
+        assert_eq!(page.state(), PageState::Converting(version));
+        assert!(!page.is_convertible(version));
+        let version = version.increment();
+        assert!(page.complete_conversion(version).is_ok());
         assert_eq!(page.state(), PageState::Converted);
         assert_eq!(page.pop_owner().unwrap(), PageOwnerId::host());
         assert!(page.pop_owner().is_err());

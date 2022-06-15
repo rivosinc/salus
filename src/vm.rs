@@ -192,11 +192,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         let exit = {
             let mut vcpu = vcpu.lock();
 
-            // Activate this vCPU and its address space.
-            let mut active_vcpu = vcpu.activate(&self.vm_pages).unwrap();
-
             // Run until there's an exit we can't handle.
             loop {
+                // Activate this vCPU and its address space. We re-activate after every exit (even
+                // if it was handled) so that any pending TLB maintenance can be completed.
+                let mut active_vcpu = vcpu.activate(&self.vm_pages).unwrap();
+
                 let exit = active_vcpu.run_to_exit();
                 match exit {
                     VmCpuExit::Ecall(Some(sbi_msg)) => {
@@ -319,7 +320,17 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 page_type,
                 num_pages,
             } => self.reclaim_pages(page_addr, page_type, num_pages).into(),
-            TsmInitiateFence | TsmLocalFence => SbiReturn::from(sbi::Error::NotSupported),
+            TsmInitiateFence => self
+                .vm_pages
+                .initiate_fence()
+                .map_err(|_| SbiError::Failed)
+                .map(|_| 0)
+                .into(),
+            TsmLocalFence => {
+                // Nothing to do here as the fence itself will occur once we re-enter `VmPages` the
+                // next time we're run.
+                SbiReturn::success(0)
+            }
             AddPageTablePages {
                 guest_id,
                 page_addr,

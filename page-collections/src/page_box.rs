@@ -30,18 +30,15 @@ use riscv_pages::{InternalClean, InternalDirty, Page, PageAddr, PageSize, PhysPa
 ///
 /// ```rust
 /// use page_collections::page_box::PageBox;
-/// use riscv_pages::{Page, InternalClean, InternalDirty};
+/// use riscv_pages::{InternalClean, InternalDirty, Page};
 ///
 /// struct TestData {
 ///     a: u64,
 ///     b: u64,
 /// }
 ///
-/// fn add_in_box(a:u64, b:u64, backing_page: Page<InternalClean>) -> (u64, Page<InternalDirty>) {
-///     let boxxed_data = PageBox::new_with(
-///         TestData {a, b},
-///         backing_page,
-///     );
+/// fn add_in_box(a: u64, b: u64, backing_page: Page<InternalClean>) -> (u64, Page<InternalDirty>) {
+///     let boxxed_data = PageBox::new_with(TestData { a, b }, backing_page);
 ///     let sum = boxxed_data.a + boxxed_data.b;
 ///     (sum, boxxed_data.to_page())
 /// }

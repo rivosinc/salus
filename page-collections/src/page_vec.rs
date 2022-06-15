@@ -21,12 +21,14 @@ use riscv_pages::{InternalClean, InternalDirty, PageAddr, PageSize, RawAddr, Seq
 /// ## Example
 ///
 /// ```rust
-/// use page_collections::page_vec::PageVec;
-/// use riscv_pages::{SequentialPages, Page, PageSize, InternalClean, InternalDirty};
 /// use core::result::Result;
+/// use page_collections::page_vec::PageVec;
+/// use riscv_pages::{InternalClean, InternalDirty, Page, PageSize, SequentialPages};
 ///
-/// fn sum_in_page<I>(vals: I, pages: SequentialPages<InternalClean>)
-///     -> Result<(u64, SequentialPages<InternalDirty>), ()>
+/// fn sum_in_page<I>(
+///     vals: I,
+///     pages: SequentialPages<InternalClean>,
+/// ) -> Result<(u64, SequentialPages<InternalDirty>), ()>
 /// where
 ///     I: IntoIterator<Item = u64>,
 /// {

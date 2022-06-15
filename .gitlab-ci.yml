@@ -26,7 +26,7 @@ format-code:
   script:
     - rustup target add riscv64gc-unknown-none-elf
     - rustup component add rustfmt
-    - cargo fmt -- --check
+    - cargo fmt -- --check --config format_code_in_doc_comments=true
 
 test-code:
   stage: test

@@ -21,12 +21,17 @@ const MIN_GROUP_SHIFT: u32 = 24; // As mandated by the AIA spec.
 /// Errors that can be returned when claiming or releasing guest interrupt files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    /// The requested CPU does not exist.
     InvalidCpu(CpuId),
+    /// No guest file for the specified guest.
     InvalidGuestFile,
+    /// Guest file for this guest already taken.
     GuestFileTaken,
+    /// Attempt to free a guest file that's not taken.
     GuestFileFree,
 }
 
+/// Holds the result of IMSIC operations.
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// IMSIC indirect CSRs.
@@ -49,10 +54,11 @@ impl ImsicRegister {
 }
 
 /// IMSIC external interrupt IDs.
+/// For now, we only expect to handle IPIs at HS-level.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImsicInterruptId {
-    // For now, we only expect to handle IPIs at HS-level.
+    /// Interrupt ID for inter-processer notifications.
     Ipi = 1,
 }
 
@@ -127,7 +133,9 @@ impl ReclaimablePhysPage for ImsicGuestPage<ConvertedClean> {
 /// is always invalid, as per the AIA spec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImsicGuestId {
+    /// Interrupt file for the Host VM.
     HostVm,
+    /// Interrupt file for a guest with the provided index.
     GuestVm(usize),
 }
 

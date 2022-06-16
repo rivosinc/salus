@@ -3,8 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Hardware drivers
-//!
-//! - `CpuInfo` holds the topology and static properties  of the CPUs the hypervisor is running on.
+
 #![no_std]
 #![feature(allocator_api, int_log)]
 
@@ -15,7 +14,9 @@ extern crate alloc;
 #[macro_use]
 extern crate std;
 
+/// Provides access to topology and static properties of the CPU the hypervisor is running on.
 pub mod cpu;
+/// Provides the driver for the IMSIC from the AIA spec.
 pub mod imsic;
 
 pub use cpu::{CpuId, CpuInfo, MAX_CPUS};

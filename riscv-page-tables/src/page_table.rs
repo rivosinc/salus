@@ -13,17 +13,27 @@ use crate::TlbVersion;
 
 pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 
+/// Error in creating or modifying a page table.
 #[derive(Debug)]
 pub enum Error {
+    /// Failure to create a root page table because the root requires more pages.
     InsufficientPages(SequentialPages<InternalClean>),
+    /// Failure to allocate a page to hold the PTEs for the given mapping.
     InsufficientPtePages,
+    /// Attempt to access a middle-level page table, but found a leaf.
     LeafEntryNotTable,
+    /// Failure creating a root page table at an address that isn't aligned as required.
     MisalignedPages(SequentialPages<InternalClean>),
+    /// The requested page size isn't (yet) handled by the hypervisor.
     PageSizeNotSupported(PageSize),
+    /// Attempt to create a mapping over an existing one.
     MappingExists,
+    /// The requested range couldn't be removed from the page table.
     PageNotUnmappable,
+    /// Attempt to access a non-converted page as confidential.
     PageNotConverted,
 }
+/// Hold the result of page table operations.
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// Defines the structure of a multi-level page table.
@@ -355,7 +365,9 @@ pub trait GuestStagePageTable: PlatformPageTable<MappedAddressSpace = GuestPhys>
 
 /// A page table for a given addressing type.
 pub trait PlatformPageTable: Sized {
+    /// The level of this table in the paging hierachry.
     type Level: PageTableLevel;
+    /// The address space that is mapped by this page table.
     type MappedAddressSpace: AddressSpace;
 
     /// The alignement requirement of the top level page table.

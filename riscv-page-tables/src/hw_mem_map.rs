@@ -90,9 +90,12 @@ pub enum HwReservedMemType {
     /// The system page map.
     PageMap,
 
-    /// The host VM's kernel and initramfs images as loaded by firmware into (otherwise usable)
-    /// memory. The hypervisor should take care not to overwrite these.
+    /// The host VM's kernel image as loaded by firmware into (otherwise usable) memory. The
+    /// hypervisor should take care not to overwrite these.
     HostKernelImage,
+
+    /// The host VM's initramfs image as loaded by firmware into (otherwise usable) memory. The
+    /// hypervisor should take care not to overwrite these.
     HostInitramfsImage,
 }
 
@@ -111,6 +114,7 @@ pub enum Error {
     /// No more entries available in the memory map.
     OutOfSpace,
 }
+/// Holds the result of memory map operations.
 pub type Result<T> = result::Result<T, Error>;
 
 impl HwMemRegion {

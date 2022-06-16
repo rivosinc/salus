@@ -43,9 +43,15 @@ extern crate alloc;
 mod hw_mem_map;
 mod page_info;
 mod page_table;
+/// Handles tracking the owner and state of each page.
 pub mod page_tracking;
+/// Provides access to the fields of a riscv PTE.
+mod pte;
+/// Interfaces to build and manage sv48 page tables for S and U mode access.
 mod sv48;
+/// Interfaces to build and manage sv48x4 page tables for VMs.
 pub mod sv48x4;
+/// Provides low-level TLB management functions such as fencing.
 pub mod tlb;
 
 pub use hw_mem_map::Error as MemMapError;
@@ -61,8 +67,6 @@ pub use page_tracking::{HypPageAlloc, PageTracker};
 pub use sv48::Sv48;
 pub use sv48x4::Sv48x4;
 pub use tlb::TlbVersion;
-
-pub mod pte;
 
 #[cfg(test)]
 #[macro_use]

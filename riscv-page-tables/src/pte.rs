@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+// Allow unused code until all features are added to the owning crate.
+#![allow(dead_code)]
+
 use riscv_pages::{Pfn, SupervisorPfn};
 
 // Both Sv39 and Sv48 use 44 bits for the page frame number.
@@ -14,36 +17,53 @@ const PFN_SHIFT: u64 = 10;
 /// Bits from a Risc-V PTE.
 #[derive(Copy, Clone)]
 pub enum PteFieldBit {
+    /// This PTE is valid when set.
     Valid = 0,
+    /// Reading allowed when set.
     Read = 1,
+    /// Writing allowed when set.
     Write = 2,
+    /// Executing allowed when set.
     Execute = 3,
+    /// Access from U mode is allowed when set.
     User = 4,
+    /// When set, indicates this is a global mapping.
     Global = 5,
+    /// The page has been accessed.
     Accessed = 6,
+    /// The page has been written.
     Dirty = 7,
 }
 
 impl PteFieldBit {
+    /// Returns the bit position of this bit field in the PTE.
     pub const fn shift(&self) -> u64 {
         *self as u64
     }
 
+    /// Returns the mask covering all bits of this PTE field.
     pub const fn mask(&self) -> u64 {
         1 << self.shift()
     }
 
+    /// Returns true if the field is non-zero.
     pub const fn is_set(&self, val: u64) -> bool {
         val & self.mask() != 0
     }
 }
 
 /// Permissions for a leaf page entry.
+#[allow(clippy::upper_case_acronyms)]
 pub enum PteLeafPerms {
+    /// Read only
     R = PteFieldBit::Read.mask() as isize,
+    /// Read/Write
     RW = (PteFieldBit::Read.mask() | PteFieldBit::Write.mask()) as isize,
+    /// Execute only
     X = PteFieldBit::Execute.mask() as isize,
+    /// Read/Execute
     RX = (PteFieldBit::Read.mask() | PteFieldBit::Execute.mask()) as isize,
+    /// Read/Write/Execute
     RWX = (PteFieldBit::Read.mask() | PteFieldBit::Write.mask() | PteFieldBit::Execute.mask())
         as isize,
 }

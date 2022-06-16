@@ -8,11 +8,16 @@ use crate::page_table::Result;
 use crate::page_table::*;
 use crate::page_tracking::PageTracker;
 
+/// The levels of the four-level Sv48x4 page table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sv48x4Level {
+    /// Level 1 table - references 4k pages.
     L1Table,
+    /// Level 2 table - references L1 tables or 2M pages.
     L2Table,
+    /// Level 3 table - references L2 tables or 1G pages.
     L3Table,
+    /// Level 4 table - references L3 tables or 512G pages.
     L4Table,
 }
 

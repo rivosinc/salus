@@ -41,6 +41,7 @@ pub enum Error {
     InvalidStateTransition,
 }
 
+/// Holds the result of page tracking operations.
 pub type Result<T> = core::result::Result<T, Error>;
 
 // Inner struct that is wrapped in a mutex by `PageTracker`.

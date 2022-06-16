@@ -14,7 +14,7 @@ use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
     Readable, Trap, Writeable, CSR,
 };
-use sbi::{SbiMessage, SbiReturn};
+use sbi::{SbiMessage, SbiReturnType};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
@@ -421,10 +421,15 @@ impl VmCpu {
     }
 
     /// Updates A0/A1 with the result of an SBI call.
-    pub fn set_ecall_result(&mut self, result: SbiReturn) {
-        self.set_gpr(GprIndex::A0, result.error_code as u64);
-        if result.error_code == sbi::SBI_SUCCESS {
-            self.set_gpr(GprIndex::A1, result.return_value as u64);
+    pub fn set_ecall_result(&mut self, result: SbiReturnType) {
+        match result {
+            SbiReturnType::Legacy(a0) => {
+                self.set_gpr(GprIndex::A0, a0);
+            }
+            SbiReturnType::Standard(ret) => {
+                self.set_gpr(GprIndex::A0, ret.error_code as u64);
+                self.set_gpr(GprIndex::A1, ret.return_value as u64);
+            }
         }
     }
 

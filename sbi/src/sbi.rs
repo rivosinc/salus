@@ -12,19 +12,28 @@ pub use consts::*;
 
 use riscv_regs::{GeneralPurposeRegisters, GprIndex};
 
-/// Errors passed over the SBI protocol
-#[derive(Debug)]
+/// Errors passed over the SBI protocol.
+///
+/// Constants from the SBI [spec](https://github.com/riscv-non-isa/riscv-sbi-doc/releases).
+#[repr(i64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// Address passed is invalid.
-    InvalidAddress,
-    /// Parameter passed isn't valid.
-    InvalidParam,
     /// Generic failure in execution of the SBI call.
-    Failed,
-    /// Extension and function are valid, but not supported by this implementation.
-    NotSupported,
-    /// Extension of function are not known.
-    UnknownSbiExtension,
+    Failed = -1,
+    /// Extension or function is not supported.
+    NotSupported = -2,
+    /// Parameter passed isn't valid.
+    InvalidParam = -3,
+    /// Permission denied.
+    Denied = -4,
+    /// Address passed is invalid.
+    InvalidAddress = -5,
+    /// The given hart has already been started.
+    AlreadyAvailable = -6,
+    /// Some of the given counters have already been started.
+    AlreadyStarted = -7,
+    /// Some of the given counters have already been stopped.
+    AlreadyStopped = -8,
 }
 
 impl Error {
@@ -32,22 +41,15 @@ impl Error {
     pub fn from_code(e: i64) -> Self {
         use Error::*;
         match e {
-            SBI_ERR_INVALID_ADDRESS => InvalidAddress,
-            SBI_ERR_INVALID_PARAM => InvalidParam,
-            SBI_ERR_NOT_SUPPORTED => NotSupported,
+            -1 => Failed,
+            -2 => NotSupported,
+            -3 => InvalidParam,
+            -4 => Denied,
+            -5 => InvalidAddress,
+            -6 => AlreadyAvailable,
+            -7 => AlreadyStarted,
+            -8 => AlreadyStopped,
             _ => Failed,
-        }
-    }
-
-    /// Convert `Self` to a 64bit error code to be returned over SBI.
-    pub fn to_code(&self) -> i64 {
-        use Error::*;
-        match self {
-            InvalidAddress => SBI_ERR_INVALID_ADDRESS,
-            InvalidParam => SBI_ERR_INVALID_PARAM,
-            Failed => SBI_ERR_FAILED,
-            NotSupported => SBI_ERR_NOT_SUPPORTED,
-            UnknownSbiExtension => SBI_ERR_INVALID_PARAM,
         }
     }
 }
@@ -134,7 +136,7 @@ impl BaseFunction {
             4 => Ok(GetMachineVendorID),
             5 => Ok(GetMachineArchitectureID),
             6 => Ok(GetMachineImplementationID),
-            _ => Err(Error::InvalidParam),
+            _ => Err(Error::NotSupported),
         }
     }
 }
@@ -229,7 +231,7 @@ impl StateFunction {
                 resume_addr: args[1],
                 opaque: args[2],
             }),
-            _ => Err(Error::InvalidParam),
+            _ => Err(Error::NotSupported),
         }
     }
 }
@@ -311,14 +313,15 @@ pub enum ResetFunction {
 }
 
 /// The types of reset a supervisor can request.
-#[derive(Copy, Clone)]
+#[repr(u64)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ResetType {
     /// Powers down the system.
-    Shutdown,
+    Shutdown = 0,
     /// Powers down, then reboots.
-    ColdReset,
+    ColdReset = 1,
     /// Reboots, doesn't power down.
-    WarmReset,
+    WarmReset = 2,
 }
 
 impl ResetType {
@@ -336,12 +339,13 @@ impl ResetType {
 }
 
 /// Reasons why a supervisor requests a reset.
-#[derive(Copy, Clone)]
+#[repr(u64)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ResetReason {
     /// Used for normal resets.
-    NoReason,
+    NoReason = 0,
     /// Used when the system has failed.
-    SystemFailure,
+    SystemFailure = 1,
 }
 
 impl ResetReason {
@@ -377,7 +381,7 @@ impl ResetFunction {
                 reset_type: ResetType::from_reg(args[0])?,
                 reason: ResetReason::from_reg(args[1])?,
             },
-            _ => return Err(Error::InvalidParam),
+            _ => return Err(Error::NotSupported),
         })
     }
 }
@@ -741,7 +745,7 @@ impl TeeFunction {
             }),
             14 => Ok(TsmInitiateFence),
             15 => Ok(TsmLocalFence),
-            _ => Err(Error::InvalidParam),
+            _ => Err(Error::NotSupported),
         }
     }
 }
@@ -1088,7 +1092,7 @@ impl MeasurementFunction {
                 measurement_type: args[1],
                 dest_addr: args[2],
             }),
-            _ => Err(Error::InvalidParam),
+            _ => Err(Error::NotSupported),
         }
     }
 }
@@ -1170,10 +1174,29 @@ impl From<Result<u64>> for SbiReturn {
 impl From<Error> for SbiReturn {
     fn from(error: Error) -> SbiReturn {
         SbiReturn {
-            error_code: error.to_code(),
+            error_code: error as i64,
             return_value: 0,
         }
     }
+}
+
+impl From<SbiReturn> for Result<u64> {
+    fn from(ret: SbiReturn) -> Result<u64> {
+        match ret.error_code {
+            SBI_SUCCESS => Ok(ret.return_value),
+            e => Err(Error::from_code(e)),
+        }
+    }
+}
+
+/// SBI return value conventions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SbiReturnType {
+    /// Legacy (v0.1) extensions return a single value in A0, usually with the convention that 0
+    /// is success and < 0 is an implementation defined error code.
+    Legacy(u64),
+    /// Modern extensions use the standard error code values enumerated above.
+    Standard(SbiReturn),
 }
 
 /// SBI Message used to invoke the specified SBI extension in the firmware.
@@ -1208,7 +1231,7 @@ impl SbiMessage {
             EXT_MEASUREMENT => {
                 MeasurementFunction::from_regs(gprs.a_regs()).map(SbiMessage::Measurement)
             }
-            _ => Err(Error::UnknownSbiExtension),
+            _ => Err(Error::NotSupported),
         }
     }
 
@@ -1315,19 +1338,18 @@ impl SbiMessage {
     /// }
     /// ```
     pub fn result(&self, a0: u64, a1: u64) -> Result<u64> {
+        let ret = SbiReturn {
+            error_code: a0 as i64,
+            return_value: a1,
+        };
         match self {
-            SbiMessage::Base(_) => {
-                if a0 == 0 {
-                    Ok(a1)
-                } else {
-                    Err(Error::InvalidParam) // TODO - set error
-                }
-            } //TODO
-            SbiMessage::HartState(_) => Ok(a1), //TODO
-            SbiMessage::PutChar(_) => Ok(0),
-            SbiMessage::Reset(_) => Err(Error::InvalidParam),
-            SbiMessage::Tee(f) => f.result(a0, a1),
-            SbiMessage::Measurement(f) => f.result(a0, a1),
+            // For legacy messages, a0 is 0 on success and an implementation-defined error value on
+            // failure. Nothing is returned in a1.
+            SbiMessage::PutChar(_) => match a0 as i64 {
+                SBI_SUCCESS => Ok(0),
+                _ => Err(Error::Failed),
+            },
+            _ => ret.into(),
         }
     }
 }

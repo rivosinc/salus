@@ -12,8 +12,8 @@ use riscv_regs::GprIndex;
 use s_mode_utils::abort::abort;
 use sbi::Error as SbiError;
 use sbi::{
-    self, BaseFunction, HartState, MeasurementFunction, SbiMessage, SbiReturn, StateFunction,
-    TeeFunction,
+    self, BaseFunction, HartState, MeasurementFunction, SbiMessage, SbiReturn, SbiReturnType,
+    StateFunction, TeeFunction,
 };
 
 use crate::guest_tracking::{GuestState, Guests};
@@ -199,28 +199,31 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 let mut active_vcpu = vcpu.activate(&self.vm_pages).unwrap();
 
                 let exit = active_vcpu.run_to_exit();
+                use SbiReturnType::*;
                 match exit {
                     VmCpuExit::Ecall(Some(sbi_msg)) => {
                         match self.handle_ecall(sbi_msg, active_vcpu.active_pages()) {
                             EcallAction::LegacyOk => {
-                                // for legacy, leave the a0 and a1 registers as-is.
+                                active_vcpu.set_ecall_result(Legacy(0));
                             }
                             EcallAction::Unhandled => {
-                                active_vcpu
-                                    .set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
+                                active_vcpu.set_ecall_result(Standard(SbiReturn::from(
+                                    SbiError::NotSupported,
+                                )));
                             }
                             EcallAction::Continue(sbi_ret) => {
-                                active_vcpu.set_ecall_result(sbi_ret);
+                                active_vcpu.set_ecall_result(Standard(sbi_ret));
                             }
                             EcallAction::Break(reason, sbi_ret) => {
-                                active_vcpu.set_ecall_result(sbi_ret);
+                                active_vcpu.set_ecall_result(Standard(sbi_ret));
                                 break reason;
                             }
                         }
                     }
                     VmCpuExit::Ecall(None) => {
                         // Unrecognized ECALL, return an error.
-                        active_vcpu.set_ecall_result(SbiReturn::from(sbi::Error::NotSupported));
+                        active_vcpu
+                            .set_ecall_result(Standard(SbiReturn::from(SbiError::NotSupported)));
                     }
                     VmCpuExit::PageFault(addr) => {
                         if self.handle_guest_fault(addr).is_err() {

@@ -57,7 +57,7 @@ impl PageSize {
 }
 
 /// A raw address in an address space.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RawAddr<AS: AddressSpace>(u64, AS);
 
 impl<AS: AddressSpace> RawAddr<AS> {
@@ -116,12 +116,6 @@ pub type GuestPhysAddr = RawAddr<GuestPhys>;
 impl<AS: AddressSpace> From<PageAddr<AS>> for RawAddr<AS> {
     fn from(p: PageAddr<AS>) -> RawAddr<AS> {
         p.addr
-    }
-}
-
-impl<AS: AddressSpace> PartialEq for RawAddr<AS> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
     }
 }
 

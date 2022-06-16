@@ -49,7 +49,7 @@ impl PageOwnerId {
 }
 
 /// `AddressSpace` identifies the address space that a raw address is in.
-pub trait AddressSpace: Clone + Copy {
+pub trait AddressSpace: Clone + Copy + PartialEq + Eq {
     /// Returns the `PageOwnerId` for the address space.
     fn id(&self) -> PageOwnerId;
 }

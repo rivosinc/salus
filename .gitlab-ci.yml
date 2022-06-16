@@ -19,7 +19,7 @@ lint-code:
   script:
     - rustup target add riscv64gc-unknown-none-elf
     - rustup component add clippy
-    - cargo clippy -- -D warnings
+    - cargo clippy -- -D warnings  -Wmissing-docs
 
 format-code:
   stage: test

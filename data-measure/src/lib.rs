@@ -4,5 +4,9 @@
 
 #![no_std]
 
+//! Trait for measurement and implementations for different algorithms.
+
+/// Base trait for measuring pages as they are added to VMs.
 pub mod data_measure;
+/// A Sha256-based implementation of DataMeasure.
 pub mod sha256;

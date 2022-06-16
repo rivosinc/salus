@@ -5,8 +5,10 @@
 use crate::data_measure::DataMeasure;
 use sha2::{Digest, Sha256};
 
+/// The number of bytes in a sha256 digest.
 pub const SHA256_DIGEST_BYTES: usize = 32;
 
+/// Maintains a Sha256 measurement of the pages added.
 pub struct Sha256Measure {
     measurement: [u8; SHA256_DIGEST_BYTES],
 }
@@ -26,6 +28,7 @@ impl DataMeasure for Sha256Measure {
 }
 
 impl Sha256Measure {
+    /// Creates a new, zeroed measurement.
     pub fn new() -> Self {
         Sha256Measure {
             measurement: [0u8; SHA256_DIGEST_BYTES],

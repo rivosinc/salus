@@ -261,7 +261,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
         guest_id: vmid,
         vcpu_id: 0,
-        register: sbi::TvmCpuRegister::Pc,
+        register: sbi::TvmCpuRegister::EntryPc,
         value: 0x8020_0000,
     });
     // Safety: Setting a guest register doesn't affect host memory safety.

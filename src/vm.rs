@@ -100,8 +100,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
             .map_err(|_| SbiError::InvalidParam)?;
         let mut vcpu = vcpu.lock();
         match register {
-            sbi::TvmCpuRegister::Pc => vcpu.set_sepc(value),
-            sbi::TvmCpuRegister::A1 => vcpu.set_gpr(GprIndex::A1, value),
+            sbi::TvmCpuRegister::EntryPc => vcpu.set_sepc(value),
+            sbi::TvmCpuRegister::EntryArg => vcpu.set_gpr(GprIndex::A1, value),
+            _ => {
+                return Err(SbiError::InvalidParam);
+            }
         };
         Ok(())
     }
@@ -379,6 +382,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             } => self
                 .guest_set_vcpu_reg(guest_id, vcpu_id, register, value)
                 .into(),
+            TvmCpuGetRegister { .. } => SbiReturn::from(SbiError::NotSupported),
             GetGuestMeasurement {
                 measurement_version,
                 measurement_type,
@@ -799,10 +803,10 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     /// Sets the launch arguments (entry point and FDT) for the host vCPU.
     pub fn set_launch_args(&self, entry_addr: GuestPhysAddr, fdt_addr: GuestPhysAddr) {
         self.inner
-            .set_vcpu_reg(0, sbi::TvmCpuRegister::Pc, entry_addr.bits())
+            .set_vcpu_reg(0, sbi::TvmCpuRegister::EntryPc, entry_addr.bits())
             .unwrap();
         self.inner
-            .set_vcpu_reg(0, sbi::TvmCpuRegister::A1, fdt_addr.bits())
+            .set_vcpu_reg(0, sbi::TvmCpuRegister::EntryArg, fdt_addr.bits())
             .unwrap();
     }
 

@@ -406,22 +406,71 @@ impl SbiFunction for ResetFunction {
     }
 }
 
-/// List of registers that can be set prior to starting a confidential VM.
+/// The exit cause for a TVM vCPU returned from TvmCpuRun. Certain exit causes may be accompanied
+/// by more detailed cuase information (e.g. faulting address) in which case that information can
+/// be retrieved by accessing the virtual `ExitCause` registers of the vCPU.
 #[repr(u64)]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TvmCpuExitCode {
+    /// The vCPU exited due to an interrupt directed at the host.
+    HostInterrupt = 0,
+
+    /// The vCPU made a sbi_system_reset() call. The reset type and cuase are stored in the
+    /// `ExitCause0` and `ExitCause1` registers, respectively. All vCPUs of the TVM are no longer
+    /// runnable.
+    SystemReset = 1,
+
+    /// The vCPU made a sbi_hart_start() call. The target hart ID is stored in `ExitCause0` and the
+    /// vCPU matching the hart ID is made runnable.
+    HartStart = 2,
+
+    /// The vCPU made a sbi_hart_stop() call. The vCPU is no longer runnable.
+    HartStop = 3,
+
+    /// The vCPU encountered a guest page fault. The faulting guest physical address is stored in
+    /// `ExitCause0`. The vCPU will resume at the faulting instruction the next time it is run.
+    ///
+    /// TODO: Do we need to differentiate between the type (fetch/load/store) of page fault?
+    GuestPageFault = 4,
+
+    /// The vCPU executed a WFI instruction.
+    WaitForInterupt = 5,
+
+    /// The vCPU encountered an exception that the TSM cannot handle internally and that cannot
+    /// be safely delegated to the host. The value of the SCAUSE register is stored in `ExitCause0`.
+    /// The vCPU is no longer runnable.
+    UnhandledException = 6,
+}
+
+/// List of registers that can be read or written for a TVM's vCPU.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TvmCpuRegister {
-    /// Program Counter.
-    Pc = 0,
-    /// A1 - commonly used for a device tree pointer.
-    A1 = 1,
+    /// Entry point (initial SEPC) of the boot CPU of a TVM. Raed-write prior to TVM finalization;
+    /// inaccessible after the TVM has started.
+    EntryPc = 0,
+
+    /// Boot argument (stored in A1, usually a pointer to a device-tree) of the boot CPU of a TVM.
+    /// Raed-write prior to TVM finalization; inaccessible after the TVM has started.
+    EntryArg = 1,
+
+    /// Detailed TVM CPU exit cause register. Read-only, and only accessible after the TVM has
+    /// started.
+    ExitCause0 = 2,
+
+    /// An additional exit cause register with the same access properties as `ExitCause0`.
+    ExitCause1 = 3,
 }
 
 impl TvmCpuRegister {
-    // Returns the cpu register specified by the index or an error if the index is out of range.
-    fn from_reg(a2: u64) -> Result<Self> {
+    /// Returns the cpu register specified by the index or an error if the index is out of range.
+    pub fn from_reg(a2: u64) -> Result<Self> {
+        use TvmCpuRegister::*;
         match a2 {
-            0 => Ok(TvmCpuRegister::Pc),
-            1 => Ok(TvmCpuRegister::A1),
+            0 => Ok(EntryPc),
+            1 => Ok(EntryArg),
+            2 => Ok(ExitCause0),
+            3 => Ok(ExitCause1),
             _ => Err(Error::InvalidParam),
         }
     }
@@ -613,8 +662,8 @@ pub enum TeeFunction {
         /// a1 = vCPU id
         vcpu_id: u64,
     },
-    /// Sets the register identified by `register` to `value` in the vCPU with ID `vcpu_id`. vCPU
-    /// register state may not be modified after the TVM is finalized.
+    /// Sets the register identified by `register` to `value` in the vCPU with ID `vcpu_id`. See
+    /// the defintion of `TvmCpuRegister` for details on which registers are writeable and when.
     ///
     /// a6 = 9
     TvmCpuSetRegister {
@@ -626,6 +675,19 @@ pub enum TeeFunction {
         register: TvmCpuRegister,
         /// a3 = register value
         value: u64,
+    },
+    /// Gets the regsiter identified by `register` in the vCPU with ID `vcpu_id`. See the definition
+    /// of `TvmCpuRegister` for details on which registers are readable and when. The contents of
+    /// the specified register are returned upon success.
+    ///
+    /// a6 = 16
+    TvmCpuGetRegister {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = vCPU id
+        vcpu_id: u64,
+        /// a2 = register id
+        register: TvmCpuRegister,
     },
     /// Writes up to `len` bytes of the `TsmInfo` structure to the non-confidential physical address
     /// `dest_addr`. Returns the number of bytes written.
@@ -745,6 +807,11 @@ impl TeeFunction {
             }),
             14 => Ok(TsmInitiateFence),
             15 => Ok(TsmLocalFence),
+            16 => Ok(TvmCpuGetRegister {
+                guest_id: args[0],
+                vcpu_id: args[1],
+                register: TvmCpuRegister::from_reg(args[2])?,
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -816,6 +883,11 @@ impl SbiFunction for TeeFunction {
             } => 13,
             TsmInitiateFence => 14,
             TsmLocalFence => 15,
+            TvmCpuGetRegister {
+                guest_id: _,
+                vcpu_id: _,
+                register: _,
+            } => 16,
         }
     }
 
@@ -879,6 +951,11 @@ impl SbiFunction for TeeFunction {
                 page_type: _,
                 num_pages: _,
             } => *page_addr,
+            TvmCpuGetRegister {
+                guest_id,
+                vcpu_id: _,
+                register: _,
+            } => *guest_id,
             _ => 0,
         }
     }
@@ -941,6 +1018,11 @@ impl SbiFunction for TeeFunction {
                 page_type,
                 num_pages: _,
             } => *page_type as u64,
+            TvmCpuGetRegister {
+                guest_id: _,
+                vcpu_id,
+                register: _,
+            } => *vcpu_id,
             _ => 0,
         }
     }
@@ -990,6 +1072,11 @@ impl SbiFunction for TeeFunction {
                 page_type: _,
                 num_pages,
             } => *num_pages,
+            TvmCpuGetRegister {
+                guest_id: _,
+                vcpu_id: _,
+                register,
+            } => *register as u64,
             _ => 0,
         }
     }

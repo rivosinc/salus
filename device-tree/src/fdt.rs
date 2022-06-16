@@ -103,9 +103,11 @@ pub struct FdtMemoryRegion {
 }
 
 impl FdtMemoryRegion {
+    /// Returns the base address of the memory region.
     pub fn base(&self) -> u64 {
         self.base
     }
+    /// Returns the size of the memory region.
     pub fn size(&self) -> u64 {
         self.size
     }

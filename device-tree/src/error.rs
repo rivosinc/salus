@@ -6,13 +6,20 @@ use alloc::collections::TryReserveError;
 use core::{fmt, result, str};
 use fdt_rs::error::DevTreeError;
 
+/// Errors returned from the `device-tree` crate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    /// Error parsing a device tree string.
     StrError(str::Utf8Error),
+    /// The given node id wasn't found.
     InvalidNodeId,
+    /// The passed FDT isn't a proper tree(more than one node without a parent).
     MalformedFdt,
+    /// The given property isn't found in the node.
     PropNotFound,
+    /// Propagated error from `fdt_rs` parsing.
     FdtError(DevTreeError),
+    /// Couldn't allocate space to store the node/property.
     AllocError(TryReserveError),
 }
 
@@ -47,4 +54,5 @@ impl fmt::Display for Error {
     }
 }
 
+/// Result from device tree operations.
 pub type Result<T> = result::Result<T, Error>;

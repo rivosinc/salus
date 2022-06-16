@@ -6,6 +6,7 @@ use core::ptr::NonNull;
 use riscv_pages::SupervisorPhysAddr;
 use spin::{Mutex, Once};
 
+/// Provides basic print support in the bare-metal hypervisor environment.
 #[macro_export]
 macro_rules! print {
     ($($args:tt)*) => {
@@ -16,6 +17,7 @@ macro_rules! print {
     };
 }
 
+/// Provides basic println support in the bare-metal hypervisor environment.
 #[macro_export]
 macro_rules! println {
     ($($args:tt)*) => {

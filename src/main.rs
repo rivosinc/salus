@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+//! A small Risc-V hypervisor to enable trusted execution environments.
+
 #![no_main]
 #![no_std]
 #![feature(
@@ -70,6 +72,7 @@ unsafe impl GlobalAlloc for GeneralGlobalAlloc {
 #[global_allocator]
 static GENERAL_ALLOCATOR: GeneralGlobalAlloc = GeneralGlobalAlloc;
 
+/// Aborts if the system hits an allocation error.
 #[alloc_error_handler]
 pub fn alloc_error(_layout: Layout) -> ! {
     abort()

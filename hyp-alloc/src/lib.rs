@@ -10,9 +10,13 @@
     slice_ptr_len
 )]
 
+//! Provides basic allocation ability for the hypervisor.
+
 extern crate alloc;
 
+/// A simple type-safe arena with support for using a custom allocator.
 pub mod arena;
+/// A simple thread-safe bump-pointer allocator backed by a fixed-length contiguous range of Pages.
 pub mod hyp_alloc;
 
 pub use crate::hyp_alloc::HypAlloc;

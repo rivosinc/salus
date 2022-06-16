@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Provides basic functions for code running in S-mode.
+
 #![no_std]
 #![feature(
     panic_info_message,
@@ -14,6 +16,9 @@
 
 pub use core::alloc::{GlobalAlloc, Layout};
 
+/// Provides the ability to terminate the running S-mode code.
 pub mod abort;
+/// Supports invoking ecalls in the HS or M mode code above.
 pub mod ecall;
+/// Printing ability for an SBI-based console.
 pub mod print_sbi;

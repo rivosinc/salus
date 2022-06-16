@@ -7,6 +7,7 @@ use sbi::SbiMessage;
 use crate::ecall::ecall_send;
 pub use crate::println;
 
+/// `print` macro based on writing to SBI
 #[macro_export]
 macro_rules! print {
     ($($args:tt)*) => {
@@ -17,6 +18,7 @@ macro_rules! print {
     };
 }
 
+/// `println` macro based on writing to SBI
 #[macro_export]
 macro_rules! println {
     ($($args:tt)*) => {

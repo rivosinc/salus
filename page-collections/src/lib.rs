@@ -19,6 +19,9 @@
 
 extern crate alloc;
 
+/// A Page-backed version of std::sync::Arc.
 pub mod page_arc;
+/// A Page-backed version of std::collections::Box.
 pub mod page_box;
+/// A Page-backed version of std::collections::Vec.
 pub mod page_vec;

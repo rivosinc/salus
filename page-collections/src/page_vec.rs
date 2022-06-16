@@ -72,7 +72,7 @@ impl<T> PageVec<T> {
         }
     }
 
-    // Wrapper implementations from `Vec`
+    /// See `std::vec::try_reserve`
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
         if self.len() + additional > self.capacity() {
             Err(TryReserveErrorKind::CapacityOverflow.into())
@@ -81,10 +81,12 @@ impl<T> PageVec<T> {
         }
     }
 
+    /// See `std::vec::push`
     pub fn push(&mut self, item: T) {
         self.0.push(item)
     }
 
+    /// See `std::vec::retain`
     pub fn retain<F>(&mut self, f: F)
     where
         F: FnMut(&T) -> bool,
@@ -92,22 +94,27 @@ impl<T> PageVec<T> {
         self.0.retain(f)
     }
 
+    /// See `std::vec::remove`
     pub fn remove(&mut self, index: usize) -> T {
         self.0.remove(index)
     }
 
+    /// See `std::vec::pop`
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
     }
 
+    /// See `std::vec::clear`
     pub fn clear(&mut self) {
         self.0.clear()
     }
 
+    /// See `std::vec::capacity`
     pub fn capacity(&self) -> usize {
         self.0.capacity()
     }
 
+    /// See `std::vec::get_mut`
     pub fn get_mut<I>(&mut self, index: I) -> Option<&mut <I as SliceIndex<[T]>>::Output>
     where
         I: SliceIndex<[T]>,

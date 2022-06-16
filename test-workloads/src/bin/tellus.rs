@@ -287,7 +287,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             println!("Tellus - Run returned error {:?}", e);
             panic!("Could not run guest VM");
         }
-        Ok(_) => println!("Tellus - Run success"),
+        Ok(exit_code) => println!("Tellus - Guest exited with status {:}", exit_code),
     }
 
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmDestroy { guest_id: vmid });

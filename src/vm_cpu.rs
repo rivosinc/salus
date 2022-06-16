@@ -371,9 +371,26 @@ struct CurrentCpu {
     tlb_version: TlbVersion,
 }
 
+/// Virtual CPU registers that are used to store vCPU state accessible to the VM's host without
+/// giving the host access to internal register state.
+pub enum VirtualRegister {
+    /// 1st detailed exit cause register. Usage depends on the exit code.
+    Cause0,
+    /// 2nd detailed exit cause register. Usage depends on the exit code.
+    Cause1,
+}
+
+/// Virtual register state of a vCPU.
+#[derive(Default)]
+struct VirtualRegisters {
+    cause0: u64,
+    cause1: u64,
+}
+
 /// Represents a single virtual CPU of a VM.
 pub struct VmCpu {
     state: VmCpuState,
+    virt_regs: VirtualRegisters,
     current_cpu: Option<CurrentCpu>,
     // TODO: interrupt_file should really be part of CurrentCpu, but we have no way to migrate it
     // at present.
@@ -404,6 +421,7 @@ impl VmCpu {
 
         Self {
             state,
+            virt_regs: VirtualRegisters::default(),
             current_cpu: None,
             interrupt_file: None,
             guest_id,
@@ -415,9 +433,41 @@ impl VmCpu {
         self.state.guest_regs.sepc = sepc;
     }
 
+    /// Gets the current `sepc` CSR value of the vCPU.
+    pub fn get_sepc(&mut self) -> u64 {
+        self.state.guest_regs.sepc
+    }
+
     /// Sets one of the vCPU's general-purpose registers.
     pub fn set_gpr(&mut self, gpr: GprIndex, value: u64) {
         self.state.guest_regs.gprs.set_reg(gpr, value);
+    }
+
+    /// Gets one of the vCPU's general purpose registers.
+    pub fn get_gpr(&mut self, gpr: GprIndex) -> u64 {
+        self.state.guest_regs.gprs.reg(gpr)
+    }
+
+    /// Set one of the vCPU's virtual registers.
+    pub fn set_virt_reg(&mut self, reg: VirtualRegister, value: u64) {
+        use VirtualRegister::*;
+        match reg {
+            Cause0 => {
+                self.virt_regs.cause0 = value;
+            }
+            Cause1 => {
+                self.virt_regs.cause1 = value;
+            }
+        }
+    }
+
+    /// Gets one of the vCPU's virtual registers.
+    pub fn get_virt_reg(&mut self, reg: VirtualRegister) -> u64 {
+        use VirtualRegister::*;
+        match reg {
+            Cause0 => self.virt_regs.cause0,
+            Cause1 => self.virt_regs.cause1,
+        }
     }
 
     /// Updates A0/A1 with the result of an SBI call.

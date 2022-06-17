@@ -11,5 +11,7 @@ pub const EXT_HART_STATE: u64 = 0x48534D;
 pub const EXT_RESET: u64 = 0x53525354;
 pub const EXT_TEE: u64 = 0x41544545;
 pub const EXT_MEASUREMENT: u64 = 0x5464545;
+// TODO Replace the measurement extension once the `GetEvidence` implementation is complete
+pub const EXT_ATTESTATION: u64 = 0x41545354; // ATST
 
 pub const SBI_SUCCESS: i64 = 0;

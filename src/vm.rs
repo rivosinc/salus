@@ -351,6 +351,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             SbiMessage::Measurement(measurement_func) => {
                 EcallAction::Continue(self.handle_measurement_msg(measurement_func, active_pages))
             }
+            SbiMessage::Attestation(_) => todo!(),
         }
     }
 

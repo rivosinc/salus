@@ -57,7 +57,7 @@ pub mod tlb;
 pub use hw_mem_map::Error as MemMapError;
 pub use hw_mem_map::Result as MemMapResult;
 pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemRegionType, HwReservedMemType};
-pub use page_info::PageState;
+pub use page_info::MAX_PAGE_OWNERS;
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
 pub use page_table::{FirstStagePageTable, GuestStagePageTable, PlatformPageTable};

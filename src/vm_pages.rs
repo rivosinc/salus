@@ -7,7 +7,7 @@ use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{tlb, GuestStagePageTable, PageTracker, TlbVersion};
+use riscv_page_tables::{tlb, GuestStagePageTable, PageTracker, TlbVersion, MAX_PAGE_OWNERS};
 use riscv_pages::*;
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
@@ -23,7 +23,7 @@ pub enum Error {
     InsufficientPtePageStorage,
     Paging(riscv_page_tables::PageTableError),
     PageFaultHandling, // TODO - individual errors from sv48x4
-    SettingOwner(riscv_page_tables::PageTrackingError),
+    NestingTooDeep,
     // Page table root must be aligned to 16k to be used for sv48x4 mappings
     UnalignedVmPages(GuestPageAddr),
     UnsupportedPageSize(PageSize),
@@ -296,10 +296,11 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
             let initialized = dirty
                 .try_initialize(|bytes| self.copy_from_guest(bytes, src_addr.into()))
                 .map_err(|(e, _)| e)?;
+            // Unwrap ok since we've guaranteed there's space for another owner.
             let mappable = self
                 .page_tracker
                 .assign_page_for_mapping(initialized, new_owner)
-                .map_err(Error::SettingOwner)?;
+                .unwrap();
             to.add_measured_4k_page(to_addr, mappable)?;
         }
         Ok(count)
@@ -317,6 +318,8 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     page_owner_id: PageOwnerId,
     page_tracker: PageTracker,
     tlb_tracker: TlbTracker,
+    // How many nested TVMs deep this VM is, with 0 being the host.
+    nesting: usize,
     // Locking order: `root` -> `measurement` -> `pte_pages`
     root: Mutex<T>,
     measurement: Mutex<Sha256Measure>,
@@ -357,6 +360,11 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
 impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
     /// Converts `num_pages` starting at guest physical address `page_addr` to confidential memory.
     pub fn convert_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
+        if self.nesting >= MAX_PAGE_OWNERS - 1 {
+            // We shouldn't bother converting pages if we won't be able to assign them.
+            return Err(Error::NestingTooDeep);
+        }
+
         let mut root = self.root.lock();
         let invalidated_pages = root
             .invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
@@ -408,7 +416,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             .get_converted_range::<Page<ConvertedDirty>>(addr, PageSize::Size4k, num_pages, version)
             .map_err(Error::Paging)?
             .map(|converted| {
-                // TODO: This unwrap could fail if we overflow. Handle errors here more gracefully.
+                // Unwrap ok since we've guaranteed there is space for another owner.
                 self.page_tracker
                     .assign_page_for_internal_state(converted.clean(), new_owner)
                     .unwrap()
@@ -445,7 +453,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 
         Ok((
             Vm::new(
-                VmPages::new(guest_root, pte_vec_pages),
+                VmPages::new(guest_root, pte_vec_pages, self.nesting + 1),
                 VmCpus::new(id, vcpu_pages).unwrap(),
             ),
             state_page,
@@ -487,10 +495,11 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             .map(|dirty| dirty.clean());
         let new_owner = to.page_owner_id();
         for (page, guest_addr) in pages.zip(to_addr.iter_from()) {
+            // Unwrap ok since we've guaranteed there's space for another owner.
             let mappable = self
                 .page_tracker
                 .assign_page_for_mapping(page, new_owner)
-                .map_err(Error::SettingOwner)?;
+                .unwrap();
             to.add_4k_page(guest_addr, mappable)?;
         }
         Ok(count)
@@ -525,11 +534,12 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     /// Creates a new `VmPages` from the given root page table, using `pte_vec_page` for a vector
     /// of page-table pages.
-    pub fn new(root: T, pte_vec_pages: SequentialPages<InternalClean>) -> Self {
+    pub fn new(root: T, pte_vec_pages: SequentialPages<InternalClean>, nesting: usize) -> Self {
         Self {
             page_owner_id: root.page_owner_id(),
             page_tracker: root.page_tracker(),
             tlb_tracker: TlbTracker::new(),
+            nesting,
             root: Mutex::new(root),
             measurement: Mutex::new(Sha256Measure::new()),
             pte_pages: Mutex::new(PageVec::from(pte_vec_pages)),
@@ -587,6 +597,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
             page_owner_id: self.page_owner_id,
             page_tracker: self.page_tracker,
             tlb_tracker: self.tlb_tracker,
+            nesting: self.nesting,
             root: self.root,
             measurement: self.measurement,
             pte_pages: self.pte_pages,

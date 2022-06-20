@@ -44,7 +44,7 @@ pub enum PageState {
 
 /// The maximum length for an ownership chain. Enough for the host VM to assign to a guest VM
 /// without further nesting. An empty owners vector indicates that the page is hypervisor-owned.
-const MAX_PAGE_OWNERS: usize = 2;
+pub const MAX_PAGE_OWNERS: usize = 2;
 
 /// Holds ownership and typing details about a particular page in the system memory map.
 #[derive(Clone, Debug)]

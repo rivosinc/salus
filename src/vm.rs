@@ -881,7 +881,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
 
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root = T::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
-        let vm_pages = VmPages::new(root, pte_vec_pages);
+        let vm_pages = VmPages::new(root, pte_vec_pages, 0);
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();
         }

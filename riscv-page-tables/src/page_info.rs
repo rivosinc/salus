@@ -40,11 +40,8 @@ pub enum PageState {
 }
 
 /// The maximum length for an ownership chain. Enough for the host VM to assign to a guest VM
-/// without further nesting.
-///
-/// TODO: Could save a u64 here by having hypervisor-owned pages be a separate `PageInfo` state
-/// since pages can't transition between hypervisor-owned and VM-owned post-startup.
-const MAX_PAGE_OWNERS: usize = 3;
+/// without further nesting. An empty owners vector indicates that the page is hypervisor-owned.
+const MAX_PAGE_OWNERS: usize = 2;
 
 /// Holds ownership and typing details about a particular page in the system memory map.
 #[derive(Clone, Debug)]
@@ -66,12 +63,10 @@ impl PageInfo {
 
     /// Creates a new `PageInfo` representing a RAM page that is initially owned by the hypervisor.
     pub fn new_hypervisor_owned() -> Self {
-        let mut owners = PageOwnerVec::new();
-        owners.push(PageOwnerId::hypervisor());
         Self {
             mem_type: MemType::Ram,
             state: PageState::Converted,
-            owners,
+            owners: PageOwnerVec::new(),
         }
     }
 
@@ -86,12 +81,10 @@ impl PageInfo {
 
     /// Creates a new `PageInfo` representing an MMIO page.
     pub fn new_mmio(dev_type: DeviceMemType) -> Self {
-        let mut owners = PageOwnerVec::new();
-        owners.push(PageOwnerId::hypervisor());
         Self {
             mem_type: MemType::Mmio(dev_type),
             state: PageState::Converted,
-            owners,
+            owners: PageOwnerVec::new(),
         }
     }
 
@@ -100,7 +93,11 @@ impl PageInfo {
         use PageState::*;
         match self.state {
             Converting(_) | Converted | Mapped | VmState => {
-                Some(self.owners[self.owners.len() - 1])
+                if !self.owners.is_empty() {
+                    Some(self.owners[self.owners.len() - 1])
+                } else {
+                    Some(PageOwnerId::hypervisor())
+                }
             }
             _ => None,
         }
@@ -131,10 +128,10 @@ impl PageInfo {
         use PageState::*;
         match self.state {
             Mapped | VmState | Converted | Converting(_) => {
-                if self.owners.len() == 1 {
+                if self.owners.is_empty() {
                     Err(PageTrackingError::OwnerUnderflow) // Can't pop the last owner.
                 } else {
-                    let owner = self.owners.pop().expect("PageOwnerVec can't be empty");
+                    let owner = self.owners.pop().unwrap();
                     self.state = Converted;
                     Ok(owner)
                 }
@@ -171,7 +168,9 @@ impl PageInfo {
         }
         match self.state {
             Free => {
-                self.owners.push(owner);
+                if owner != PageOwnerId::hypervisor() {
+                    self.owners.push(owner);
+                }
                 self.state = new_state;
                 Ok(())
             }

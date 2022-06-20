@@ -381,28 +381,27 @@ pub trait InitializablePhysPage: PhysPage {
 /// Trait representing a page that can be mapped into a VM's address space.
 pub trait MappablePhysPage<M: MeasureRequirement>: PhysPage {}
 
+/// Trait representing a converted, but unassigned, page.
+pub trait ConvertedPhysPage: PhysPage {
+    /// The page type representing the initial state of a page just after conversion.
+    type DirtyPage: ConvertedPhysPage;
+}
+
 /// Trait representing a converted page that can be assigned to a child VM. Pages transition from
 /// converted to assignable by cleaning or initializing the converted page.
-pub trait AssignablePhysPage<M: MeasureRequirement>: PhysPage {
+pub trait AssignablePhysPage<M: MeasureRequirement>: ConvertedPhysPage {
     /// The page type representing an assignable page that has been assigned as a mapped page
     /// in a child VM.
     type MappablePage: MappablePhysPage<M>;
 }
 
-/// Trait representing the default state of a converted, but unassigned, page.
-pub trait ConvertedPhysPage: PhysPage {}
-
 /// Trait representing a page that has been invalidated in a VM. Invalidated pages are created
 /// by unmapping a previously-mapped page in a VM's address space.
-pub trait InvalidatedPhysPage: PhysPage {
-    /// The page type representing an invalidated page that has been converted so that it can
-    /// be further assigned to a child VM.
-    type ConvertedPage: ConvertedPhysPage;
-}
+pub trait InvalidatedPhysPage: PhysPage {}
 
 /// Trait representing a converted page that is eligible to be reclaimed by the owner. Pages
 /// transition from converted to reclaimable once they have been cleaned.
-pub trait ReclaimablePhysPage: PhysPage {
+pub trait ReclaimablePhysPage: ConvertedPhysPage {
     /// The page type representing a page that has been reclaimed as a mappable page in the
     /// owning VM. Pages must be clean to be mapped back into the owner.
     type MappablePage: MappablePhysPage<MeasureOptional>;
@@ -561,16 +560,16 @@ impl<S: Initializable> InitializablePhysPage for Page<S> {
 
 impl<S: Mappable<M>, M: MeasureRequirement> MappablePhysPage<M> for Page<S> {}
 
+impl<S: Converted> ConvertedPhysPage for Page<S> {
+    // Converted pages are considered dirty until they're cleaned or initialized.
+    type DirtyPage = Page<ConvertedDirty>;
+}
+
 impl<S: Assignable<M>, M: MeasureRequirement> AssignablePhysPage<M> for Page<S> {
     type MappablePage = Page<S::Mappable>;
 }
 
-// Converted pages are considered dirty until they're cleaned or initialized.
-impl ConvertedPhysPage for Page<ConvertedDirty> {}
-
-impl InvalidatedPhysPage for Page<Invalidated> {
-    type ConvertedPage = Page<ConvertedDirty>;
-}
+impl InvalidatedPhysPage for Page<Invalidated> {}
 
 // Pages are only reclaimable if they're clean.
 impl ReclaimablePhysPage for Page<ConvertedClean> {

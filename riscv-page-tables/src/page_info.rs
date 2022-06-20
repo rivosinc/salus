@@ -34,9 +34,12 @@ pub enum PageState {
     /// Page has been invalidated and started the conversion operation at the given TLB version.
     Converting(TlbVersion),
 
-    /// Page has completed the conversion operation and is eligible for use in a child VM or to
-    /// be reclaimed.
+    /// Page has completed the conversion operation and is eligible for assignment or to be reclaimed.
+    /// The page must be locked exclusively before it can be assigned or reclaimed.
     Converted,
+
+    /// Page has completed the conversion operation and is locked pending assignment or reclaim.
+    ConvertedLocked,
 }
 
 /// The maximum length for an ownership chain. Enough for the host VM to assign to a guest VM
@@ -65,7 +68,7 @@ impl PageInfo {
     pub fn new_hypervisor_owned() -> Self {
         Self {
             mem_type: MemType::Ram,
-            state: PageState::Converted,
+            state: PageState::ConvertedLocked,
             owners: PageOwnerVec::new(),
         }
     }
@@ -83,7 +86,7 @@ impl PageInfo {
     pub fn new_mmio(dev_type: DeviceMemType) -> Self {
         Self {
             mem_type: MemType::Mmio(dev_type),
-            state: PageState::Converted,
+            state: PageState::ConvertedLocked,
             owners: PageOwnerVec::new(),
         }
     }
@@ -92,7 +95,7 @@ impl PageInfo {
     pub fn owner(&self) -> Option<PageOwnerId> {
         use PageState::*;
         match self.state {
-            Converting(_) | Converted | Mapped | VmState => {
+            Converting(_) | Converted | ConvertedLocked | Mapped | VmState => {
                 if !self.owners.is_empty() {
                     Some(self.owners[self.owners.len() - 1])
                 } else {
@@ -124,7 +127,7 @@ impl PageInfo {
     }
 
     /// Pops the current owner if there is one, returning the page to the previous owner.
-    pub fn pop_owner(&mut self) -> PageTrackingResult<PageOwnerId> {
+    pub fn release(&mut self) -> PageTrackingResult<PageOwnerId> {
         use PageState::*;
         match self.state {
             Mapped | VmState | Converted | Converting(_) => {
@@ -136,46 +139,44 @@ impl PageInfo {
                     Ok(owner)
                 }
             }
+            ConvertedLocked => Err(PageTrackingError::PageLocked),
             Reserved => Err(PageTrackingError::ReservedPage),
             Free => Err(PageTrackingError::UnownedPage),
         }
     }
 
     /// Pops owners while the provided `check` function returns true or there are no more owners.
-    pub fn pop_owners_while<F>(&mut self, check: F)
+    pub fn release_while<F>(&mut self, check: F)
     where
         F: Fn(&PageOwnerId) -> bool,
     {
         while let Some(o) = self.owner() {
-            if !check(&o) || self.pop_owner().is_err() {
+            if !check(&o) || self.release().is_err() {
                 break;
             }
         }
     }
 
-    /// Sets the current owner of the page while maintaining a "chain of custody" so the previous
-    /// owner is known when the new owner abandons the page.
-    pub fn push_owner(
-        &mut self,
-        owner: PageOwnerId,
-        new_state: PageState,
-    ) -> PageTrackingResult<()> {
+    /// Assigns the page to `owner` with state `new_state`. The page must be locked for assingment.
+    pub fn assign(&mut self, owner: PageOwnerId, new_state: PageState) -> PageTrackingResult<()> {
         use PageState::*;
-        if !matches!(new_state, Mapped | VmState | Converted) {
+        if !matches!(new_state, Mapped | VmState | Converted | ConvertedLocked) {
             // Going back to free/reserved isn't allowed, nor does it make sense for a page to
             // immediately enter the "Converting" state.
             return Err(PageTrackingError::InvalidStateTransition);
         }
         match self.state {
             Free => {
+                // We need not be "locked" here since Free is a startup-only state when the hypervisor
+                // has exclusive ownership over all memory.
                 if owner != PageOwnerId::hypervisor() {
                     self.owners.push(owner);
                 }
                 self.state = new_state;
                 Ok(())
             }
-            Converted => {
-                if matches!(new_state, Converted) {
+            ConvertedLocked => {
+                if matches!(new_state, Converted | ConvertedLocked) {
                     // A page converted by a VM can't immediately become a converted page in a child
                     // VM.
                     return Err(PageTrackingError::InvalidStateTransition);
@@ -186,9 +187,8 @@ impl PageInfo {
                 self.state = new_state;
                 Ok(())
             }
-            VmState | Mapped | Reserved | Converting(_) => {
-                Err(PageTrackingError::PageNotAssignable)
-            }
+            Converted => Err(PageTrackingError::PageNotLocked),
+            _ => Err(PageTrackingError::PageNotAssignable),
         }
     }
 
@@ -230,15 +230,44 @@ impl PageInfo {
         }
     }
 
-    /// Transitions the page to the Mapped state back from the Converting or Converted state so that
-    /// it can be mapped back into the owner.
+    /// Transitions the page to the ConvertedLocked state from Converted, indicating that an exclusive
+    /// reference has been taken to the page in preparation for assignment or reclaim.
+    pub fn lock_for_assignment(&mut self) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            Converted => {
+                self.state = ConvertedLocked;
+                Ok(())
+            }
+            ConvertedLocked => Err(PageTrackingError::PageLocked),
+            _ => Err(PageTrackingError::PageNotAssignable),
+        }
+    }
+
+    /// Drops the exclusive lock on the a converted page.
+    pub fn unlock(&mut self) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            ConvertedLocked => {
+                self.state = Converted;
+                Ok(())
+            }
+            _ => Err(PageTrackingError::PageNotLocked),
+        }
+    }
+
+    /// Reclaims the converted and locked, but unassigned, page as a Mapped page for the current owner.
     pub fn reclaim(&mut self) -> PageTrackingResult<()> {
         use PageState::*;
-        if !matches!(self.state, Converted | Converting(_)) {
-            return Err(PageTrackingError::PageNotReclaimable);
+        match self.state {
+            ConvertedLocked => {
+                self.state = Mapped;
+                Ok(())
+            }
+            Converted => Err(PageTrackingError::PageNotLocked),
+            // TODO: Reclaim pages that are converting but not yet fully converted?
+            _ => Err(PageTrackingError::PageNotReclaimable),
         }
-        self.state = Mapped;
-        Ok(())
     }
 }
 
@@ -585,11 +614,9 @@ mod tests {
         let mut page = PageInfo::new();
         assert!(page.is_free());
         assert!(page
-            .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
+            .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
             .is_ok());
-        assert!(page
-            .push_owner(PageOwnerId::host(), PageState::Mapped)
-            .is_ok());
+        assert!(page.assign(PageOwnerId::host(), PageState::Mapped).is_ok());
         assert_eq!(page.owner().unwrap(), PageOwnerId::host());
         let version = TlbVersion::new();
         assert!(page.begin_conversion(version).is_ok());
@@ -598,14 +625,18 @@ mod tests {
         let version = version.increment();
         assert!(page.complete_conversion(version).is_ok());
         assert_eq!(page.state(), PageState::Converted);
-        assert_eq!(page.pop_owner().unwrap(), PageOwnerId::host());
-        assert!(page.pop_owner().is_err());
-        assert!(!page.is_free());
+        assert!(page.lock_for_assignment().is_ok());
+        let guest_id = PageOwnerId::new(2).unwrap();
+        assert!(page.assign(guest_id, PageState::Mapped).is_ok());
+        assert_eq!(page.release().unwrap(), guest_id);
+        assert!(page.lock_for_assignment().is_ok());
+        assert_eq!(page.state(), PageState::ConvertedLocked);
+        assert!(page.reclaim().is_ok());
 
         let mut page = PageInfo::new_reserved();
         assert!(!page.is_free());
         assert!(page
-            .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
+            .assign(PageOwnerId::hypervisor(), PageState::Converted)
             .is_err());
     }
 }

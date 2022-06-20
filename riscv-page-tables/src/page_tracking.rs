@@ -39,6 +39,10 @@ pub enum Error {
     PageNotReclaimable,
     /// Attempt to intiate an invalid page state transition.
     InvalidStateTransition,
+    /// Attempt to assign or reclaim a page that is not locked.
+    PageNotLocked,
+    /// Attempt to lock a page for assignment that is already locked.
+    PageLocked,
 }
 
 /// Holds the result of page tracking operations.
@@ -54,13 +58,13 @@ struct PageTrackerInner {
 impl PageTrackerInner {
     fn get_mut(&mut self, addr: SupervisorPageAddr) -> Result<&mut PageInfo> {
         let page = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
-        page.pop_owners_while(|id| !self.active_guests.contains(id));
+        page.release_while(|id| !self.active_guests.contains(id));
         Ok(page)
     }
 
     fn get(&mut self, addr: SupervisorPageAddr) -> Result<&PageInfo> {
         let page = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
-        page.pop_owners_while(|id| !self.active_guests.contains(id));
+        page.release_while(|id| !self.active_guests.contains(id));
         Ok(page)
     }
 }
@@ -156,7 +160,7 @@ impl PageTracker {
     {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.push_owner(owner, PageState::Mapped)?;
+        info.assign(owner, PageState::Mapped)?;
         // Safe since we own the page and have updated its state.
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
@@ -170,7 +174,7 @@ impl PageTracker {
     ) -> Result<Page<InternalClean>> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.push_owner(owner, PageState::VmState)?;
+        info.assign(owner, PageState::VmState)?;
         // Safe since we own the page and have updated its state.
         Ok(unsafe { Page::new_with_size(page.addr(), page.size()) })
     }
@@ -199,14 +203,15 @@ impl PageTracker {
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
 
-    /// Returns the Converted page at `addr` if it's unassigned and owned by `owner`. Completes
-    /// conversion if the page was Converting at a TLB version older than `tlb_version`.
+    /// Acquires an exclusive reference to the Converted page at `addr` if it's unassigned and owned
+    /// by `owner`. Completes conversion if the page was Converting at a TLB version older than
+    /// `tlb_version`.
     pub(crate) fn get_converted_page<P: ConvertedPhysPage>(
         &self,
         addr: SupervisorPageAddr,
         owner: PageOwnerId,
         tlb_version: TlbVersion,
-    ) -> Result<P> {
+    ) -> Result<P::DirtyPage> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(addr)?;
         if info.owner() != Some(owner)
@@ -216,11 +221,19 @@ impl PageTracker {
         {
             return Err(Error::PageNotConvertible);
         }
-        // Safe since we've verified ownership and typing of the page, and that it is converted
-        // as of `tlb_version`.
+        info.lock_for_assignment()?;
+        // Safe since we've taken exclusive ownership of the page, verified its typing, and that it is
+        // converted as of `tlb_version`.
         //
         // TODO: Page size
-        Ok(unsafe { P::new(addr) })
+        Ok(unsafe { P::DirtyPage::new(addr) })
+    }
+
+    /// Releases an exclusive reference to a converted and locked page.
+    pub fn put_converted_page<P: ConvertedPhysPage>(&self, page: P) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(page.addr())?;
+        info.unlock()
     }
 
     /// Returns true if and only if `addr` is a "Mapped" page owned by `owner` with type `mem_type`.
@@ -312,7 +325,7 @@ impl<A: Allocator> HypPageAlloc<A> {
                 self.pages
                     .get_mut(page)
                     .unwrap()
-                    .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
+                    .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
                     .unwrap();
             }
 
@@ -378,7 +391,7 @@ impl<A: Allocator> HypPageAlloc<A> {
                 if page_info.is_free() {
                     // OK to unwrap as this struct is new and must have space for one owner.
                     page_info
-                        .push_owner(PageOwnerId::hypervisor(), PageState::Converted)
+                        .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
                         .unwrap();
                 }
             }
@@ -412,7 +425,7 @@ impl<A: Allocator> HypPageAlloc<A> {
         SequentialPages::from_pages(assignable_pages.into_iter().map(|p| {
             let page_info = self.pages.get_mut(p.addr()).unwrap();
             page_info
-                .push_owner(PageOwnerId::host(), PageState::VmState)
+                .assign(PageOwnerId::host(), PageState::VmState)
                 .unwrap();
             // Safety: We uniquely own this memory and we've updated its state in page_info.
             unsafe { Page::<InternalClean>::new(p.addr()) }

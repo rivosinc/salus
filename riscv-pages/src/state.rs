@@ -22,9 +22,12 @@ pub trait State {}
 /// Trait for states in which a `PhysPage` can be mapped into a page table.
 pub trait Mappable<M: MeasureRequirement>: State {}
 
+/// Trait for converted, but unassigned, `PhysPage` states.
+pub trait Converted: State {}
+
 /// Trait for states in which a `PhysPage` can be assigned for use by a child VM, either as a
 /// mappable page or as an internal state page.
-pub trait Assignable<M: MeasureRequirement>: State {
+pub trait Assignable<M: MeasureRequirement>: Converted {
     /// The type of page that can be mapped to the guest, either cleaned or measured.
     type Mappable: Mappable<M>;
 }
@@ -53,6 +56,7 @@ impl State for Invalidated {}
 #[derive(Debug)]
 pub enum ConvertedDirty {}
 impl State for ConvertedDirty {}
+impl Converted for ConvertedDirty {}
 impl Cleanable for ConvertedDirty {
     type Cleaned = ConvertedClean;
 }
@@ -63,6 +67,7 @@ impl Initializable for ConvertedDirty {}
 #[derive(Debug)]
 pub enum ConvertedClean {}
 impl State for ConvertedClean {}
+impl Converted for ConvertedClean {}
 impl Assignable<MeasureOptional> for ConvertedClean {
     type Mappable = MappableClean;
 }
@@ -73,6 +78,7 @@ impl Initializable for ConvertedClean {}
 #[derive(Debug)]
 pub enum ConvertedInitialized {}
 impl State for ConvertedInitialized {}
+impl Converted for ConvertedInitialized {}
 impl Assignable<MeasureRequired> for ConvertedInitialized {
     type Mappable = MappableInitialized;
 }

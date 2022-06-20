@@ -120,10 +120,10 @@ impl MappablePhysPage<MeasureOptional> for ImsicGuestPage<MappableClean> {}
 impl AssignablePhysPage<MeasureOptional> for ImsicGuestPage<ConvertedClean> {
     type MappablePage = ImsicGuestPage<MappableClean>;
 }
-impl ConvertedPhysPage for ImsicGuestPage<ConvertedClean> {}
-impl InvalidatedPhysPage for ImsicGuestPage<Invalidated> {
-    type ConvertedPage = ImsicGuestPage<ConvertedClean>;
+impl ConvertedPhysPage for ImsicGuestPage<ConvertedClean> {
+    type DirtyPage = ImsicGuestPage<ConvertedClean>;
 }
+impl InvalidatedPhysPage for ImsicGuestPage<Invalidated> {}
 impl ReclaimablePhysPage for ImsicGuestPage<ConvertedClean> {
     type MappablePage = ImsicGuestPage<MappableClean>;
 }

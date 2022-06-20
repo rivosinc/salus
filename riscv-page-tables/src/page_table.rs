@@ -475,13 +475,13 @@ pub trait PlatformPageTable: Sized {
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
         tlb_version: TlbVersion,
-    ) -> Result<P> {
+    ) -> Result<P::DirtyPage> {
         let page_tracker = self.page_tracker();
         let id = self.page_owner_id();
         let entry = self.get_converted_4k_leaf(RawAddr::from(addr), P::mem_type(), tlb_version)?;
         // Unwrap ok since we've already verified that this page is owned and converted.
         let page = page_tracker
-            .get_converted_page(entry.page_addr().unwrap(), id, tlb_version)
+            .get_converted_page::<P>(entry.page_addr().unwrap(), id, tlb_version)
             .unwrap();
         Ok(page)
     }
@@ -708,7 +708,7 @@ impl<'a, T: PlatformPageTable, P: ConvertedPhysPage> ConvertedPageIter<'a, T, P>
 }
 
 impl<'a, T: PlatformPageTable, P: ConvertedPhysPage> Iterator for ConvertedPageIter<'a, T, P> {
-    type Item = P;
+    type Item = P::DirtyPage;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == 0 {
@@ -719,7 +719,7 @@ impl<'a, T: PlatformPageTable, P: ConvertedPhysPage> Iterator for ConvertedPageI
         self.curr = self.curr.checked_add_pages(1).unwrap();
         self.count -= 1;
         self.owner
-            .get_converted_page(this_page, self.tlb_version)
+            .get_converted_page::<P>(this_page, self.tlb_version)
             .ok()
     }
 }

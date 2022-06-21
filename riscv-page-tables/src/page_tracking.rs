@@ -43,6 +43,8 @@ pub enum Error {
     PageNotLocked,
     /// Attempt to lock a page for assignment that is already locked.
     PageLocked,
+    /// Attempt to create a link from a page that is already linked.
+    PageAlreadyLinked,
 }
 
 /// Holds the result of page tracking operations.
@@ -271,6 +273,34 @@ impl PageTracker {
         } else {
             false
         }
+    }
+
+    /// Creates a link from page `a` to `b` if neither is already linked.
+    pub(crate) fn link_pages(&self, a: SupervisorPageAddr, b: SupervisorPageAddr) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        // We don't need to touch the destination, but we need to make sure it isn't linked.
+        let dst = page_tracker.get(b)?;
+        if dst.next().is_some() {
+            return Err(Error::PageAlreadyLinked);
+        }
+        let src = page_tracker.get_mut(a)?;
+        src.link(b)
+    }
+
+    /// Unlinks the page at `addr`, returning the address of the page to which it was pointing.
+    pub(crate) fn unlink_page(&self, addr: SupervisorPageAddr) -> Option<SupervisorPageAddr> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr).ok()?;
+        let next = info.next();
+        info.unlink();
+        next
+    }
+
+    /// Returns the address of the page linked to the page at `addr`, if any.
+    pub(crate) fn linked_page(&self, addr: SupervisorPageAddr) -> Option<SupervisorPageAddr> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr).ok()?;
+        info.next()
     }
 }
 

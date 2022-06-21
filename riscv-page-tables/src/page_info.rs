@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
+use core::num::NonZeroU64;
 use page_collections::page_vec::PageVec;
 use riscv_pages::*;
 
@@ -52,6 +53,8 @@ pub struct PageInfo {
     mem_type: MemType,
     state: PageState,
     owners: PageOwnerVec,
+    // Address of the next page in the list if != None.
+    link: Option<NonZeroU64>,
 }
 
 impl PageInfo {
@@ -61,6 +64,7 @@ impl PageInfo {
             mem_type: MemType::Ram,
             state: PageState::Free,
             owners: PageOwnerVec::new(),
+            link: None,
         }
     }
 
@@ -70,6 +74,7 @@ impl PageInfo {
             mem_type: MemType::Ram,
             state: PageState::ConvertedLocked,
             owners: PageOwnerVec::new(),
+            link: None,
         }
     }
 
@@ -79,6 +84,7 @@ impl PageInfo {
             mem_type: MemType::Ram,
             state: PageState::Reserved,
             owners: PageOwnerVec::new(),
+            link: None,
         }
     }
 
@@ -88,6 +94,7 @@ impl PageInfo {
             mem_type: MemType::Mmio(dev_type),
             state: PageState::ConvertedLocked,
             owners: PageOwnerVec::new(),
+            link: None,
         }
     }
 
@@ -268,6 +275,29 @@ impl PageInfo {
             // TODO: Reclaim pages that are converting but not yet fully converted?
             _ => Err(PageTrackingError::PageNotReclaimable),
         }
+    }
+
+    /// Links this page to the page with the given address. Returns an error if the page is already
+    /// linked.
+    pub fn link(&mut self, next: SupervisorPageAddr) -> PageTrackingResult<()> {
+        if self.link.is_some() {
+            Err(PageTrackingError::PageAlreadyLinked)
+        } else {
+            let addr = NonZeroU64::new(next.bits()).ok_or(PageTrackingError::InvalidPage(next))?;
+            self.link = Some(addr);
+            Ok(())
+        }
+    }
+
+    /// Unlinks this page.
+    pub fn unlink(&mut self) {
+        self.link = None;
+    }
+
+    /// Returns the next page in the list, if any.
+    pub fn next(&self) -> Option<SupervisorPageAddr> {
+        self.link
+            .and_then(|n| PageAddr::new(RawAddr::supervisor(n.get())))
     }
 }
 

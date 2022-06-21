@@ -7,6 +7,7 @@ use core::marker::PhantomData;
 use data_measure::data_measure::DataMeasure;
 use riscv_pages::*;
 
+use crate::page_list::{LockedPageList, PageList};
 use crate::page_tracking::PageTracker;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 use crate::TlbVersion;
@@ -154,34 +155,13 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
         }
     }
 
-    /// Take the page out of the page table that owns it and return it.
+    /// Mark the page invalid in the page table that owns it and return it.
     /// Returns the page if a valid leaf, otherwise, None.
     ///
     /// # Safety
     ///
     /// The caller must guarantee that this page table entry points to a page of memory of the
     /// same type as `P`.
-    pub unsafe fn take_page<P: InvalidatedPhysPage>(self) -> Option<P> {
-        let addr = self.page_addr()?;
-        if let ValidTableEntryMut::Leaf(pte, level) = self {
-            // The page is guaranteed to be owned by this page table (and by extension the
-            // root `PlatformPageTable`), so the safety requirements of `P::new()` are partially
-            // met. It's up to the caller of `take_page()` to ensure the page is of the correct
-            // type.
-            let page = P::new_with_size(addr, level.leaf_page_size());
-            pte.clear();
-            Some(page)
-        } else {
-            None
-        }
-    }
-
-    /// Mark the page invalid in the page table that owns it and return it.
-    /// Returns the page if a valid leaf, otherwise, None.
-    ///
-    /// # Safety
-    ///
-    /// See the safety requirements for `take_page()`.
     pub unsafe fn invalidate_page<P: InvalidatedPhysPage>(self) -> Option<P> {
         let addr = self.page_addr()?;
         if let ValidTableEntryMut::Leaf(pte, level) = self {
@@ -444,90 +424,71 @@ pub trait PlatformPageTable: Sized {
         Ok(())
     }
 
-    /// Invalidates and clears the PTE mapping `addr`, returning the mapped host page.
-    fn unmap_page<P: InvalidatedPhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-    ) -> Result<P> {
-        let entry = self.get_mapped_4k_leaf(RawAddr::from(addr), P::mem_type())?;
-        let page = unsafe {
-            // Safe since we've verified the typing of the page.
-            entry.take_page().unwrap()
-        };
-        Ok(page)
-    }
-
-    /// Like `unmap_page` but leaves the PFN in the PTE intact.
-    fn invalidate_page<P: InvalidatedPhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-    ) -> Result<P> {
-        let entry = self.get_mapped_4k_leaf(RawAddr::from(addr), P::mem_type())?;
-        let page = unsafe {
-            // Safe since we've verified the typing of the page.
-            entry.invalidate_page().unwrap()
-        };
-        Ok(page)
-    }
-
-    /// Returns the converted page that was mapped at `addr` prior to conversion.
-    fn get_converted_page<P: ConvertedPhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        tlb_version: TlbVersion,
-    ) -> Result<P::DirtyPage> {
-        let page_tracker = self.page_tracker();
-        let id = self.page_owner_id();
-        let entry = self.get_converted_4k_leaf(RawAddr::from(addr), P::mem_type(), tlb_version)?;
-        // Unwrap ok since we've already verified that this page is owned and converted.
-        let page = page_tracker
-            .get_converted_page::<P>(entry.page_addr().unwrap(), id, tlb_version)
-            .unwrap();
-        Ok(page)
-    }
-
-    /// Returns an iterator to invalidated pages for the given range.
-    /// Guarantees that the full range of pages can be unmapped.
+    /// Returns a list of invalidated pages for the given range.
     fn invalidate_range<P: InvalidatedPhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
         page_size: PageSize,
         num_pages: u64,
-    ) -> Result<InvalidateIter<Self, P>> {
+    ) -> Result<PageList<P>> {
         if page_size.is_huge() {
             return Err(Error::PageSizeNotSupported(page_size));
         }
-        if addr.iter_from().take(num_pages as usize).all(|a| {
+
+        // First make sure the entire range can be unmapped before we start invalidating things.
+        if !addr.iter_from().take(num_pages as usize).all(|a| {
             self.get_mapped_4k_leaf(RawAddr::from(a), P::mem_type())
                 .is_ok()
         }) {
-            Ok(InvalidateIter::new(self, addr, num_pages))
-        } else {
-            Err(Error::PageNotUnmappable)
+            return Err(Error::PageNotUnmappable);
         }
+
+        let mut pages = PageList::new(self.page_tracker());
+        for a in addr.iter_from().take(num_pages as usize) {
+            // We verified above that we can safely unwrap here.
+            let entry = self
+                .get_mapped_4k_leaf(RawAddr::from(a), P::mem_type())
+                .unwrap();
+            let page = unsafe {
+                // Safe since we've verified the typing of the page.
+                entry.invalidate_page().unwrap()
+            };
+            // Unwrap ok, a just-invalidated page can't be on any other PageList.
+            pages.push(page).unwrap();
+        }
+
+        Ok(pages)
     }
 
-    /// Returns an iterator to the converted pages that were previously mapped in this page table
-    /// if they were invalidated a TLB version older than `tlb_version`. Guarantees that the full
-    /// range of pages are converted pages.
+    /// Returns a list of converted pages that were previously mapped in this page table if they were
+    /// invalidated a TLB version older than `tlb_version`. Guarantees that the full range of pages
+    /// are converted pages.
     fn get_converted_range<P: ConvertedPhysPage>(
         &mut self,
         addr: PageAddr<Self::MappedAddressSpace>,
         page_size: PageSize,
         num_pages: u64,
         tlb_version: TlbVersion,
-    ) -> Result<ConvertedPageIter<Self, P>> {
+    ) -> Result<LockedPageList<P::DirtyPage>> {
         if page_size.is_huge() {
             return Err(Error::PageSizeNotSupported(page_size));
         }
-        if addr.iter_from().take(num_pages as usize).all(|a| {
-            self.get_converted_4k_leaf(RawAddr::from(a), P::mem_type(), tlb_version)
-                .is_ok()
-        }) {
-            Ok(ConvertedPageIter::new(self, addr, num_pages, tlb_version))
-        } else {
-            Err(Error::PageNotUnmappable)
+
+        let page_tracker = self.page_tracker();
+        let id = self.page_owner_id();
+        let mut pages = LockedPageList::new(page_tracker.clone());
+        for a in addr.iter_from().take(num_pages as usize) {
+            let entry = self.get_converted_4k_leaf(RawAddr::from(a), P::mem_type(), tlb_version)?;
+            // Unwrap ok since we've already verified that this page is owned and converted.
+            let page = page_tracker
+                .get_converted_page::<P>(entry.page_addr().unwrap(), id, tlb_version)
+                .unwrap();
+            // Unwrap ok since we have unique ownership of the page and therefore it can't be on
+            // any other list.
+            pages.push(page).unwrap();
         }
+
+        Ok(pages)
     }
 }
 
@@ -648,78 +609,3 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
 }
 
 impl<T: PlatformPageTable> PlatformPageTableHelpers for T {}
-
-pub struct InvalidateIter<'a, T: PlatformPageTable, P: InvalidatedPhysPage> {
-    owner: &'a mut T,
-    curr: PageAddr<T::MappedAddressSpace>,
-    count: u64,
-    phantom: PhantomData<P>,
-}
-
-impl<'a, T: PlatformPageTable, P: InvalidatedPhysPage> InvalidateIter<'a, T, P> {
-    pub fn new(owner: &'a mut T, curr: PageAddr<T::MappedAddressSpace>, count: u64) -> Self {
-        Self {
-            owner,
-            curr,
-            count,
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl<'a, T: PlatformPageTable, P: InvalidatedPhysPage> Iterator for InvalidateIter<'a, T, P> {
-    type Item = P;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.count == 0 {
-            return None;
-        }
-
-        let this_page = self.curr;
-        self.curr = self.curr.checked_add_pages(1).unwrap();
-        self.count -= 1;
-        self.owner.invalidate_page(this_page).ok()
-    }
-}
-
-pub struct ConvertedPageIter<'a, T: PlatformPageTable, P: ConvertedPhysPage> {
-    owner: &'a mut T,
-    curr: PageAddr<T::MappedAddressSpace>,
-    count: u64,
-    tlb_version: TlbVersion,
-    phantom: PhantomData<P>,
-}
-
-impl<'a, T: PlatformPageTable, P: ConvertedPhysPage> ConvertedPageIter<'a, T, P> {
-    pub fn new(
-        owner: &'a mut T,
-        curr: PageAddr<T::MappedAddressSpace>,
-        count: u64,
-        tlb_version: TlbVersion,
-    ) -> Self {
-        Self {
-            owner,
-            curr,
-            count,
-            tlb_version,
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl<'a, T: PlatformPageTable, P: ConvertedPhysPage> Iterator for ConvertedPageIter<'a, T, P> {
-    type Item = P::DirtyPage;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.count == 0 {
-            return None;
-        }
-
-        let this_page = self.curr;
-        self.curr = self.curr.checked_add_pages(1).unwrap();
-        self.count -= 1;
-        self.owner
-            .get_converted_page::<P>(this_page, self.tlb_version)
-            .ok()
-    }
-}

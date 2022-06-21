@@ -36,12 +36,14 @@
 //! address translation). Interacting directly with memory currently mapped to a VM will lead to
 //! pain so the interfaces don't support that.
 #![no_std]
-#![feature(allocator_api)]
+#![feature(allocator_api, let_chains)]
 
 extern crate alloc;
 
 mod hw_mem_map;
 mod page_info;
+/// Implements a linked-list of pages using `PageTracker`.
+pub mod page_list;
 mod page_table;
 /// Handles tracking the owner and state of each page.
 pub mod page_tracking;
@@ -58,6 +60,7 @@ pub use hw_mem_map::Error as MemMapError;
 pub use hw_mem_map::Result as MemMapResult;
 pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemRegionType, HwReservedMemType};
 pub use page_info::MAX_PAGE_OWNERS;
+pub use page_list::{LockedPageList, PageList};
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
 pub use page_table::{FirstStagePageTable, GuestStagePageTable, PlatformPageTable};
@@ -215,5 +218,26 @@ mod tests {
         let clean_page = converted_pages.next().unwrap().clean();
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn page_list() {
+        let state = stub_sys_memory();
+        let first_page_addr = state.pte_pages.base();
+        {
+            let mut pte_list = PageList::new(state.page_tracker.clone());
+            for p in state.pte_pages {
+                pte_list.push(p).unwrap();
+            }
+            // Not safe -- just a test.
+            let already_linked: Page<InternalClean> = unsafe { Page::new(first_page_addr) };
+            assert!(pte_list.push(already_linked).is_err());
+        }
+        let mut new_list = PageList::new(state.page_tracker);
+        for p in state.root_pages {
+            new_list.push(p).unwrap();
+        }
+        let was_linked: Page<InternalClean> = unsafe { Page::new(first_page_addr) };
+        new_list.push(was_linked).unwrap();
     }
 }

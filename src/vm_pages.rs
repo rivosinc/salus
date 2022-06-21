@@ -7,7 +7,9 @@ use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
-use riscv_page_tables::{tlb, GuestStagePageTable, PageTracker, TlbVersion, MAX_PAGE_OWNERS};
+use riscv_page_tables::{
+    tlb, GuestStagePageTable, LockedPageList, PageList, PageTracker, TlbVersion, MAX_PAGE_OWNERS,
+};
 use riscv_pages::*;
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
@@ -269,6 +271,8 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         Ok(())
     }
 
+    /// Copies `count` pages from `src_addr` in the current guest to the converted pages starting at
+    /// `from_addr`. The pages are then mapped into the child's address space at `to_addr`.
     pub fn copy_and_add_data_pages_builder(
         &self,
         src_addr: GuestPageAddr,
@@ -277,18 +281,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         to: &VmPages<T, VmStateInitializing>,
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
-        let mut root = self.root.lock();
-        // We use the TLB version of the underlying VmPages rather than the version at which we
-        // were entered since it may be stale.
-        let version = self.tlb_tracker.current();
-        let converted_pages = root
-            .get_converted_range::<Page<ConvertedDirty>>(
-                from_addr,
-                PageSize::Size4k,
-                count,
-                version,
-            )
-            .map_err(Error::Paging)?;
+        let converted_pages = self.get_converted_pages(from_addr, count)?;
         let new_owner = to.page_owner_id();
         for (dirty, (src_addr, to_addr)) in
             converted_pages.zip(src_addr.iter_from().zip(to_addr.iter_from()))
@@ -358,6 +351,23 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
 }
 
 impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
+    /// Returns a list of converted and locked pages created from `num_pages` starting at `page_addr`.
+    fn get_converted_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        num_pages: u64,
+    ) -> Result<LockedPageList<Page<ConvertedDirty>>> {
+        let version = self.tlb_tracker.current();
+        let mut root = self.root.lock();
+        root.get_converted_range::<Page<ConvertedDirty>>(
+            page_addr,
+            PageSize::Size4k,
+            num_pages,
+            version,
+        )
+        .map_err(Error::Paging)
+    }
+
     /// Converts `num_pages` starting at guest physical address `page_addr` to confidential memory.
     pub fn convert_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
         if self.nesting >= MAX_PAGE_OWNERS - 1 {
@@ -365,34 +375,34 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             return Err(Error::NestingTooDeep);
         }
 
-        let mut root = self.root.lock();
-        let invalidated_pages = root
-            .invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
-            .map_err(Error::Paging)?;
+        let invalidated_pages = {
+            let mut root = self.root.lock();
+            root.invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
+        }
+        .map_err(Error::Paging)?;
         let version = self.tlb_tracker.current();
-        for p in invalidated_pages {
+        for page in invalidated_pages {
             // Unwrap ok since the page was just invalidated.
-            self.page_tracker.convert_page(p, version).unwrap();
+            self.page_tracker.convert_page(page, version).unwrap();
         }
         Ok(())
     }
 
     /// Reclaims `num_pages` of confidential memory starting at guest physical address `page_addr`.
     pub fn reclaim_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
-        let mut root = self.root.lock();
-        let version = self.tlb_tracker.current();
+        // TODO: Support reclaim of converted pages that haven't yet been fenced.
+        let converted_pages = self.get_converted_pages(page_addr, num_pages)?;
         let mut pte_pages = self.pte_pages.lock();
-        for addr in page_addr.iter_from().take(num_pages as usize) {
-            // TODO: Support reclaim of converted pages that haven't yet been fenced.
-            let converted = root
-                .get_converted_page::<Page<ConvertedDirty>>(addr, version)
-                .map_err(Error::Paging)?;
+        for (page, addr) in converted_pages.zip(page_addr.iter_from()) {
             // Unwrap ok since we know that it's a converted page.
-            let mappable = self.page_tracker.reclaim_page(converted.clean()).unwrap();
-            // Unwrap ok since the PTE for the page must have previously been invalid and all of
-            // the intermediate page-tables must already have been populatd.
-            root.map_page(addr, mappable, &mut || pte_pages.pop())
-                .unwrap();
+            let mappable = self.page_tracker.reclaim_page(page.clean()).unwrap();
+            {
+                let mut root = self.root.lock();
+                // Unwrap ok since the PTE for the page must have previously been invalid and all of
+                // the intermediate page-tables must already have been populatd.
+                root.map_page(addr, mappable, &mut || pte_pages.pop())
+                    .unwrap();
+            }
         }
         Ok(())
     }
@@ -402,26 +412,23 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         self.tlb_tracker.increment()
     }
 
-    /// Assigns `num_pages` of confidential memory starting at `addr` as internal state pages for
-    /// `new_owner`, returning the pages as a `SequentialPages` if they are contiguous.
-    fn get_state_pages_for(
+    /// Assigns the converted pages in `pages` to `new_owner` as state pages.
+    fn assign_state_pages_for(
         &self,
-        addr: GuestPageAddr,
-        num_pages: u64,
+        pages: LockedPageList<Page<ConvertedDirty>>,
         new_owner: PageOwnerId,
-    ) -> Result<SequentialPages<InternalClean>> {
-        let mut root = self.root.lock();
-        let version = self.tlb_tracker.current();
-        let assigned_pages = root
-            .get_converted_range::<Page<ConvertedDirty>>(addr, PageSize::Size4k, num_pages, version)
-            .map_err(Error::Paging)?
-            .map(|converted| {
-                // Unwrap ok since we've guaranteed there is space for another owner.
-                self.page_tracker
-                    .assign_page_for_internal_state(converted.clean(), new_owner)
-                    .unwrap()
-            });
-        SequentialPages::from_pages(assigned_pages).map_err(|_| Error::NonContiguousPages)
+    ) -> PageList<Page<InternalClean>> {
+        let mut assigned_pages = PageList::new(self.page_tracker.clone());
+        for page in pages {
+            // Unwrap ok since we've guaranteed there is space for another owner.
+            let assigned = self
+                .page_tracker
+                .assign_page_for_internal_state(page.clean(), new_owner)
+                .unwrap();
+            // Unwrap ok since we uniquely own the page and it can't be on another list.
+            assigned_pages.push(assigned).unwrap();
+        }
+        assigned_pages
     }
 
     /// Creates a new `Vm` using pages donated by `self`. The returned `Vm` is in the initializing
@@ -436,20 +443,35 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedVmPages(page_root_addr));
         }
+
+        // Make sure we can grab the pages first before we start wiping and assigning them.
+        let guest_root_pages = self.get_converted_pages(page_root_addr, 4)?;
+        if !guest_root_pages.is_contiguous() {
+            return Err(Error::NonContiguousPages);
+        }
+        let state_pages = self.get_converted_pages(state_addr, TVM_STATE_PAGES)?;
+        if !state_pages.is_contiguous() {
+            return Err(Error::NonContiguousPages);
+        }
+        let vcpu_pages = self.get_converted_pages(vcpus_addr, num_vcpu_pages)?;
+        if !vcpu_pages.is_contiguous() {
+            return Err(Error::NonContiguousPages);
+        }
         let id = self
             .page_tracker
             .add_active_guest()
             .map_err(Error::GuestId)?;
-        let guest_root_pages = self.get_state_pages_for(page_root_addr, 4, id)?;
+
+        let guest_root_pages =
+            SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
         let guest_root = T::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
 
-        let mut state_pages = self
-            .get_state_pages_for(state_addr, TVM_STATE_PAGES, id)?
-            .into_iter();
+        let mut state_pages = self.assign_state_pages_for(state_pages, id);
         let state_page = state_pages.next().unwrap();
         let pte_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
 
-        let vcpu_pages = self.get_state_pages_for(vcpus_addr, num_vcpu_pages, id)?;
+        let vcpu_pages =
+            SequentialPages::from_pages(self.assign_state_pages_for(vcpu_pages, id)).unwrap();
 
         Ok((
             Vm::new(
@@ -467,9 +489,15 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         count: u64,
         to: &VmPages<T, VmStateInitializing>,
     ) -> Result<()> {
-        let pt_pages = self.get_state_pages_for(from_addr, count, to.page_owner_id())?;
-        for page in pt_pages.into_iter() {
-            to.add_pte_page(page)?;
+        let converted_pages = self.get_converted_pages(from_addr, count)?;
+        let new_owner = to.page_owner_id();
+        for page in converted_pages {
+            // Unwrap ok since we've guaranteed the page is assignable.
+            let assigned = self
+                .page_tracker
+                .assign_page_for_internal_state(page.clean(), new_owner)
+                .unwrap();
+            to.add_pte_page(assigned)?;
         }
         Ok(())
     }
@@ -482,23 +510,13 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         to: &VmPages<T, VmStateInitializing>,
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
-        let mut root = self.root.lock();
-        let version = self.tlb_tracker.current();
-        let pages = root
-            .get_converted_range::<Page<ConvertedDirty>>(
-                from_addr,
-                PageSize::Size4k,
-                count,
-                version,
-            )
-            .map_err(Error::Paging)?
-            .map(|dirty| dirty.clean());
+        let converted_pages = self.get_converted_pages(from_addr, count)?;
         let new_owner = to.page_owner_id();
-        for (page, guest_addr) in pages.zip(to_addr.iter_from()) {
+        for (page, guest_addr) in converted_pages.zip(to_addr.iter_from()) {
             // Unwrap ok since we've guaranteed there's space for another owner.
             let mappable = self
                 .page_tracker
-                .assign_page_for_mapping(page, new_owner)
+                .assign_page_for_mapping(page.clean(), new_owner)
                 .unwrap();
             to.add_4k_page(guest_addr, mappable)?;
         }

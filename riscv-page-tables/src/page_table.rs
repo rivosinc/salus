@@ -3,8 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::marker::PhantomData;
-
-use data_measure::data_measure::DataMeasure;
 use riscv_pages::*;
 use spin::Mutex;
 
@@ -730,7 +728,7 @@ impl<'a, T: PagingMode> PageTableMapper<'a, T> {
     /// Maps `vaddr` to `page_to_map`, consuming `page_to_map`.
     ///
     /// TODO: Page permissions.
-    pub fn map_page<P: MappablePhysPage<MeasureOptional>>(
+    pub fn map_page<P: MappablePhysPage<M>, M: MeasureRequirement>(
         &self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         page_to_map: P,
@@ -748,34 +746,6 @@ impl<'a, T: PagingMode> PageTableMapper<'a, T> {
             // Safe since we uniquely own page_to_map.
             inner.map_4k_leaf(vaddr, page_to_map.addr(), PteLeafPerms::RWX)
         }
-    }
-
-    /// Same as `map_page()`, but also extends `data_measure` with the address and contents of the
-    /// page to be mapped.
-    pub fn map_page_with_measurement<S: Mappable<M>, M: MeasureRequirement>(
-        &self,
-        vaddr: PageAddr<T::MappedAddressSpace>,
-        page_to_map: Page<S>,
-        data_measure: &mut dyn DataMeasure,
-    ) -> Result<()> {
-        if page_to_map.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(page_to_map.size()));
-        }
-        let end_vaddr = self.vaddr.checked_add_pages(self.num_pages).unwrap();
-        if vaddr < self.vaddr || vaddr >= end_vaddr {
-            return Err(Error::OutOfMapRange);
-        }
-
-        {
-            let mut inner = self.owner.inner.lock();
-            unsafe {
-                // Safe since we uniquely own page_to_map.
-                inner.map_4k_leaf(vaddr, page_to_map.addr(), PteLeafPerms::RWX)
-            }?;
-        }
-
-        data_measure.add_page(vaddr.bits(), page_to_map.as_bytes());
-        Ok(())
     }
 }
 

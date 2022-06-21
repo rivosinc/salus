@@ -194,10 +194,11 @@ impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
         S: Mappable<M>,
         M: MeasureRequirement,
     {
-        let mut measurement = self.vm_pages.measurement.lock();
-        self.inner
-            .map_page_with_measurement(to_addr, page, &mut *measurement)
-            .map_err(Error::Paging)
+        {
+            let mut measurement = self.vm_pages.measurement.lock();
+            measurement.add_page(to_addr.bits(), page.as_bytes());
+        }
+        self.inner.map_page(to_addr, page).map_err(Error::Paging)
     }
 }
 

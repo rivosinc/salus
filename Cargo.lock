@@ -205,7 +205,6 @@ name = "riscv_page_tables"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "data_measure",
  "page_collections",
  "riscv_pages",
  "spin",

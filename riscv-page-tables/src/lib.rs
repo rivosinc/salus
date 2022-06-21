@@ -65,7 +65,9 @@ pub use page_info::MAX_PAGE_OWNERS;
 pub use page_list::{LockedPageList, PageList};
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
-pub use page_table::{FirstStagePageTable, GuestStagePageTable, PagingMode, PlatformPageTable};
+pub use page_table::{
+    FirstStagePageTable, GuestStagePageTable, PageTableMapper, PagingMode, PlatformPageTable,
+};
 pub use page_tracking::Error as PageTrackingError;
 pub use page_tracking::Result as PageTrackingResult;
 pub use page_tracking::{HypPageAlloc, PageTracker};
@@ -145,6 +147,9 @@ mod tests {
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
         let mut pte_pages = state.pte_pages.into_iter();
         let gpa_base = PageAddr::new(RawAddr::guest(0x8000_0000, PageOwnerId::host())).unwrap();
+        let mapper = guest_page_table
+            .map_range(gpa_base, PageSize::Size4k, 2, &mut || pte_pages.next())
+            .unwrap();
         for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
             // Write to the page so that we can test if it's retained later.
             unsafe {
@@ -156,9 +161,7 @@ mod tests {
                 slice[0] = 0xdeadbeef;
             }
             let mappable = page_tracker.assign_page_for_mapping(page, id).unwrap();
-            assert!(guest_page_table
-                .map_page(gpa, mappable, &mut || pte_pages.next())
-                .is_ok());
+            assert!(mapper.map_page(gpa, mappable).is_ok());
         }
         let version = TlbVersion::new();
         guest_page_table
@@ -192,6 +195,9 @@ mod tests {
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
         let mut pte_pages = state.pte_pages.into_iter();
         let gpa_base = PageAddr::new(RawAddr::supervisor_virt(0x8000_0000)).unwrap();
+        let mapper = guest_page_table
+            .map_range(gpa_base, PageSize::Size4k, 2, &mut || pte_pages.next())
+            .unwrap();
         for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
             // Write to the page so that we can test if it's retained later.
             unsafe {
@@ -203,9 +209,7 @@ mod tests {
                 slice[0] = 0xdeadbeef;
             }
             let mappable = page_tracker.assign_page_for_mapping(page, id).unwrap();
-            assert!(guest_page_table
-                .map_page(gpa, mappable, &mut || pte_pages.next())
-                .is_ok());
+            assert!(mapper.map_page(gpa, mappable).is_ok());
         }
         let version = TlbVersion::new();
         guest_page_table

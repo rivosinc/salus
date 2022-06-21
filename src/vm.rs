@@ -928,10 +928,9 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
-            self.inner
-                .vm_pages
-                .add_measured_4k_page(vm_addr, mappable)
-                .unwrap();
+            // TODO: Use an ExactSizeIterator so we don't have to create a mapper for every page.
+            let mapper = self.inner.vm_pages.map_pages(vm_addr, 1).unwrap();
+            mapper.map_page_with_measurement(vm_addr, mappable).unwrap();
         }
     }
 
@@ -955,7 +954,9 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
-            self.inner.vm_pages.add_4k_page(vm_addr, mappable).unwrap();
+            // TODO: Use an ExactSizeIterator so we don't have to create a mapper for every page.
+            let mapper = self.inner.vm_pages.map_pages(vm_addr, 1).unwrap();
+            mapper.map_page(vm_addr, mappable).unwrap();
         }
     }
 

@@ -33,6 +33,8 @@ pub enum PteFieldBit {
     Accessed = 6,
     /// The page has been written.
     Dirty = 7,
+    /// The page has been locked by software.
+    Locked = 8,
 }
 
 impl PteFieldBit {
@@ -78,9 +80,16 @@ pub(crate) struct Pte(u64);
 
 impl Pte {
     /// Writes the mapping for the given page with that config bits in `status` and marks the entry
-    /// as valid.
+    /// as valid. Preserves the `Locked` bit.
     pub fn set(&mut self, pfn: SupervisorPfn, status: &PteFieldBits) {
-        self.0 = (pfn.bits() << PFN_SHIFT) | status.bits | PteFieldBit::Valid.mask();
+        let bits = (((pfn.bits() << PFN_SHIFT) | status.bits | PteFieldBit::Valid.mask())
+            & !PteFieldBit::Locked.mask())
+            | if self.locked() {
+                PteFieldBit::Locked.mask()
+            } else {
+                0
+            };
+        self.0 = bits
     }
 
     /// Returns the raw bits the make up the PTE.
@@ -102,6 +111,24 @@ impl Pte {
     #[allow(dead_code)]
     pub fn mark_valid(&mut self) {
         self.0 |= PteFieldBit::Valid.mask();
+    }
+
+    /// Returns if the entry is marked as locked.
+    ///
+    /// TODO: Put `Pte` modifiers behind a guard object that is returned from `locked()` if the `Pte`
+    /// is currently locked.
+    pub fn locked(&self) -> bool {
+        PteFieldBit::Locked.is_set(self.bits())
+    }
+
+    /// Marks the entry as locked.
+    pub fn lock(&mut self) {
+        self.0 |= PteFieldBit::Locked.mask()
+    }
+
+    /// Marks the entry as unlocked.
+    pub fn unlock(&mut self) {
+        self.0 &= !PteFieldBit::Locked.mask()
     }
 
     /// Clears everything including valid bit.

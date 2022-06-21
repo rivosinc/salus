@@ -8,8 +8,8 @@ use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{
-    tlb, GuestStagePageTable, LockedPageList, PageList, PageTracker, PlatformPageTable, TlbVersion,
-    MAX_PAGE_OWNERS,
+    tlb, GuestStagePageTable, LockedPageList, PageList, PageTableMapper, PageTracker,
+    PlatformPageTable, TlbVersion, MAX_PAGE_OWNERS,
 };
 use riscv_pages::*;
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
@@ -154,6 +154,53 @@ impl TlbTracker {
     }
 }
 
+/// Wrapper for a `PageTableMapper` created from the page table of `VmPages`. Measures pages as
+/// they are inserted, if necessary.
+pub struct VmPagesMapper<'a, T: GuestStagePageTable, S> {
+    inner: PageTableMapper<'a, T>,
+    vm_pages: &'a VmPages<T, S>,
+}
+
+impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
+    /// Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr`.
+    fn new(vm_pages: &'a VmPages<T, S>, page_addr: GuestPageAddr, num_pages: u64) -> Result<Self> {
+        let mut pte_pages = vm_pages.pte_pages.lock();
+        let inner = vm_pages
+            .root
+            .map_range(page_addr, PageSize::Size4k, num_pages, &mut || {
+                pte_pages.pop()
+            })
+            .map_err(Error::Paging)?;
+        Ok(Self { inner, vm_pages })
+    }
+
+    /// Maps an unmeasured page into the guest's address space.
+    pub fn map_page<P>(&self, to_addr: GuestPageAddr, page: P) -> Result<()>
+    where
+        P: MappablePhysPage<MeasureOptional>,
+    {
+        self.inner.map_page(to_addr, page).map_err(Error::Paging)
+    }
+}
+
+impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
+    /// Maps a page into the guest's address space and measures it.
+    pub fn map_page_with_measurement<S, M>(
+        &self,
+        to_addr: GuestPageAddr,
+        page: Page<S>,
+    ) -> Result<()>
+    where
+        S: Mappable<M>,
+        M: MeasureRequirement,
+    {
+        let mut measurement = self.vm_pages.measurement.lock();
+        self.inner
+            .map_page_with_measurement(to_addr, page, &mut *measurement)
+            .map_err(Error::Paging)
+    }
+}
+
 /// Represents a reference to the current VM address space. The previous address space is restored
 /// when dropped. Used to directly access a guest's memory.
 pub struct ActiveVmPages<'a, T: GuestStagePageTable> {
@@ -283,6 +330,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
+        let mapper = to.map_pages(to_addr, count)?;
         let new_owner = to.page_owner_id();
         for (dirty, (src_addr, to_addr)) in
             converted_pages.zip(src_addr.iter_from().zip(to_addr.iter_from()))
@@ -295,7 +343,8 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
                 .page_tracker
                 .assign_page_for_mapping(initialized, new_owner)
                 .unwrap();
-            to.add_measured_4k_page(to_addr, mappable)?;
+            // Unwrap ok since the address is in range and we haven't mapped it yet.
+            mapper.map_page_with_measurement(to_addr, mappable).unwrap();
         }
         Ok(count)
     }
@@ -315,7 +364,6 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     // How many nested TVMs deep this VM is, with 0 being the host.
     nesting: usize,
     root: PlatformPageTable<T>,
-    // Locking order: `measurement` -> `pte_pages`
     measurement: Mutex<Sha256Measure>,
     pte_pages: Mutex<PageVec<Page<InternalClean>>>,
     phantom: PhantomData<S>,
@@ -392,15 +440,13 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
     pub fn reclaim_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
         // TODO: Support reclaim of converted pages that haven't yet been fenced.
         let converted_pages = self.get_converted_pages(page_addr, num_pages)?;
-        let mut pte_pages = self.pte_pages.lock();
+        // Unwrap ok since the PTE for the page must have previously been invalid and all of
+        // the intermediate page-tables must already have been populatd.
+        let mapper = VmPagesMapper::new(self, page_addr, num_pages).unwrap();
         for (page, addr) in converted_pages.zip(page_addr.iter_from()) {
             // Unwrap ok since we know that it's a converted page.
             let mappable = self.page_tracker.reclaim_page(page.clean()).unwrap();
-            // Unwrap ok since the PTE for the page must have previously been invalid and all of
-            // the intermediate page-tables must already have been populatd.
-            self.root
-                .map_page(addr, mappable, &mut || pte_pages.pop())
-                .unwrap();
+            mapper.map_page(addr, mappable).unwrap();
         }
         Ok(())
     }
@@ -510,6 +556,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
+        let mapper = to.map_pages(to_addr, count)?;
         let new_owner = to.page_owner_id();
         for (page, guest_addr) in converted_pages.zip(to_addr.iter_from()) {
             // Unwrap ok since we've guaranteed there's space for another owner.
@@ -517,7 +564,8 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
                 .page_tracker
                 .assign_page_for_mapping(page.clean(), new_owner)
                 .unwrap();
-            to.add_4k_page(guest_addr, mappable)?;
+            // Unwrap ok since the address is in range and we haven't mapped it yet.
+            mapper.map_page(guest_addr, mappable).unwrap();
         }
         Ok(count)
     }
@@ -581,34 +629,14 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         Ok(())
     }
 
-    /// Maps a page into the guest's address space and measures it.
-    pub fn add_measured_4k_page<S, M>(&self, to_addr: GuestPageAddr, page: Page<S>) -> Result<()>
-    where
-        S: Mappable<M>,
-        M: MeasureRequirement,
-    {
-        if page.size() != PageSize::Size4k {
-            return Err(Error::UnsupportedPageSize(page.size()));
-        }
-        let mut measurement = self.measurement.lock();
-        let mut pte_pages = self.pte_pages.lock();
-        self.root
-            .map_page_with_measurement(to_addr, page, &mut || pte_pages.pop(), &mut *measurement)
-            .map_err(Error::Paging)
-    }
-
-    /// Maps an unmeasured page into the guest's address space.
-    pub fn add_4k_page<P>(&self, to_addr: GuestPageAddr, page: P) -> Result<()>
-    where
-        P: MappablePhysPage<MeasureOptional>,
-    {
-        if page.size() != PageSize::Size4k {
-            return Err(Error::UnsupportedPageSize(page.size()));
-        }
-        let mut pte_pages = self.pte_pages.lock();
-        self.root
-            .map_page(to_addr, page, &mut || pte_pages.pop())
-            .map_err(Error::Paging)
+    /// Locks `count` 4kB pages starting at `page_addr` for mapping, returning a `VmPagesMapper` that
+    /// can be used to insert (and measure, if necessary) the pages.
+    pub fn map_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<VmPagesMapper<T, VmStateInitializing>> {
+        VmPagesMapper::new(self, page_addr, count)
     }
 
     /// Consumes this `VmPages`, returning a finalized one.

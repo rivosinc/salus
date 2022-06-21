@@ -84,7 +84,7 @@ static HOST_VM: Once<HostVm<Sv48x4>> = Once::new();
 /// Builds the hardware memory map from the device-tree. The kernel & initramfs image regions are
 /// aligned to `T::TOP_LEVEL_ALIGN` so that they can be mapped directly into the host VM's guest
 /// physical address space.
-fn build_memory_map<T: PlatformPageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
+fn build_memory_map<T: GuestStagePageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
     let mut builder = HwMemMapBuilder::new(T::TOP_LEVEL_ALIGN);
 
     // First add the memory regions.

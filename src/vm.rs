@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::{alloc::Allocator, mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
-use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageTracker};
+use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageTracker, PlatformPageTable};
 use riscv_pages::*;
 use riscv_regs::GprIndex;
 use s_mode_utils::abort::abort;
@@ -880,7 +880,8 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let pte_vec_pages = hyp_mem.take_pages_for_host_state(num_pte_vec_pages as usize);
 
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
-        let root = T::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
+        let root =
+            PlatformPageTable::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
         let vm_pages = VmPages::new(root, pte_vec_pages, 0);
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();

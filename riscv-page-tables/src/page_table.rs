@@ -6,6 +6,7 @@ use core::marker::PhantomData;
 
 use data_measure::data_measure::DataMeasure;
 use riscv_pages::*;
+use spin::Mutex;
 
 use crate::page_list::{LockedPageList, PageList};
 use crate::page_tracking::PageTracker;
@@ -61,14 +62,14 @@ pub trait PageTableLevel: Sized + Clone + Copy + PartialEq {
 }
 
 /// A mutable reference to an entry of a page table, either valid or invalid.
-pub(crate) enum TableEntryMut<'a, T: PlatformPageTable> {
+enum TableEntryMut<'a, T: PagingMode> {
     Valid(ValidTableEntryMut<'a, T>),
     Invalid(&'a mut Pte, T::Level),
 }
 
-impl<'a, T: PlatformPageTable> TableEntryMut<'a, T> {
+impl<'a, T: PagingMode> TableEntryMut<'a, T> {
     /// Creates a `TableEntryMut` by inspecting the passed `pte` and determining its type.
-    pub fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
+    fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
         if !pte.valid() {
             TableEntryMut::Invalid(pte, level)
         } else {
@@ -77,7 +78,7 @@ impl<'a, T: PlatformPageTable> TableEntryMut<'a, T> {
     }
 
     /// Returns the entry as a `ValidTableEntryMut` if it's a valid PTE.
-    pub fn as_valid_entry(entry: TableEntryMut<'a, T>) -> Option<ValidTableEntryMut<'a, T>> {
+    fn as_valid_entry(entry: TableEntryMut<'a, T>) -> Option<ValidTableEntryMut<'a, T>> {
         if let TableEntryMut::Valid(v) = entry {
             Some(v)
         } else {
@@ -86,7 +87,7 @@ impl<'a, T: PlatformPageTable> TableEntryMut<'a, T> {
     }
 
     /// Returns the `PageTableLevel` this entry is at.
-    pub fn level(&self) -> T::Level {
+    fn level(&self) -> T::Level {
         match self {
             TableEntryMut::Valid(v) => v.level(),
             TableEntryMut::Invalid(_, level) => *level,
@@ -95,7 +96,7 @@ impl<'a, T: PlatformPageTable> TableEntryMut<'a, T> {
 
     /// Returns the physical address of the page this entry maps if it's a valid leaf, or would
     /// map if it were valid.
-    pub fn page_addr(&self) -> Option<SupervisorPageAddr> {
+    fn page_addr(&self) -> Option<SupervisorPageAddr> {
         match self {
             TableEntryMut::Valid(v) => v.page_addr(),
             TableEntryMut::Invalid(pte, level) => {
@@ -107,14 +108,14 @@ impl<'a, T: PlatformPageTable> TableEntryMut<'a, T> {
 
 /// A valid entry that contains either a `Leaf` with the host address of the page, or a `Table` with
 /// a nested `PageTable`.
-pub(crate) enum ValidTableEntryMut<'a, T: PlatformPageTable> {
+enum ValidTableEntryMut<'a, T: PagingMode> {
     Leaf(&'a mut Pte, T::Level),
     Table(PageTable<'a, T>),
 }
 
-impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
+impl<'a, T: PagingMode> ValidTableEntryMut<'a, T> {
     /// Creates a valid entry from a raw `Pte` at the given level. Asserts if the PTE is invalid.
-    pub fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
+    fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
         assert!(pte.valid()); // TODO -valid pte type to eliminate this runtime assert.
         if pte.leaf() {
             ValidTableEntryMut::Leaf(pte, level)
@@ -130,7 +131,7 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     }
 
     /// Returns the `PageTableLevel` this entry is at.
-    pub fn level(&self) -> T::Level {
+    fn level(&self) -> T::Level {
         match self {
             ValidTableEntryMut::Leaf(_, level) => *level,
             ValidTableEntryMut::Table(t) => t.level(),
@@ -138,7 +139,7 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     }
 
     /// Returns the page table pointed to by this entry or `None` if it is a leaf.
-    pub fn table(self) -> Option<PageTable<'a, T>> {
+    fn table(self) -> Option<PageTable<'a, T>> {
         match self {
             ValidTableEntryMut::Table(t) => Some(t),
             ValidTableEntryMut::Leaf(..) => None,
@@ -147,7 +148,7 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
 
     /// Returns the supervisor physical address mapped by this entry or `None` if it is a table
     /// pointer.
-    pub fn page_addr(&self) -> Option<SupervisorPageAddr> {
+    fn page_addr(&self) -> Option<SupervisorPageAddr> {
         if let ValidTableEntryMut::Leaf(pte, level) = self {
             PageAddr::from_pfn(pte.pfn(), level.leaf_page_size())
         } else {
@@ -162,7 +163,7 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
     ///
     /// The caller must guarantee that this page table entry points to a page of memory of the
     /// same type as `P`.
-    pub unsafe fn invalidate_page<P: InvalidatedPhysPage>(self) -> Option<P> {
+    unsafe fn invalidate_page<P: InvalidatedPhysPage>(self) -> Option<P> {
         let addr = self.page_addr()?;
         if let ValidTableEntryMut::Leaf(pte, level) = self {
             // See comments above in `take_page()`.
@@ -177,20 +178,20 @@ impl<'a, T: PlatformPageTable> ValidTableEntryMut<'a, T> {
 
 /// Holds the address of a page table for a given level in the paging structure.
 /// `PageTable`s are loaned by top level pages translation schemes such as `Sv48x4` and `Sv48`
-/// (implementors of `PlatformPageTable`).
-pub(crate) struct PageTable<'a, T: PlatformPageTable> {
+/// (implementors of `PagingMode`).
+struct PageTable<'a, T: PagingMode> {
     table_addr: SupervisorPageAddr,
     level: T::Level,
     // Bind our lifetime to that of the top-level `PlatformPageTable`.
-    phantom: PhantomData<&'a mut T>,
+    phantom: PhantomData<&'a mut PageTableInner<T>>,
 }
 
-impl<'a, T: PlatformPageTable> PageTable<'a, T> {
+impl<'a, T: PagingMode> PageTable<'a, T> {
     /// Creates a `PageTable` from the root of a `PlatformPageTable`.
-    pub fn from_root(owner: &'a mut T) -> Self {
+    fn from_root(owner: &'a mut PageTableInner<T>) -> Self {
         Self {
-            table_addr: owner.get_root_address(),
-            level: owner.root_level(),
+            table_addr: owner.root.base(),
+            level: T::root_level(),
             phantom: PhantomData,
         }
     }
@@ -202,7 +203,7 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
     /// The given `Pte` must be valid and point to an intermediate paging structure at the specified
     /// level. The pointed-to page table must be owned by the same `PlatformPageTable` that owns the
     /// `Pte`.
-    pub unsafe fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
+    unsafe fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
         assert!(pte.valid());
         // Beyond the root, every level must be only one 4kB page.
         assert_eq!(level.table_pages(), 1);
@@ -215,7 +216,7 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
     }
 
     /// Returns the `PageTableLevel` this table is at.
-    pub fn level(&self) -> T::Level {
+    fn level(&self) -> T::Level {
         self.level
     }
 
@@ -233,8 +234,8 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
     /// # Safety
     ///
     /// The caller must guarantee that `spa` references a page uniquely owned by the root
-    /// `PlatformPageTabel`.
-    pub unsafe fn map_leaf(
+    /// `PlatformPageTable`.
+    unsafe fn map_leaf(
         &mut self,
         addr: PageAddr<T::MappedAddressSpace>,
         spa: SupervisorPageAddr,
@@ -262,17 +263,14 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
     }
 
     /// Returns a mutable reference to the entry at this level for the address being translated.
-    pub fn entry_for_addr_mut(
-        &mut self,
-        addr: RawAddr<T::MappedAddressSpace>,
-    ) -> TableEntryMut<'a, T> {
+    fn entry_for_addr_mut(&mut self, addr: RawAddr<T::MappedAddressSpace>) -> TableEntryMut<'a, T> {
         let level = self.level;
         TableEntryMut::from_pte(self.entry_mut(addr), level)
     }
 
     /// Returns the next page table level for the given address to translate.
     /// If the next level isn't yet filled, consumes a `free_page` and uses it to map those entries.
-    pub fn next_level_or_fill_fn(
+    fn next_level_or_fill_fn(
         &mut self,
         addr: RawAddr<T::MappedAddressSpace>,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
@@ -293,7 +291,7 @@ impl<'a, T: PlatformPageTable> PageTable<'a, T> {
 }
 
 /// An index to an entry in a page table.
-pub(crate) trait PteIndex {
+trait PteIndex {
     /// Returns the offset in bytes of the index
     fn offset(&self) -> u64 {
         self.index() * core::mem::size_of::<u64>() as u64
@@ -306,14 +304,14 @@ pub(crate) trait PteIndex {
 /// Guarantees that the contained index is within the range of the page table type it is constructed
 /// for.
 #[derive(Copy, Clone)]
-pub(crate) struct PageTableIndex<T: PlatformPageTable> {
+struct PageTableIndex<T: PagingMode> {
     index: u64,
     level: PhantomData<T::Level>,
 }
 
-impl<T: PlatformPageTable> PageTableIndex<T> {
+impl<T: PagingMode> PageTableIndex<T> {
     /// Get an index from the address to be translated
-    pub fn from_addr(addr: u64, level: T::Level) -> Self {
+    fn from_addr(addr: u64, level: T::Level) -> Self {
         let addr_bit_mask = (1 << level.addr_width()) - 1;
         let index = (addr >> level.addr_shift()) & addr_bit_mask;
         Self {
@@ -323,29 +321,15 @@ impl<T: PlatformPageTable> PageTableIndex<T> {
     }
 }
 
-impl<T: PlatformPageTable> PteIndex for PageTableIndex<T> {
+impl<T: PagingMode> PteIndex for PageTableIndex<T> {
     fn index(&self) -> u64 {
         self.index
     }
 }
 
-/// A page table for a S or U mode. It's enabled by storing its root address in `satp`.
-/// Examples include `Sv39`, `Sv48`, or `Sv57`
-pub trait FirstStagePageTable: PlatformPageTable<MappedAddressSpace = SupervisorVirt> {
-    /// `SATP_VALUE` must be set to the paging mode stored in register satp.
-    const SATP_VALUE: u64;
-}
-
-/// A page table for a VM. It's enabled by storing its root address in `hgatp`.
-/// Examples include `Sv39x4`, `Sv48x4`, or `Sv57x4`
-pub trait GuestStagePageTable: PlatformPageTable<MappedAddressSpace = GuestPhys> {
-    /// `HGATP_VALUE` must be set to the paging mode stored in register hgatp.
-    const HGATP_VALUE: u64;
-}
-
-/// A page table for a given addressing type.
-pub trait PlatformPageTable: Sized {
-    /// The level of this table in the paging hierachry.
+/// Defines the structure of a particular paging mode.
+pub trait PagingMode {
+    /// The levels used by this paging mode.
     type Level: PageTableLevel;
     /// The address space that is mapped by this page table.
     type MappedAddressSpace: AddressSpace;
@@ -353,155 +337,71 @@ pub trait PlatformPageTable: Sized {
     /// The alignement requirement of the top level page table.
     const TOP_LEVEL_ALIGN: u64;
 
-    /// Creates a new page table root from the provided `pages` that must be at least
-    /// `root_level().table_pages()` in length and aligned to `T::TOP_LEVEL_ALIGN`.
-    fn new(
-        pages: SequentialPages<InternalClean>,
-        owner: PageOwnerId,
-        page_tracker: PageTracker,
-    ) -> Result<Self>;
+    /// Returns the root `PageTableLevel` for this type of page table.
+    fn root_level() -> Self::Level;
 
-    /// Returns an ref to the systems physical pages map.
-    fn page_tracker(&self) -> PageTracker;
-
-    /// Returns the owner Id for this page table.
-    fn page_owner_id(&self) -> PageOwnerId;
-
-    /// Returns the address of the top level page table.
-    /// This is the value that should be written to satp/hgatp to start using the page tables.
-    fn get_root_address(&self) -> SupervisorPageAddr;
-
-    /// Returns the root `PageTableLevel`.
-    fn root_level(&self) -> Self::Level;
-
-    /// Calculates the number of PTE pages that are needed to map all pages for `num_pages` maped
-    /// pages.
+    /// Calculates the number of PTE pages that are needed to map all pages for `num_pages` mapped
+    /// pages for this type of page table.
     fn max_pte_pages(num_pages: u64) -> u64;
-
-    /// Handles a fault from the owner of this page table. Until page permissions are added,
-    /// this will only happen when a page has been loaned to another guest. That is valid if the
-    /// guest has exited, in which case this fixed the PTE entry and returns true. False will be
-    /// returned if the page is still owned by the guest it was loaned to, or if the entry is
-    /// invalid.
-    fn do_fault(&mut self, addr: RawAddr<Self::MappedAddressSpace>) -> bool;
-
-    /// Maps a page for translation with address `addr`, using `get_pte_page` to fetch new page-table
-    /// pages if necessary.
-    ///
-    /// TODO: Page permissions.
-    fn map_page<P: MappablePhysPage<MeasureOptional>>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        page_to_map: P,
-        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
-    ) -> Result<()> {
-        self.do_map_page(
-            addr,
-            page_to_map.addr(),
-            page_to_map.size(),
-            PteLeafPerms::RWX,
-            get_pte_page,
-        )
-    }
-
-    /// Same as `map_page()`, but also extends `data_measure` with the address and contents of the
-    /// page to be mapped.
-    fn map_page_with_measurement<S: Mappable<M>, M: MeasureRequirement>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        page_to_map: Page<S>,
-        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
-        data_measure: &mut dyn DataMeasure,
-    ) -> Result<()> {
-        self.do_map_page(
-            addr,
-            page_to_map.addr(),
-            page_to_map.size(),
-            PteLeafPerms::RWX,
-            get_pte_page,
-        )?;
-        data_measure.add_page(addr.bits(), page_to_map.as_bytes());
-        Ok(())
-    }
-
-    /// Returns a list of invalidated pages for the given range.
-    fn invalidate_range<P: InvalidatedPhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        page_size: PageSize,
-        num_pages: u64,
-    ) -> Result<PageList<P>> {
-        if page_size.is_huge() {
-            return Err(Error::PageSizeNotSupported(page_size));
-        }
-
-        // First make sure the entire range can be unmapped before we start invalidating things.
-        if !addr.iter_from().take(num_pages as usize).all(|a| {
-            self.get_mapped_4k_leaf(RawAddr::from(a), P::mem_type())
-                .is_ok()
-        }) {
-            return Err(Error::PageNotUnmappable);
-        }
-
-        let mut pages = PageList::new(self.page_tracker());
-        for a in addr.iter_from().take(num_pages as usize) {
-            // We verified above that we can safely unwrap here.
-            let entry = self
-                .get_mapped_4k_leaf(RawAddr::from(a), P::mem_type())
-                .unwrap();
-            let page = unsafe {
-                // Safe since we've verified the typing of the page.
-                entry.invalidate_page().unwrap()
-            };
-            // Unwrap ok, a just-invalidated page can't be on any other PageList.
-            pages.push(page).unwrap();
-        }
-
-        Ok(pages)
-    }
-
-    /// Returns a list of converted pages that were previously mapped in this page table if they were
-    /// invalidated a TLB version older than `tlb_version`. Guarantees that the full range of pages
-    /// are converted pages.
-    fn get_converted_range<P: ConvertedPhysPage>(
-        &mut self,
-        addr: PageAddr<Self::MappedAddressSpace>,
-        page_size: PageSize,
-        num_pages: u64,
-        tlb_version: TlbVersion,
-    ) -> Result<LockedPageList<P::DirtyPage>> {
-        if page_size.is_huge() {
-            return Err(Error::PageSizeNotSupported(page_size));
-        }
-
-        let page_tracker = self.page_tracker();
-        let id = self.page_owner_id();
-        let mut pages = LockedPageList::new(page_tracker.clone());
-        for a in addr.iter_from().take(num_pages as usize) {
-            let entry = self.get_converted_4k_leaf(RawAddr::from(a), P::mem_type(), tlb_version)?;
-            // Unwrap ok since we've already verified that this page is owned and converted.
-            let page = page_tracker
-                .get_converted_page::<P>(entry.page_addr().unwrap(), id, tlb_version)
-                .unwrap();
-            // Unwrap ok since we have unique ownership of the page and therefore it can't be on
-            // any other list.
-            pages.push(page).unwrap();
-        }
-
-        Ok(pages)
-    }
 }
 
-pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
+/// A page table for a S or U mode. It's enabled by storing its root address in `satp`.
+/// Examples include `Sv39`, `Sv48`, or `Sv57`
+pub trait FirstStagePageTable: PagingMode<MappedAddressSpace = SupervisorVirt> {
+    /// `SATP_VALUE` must be set to the paging mode stored in register satp.
+    const SATP_VALUE: u64;
+}
+
+/// A page table for a VM. It's enabled by storing its root address in `hgatp`.
+/// Examples include `Sv39x4`, `Sv48x4`, or `Sv57x4`
+pub trait GuestStagePageTable: PagingMode<MappedAddressSpace = GuestPhys> {
+    /// `HGATP_VALUE` must be set to the paging mode stored in register hgatp.
+    const HGATP_VALUE: u64;
+}
+
+/// The internal state of a paging hierarchy.
+struct PageTableInner<T: PagingMode> {
+    root: SequentialPages<InternalClean>,
+    owner: PageOwnerId,
+    page_tracker: PageTracker,
+    table_type: PhantomData<T>,
+}
+
+impl<T: PagingMode> PageTableInner<T> {
+    /// Creates a new `PageTableInner` from the pages in `root`.
+    fn new(
+        root: SequentialPages<InternalClean>,
+        owner: PageOwnerId,
+        page_tracker: PageTracker,
+    ) -> Result<Self> {
+        // TODO: Verify ownership of root PT pages.
+        if root.page_size().is_huge() {
+            return Err(Error::PageSizeNotSupported(root.page_size()));
+        }
+        if root.base().bits() & (T::TOP_LEVEL_ALIGN - 1) != 0 {
+            return Err(Error::MisalignedPages(root));
+        }
+        if root.len() < T::root_level().table_pages() as u64 {
+            return Err(Error::InsufficientPages(root));
+        }
+
+        Ok(Self {
+            root,
+            owner,
+            page_tracker,
+            table_type: PhantomData,
+        })
+    }
+
     /// Walks the page table from the root for `vaddr` until `pred` returns true. Returns `None` if
     /// a leaf is reached without `pred` being met.
     fn walk_until<P>(
         &mut self,
-        vaddr: RawAddr<Self::MappedAddressSpace>,
+        vaddr: RawAddr<T::MappedAddressSpace>,
         mut pred: P,
-    ) -> Option<TableEntryMut<Self>>
+    ) -> Option<TableEntryMut<T>>
     where
-        P: FnMut(&TableEntryMut<Self>) -> bool,
+        P: FnMut(&TableEntryMut<T>) -> bool,
     {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
@@ -520,8 +420,8 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     /// `mapped_addr` is not mapped.
     fn walk_to_leaf(
         &mut self,
-        mapped_addr: RawAddr<Self::MappedAddressSpace>,
-    ) -> Option<ValidTableEntryMut<Self>> {
+        mapped_addr: RawAddr<T::MappedAddressSpace>,
+    ) -> Option<ValidTableEntryMut<T>> {
         use TableEntryMut::*;
         use ValidTableEntryMut::*;
         self.walk_until(mapped_addr, |e| matches!(e, Valid(Leaf(..))))
@@ -532,8 +432,8 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     /// Returns `None` if `mapped_addr` is mapped.
     fn walk_until_invalid(
         &mut self,
-        mapped_addr: RawAddr<Self::MappedAddressSpace>,
-    ) -> Option<TableEntryMut<Self>> {
+        mapped_addr: RawAddr<T::MappedAddressSpace>,
+    ) -> Option<TableEntryMut<T>> {
         use TableEntryMut::*;
         self.walk_until(mapped_addr, |e| matches!(e, Invalid(..)))
     }
@@ -543,7 +443,7 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     /// using `get_pte_page` as necessary.
     fn do_map_page(
         &mut self,
-        vaddr: PageAddr<Self::MappedAddressSpace>,
+        vaddr: PageAddr<T::MappedAddressSpace>,
         spa: SupervisorPageAddr,
         page_size: PageSize,
         perms: PteLeafPerms,
@@ -567,11 +467,11 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     /// `mem_type`.
     fn get_mapped_4k_leaf(
         &mut self,
-        vaddr: RawAddr<Self::MappedAddressSpace>,
+        vaddr: RawAddr<T::MappedAddressSpace>,
         mem_type: MemType,
-    ) -> Result<ValidTableEntryMut<Self>> {
-        let page_tracker = self.page_tracker();
-        let owner = self.page_owner_id();
+    ) -> Result<ValidTableEntryMut<T>> {
+        let page_tracker = self.page_tracker.clone();
+        let owner = self.owner;
         let entry = self.walk_to_leaf(vaddr).ok_or(Error::PageNotUnmappable)?;
         if !entry.level().is_leaf() {
             return Err(Error::PageSizeNotSupported(entry.level().leaf_page_size()));
@@ -588,12 +488,12 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     /// page that was converted at a TLB version older than `tlb_version`.
     fn get_converted_4k_leaf(
         &mut self,
-        vaddr: RawAddr<Self::MappedAddressSpace>,
+        vaddr: RawAddr<T::MappedAddressSpace>,
         mem_type: MemType,
         tlb_version: TlbVersion,
-    ) -> Result<TableEntryMut<Self>> {
-        let page_tracker = self.page_tracker();
-        let owner = self.page_owner_id();
+    ) -> Result<TableEntryMut<T>> {
+        let page_tracker = self.page_tracker.clone();
+        let owner = self.owner;
         let entry = self
             .walk_until_invalid(vaddr)
             .ok_or(Error::PageNotConverted)?;
@@ -608,4 +508,159 @@ pub(crate) trait PlatformPageTableHelpers: PlatformPageTable {
     }
 }
 
-impl<T: PlatformPageTable> PlatformPageTableHelpers for T {}
+/// A paging hierarchy for a given addressing type.
+///
+/// TODO: Support non-4k page sizes.
+pub struct PlatformPageTable<T: PagingMode> {
+    inner: Mutex<PageTableInner<T>>,
+}
+
+impl<T: PagingMode> PlatformPageTable<T> {
+    /// Creates a new page table root from the provided `root` that must be at least
+    /// `T::root_level().table_pages()` in length and aligned to `T::TOP_LEVEL_ALIGN`.
+    pub fn new(
+        root: SequentialPages<InternalClean>,
+        owner: PageOwnerId,
+        page_tracker: PageTracker,
+    ) -> Result<Self> {
+        let inner = PageTableInner::new(root, owner, page_tracker)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Returns a reference to the systems physical pages map.
+    pub fn page_tracker(&self) -> PageTracker {
+        self.inner.lock().page_tracker.clone()
+    }
+
+    /// Returns the owner Id for this page table.
+    pub fn page_owner_id(&self) -> PageOwnerId {
+        self.inner.lock().owner
+    }
+
+    /// Returns the address of the top level page table. The PFN of this address is what should be
+    /// written to the SATP or HGATP CSR to start using the translations provided by this page table.
+    pub fn get_root_address(&self) -> SupervisorPageAddr {
+        self.inner.lock().root.base()
+    }
+
+    /// Handles a fault from the owner of this page table.
+    pub fn do_fault(&self, _addr: RawAddr<T::MappedAddressSpace>) -> bool {
+        // At the moment we have no reason to take a page fault.
+        false
+    }
+
+    /// Maps a page for translation with address `addr`, using `get_pte_page` to fetch new page-table
+    /// pages if necessary.
+    ///
+    /// TODO: Page permissions.
+    pub fn map_page<P: MappablePhysPage<MeasureOptional>>(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_to_map: P,
+        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock();
+        inner.do_map_page(
+            addr,
+            page_to_map.addr(),
+            page_to_map.size(),
+            PteLeafPerms::RWX,
+            get_pte_page,
+        )
+    }
+
+    /// Same as `map_page()`, but also extends `data_measure` with the address and contents of the
+    /// page to be mapped.
+    pub fn map_page_with_measurement<S: Mappable<M>, M: MeasureRequirement>(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_to_map: Page<S>,
+        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
+        data_measure: &mut dyn DataMeasure,
+    ) -> Result<()> {
+        {
+            let mut inner = self.inner.lock();
+            inner.do_map_page(
+                addr,
+                page_to_map.addr(),
+                page_to_map.size(),
+                PteLeafPerms::RWX,
+                get_pte_page,
+            )?;
+        }
+        data_measure.add_page(addr.bits(), page_to_map.as_bytes());
+        Ok(())
+    }
+
+    /// Returns a list of invalidated pages for the given range.
+    pub fn invalidate_range<P: InvalidatedPhysPage>(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
+        num_pages: u64,
+    ) -> Result<PageList<P>> {
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
+        }
+
+        let mut inner = self.inner.lock();
+        // First make sure the entire range can be unmapped before we start invalidating things.
+        if !addr.iter_from().take(num_pages as usize).all(|a| {
+            inner
+                .get_mapped_4k_leaf(RawAddr::from(a), P::mem_type())
+                .is_ok()
+        }) {
+            return Err(Error::PageNotUnmappable);
+        }
+
+        let mut pages = PageList::new(inner.page_tracker.clone());
+        for a in addr.iter_from().take(num_pages as usize) {
+            // We verified above that we can safely unwrap here.
+            let entry = inner
+                .get_mapped_4k_leaf(RawAddr::from(a), P::mem_type())
+                .unwrap();
+            let page = unsafe {
+                // Safe since we've verified the typing of the page.
+                entry.invalidate_page().unwrap()
+            };
+            // Unwrap ok, a just-invalidated page can't be on any other PageList.
+            pages.push(page).unwrap();
+        }
+
+        Ok(pages)
+    }
+
+    /// Returns a list of converted pages that were previously mapped in this page table if they were
+    /// invalidated a TLB version older than `tlb_version`. Guarantees that the full range of pages
+    /// are converted pages.
+    pub fn get_converted_range<P: ConvertedPhysPage>(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
+        num_pages: u64,
+        tlb_version: TlbVersion,
+    ) -> Result<LockedPageList<P::DirtyPage>> {
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
+        }
+
+        let mut inner = self.inner.lock();
+        let page_tracker = inner.page_tracker.clone();
+        let mut pages = LockedPageList::new(inner.page_tracker.clone());
+        for a in addr.iter_from().take(num_pages as usize) {
+            let entry =
+                inner.get_converted_4k_leaf(RawAddr::from(a), P::mem_type(), tlb_version)?;
+            // Unwrap ok since we've already verified that this page is owned and converted.
+            let page = page_tracker
+                .get_converted_page::<P>(entry.page_addr().unwrap(), inner.owner, tlb_version)
+                .unwrap();
+            // Unwrap ok since we have unique ownership of the page and therefore it can't be on
+            // any other list.
+            pages.push(page).unwrap();
+        }
+
+        Ok(pages)
+    }
+}

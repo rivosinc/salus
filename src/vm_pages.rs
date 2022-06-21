@@ -8,7 +8,8 @@ use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
 use page_collections::page_vec::PageVec;
 use riscv_page_tables::{
-    tlb, GuestStagePageTable, LockedPageList, PageList, PageTracker, TlbVersion, MAX_PAGE_OWNERS,
+    tlb, GuestStagePageTable, LockedPageList, PageList, PageTracker, PlatformPageTable, TlbVersion,
+    MAX_PAGE_OWNERS,
 };
 use riscv_pages::*;
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
@@ -313,8 +314,8 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     tlb_tracker: TlbTracker,
     // How many nested TVMs deep this VM is, with 0 being the host.
     nesting: usize,
-    // Locking order: `root` -> `measurement` -> `pte_pages`
-    root: Mutex<T>,
+    root: PlatformPageTable<T>,
+    // Locking order: `measurement` -> `pte_pages`
     measurement: Mutex<Sha256Measure>,
     pte_pages: Mutex<PageVec<Page<InternalClean>>>,
     phantom: PhantomData<S>,
@@ -341,7 +342,7 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     /// Returns the address of the root page table for this VM.
     pub fn root_address(&self) -> SupervisorPageAddr {
         // TODO: Cache this to avoid bouncing off the lock?
-        self.root.lock().get_root_address()
+        self.root.get_root_address()
     }
 
     /// Returns the global page tracking structure.
@@ -358,14 +359,14 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         num_pages: u64,
     ) -> Result<LockedPageList<Page<ConvertedDirty>>> {
         let version = self.tlb_tracker.current();
-        let mut root = self.root.lock();
-        root.get_converted_range::<Page<ConvertedDirty>>(
-            page_addr,
-            PageSize::Size4k,
-            num_pages,
-            version,
-        )
-        .map_err(Error::Paging)
+        self.root
+            .get_converted_range::<Page<ConvertedDirty>>(
+                page_addr,
+                PageSize::Size4k,
+                num_pages,
+                version,
+            )
+            .map_err(Error::Paging)
     }
 
     /// Converts `num_pages` starting at guest physical address `page_addr` to confidential memory.
@@ -375,11 +376,10 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             return Err(Error::NestingTooDeep);
         }
 
-        let invalidated_pages = {
-            let mut root = self.root.lock();
-            root.invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
-        }
-        .map_err(Error::Paging)?;
+        let invalidated_pages = self
+            .root
+            .invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
+            .map_err(Error::Paging)?;
         let version = self.tlb_tracker.current();
         for page in invalidated_pages {
             // Unwrap ok since the page was just invalidated.
@@ -396,13 +396,11 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         for (page, addr) in converted_pages.zip(page_addr.iter_from()) {
             // Unwrap ok since we know that it's a converted page.
             let mappable = self.page_tracker.reclaim_page(page.clean()).unwrap();
-            {
-                let mut root = self.root.lock();
-                // Unwrap ok since the PTE for the page must have previously been invalid and all of
-                // the intermediate page-tables must already have been populatd.
-                root.map_page(addr, mappable, &mut || pte_pages.pop())
-                    .unwrap();
-            }
+            // Unwrap ok since the PTE for the page must have previously been invalid and all of
+            // the intermediate page-tables must already have been populatd.
+            self.root
+                .map_page(addr, mappable, &mut || pte_pages.pop())
+                .unwrap();
         }
         Ok(())
     }
@@ -464,7 +462,8 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 
         let guest_root_pages =
             SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
-        let guest_root = T::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
+        let guest_root =
+            PlatformPageTable::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
 
         let mut state_pages = self.assign_state_pages_for(state_pages, id);
         let state_page = state_pages.next().unwrap();
@@ -525,8 +524,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 
     /// Handles a page fault for the given address.
     pub fn handle_page_fault(&self, addr: GuestPhysAddr) -> Result<()> {
-        let mut root = self.root.lock();
-        if root.do_fault(addr) {
+        if self.root.do_fault(addr) {
             Ok(())
         } else {
             Err(Error::PageFaultHandling)
@@ -552,13 +550,17 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     /// Creates a new `VmPages` from the given root page table, using `pte_vec_page` for a vector
     /// of page-table pages.
-    pub fn new(root: T, pte_vec_pages: SequentialPages<InternalClean>, nesting: usize) -> Self {
+    pub fn new(
+        root: PlatformPageTable<T>,
+        pte_vec_pages: SequentialPages<InternalClean>,
+        nesting: usize,
+    ) -> Self {
         Self {
             page_owner_id: root.page_owner_id(),
             page_tracker: root.page_tracker(),
             tlb_tracker: TlbTracker::new(),
             nesting,
-            root: Mutex::new(root),
+            root,
             measurement: Mutex::new(Sha256Measure::new()),
             pte_pages: Mutex::new(PageVec::from(pte_vec_pages)),
             phantom: PhantomData,
@@ -588,10 +590,10 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         if page.size() != PageSize::Size4k {
             return Err(Error::UnsupportedPageSize(page.size()));
         }
-        let mut root = self.root.lock();
         let mut measurement = self.measurement.lock();
         let mut pte_pages = self.pte_pages.lock();
-        root.map_page_with_measurement(to_addr, page, &mut || pte_pages.pop(), &mut *measurement)
+        self.root
+            .map_page_with_measurement(to_addr, page, &mut || pte_pages.pop(), &mut *measurement)
             .map_err(Error::Paging)
     }
 
@@ -603,9 +605,9 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         if page.size() != PageSize::Size4k {
             return Err(Error::UnsupportedPageSize(page.size()));
         }
-        let mut root = self.root.lock();
         let mut pte_pages = self.pte_pages.lock();
-        root.map_page(to_addr, page, &mut || pte_pages.pop())
+        self.root
+            .map_page(to_addr, page, &mut || pte_pages.pop())
             .map_err(Error::Paging)
     }
 

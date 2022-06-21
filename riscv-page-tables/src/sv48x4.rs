@@ -4,9 +4,7 @@
 
 use riscv_pages::*;
 
-use crate::page_table::Result;
 use crate::page_table::*;
-use crate::page_tracking::PageTracker;
 
 /// The levels of the four-level Sv48x4 page table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,29 +70,20 @@ impl PageTableLevel for Sv48x4Level {
     }
 }
 
-/// An Sv48x4 set of mappings for second stage translation.
-pub struct Sv48x4 {
-    root: SequentialPages<InternalClean>,
-    owner: PageOwnerId,
-    page_tracker: PageTracker,
-}
+/// The `Sv48x4` addressing mode for 2nd-stage translation tables.
+pub enum Sv48x4 {}
 
 impl GuestStagePageTable for Sv48x4 {
     const HGATP_VALUE: u64 = 9;
 }
 
-// TODO: Support non-4k page sizes.
-impl PlatformPageTable for Sv48x4 {
+impl PagingMode for Sv48x4 {
     type Level = Sv48x4Level;
     type MappedAddressSpace = GuestPhys;
 
     const TOP_LEVEL_ALIGN: u64 = 16 * 1024;
 
-    fn page_owner_id(&self) -> PageOwnerId {
-        self.owner
-    }
-
-    fn root_level(&self) -> Self::Level {
+    fn root_level() -> Self::Level {
         Sv48x4Level::L4Table
     }
 
@@ -105,39 +94,5 @@ impl PlatformPageTable for Sv48x4 {
         let num_l3_pages = num_l2_pages / ENTRIES_PER_PAGE + 1;
         let num_l4_pages = 4;
         num_l1_pages + num_l2_pages + num_l3_pages + num_l4_pages
-    }
-
-    fn new(
-        root: SequentialPages<InternalClean>,
-        owner: PageOwnerId,
-        page_tracker: PageTracker,
-    ) -> Result<Self> {
-        // TODO: Verify ownership of root PT pages.
-        if root.page_size().is_huge() {
-            return Err(Error::PageSizeNotSupported(root.page_size()));
-        }
-        if root.base().bits() & (Self::TOP_LEVEL_ALIGN - 1) != 0 {
-            return Err(Error::MisalignedPages(root));
-        }
-        if root.len() < Sv48x4Level::L4Table.table_pages() as u64 {
-            return Err(Error::InsufficientPages(root));
-        }
-        Ok(Self {
-            root,
-            owner,
-            page_tracker,
-        })
-    }
-
-    fn page_tracker(&self) -> PageTracker {
-        self.page_tracker.clone()
-    }
-
-    fn get_root_address(&self) -> SupervisorPageAddr {
-        self.root.base()
-    }
-
-    fn do_fault(&mut self, _gpa: RawAddr<Self::MappedAddressSpace>) -> bool {
-        false
     }
 }

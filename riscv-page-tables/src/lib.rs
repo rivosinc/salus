@@ -8,9 +8,11 @@
 //!
 //! - `Page` is the basic building block, representing pages of host supervisor memory. Provided by
 //!   the `riscv-pages` crate.
-//! - `Sv48x4`, `Sv48` etc are top level page table structures used to manipulate address
-//! translation and protection.
+//! - `PlatformPageTable` is a top-level page table structures used to manipulate address translation
+//! and protection.
 //! - `PageTable` provides a generic implementation of a single level of multi-level translation.
+//! - `Sv48x4`, `Sv48`, etc. define standard RISC-V translation modes for 1st or 2nd-stage translation
+//! tables.
 //! - `PageTracker` - Contains information about active VMs (page owners), manages allocation of
 //! unique owner IDs, and per-page state such as current and previous owner. This is system-wide
 //! state updated whenever a page owner changes or a VM starts or stops.
@@ -27,9 +29,9 @@
 //!
 //! ## Safety
 //!
-//! Safe interfaces are exposed by giving each page table (such as `Sv48x4`) ownership of the pages
-//! used to construct the page tables. In this way the pages can be manipulated as needed, but only
-//! by the owning page table. The details of managing the pages are contained in the page table.
+//! Safe interfaces are exposed by giving each `PlatformPageTable` ownership of the pages used to
+//! construct the page tables. In this way the pages can be manipulated as needed, but only by the
+//! owning page table. The details of managing the pages are contained in the page table.
 //!
 //! Note that leaf pages mapped into the table are assumed to never be safe to "own", they are
 //! implicitly shared with the user of the page table (the entity on the other end of that stage of
@@ -63,7 +65,7 @@ pub use page_info::MAX_PAGE_OWNERS;
 pub use page_list::{LockedPageList, PageList};
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
-pub use page_table::{FirstStagePageTable, GuestStagePageTable, PlatformPageTable};
+pub use page_table::{FirstStagePageTable, GuestStagePageTable, PagingMode, PlatformPageTable};
 pub use page_tracking::Error as PageTrackingError;
 pub use page_tracking::Result as PageTrackingResult;
 pub use page_tracking::{HypPageAlloc, PageTracker};
@@ -135,8 +137,9 @@ mod tests {
         let page_tracker = state.page_tracker;
         let mut host_pages = state.host_pages.into_iter().flatten();
         let id = page_tracker.add_active_guest().unwrap();
-        let mut guest_page_table =
-            Sv48x4::new(state.root_pages, id, page_tracker.clone()).expect("creating sv48x4");
+        let guest_page_table: PlatformPageTable<Sv48x4> =
+            PlatformPageTable::new(state.root_pages, id, page_tracker.clone())
+                .expect("creating sv48x4");
 
         let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
@@ -181,8 +184,9 @@ mod tests {
         let page_tracker = state.page_tracker;
         let mut host_pages = state.host_pages.into_iter().flatten();
         let id = page_tracker.add_active_guest().unwrap();
-        let mut guest_page_table =
-            Sv48::new(state.root_pages, id, page_tracker.clone()).expect("creating sv48");
+        let guest_page_table: PlatformPageTable<Sv48> =
+            PlatformPageTable::new(state.root_pages, id, page_tracker.clone())
+                .expect("creating sv48");
 
         let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();

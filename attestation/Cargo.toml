@@ -1,0 +1,14 @@
+[package]
+name = "attestation"
+authors = ["Rivos, Inc."]
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrayvec = { version = "0.7.2", default-features = false }
+const-oid = { version = "0.9.0", features = ["db"] }
+der = { version = "0.6.0", features = ["derive", "oid"] }
+ed25519 = { version = "1.5.2", default-features = false, features = ["pkcs8"] }
+ed25519-dalek = { version = "1.0.1", default-features = false, features = ["u64_backend"] }
+lazy_static = { version = "1.4.0", default-features = false, features = ["spin_no_std"] }
+spki = "0.6.0"

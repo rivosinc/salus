@@ -2,12 +2,11 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use alloc::vec::Vec;
 use arrayvec::ArrayString;
 use core::{alloc::Allocator, fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
 use drivers::{CpuId, CpuInfo, Imsic, ImsicGuestId};
-use riscv_page_tables::{GuestStagePageTable, HwMemRegion, HypPageAlloc};
+use riscv_page_tables::{GuestStagePageTable, HwMemRegion, HypPageAlloc, PageList};
 use riscv_pages::*;
 
 use crate::print_util::*;
@@ -148,7 +147,7 @@ pub struct HostVmLoader<T: GuestStagePageTable, A: Allocator + Clone> {
     initramfs: Option<HwMemRegion>,
     vm: HostVm<T, VmStateInitializing>,
     fdt_pages: FdtPages,
-    zero_pages: Vec<SequentialPages<ConvertedClean>, A>,
+    zero_pages: PageList<Page<ConvertedClean>>,
     guest_ram_base: GuestPhysAddr,
 }
 
@@ -161,7 +160,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         initramfs: Option<HwMemRegion>,
         guest_ram_base: GuestPhysAddr,
         guest_phys_size: u64,
-        mut page_alloc: HypPageAlloc<A>,
+        mut page_alloc: HypPageAlloc,
     ) -> Self {
         // Reserve a contiguous chunk for the host's FDT. We assume it will be no bigger than the
         // size of the hypervisor's FDT and we align it to `T::TOP_LEVEL_ALIGN` to maintain the
@@ -197,10 +196,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
 
         // Now that the hypervisor is done claiming memory, determine the actual size of the host's
         // address space.
-        let ram_size = self
-            .zero_pages
-            .iter()
-            .fold(0, |acc, r| acc + r.length_bytes())
+        let ram_size = self.zero_pages.len() as u64 * PageSize::Size4k as u64
             + fdt_pages.length_bytes()
             + self.kernel.size()
             + self.initramfs.map(|r| r.size()).unwrap_or(0);
@@ -279,14 +275,13 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         // Host guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned block,
         // and because we built the HwMemMap with a minimum region alignment of T::TOP_LEVEL_ALIGN
         // any discontiguous ranges are also guaranteed to be aligned.
-        let mut zero_pages_iter = self.zero_pages.into_iter().flatten();
-
+        //
         // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
         let mut current_gpa = PageAddr::new(self.guest_ram_base).unwrap();
         let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
         self.vm.add_pages(
             current_gpa,
-            zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
+            self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
         );
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
@@ -305,7 +300,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
                 (INITRAMFS_OFFSET - (KERNEL_OFFSET + self.kernel.size())) / PageSize::Size4k as u64;
             self.vm.add_pages(
                 current_gpa,
-                zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
+                self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
             );
             current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
@@ -324,7 +319,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             / PageSize::Size4k as u64;
         self.vm.add_pages(
             current_gpa,
-            zero_pages_iter.by_ref().take(num_pages.try_into().unwrap()),
+            self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
         );
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
@@ -337,7 +332,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             .add_measured_pages(current_gpa, fdt_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
-        self.vm.add_pages(current_gpa, zero_pages_iter);
+        self.vm.add_pages(current_gpa, self.zero_pages);
         self.vm.set_launch_args(
             self.guest_ram_base
                 .checked_increment(KERNEL_OFFSET)

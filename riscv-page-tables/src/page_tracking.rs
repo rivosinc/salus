@@ -5,14 +5,12 @@
 // TODO - move to a riscv-specific mutex implementation when ready.
 use spin::Mutex;
 
-use alloc::vec::Vec;
-use core::alloc::Allocator;
 use page_collections::page_box::PageBox;
 use page_collections::page_vec::PageVec;
 use riscv_pages::*;
 
 use crate::page_info::{PageInfo, PageMap, PageState};
-use crate::{HwMemMap, TlbVersion};
+use crate::{HwMemMap, PageList, TlbVersion};
 
 /// Errors related to managing physical page information.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,10 +80,10 @@ pub struct PageTracker {
 impl PageTracker {
     /// Creates a new PageTracker representing all pages in the system and returns all pages that are
     /// available for the primary host to use, starting at the next `host_alignment`-aligned chunk.
-    pub fn from<A: Allocator>(
-        mut hyp_mem: HypPageAlloc<A>,
+    pub fn from(
+        mut hyp_mem: HypPageAlloc,
         host_alignment: u64,
-    ) -> (Self, Vec<SequentialPages<ConvertedClean>, A>) {
+    ) -> (Self, PageList<Page<ConvertedClean>>) {
         // TODO - hard coded to two pages worth of guests. - really dumb if page size is 1G
         let mut active_guests = PageVec::from(hyp_mem.take_pages_for_host_state(2));
         active_guests.push(PageOwnerId::host());
@@ -104,7 +102,7 @@ impl PageTracker {
             host_alignment,
         );
 
-        let (page_map, host_pages) = hyp_mem.drain();
+        let (page_map, head_addr) = hyp_mem.drain();
 
         let mutex_box = PageBox::new_with(
             Mutex::new(PageTrackerInner {
@@ -115,13 +113,17 @@ impl PageTracker {
             }),
             state_storage_page,
         );
+        let page_tracker = Self {
+            inner: PageBox::leak(mutex_box),
+        };
 
-        (
-            Self {
-                inner: PageBox::leak(mutex_box),
-            },
-            host_pages,
-        )
+        let host_pages = unsafe {
+            // Safe since we trust that HypPageAlloc::drain() properly created a linked-list starting
+            // at head_addr and that all the pages in the list were cleaned.
+            PageList::from_raw_parts(page_tracker.clone(), head_addr)
+        };
+
+        (page_tracker, host_pages)
     }
 
     /// Adds a new guest to the system, giving it the next ID.
@@ -309,83 +311,61 @@ impl PageTracker {
 /// startup for building the host VM and other local data. Once the hypervisor has taken the
 /// pages it needs, `HypPageAlloc` should be converted to the list of remaining free memory
 /// regions to be mapped into the host with `drain()`.
-pub struct HypPageAlloc<A: Allocator> {
-    next_page: SupervisorPageAddr,
+pub struct HypPageAlloc {
+    next_page: Option<SupervisorPageAddr>,
     pages: PageMap,
-    alloc: A,
 }
 
-impl<A: Allocator> HypPageAlloc<A> {
+impl HypPageAlloc {
     /// Creates a new `HypPageAlloc`. The memory map passed in contains information about what
     /// physical memory can be used by the machine.
-    pub fn new(mem_map: HwMemMap, alloc: A) -> Self {
-        // Unwrap here (and below) since we can't continue if there isn't any free memory.
+    pub fn new(mem_map: HwMemMap) -> Self {
         let first_page = mem_map.regions().next().unwrap().base();
-        let page_map = PageMap::build_from(mem_map);
-        let first_avail_page = page_map
-            .iter_from(first_page)
-            .unwrap()
-            .find(|p| p.page.is_free())
-            .unwrap()
-            .addr;
-        Self {
-            next_page: first_avail_page,
-            pages: page_map,
-            alloc,
-        }
+        let mut hyp_pages = Self {
+            next_page: None,
+            pages: PageMap::build_from(mem_map),
+        };
+        hyp_pages.next_page = hyp_pages.next_free_page(first_page);
+        hyp_pages
     }
 
-    /// Takes ownership of the remaining free pages in the system page map and adds them to 'ranges'.
-    /// It also returns the global page info structs as `PageMap`.
-    pub fn drain(mut self) -> (PageMap, Vec<SequentialPages<ConvertedClean>, A>) {
-        let mut ranges = Vec::new_in(self.alloc);
-        while self.pages.get(self.next_page).is_some() {
-            // Find the last page in this contiguous range.
-            let last_page = self
-                .next_page
-                .iter_from()
-                .find(|&a| match self.pages.get(a) {
-                    Some(p) => !p.is_free(),
-                    _ => true,
-                })
+    /// Takes ownership of the remaining free pages, cleaning them and linking them together. Returns
+    /// the global `PageMap` structure and the head of the free page list.
+    fn drain(mut self) -> (PageMap, SupervisorPageAddr) {
+        let head = self.next_page;
+        let mut tail: Option<SupervisorPageAddr> = None;
+        while let Some(next) = self.next_page {
+            let info = self.pages.get_mut(next).unwrap();
+            info.assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
                 .unwrap();
 
-            // Now take ownership.
-            for page in self.next_page.iter_from().take_while(|&a| a != last_page) {
-                self.pages
-                    .get_mut(page)
-                    .unwrap()
-                    .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
-                    .unwrap();
-            }
+            // Safe to create this page as it was previously free and we just took ownership.
+            let page: Page<ConvertedDirty> = unsafe { Page::new(next) };
+            page.clean();
 
-            // Safe to create this range as they were previously free and we just took
-            // ownership.
-            let dirty_range: SequentialPages<ConvertedDirty> = unsafe {
-                // Unwrap ok; pages are always 4kB-aligned.
-                SequentialPages::from_page_range(self.next_page, last_page, PageSize::Size4k)
-                    .unwrap()
-            };
-            ranges.push(dirty_range.clean());
+            // Link ourselves to the previous page.
+            if let Some(tail_addr) = tail {
+                let tail_info = self.pages.get_mut(tail_addr).unwrap();
+                tail_info.link(next).unwrap();
+            }
+            tail = Some(next);
 
             // Skip until the next free page or we reach the end of memory.
-            self.next_page = last_page
-                .iter_from()
-                .find(|&a| match self.pages.get(a) {
-                    Some(p) => p.is_free(),
-                    _ => true,
-                })
-                .unwrap();
+            self.next_page = self.next_free_page(next);
         }
 
-        (self.pages, ranges)
+        (self.pages, head.unwrap())
     }
 
     /// Returns the number of pages remaining in the system. Note that this may include reserved
     /// pages.
     pub fn pages_remaining(&self) -> u64 {
-        // Ok to unwrap because next page must be in range.
-        self.pages.num_after(self.next_page).unwrap() as u64
+        if let Some(addr) = self.next_page {
+            // Ok to unwrap because next page must be in range.
+            self.pages.num_after(addr).unwrap() as u64
+        } else {
+            0
+        }
     }
 
     /// Takes and cleans `count` contiguous Pages with the requested alignment from the system map.
@@ -408,15 +388,15 @@ impl<A: Allocator> HypPageAlloc<A> {
 
         // Find the free page rage and mark it, and any free pages we skipped in between,
         // as hypervisor-owned.
+        let start_page = self.next_page.unwrap();
         let first_page = self
             .pages
-            .iter_from(self.next_page)
-            .unwrap()
-            .find(|p| range_is_free_and_aligned(p.addr))
-            .unwrap()
-            .addr;
+            .iter_from(start_page)
+            .and_then(|mut i| i.find(|p| range_is_free_and_aligned(p.addr)))
+            .map(|p| p.addr)
+            .unwrap();
         let last_page = first_page.checked_add_pages(count as u64).unwrap();
-        for page in self.next_page.iter_from().take_while(|&a| a != last_page) {
+        for page in start_page.iter_from().take_while(|&a| a != last_page) {
             if let Some(page_info) = self.pages.get_mut(page) {
                 if page_info.is_free() {
                     // OK to unwrap as this struct is new and must have space for one owner.
@@ -428,13 +408,7 @@ impl<A: Allocator> HypPageAlloc<A> {
         }
 
         // Move self's next page past these taken pages.
-        self.next_page = self
-            .pages
-            .iter_from(last_page)
-            .unwrap()
-            .find(|p| p.page.is_free())
-            .unwrap()
-            .addr;
+        self.next_page = self.next_free_page(last_page);
 
         let dirty_pages: SequentialPages<ConvertedDirty> = unsafe {
             // It's safe to create a page range of the memory that `self` forfeited ownership of
@@ -467,16 +441,24 @@ impl<A: Allocator> HypPageAlloc<A> {
     pub fn take_pages_for_host_state(&mut self, count: usize) -> SequentialPages<InternalClean> {
         self.take_pages_for_host_state_with_alignment(count, PageSize::Size4k as u64)
     }
+
+    /// Returns the address of the next free page at or after `addr`, or `None` if there are no free
+    /// pages left.
+    fn next_free_page(&self, addr: SupervisorPageAddr) -> Option<SupervisorPageAddr> {
+        self.pages
+            .iter_from(addr)
+            .and_then(|mut i| i.find(|p| p.page.is_free()))
+            .map(|p| p.addr)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::HwMemMapBuilder;
-    use alloc::alloc::Global;
     use riscv_pages::RawAddr;
 
-    fn stub_hyp_mem() -> HypPageAlloc<Global> {
+    fn stub_hyp_mem() -> HypPageAlloc {
         const ONE_MEG: usize = 1024 * 1024;
         const MEM_ALIGN: usize = 2 * ONE_MEG;
         const MEM_SIZE: usize = 256 * ONE_MEG;
@@ -495,16 +477,15 @@ mod tests {
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypPageAlloc::new(hw_map, Global);
+        let hyp_mem = HypPageAlloc::new(hw_map);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
         hyp_mem
     }
 
-    fn stub_page_tracker() -> (PageTracker, Vec<SequentialPages<ConvertedClean>, Global>) {
+    fn stub_page_tracker() -> (PageTracker, PageList<Page<ConvertedClean>>) {
         let hyp_mem = stub_hyp_mem();
-        let (page_tracker, host_mem) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
-        (page_tracker, host_mem)
+        PageTracker::from(hyp_mem, PageSize::Size4k as u64)
     }
 
     #[test]
@@ -547,12 +528,9 @@ mod tests {
     fn hyp_mem_drain() {
         let hyp_mem = stub_hyp_mem();
         let remaining = hyp_mem.pages_remaining();
-        let (_, host_pages) = hyp_mem.drain();
-        assert_eq!(host_pages.len(), 1);
-        assert_eq!(
-            host_pages[0].length_bytes(),
-            remaining * PageSize::Size4k as u64
-        );
+        let (_, host_pages) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
+        assert!(host_pages.len() > 0);
+        assert!((host_pages.len() as u64) < remaining);
     }
 
     #[test]

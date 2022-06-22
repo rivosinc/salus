@@ -17,6 +17,7 @@ pub struct PageList<P: PhysPage> {
     page_tracker: PageTracker,
     head: Option<SupervisorPageAddr>,
     tail: Option<SupervisorPageAddr>,
+    len: usize,
     page_state: PhantomData<P>,
 }
 
@@ -27,6 +28,33 @@ impl<P: PhysPage> PageList<P> {
             page_tracker,
             head: None,
             tail: None,
+            len: 0,
+            page_state: PhantomData,
+        }
+    }
+
+    /// Creates a `PageList` from the head page of an already-constructed list.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that all pages in the list (`head` and the pages linked from it)
+    /// are uniquely owned and are of type `P`.
+    pub(crate) unsafe fn from_raw_parts(
+        page_tracker: PageTracker,
+        head: SupervisorPageAddr,
+    ) -> Self {
+        let mut len = 1;
+        let mut tail = head;
+        while let Some(addr) = page_tracker.linked_page(tail) {
+            len += 1;
+            tail = addr;
+        }
+
+        Self {
+            page_tracker,
+            head: Some(head),
+            tail: Some(tail),
+            len,
             page_state: PhantomData,
         }
     }
@@ -40,6 +68,7 @@ impl<P: PhysPage> PageList<P> {
             self.head = Some(page.addr());
             self.tail = Some(page.addr());
         }
+        self.len += 1;
         Ok(())
     }
 
@@ -51,6 +80,7 @@ impl<P: PhysPage> PageList<P> {
             // List is now empty.
             self.tail = None;
         }
+        self.len -= 1;
         // Safety: This list has unique ownership of the page ever sicne it was pushed.
         Some(unsafe { P::new(addr) })
     }
@@ -58,6 +88,11 @@ impl<P: PhysPage> PageList<P> {
     /// Returns if the list is empty.
     pub fn is_empty(&self) -> bool {
         self.head.is_none()
+    }
+
+    /// Returns the number of pages in the list.
+    pub fn len(&self) -> usize {
+        self.len
     }
 
     /// Returns if the list of pages is contiguous.
@@ -83,7 +118,13 @@ impl<P: PhysPage> Iterator for PageList<P> {
     fn next(&mut self) -> Option<Self::Item> {
         self.pop()
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len(), Some(self.len()))
+    }
 }
+
+impl<P: PhysPage> ExactSizeIterator for PageList<P> {}
 
 impl<P: PhysPage> Drop for PageList<P> {
     fn drop(&mut self) {
@@ -112,7 +153,13 @@ impl<P: ConvertedPhysPage> Iterator for LockedPageList<P> {
     fn next(&mut self) -> Option<Self::Item> {
         self.pop()
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len(), Some(self.len()))
+    }
 }
+
+impl<P: ConvertedPhysPage> ExactSizeIterator for LockedPageList<P> {}
 
 impl<P: ConvertedPhysPage> Drop for LockedPageList<P> {
     fn drop(&mut self) {

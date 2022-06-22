@@ -81,7 +81,6 @@ extern crate std;
 
 #[cfg(test)]
 mod tests {
-    use alloc::alloc::Global;
     use alloc::vec::Vec;
     use riscv_pages::*;
     use std::{mem, slice};
@@ -95,7 +94,7 @@ mod tests {
         root_pages: SequentialPages<InternalClean>,
         pte_pages: SequentialPages<InternalClean>,
         page_tracker: PageTracker,
-        host_pages: Vec<SequentialPages<ConvertedClean>, Global>,
+        host_pages: PageList<Page<ConvertedClean>>,
     }
 
     fn stub_sys_memory() -> StubState {
@@ -117,7 +116,7 @@ mod tests {
                 .unwrap()
                 .build()
         };
-        let mut hyp_mem = HypPageAlloc::new(hw_map, Global);
+        let mut hyp_mem = HypPageAlloc::new(hw_map);
         let root_pages =
             hyp_mem.take_pages_for_host_state_with_alignment(4, Sv48x4::TOP_LEVEL_ALIGN);
         let pte_pages = hyp_mem.take_pages_for_host_state(3);
@@ -137,7 +136,7 @@ mod tests {
         let state = stub_sys_memory();
 
         let page_tracker = state.page_tracker;
-        let mut host_pages = state.host_pages.into_iter().flatten();
+        let mut host_pages = state.host_pages;
         let id = page_tracker.add_active_guest().unwrap();
         let guest_page_table: PlatformPageTable<Sv48x4> =
             PlatformPageTable::new(state.root_pages, id, page_tracker.clone())
@@ -185,7 +184,7 @@ mod tests {
         let state = stub_sys_memory();
 
         let page_tracker = state.page_tracker;
-        let mut host_pages = state.host_pages.into_iter().flatten();
+        let mut host_pages = state.host_pages;
         let id = page_tracker.add_active_guest().unwrap();
         let guest_page_table: PlatformPageTable<Sv48> =
             PlatformPageTable::new(state.root_pages, id, page_tracker.clone())

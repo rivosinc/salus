@@ -323,7 +323,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.
-    let hyp_mem = HypPageAlloc::new(mem_map, &heap);
+    let hyp_mem = HypPageAlloc::new(mem_map);
 
     // Now load the host VM.
     let host = HostVmLoader::new(

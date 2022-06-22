@@ -203,7 +203,14 @@ impl<S: State> Iterator for SeqPageIter<S> {
         // and aligned.
         unsafe { Some(Page::new_with_size(addr, self.pages.page_size)) }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let count = self.pages.count as usize;
+        (count, Some(count))
+    }
 }
+
+impl<S: State> ExactSizeIterator for SeqPageIter<S> {}
 
 impl<S: State> IntoIterator for SequentialPages<S> {
     type Item = Page<S>;

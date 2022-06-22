@@ -124,6 +124,7 @@ impl PageInfo {
     }
 
     /// Returns if the page is marked reserved.
+    #[allow(dead_code)]
     pub fn is_reserved(&self) -> bool {
         matches!(self.state, PageState::Reserved)
     }

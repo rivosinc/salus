@@ -2,11 +2,12 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use alloc::vec::Vec;
-use core::{alloc::Allocator, mem, slice};
+use core::{mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
-use riscv_page_tables::{GuestStagePageTable, HypPageAlloc, PageTracker, PlatformPageTable};
+use riscv_page_tables::{
+    GuestStagePageTable, HypPageAlloc, PageList, PageTracker, PlatformPageTable,
+};
 use riscv_pages::*;
 use riscv_regs::GprIndex;
 use s_mode_utils::abort::abort;
@@ -857,10 +858,10 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     /// Creates an initializing host VM with an expected guest physical address space size of
     /// `host_gpa_size` from the hypervisor page allocator. Returns the remaining free pages
     /// from the allocator, along with the newly constructed `HostVm`.
-    pub fn from_hyp_mem<A: Allocator>(
-        mut hyp_mem: HypPageAlloc<A>,
+    pub fn from_hyp_mem(
+        mut hyp_mem: HypPageAlloc,
         host_gpa_size: u64,
-    ) -> (Vec<SequentialPages<ConvertedClean>, A>, Self) {
+    ) -> (PageList<Page<ConvertedClean>>, Self) {
         let root_table_pages =
             hyp_mem.take_pages_for_host_state_with_alignment(4, T::TOP_LEVEL_ALIGN);
         let num_pte_pages = T::max_pte_pages(host_gpa_size / PageSize::Size4k as u64);
@@ -914,11 +915,17 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     /// that the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
     pub fn add_measured_pages<I, S, M>(&mut self, to_addr: GuestPageAddr, pages: I)
     where
-        I: Iterator<Item = Page<S>>,
+        I: ExactSizeIterator<Item = Page<S>>,
         S: Assignable<M>,
         M: MeasureRequirement,
     {
         let page_tracker = self.inner.vm_pages.page_tracker();
+        // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
+        let mapper = self
+            .inner
+            .vm_pages
+            .map_pages(to_addr, pages.len() as u64)
+            .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
             assert_eq!(
@@ -928,8 +935,6 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
-            // TODO: Use an ExactSizeIterator so we don't have to create a mapper for every page.
-            let mapper = self.inner.vm_pages.map_pages(vm_addr, 1).unwrap();
             mapper.map_page_with_measurement(vm_addr, mappable).unwrap();
         }
     }
@@ -938,10 +943,16 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     /// the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
     pub fn add_pages<I, P>(&mut self, to_addr: GuestPageAddr, pages: I)
     where
-        I: Iterator<Item = P>,
+        I: ExactSizeIterator<Item = P>,
         P: AssignablePhysPage<MeasureOptional>,
     {
         let page_tracker = self.inner.vm_pages.page_tracker();
+        // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
+        let mapper = self
+            .inner
+            .vm_pages
+            .map_pages(to_addr, pages.len() as u64)
+            .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
             if P::mem_type() == MemType::Ram {
@@ -954,8 +965,6 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
-            // TODO: Use an ExactSizeIterator so we don't have to create a mapper for every page.
-            let mapper = self.inner.vm_pages.map_pages(vm_addr, 1).unwrap();
             mapper.map_page(vm_addr, mappable).unwrap();
         }
     }

@@ -874,16 +874,10 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * MAX_CPUS as u64);
         let vcpus_pages = hyp_mem.take_pages_for_host_state(num_vcpu_pages as usize);
 
-        // Pages for the array of free page-table pages.
-        let num_pte_vec_pages = PageSize::Size4k
-            .round_up(num_pte_pages * mem::size_of::<Page<InternalClean>>() as u64)
-            / (PageSize::Size4k as u64);
-        let pte_vec_pages = hyp_mem.take_pages_for_host_state(num_pte_vec_pages as usize);
-
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root =
             PlatformPageTable::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
-        let vm_pages = VmPages::new(root, pte_vec_pages, 0);
+        let vm_pages = VmPages::new(root, 0);
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();
         }

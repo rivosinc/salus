@@ -6,7 +6,6 @@ use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
-use page_collections::page_vec::PageVec;
 use riscv_page_tables::{
     tlb, GuestStagePageTable, LockedPageList, PageList, PageTableMapper, PageTracker,
     PlatformPageTable, TlbVersion, MAX_PAGE_OWNERS,
@@ -23,7 +22,6 @@ use crate::vm_id::VmId;
 #[derive(Debug)]
 pub enum Error {
     GuestId(riscv_page_tables::PageTrackingError),
-    InsufficientPtePageStorage,
     Paging(riscv_page_tables::PageTableError),
     PageFaultHandling, // TODO - individual errors from sv48x4
     NestingTooDeep,
@@ -40,12 +38,9 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// The minimum number of pages required to track free page-table pages.
-pub const MIN_PTE_VEC_PAGES: u64 = 1;
-
-/// The base number of state pages required to be donated for creating a new VM: pages for the
-/// page-table page vector, and one page to hold the VM state itself.
-pub const TVM_STATE_PAGES: u64 = MIN_PTE_VEC_PAGES + 1;
+/// The base number of state pages required to be donated for creating a new VM. For now, we just need
+/// one page to hold the VM state itself.
+pub const TVM_STATE_PAGES: u64 = 1;
 
 global_asm!(include_str!("guest_mem.S"));
 
@@ -366,7 +361,7 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     nesting: usize,
     root: PlatformPageTable<T>,
     measurement: Mutex<Sha256Measure>,
-    pte_pages: Mutex<PageVec<Page<InternalClean>>>,
+    pte_pages: Mutex<PageList<Page<InternalClean>>>,
     phantom: PhantomData<S>,
 }
 
@@ -511,17 +506,13 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
         let guest_root =
             PlatformPageTable::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
-
-        let mut state_pages = self.assign_state_pages_for(state_pages, id);
-        let state_page = state_pages.next().unwrap();
-        let pte_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
-
+        let state_page = self.assign_state_pages_for(state_pages, id).next().unwrap();
         let vcpu_pages =
             SequentialPages::from_pages(self.assign_state_pages_for(vcpu_pages, id)).unwrap();
 
         Ok((
             Vm::new(
-                VmPages::new(guest_root, pte_vec_pages, self.nesting + 1),
+                VmPages::new(guest_root, self.nesting + 1),
                 VmCpus::new(id, vcpu_pages).unwrap(),
             ),
             state_page,
@@ -543,7 +534,8 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
                 .page_tracker
                 .assign_page_for_internal_state(page.clean(), new_owner)
                 .unwrap();
-            to.add_pte_page(assigned)?;
+            // Unwrap ok, pages must be 4kB.
+            to.add_pte_page(assigned).unwrap();
         }
         Ok(())
     }
@@ -597,21 +589,17 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 }
 
 impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
-    /// Creates a new `VmPages` from the given root page table, using `pte_vec_page` for a vector
-    /// of page-table pages.
-    pub fn new(
-        root: PlatformPageTable<T>,
-        pte_vec_pages: SequentialPages<InternalClean>,
-        nesting: usize,
-    ) -> Self {
+    /// Creates a new `VmPages` from the given root page table.
+    pub fn new(root: PlatformPageTable<T>, nesting: usize) -> Self {
+        let page_tracker = root.page_tracker();
         Self {
             page_owner_id: root.page_owner_id(),
-            page_tracker: root.page_tracker(),
+            page_tracker: page_tracker.clone(),
             tlb_tracker: TlbTracker::new(),
             nesting,
             root,
             measurement: Mutex::new(Sha256Measure::new()),
-            pte_pages: Mutex::new(PageVec::from(pte_vec_pages)),
+            pte_pages: Mutex::new(PageList::new(page_tracker)),
             phantom: PhantomData,
         }
     }
@@ -623,10 +611,8 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
             return Err(Error::UnsupportedPageSize(page.size()));
         }
         let mut pte_pages = self.pte_pages.lock();
-        pte_pages
-            .try_reserve(1)
-            .map_err(|_| Error::InsufficientPtePageStorage)?;
-        pte_pages.push(page);
+        // Unwrap ok, we uniquely own the page so it can't be on another list.
+        pte_pages.push(page).unwrap();
         Ok(())
     }
 

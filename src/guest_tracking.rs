@@ -114,8 +114,9 @@ impl<T: GuestStagePageTable> Clone for GuestState<T> {
 impl<T: GuestStagePageTable> GuestState<T> {
     /// Creates a new initializing `GuestState` from `vm`, using `page` as storage.
     pub fn new(vm: Vm<T, VmStateInitializing>, page: Page<InternalClean>) -> Self {
+        let page_tracker = vm.page_tracker();
         Self {
-            inner: PageArc::new_with(RwLock::new(GuestStateInner::Init(vm)), page),
+            inner: PageArc::new_with(RwLock::new(GuestStateInner::Init(vm)), page, page_tracker),
         }
     }
 

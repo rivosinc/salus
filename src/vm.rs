@@ -101,6 +101,11 @@ impl<T: GuestStagePageTable, S> Vm<T, S> {
         self.vm_pages.page_owner_id()
     }
 
+    /// Returns the `PageTracker` singleton.
+    pub fn page_tracker(&self) -> PageTracker {
+        self.vm_pages.page_tracker()
+    }
+
     /// Convenience function to turn a raw u64 from an SBI call to a `GuestPageAddr`.
     fn guest_addr_from_raw(&self, guest_addr: u64) -> sbi::Result<GuestPageAddr> {
         PageAddr::new(RawAddr::guest(guest_addr, self.page_owner_id()))

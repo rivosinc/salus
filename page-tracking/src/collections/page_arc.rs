@@ -8,38 +8,40 @@ use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use riscv_pages::{InternalClean, Page, PageSize, PhysPage};
+use riscv_pages::{InternalClean, InternalDirty, Page, PageAddr, PageSize, PhysPage, RawAddr};
 
 use crate::collections::PageBox;
+use crate::PageTracker;
 
 #[repr(C)]
 struct PageArcInner<T> {
     data: T,
     rc: AtomicUsize,
     page_size: PageSize,
+    page_tracker: PageTracker,
 }
 
 /// A `PageArc` is a simplified `Arc`-like container, using a `Page` as the backing store for
-/// a reference-counted piece of data. Unlike `Arc`, `PageArc` does not support weak references
-/// and the backing `Page` is *not* automatically freed when the last reference to the `PageArc`
-/// is dropped. Instead, the user must first convert the `PageArc` into a uniquely-owned `PageBox`
-/// and then reclaim the page with `PageBox::to_page()` or `PageBox::into_inner()`.
+/// a reference-counted piece of data. Unlike `Arc`, `PageArc` does not support weak references.
+///
+/// The backing `Page` is automatically released back to the previous owner using `PageTracker` when
+/// the last reference to the `PageArc` is dropped. The user may also convert the `PageArc` into a
+/// uniquely-owned `PageBox`.
 #[allow(clippy::derive_partial_eq_without_eq)] // Silence buggy clippy warning.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PageArc<T>(NonNull<PageArcInner<T>>);
 
 impl<T> PageArc<T> {
-    /// Creates a `PageArc` that wraps the given data using `page` as the backing store.
-    /// To avoid leaking the page, the returned `PageArc` must have its page reclaimed by first
-    /// turning it into a uniquely-owned `PageBox` with `try_unwrap()` and then consuming the
-    /// `PageBox` with `PageBox::to_page()`.
-    pub fn new_with(data: T, page: Page<InternalClean>) -> Self {
+    /// Creates a `PageArc` that wraps the given data using `page` as the backing store. The page is
+    /// released back to the previous owner when the last reference is dropped using `page_tracker`.
+    pub fn new_with(data: T, page: Page<InternalClean>, page_tracker: PageTracker) -> Self {
         let ptr = page.addr().bits() as *mut PageArcInner<T>;
         assert!(!ptr.is_null()); // Explicitly ban pages at zero address.
         let inner = PageArcInner {
             data,
             rc: AtomicUsize::new(1),
             page_size: page.size(),
+            page_tracker,
         };
         assert!(core::mem::size_of::<PageArcInner<T>>() <= page.size() as usize);
         unsafe {
@@ -65,9 +67,11 @@ impl<T> PageArc<T> {
         this.inner().rc.load(Ordering::Acquire);
 
         let page_size = this.inner().page_size;
+        let page_tracker = this.inner().page_tracker.clone();
         // Safety: PageArcInner is repr(C) with data as the first field, therefore a pointer to data
         // is a page-aligned and properly initialized pointer to T.
-        let boxed = unsafe { PageBox::from_raw(Self::as_ptr(&this) as *mut T, page_size) };
+        let boxed =
+            unsafe { PageBox::from_raw(Self::as_ptr(&this) as *mut T, page_size, page_tracker) };
         core::mem::forget(this);
         Ok(boxed)
     }
@@ -118,6 +122,19 @@ impl<T> Drop for PageArc<T> {
             let ptr = Self::as_ptr(self) as *mut T;
             core::ptr::drop_in_place(ptr);
         }
+
+        let page_tracker = self.inner().page_tracker.clone();
+        let page_size = self.inner().page_size;
+        // Safe because we now have unique ownership of the page this PageArc was constructed with.
+        let page: Page<InternalDirty> = unsafe {
+            Page::new_with_size(
+                PageAddr::new(RawAddr::supervisor(self.0.as_ptr() as u64)).unwrap(),
+                page_size,
+            )
+        };
+
+        // Unwrap ok: we have unique ownership of the page so we must be able to release it.
+        page_tracker.release_page(page).unwrap();
     }
 }
 
@@ -161,34 +178,47 @@ unsafe impl<T> Sync for PageArc<T> where T: Sync + Send {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
-    use riscv_pages::{PageAddr, RawAddr};
+    use crate::TlbVersion;
+    use riscv_pages::*;
 
-    fn stub_page() -> Page<InternalClean> {
-        let mem = vec![0u8; PageSize::Size4k as usize * 2];
-        let aligned_addr = PageSize::Size4k.round_up(mem.as_ptr() as u64);
-        // This is not safe, but it's only for a test and mem isn't touched until backing_page is
-        // dropped.
-        let backing_page =
-            unsafe { Page::new(PageAddr::new(RawAddr::supervisor(aligned_addr)).unwrap()) };
-        core::mem::forget(mem);
-        backing_page
+    fn stub_page() -> (PageTracker, Page<InternalClean>) {
+        let (page_tracker, mut pages) = PageTracker::new_in_test();
+        let assigned_page = pages
+            .by_ref()
+            .take(1)
+            .map(|p| {
+                page_tracker
+                    .assign_page_for_internal_state(p, PageOwnerId::host())
+                    .unwrap()
+            })
+            .next()
+            .unwrap();
+        (page_tracker, assigned_page)
     }
 
     #[test]
     fn lifecycle() {
-        let arc = PageArc::new_with([5u8; 128], stub_page());
-        assert_eq!(PageArc::ref_count(&arc), 1);
+        let (page_tracker, backing_page) = stub_page();
+        let addr = backing_page.addr();
         {
-            let copy = arc.clone();
-            assert_eq!(PageArc::ref_count(&copy), 2);
-            assert_eq!(PageArc::ref_count(&arc), 2);
+            let arc = PageArc::new_with([5u8; 128], backing_page, page_tracker.clone());
+            assert_eq!(PageArc::ref_count(&arc), 1);
+            {
+                let copy = arc.clone();
+                assert_eq!(PageArc::ref_count(&copy), 2);
+                assert_eq!(PageArc::ref_count(&arc), 2);
+            }
+            assert_eq!(PageArc::ref_count(&arc), 1);
         }
-        assert_eq!(PageArc::ref_count(&arc), 1);
 
-        let pb = PageArc::try_unwrap(arc).unwrap();
-        let (vals, _) = pb.into_inner();
-        assert_eq!(vals, [5u8; 128]);
+        // Should go back to hypervisor-owned after the PageArc was dropped.
+        assert!(page_tracker
+            .get_converted_page::<Page<ConvertedDirty>>(
+                addr,
+                PageOwnerId::hypervisor(),
+                TlbVersion::new()
+            )
+            .is_ok());
     }
 
     #[derive(Debug)]
@@ -204,13 +234,15 @@ mod tests {
 
     #[test]
     fn destructor() {
+        let (page_tracker, backing_page) = stub_page();
         let mut destroyed = false;
         {
             let arc = PageArc::new_with(
                 ArcTest {
                     flag: &mut destroyed,
                 },
-                stub_page(),
+                backing_page,
+                page_tracker.clone(),
             );
             assert_eq!(PageArc::ref_count(&arc), 1);
             let pb = PageArc::try_unwrap(arc).unwrap();

@@ -24,5 +24,5 @@ pub mod page_box;
 pub mod page_vec;
 
 pub use page_arc::PageArc;
-pub use page_box::PageBox;
+pub use page_box::{PageBox, StaticPageRef};
 pub use page_vec::{PageVec, RawPageVec};

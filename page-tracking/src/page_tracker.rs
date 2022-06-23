@@ -6,7 +6,7 @@
 use riscv_pages::*;
 use spin::Mutex;
 
-use crate::collections::{PageBox, RawPageVec};
+use crate::collections::{RawPageVec, StaticPageRef};
 use crate::page_info::{PageInfo, PageMap, PageState};
 use crate::{HwMemMap, PageList, TlbVersion};
 
@@ -74,7 +74,7 @@ impl PageTrackerInner {
 /// backing page list. That page list is needed for the lifetime of the system.
 #[derive(Clone)]
 pub struct PageTracker {
-    inner: &'static Mutex<PageTrackerInner>,
+    inner: StaticPageRef<Mutex<PageTrackerInner>>,
 }
 
 impl PageTracker {
@@ -104,7 +104,7 @@ impl PageTracker {
 
         let (page_map, head_addr) = hyp_mem.drain();
 
-        let mutex_box = PageBox::new_with(
+        let inner = StaticPageRef::new_with(
             Mutex::new(PageTrackerInner {
                 // Start at two for owners as host and hypervisor reserve 0 and 1.
                 next_owner_id: 2,
@@ -113,9 +113,7 @@ impl PageTracker {
             }),
             state_storage_page,
         );
-        let page_tracker = Self {
-            inner: PageBox::leak(mutex_box),
-        };
+        let page_tracker = Self { inner };
 
         let host_pages = unsafe {
             // Safe since we trust that HypPageAlloc::drain() properly created a linked-list starting

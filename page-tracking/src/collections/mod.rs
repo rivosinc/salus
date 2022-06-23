@@ -25,4 +25,4 @@ pub mod page_vec;
 
 pub use page_arc::PageArc;
 pub use page_box::PageBox;
-pub use page_vec::PageVec;
+pub use page_vec::{PageVec, RawPageVec};

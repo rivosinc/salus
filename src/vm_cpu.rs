@@ -7,7 +7,7 @@ use core::{mem::size_of, ops::Deref, ops::DerefMut};
 use drivers::{CpuId, CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
-use page_tracking::TlbVersion;
+use page_tracking::{PageTracker, TlbVersion};
 use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::{GuestPhysAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages};
 use riscv_regs::{hstatus, scounteren, sstatus};
@@ -644,12 +644,16 @@ pub struct VmCpus {
 
 impl VmCpus {
     /// Creates a new vCPU tracking structure backed by `pages`.
-    pub fn new(guest_id: PageOwnerId, pages: SequentialPages<InternalClean>) -> Result<Self> {
+    pub fn new(
+        guest_id: PageOwnerId,
+        pages: SequentialPages<InternalClean>,
+        page_tracker: PageTracker,
+    ) -> Result<Self> {
         let num_vcpus = pages.length_bytes() / VM_CPU_BYTES;
         if num_vcpus == 0 {
             return Err(Error::InsufficientVmCpuStorage);
         }
-        let mut inner = PageVec::from(pages);
+        let mut inner = PageVec::new(pages, page_tracker);
         for _ in 0..num_vcpus {
             let entry = VmCpusInner {
                 status: RwLock::new(VmCpuStatus::NotPresent),

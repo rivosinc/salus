@@ -155,7 +155,7 @@ impl<T: GuestStagePageTable> Guests<T> {
     /// Creates a new `Guests` using `vec_pages` as storage.
     pub fn new(vec_pages: SequentialPages<InternalClean>, page_tracker: PageTracker) -> Self {
         Self {
-            guests: Mutex::new(PageVec::from(vec_pages)),
+            guests: Mutex::new(PageVec::new(vec_pages, page_tracker.clone())),
             page_tracker,
         }
     }

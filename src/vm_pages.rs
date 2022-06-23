@@ -515,7 +515,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         Ok((
             Vm::new(
                 VmPages::new(guest_root, self.nesting + 1),
-                VmCpus::new(id, vcpu_pages).unwrap(),
+                VmCpus::new(id, vcpu_pages, self.page_tracker.clone()).unwrap(),
             ),
             state_page,
         ))

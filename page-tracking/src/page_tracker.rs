@@ -6,7 +6,7 @@
 use riscv_pages::*;
 use spin::Mutex;
 
-use crate::collections::{PageBox, PageVec};
+use crate::collections::{PageBox, RawPageVec};
 use crate::page_info::{PageInfo, PageMap, PageState};
 use crate::{HwMemMap, PageList, TlbVersion};
 
@@ -49,10 +49,12 @@ pub type Result<T> = core::result::Result<T, Error>;
 // Inner struct that is wrapped in a mutex by `PageTracker`.
 struct PageTrackerInner {
     next_owner_id: u64,
-    active_guests: PageVec<PageOwnerId>,
+    active_guests: RawPageVec<PageOwnerId>,
     pages: PageMap,
 }
 
+// TODO: Release pages from a VM explicitly upon destruction so that we don't have to prune the exited
+// owners from a PageInfo every time we look it up.
 impl PageTrackerInner {
     fn get_mut(&mut self, addr: SupervisorPageAddr) -> Result<&mut PageInfo> {
         let page = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
@@ -83,7 +85,7 @@ impl PageTracker {
         host_alignment: u64,
     ) -> (Self, PageList<Page<ConvertedClean>>) {
         // TODO - hard coded to two pages worth of guests. - really dumb if page size is 1G
-        let mut active_guests = PageVec::from(hyp_mem.take_pages_for_host_state(2));
+        let mut active_guests = RawPageVec::from(hyp_mem.take_pages_for_host_state(2));
         active_guests.push(PageOwnerId::host());
 
         let state_storage_page = hyp_mem
@@ -211,8 +213,14 @@ impl PageTracker {
         Ok(unsafe { Page::new_with_size(page.addr(), page.size()) })
     }
 
-    // TODO: Explicit release of pages back to the previous owner. Currently all releasing is done
-    // lazily.
+    /// Relases `page` back to its previous owner.
+    pub fn release_page<P: PhysPage>(&self, page: P) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        // Don't lazily clean up exited owners since we're releasing ownership here exclusively.
+        let info = page_tracker.pages.get_mut(page.addr()).unwrap();
+        info.release()?;
+        Ok(())
+    }
 
     /// Marks the invalidated page as having started conversion at `tlb_version`.
     pub fn convert_page<P: InvalidatedPhysPage>(

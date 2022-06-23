@@ -6,7 +6,7 @@ use arrayvec::ArrayVec;
 use core::num::NonZeroU64;
 use riscv_pages::*;
 
-use crate::collections::PageVec;
+use crate::collections::RawPageVec;
 use crate::{
     HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, PageTrackingResult, TlbVersion,
 };
@@ -320,7 +320,7 @@ struct SparseMapEntry {
 
 /// Keeps information for all physical pages in the system.
 pub struct PageMap {
-    pages: PageVec<PageInfo>,
+    pages: RawPageVec<PageInfo>,
     sparse_map: ArrayVec<SparseMapEntry, MAX_SPARSE_MAP_ENTRIES>,
 }
 
@@ -349,7 +349,7 @@ impl PageMap {
             SequentialPages::from_mem_range(page_map_base, PageSize::Size4k, page_map_pages)
                 .unwrap()
         };
-        let struct_pages = PageVec::from(seq_pages.clean());
+        let struct_pages = RawPageVec::from(seq_pages.clean());
 
         // Reserve the memory consumed by the pagemap itself.
         mem_map
@@ -366,7 +366,7 @@ impl PageMap {
     }
 
     /// Constructs an empty `PageMap` from an existing vector of `PageInfo` structs.
-    fn new(pages: PageVec<PageInfo>) -> Self {
+    fn new(pages: RawPageVec<PageInfo>) -> Self {
         Self {
             pages,
             sparse_map: ArrayVec::new(),
@@ -518,7 +518,7 @@ mod tests {
     use crate::HwMemMapBuilder;
     use riscv_pages::{Page, PageAddr, PhysPage, RawAddr, SequentialPages};
 
-    fn stub_page_vec() -> PageVec<PageInfo> {
+    fn stub_page_vec() -> RawPageVec<PageInfo> {
         let backing_mem = vec![0u8; 8192];
         let aligned_pointer = unsafe {
             // Not safe - just a test
@@ -532,7 +532,7 @@ mod tests {
             // will live until the test exits.
             Page::new(addr)
         };
-        PageVec::from(SequentialPages::from(page))
+        RawPageVec::from(SequentialPages::from(page))
     }
 
     #[test]

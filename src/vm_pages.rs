@@ -6,9 +6,11 @@ use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
+use page_tracking::{
+    LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
+};
 use riscv_page_tables::{
-    tlb, GuestStagePageTable, LockedPageList, PageList, PageTableMapper, PageTracker,
-    PlatformPageTable, TlbVersion, MAX_PAGE_OWNERS,
+    tlb, GuestStagePageTable, PageTableError, PageTableMapper, PlatformPageTable,
 };
 use riscv_pages::*;
 use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
@@ -21,8 +23,8 @@ use crate::vm_id::VmId;
 
 #[derive(Debug)]
 pub enum Error {
-    GuestId(riscv_page_tables::PageTrackingError),
-    Paging(riscv_page_tables::PageTableError),
+    GuestId(PageTrackingError),
+    Paging(PageTableError),
     PageFaultHandling, // TODO - individual errors from sv48x4
     NestingTooDeep,
     // Page table root must be aligned to 16k to be used for sv48x4 mappings

@@ -6,8 +6,7 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use riscv_pages::{ConvertedPhysPage, PhysPage, SupervisorPageAddr};
 
-use crate::page_tracking::PageTracker;
-use crate::PageTrackingResult;
+use crate::{PageTracker, PageTrackingResult};
 
 /// A linked list of exclusively-owned `PhysPages` created using links in the array of `PageInfo`
 /// structs. This list can be used to pass around a list of non-contiguous pages without having
@@ -183,5 +182,37 @@ impl<P: ConvertedPhysPage> Deref for LockedPageList<P> {
 impl<P: ConvertedPhysPage> DerefMut for LockedPageList<P> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riscv_pages::*;
+
+    #[test]
+    fn page_list() {
+        let (page_tracker, mut pages) = PageTracker::new_in_test();
+
+        let first_page = pages.next().unwrap();
+        let first_page_addr = first_page.addr();
+        {
+            let mut list = PageList::new(page_tracker.clone());
+            list.push(first_page).unwrap();
+            for _ in 0..5 {
+                list.push(pages.next().unwrap()).unwrap();
+            }
+            // Not safe -- just a test.
+            let already_linked: Page<ConvertedClean> = unsafe { Page::new(first_page_addr) };
+            assert!(list.push(already_linked).is_err());
+        }
+
+        let mut new_list = PageList::new(page_tracker.clone());
+        for _ in 0..5 {
+            new_list.push(pages.next().unwrap()).unwrap();
+        }
+        // Not safe -- just a test.
+        let was_linked: Page<ConvertedClean> = unsafe { Page::new(first_page_addr) };
+        new_list.push(was_linked).unwrap();
     }
 }

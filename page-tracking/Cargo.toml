@@ -1,5 +1,5 @@
 [package]
-name = "page_collections"
+name = "page_tracking"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +7,8 @@ edition = "2021"
 
 [dependencies]
 riscv_pages = { path = "../riscv-pages" }
+spin = "*"
+
+[dependencies.arrayvec]
+version = "0.7.2"
+default-features = false

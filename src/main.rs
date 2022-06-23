@@ -35,6 +35,7 @@ use device_tree::{DeviceTree, Fdt};
 use drivers::{CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
+use page_tracking::*;
 use print_util::*;
 use riscv_page_tables::*;
 use riscv_pages::*;

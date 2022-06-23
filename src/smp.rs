@@ -5,7 +5,7 @@
 use core::arch::asm;
 use core::cell::{RefCell, RefMut};
 use drivers::{CpuId, CpuInfo, Imsic};
-use riscv_page_tables::{HwMemMap, HwMemRegionType, HwReservedMemType};
+use page_tracking::{HwMemMap, HwMemRegionType, HwReservedMemType};
 use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
 use riscv_regs::{sstatus, ReadWriteable, CSR};
 use sbi::{SbiMessage, StateFunction};

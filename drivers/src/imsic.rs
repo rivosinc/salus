@@ -5,7 +5,7 @@
 use arrayvec::{ArrayString, ArrayVec};
 use core::{alloc::Allocator, fmt, marker::PhantomData};
 use device_tree::{DeviceTree, DeviceTreeResult};
-use riscv_page_tables::HwMemMap;
+use page_tracking::HwMemMap;
 use riscv_pages::*;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use riscv_regs::Readable;

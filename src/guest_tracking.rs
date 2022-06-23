@@ -4,9 +4,9 @@
 
 use core::marker::PhantomData;
 use core::ops::Deref;
-use page_collections::page_arc::PageArc;
-use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, PageTracker};
+use page_tracking::collections::{PageArc, PageVec};
+use page_tracking::PageTracker;
+use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::{InternalClean, Page, PageOwnerId, SequentialPages};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 

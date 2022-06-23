@@ -3,13 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::marker::PhantomData;
+use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
 use riscv_pages::*;
 use spin::Mutex;
 
-use crate::page_list::{LockedPageList, PageList};
-use crate::page_tracking::PageTracker;
 use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
-use crate::TlbVersion;
 
 pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 

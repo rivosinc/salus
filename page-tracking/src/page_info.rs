@@ -4,9 +4,9 @@
 
 use arrayvec::ArrayVec;
 use core::num::NonZeroU64;
-use page_collections::page_vec::PageVec;
 use riscv_pages::*;
 
+use crate::collections::PageVec;
 use crate::{
     HwMemMap, HwMemRegionType, HwReservedMemType, PageTrackingError, PageTrackingResult, TlbVersion,
 };

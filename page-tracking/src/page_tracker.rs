@@ -3,12 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // TODO - move to a riscv-specific mutex implementation when ready.
+use riscv_pages::*;
 use spin::Mutex;
 
-use page_collections::page_box::PageBox;
-use page_collections::page_vec::PageVec;
-use riscv_pages::*;
-
+use crate::collections::{PageBox, PageVec};
 use crate::page_info::{PageInfo, PageMap, PageState};
 use crate::{HwMemMap, PageList, TlbVersion};
 
@@ -126,6 +124,36 @@ impl PageTracker {
         (page_tracker, host_pages)
     }
 
+    /// Creates a `PageTracker` and a list of the pages it contains for use in test environments.
+    #[cfg(test)]
+    pub(crate) fn new_in_test() -> (Self, PageList<Page<ConvertedClean>>) {
+        use crate::HwMemMapBuilder;
+
+        const ONE_MEG: usize = 1024 * 1024;
+        const MEM_ALIGN: usize = 2 * ONE_MEG;
+        const MEM_SIZE: usize = 256 * ONE_MEG;
+        let backing_mem = vec![0u8; MEM_SIZE + MEM_ALIGN];
+        let aligned_pointer = unsafe {
+            // Not safe - just a test
+            backing_mem
+                .as_ptr()
+                .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
+        };
+        let start_pa = RawAddr::supervisor(aligned_pointer as u64);
+        let hw_map = unsafe {
+            // Not safe - just a test
+            HwMemMapBuilder::new(PageSize::Size4k as u64)
+                .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
+                .unwrap()
+                .build()
+        };
+        let hyp_mem = HypPageAlloc::new(hw_map);
+        let (page_tracker, host_pages) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
+        // Leak the backing ram so it doesn't get freed
+        std::mem::forget(backing_mem);
+        (page_tracker, host_pages)
+    }
+
     /// Adds a new guest to the system, giving it the next ID.
     pub fn add_active_guest(&self) -> Result<PageOwnerId> {
         let mut page_tracker = self.inner.lock();
@@ -210,7 +238,7 @@ impl PageTracker {
     /// Acquires an exclusive reference to the Converted page at `addr` if it's unassigned and owned
     /// by `owner`. Completes conversion if the page was Converting at a TLB version older than
     /// `tlb_version`.
-    pub(crate) fn get_converted_page<P: ConvertedPhysPage>(
+    pub fn get_converted_page<P: ConvertedPhysPage>(
         &self,
         addr: SupervisorPageAddr,
         owner: PageOwnerId,
@@ -241,7 +269,7 @@ impl PageTracker {
     }
 
     /// Returns true if and only if `addr` is a "Mapped" page owned by `owner` with type `mem_type`.
-    pub(crate) fn is_mapped_page(
+    pub fn is_mapped_page(
         &self,
         addr: SupervisorPageAddr,
         owner: PageOwnerId,
@@ -259,7 +287,7 @@ impl PageTracker {
 
     /// Returns true if and only if `addr` is a page owned by `owner` with type `mem_type` and
     /// was converted at a TLB version older than `tlb_version`.
-    pub(crate) fn is_converted_page(
+    pub fn is_converted_page(
         &self,
         addr: SupervisorPageAddr,
         owner: PageOwnerId,

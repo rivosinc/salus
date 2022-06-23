@@ -29,7 +29,7 @@ use riscv_pages::{InternalClean, InternalDirty, Page, PageAddr, PageSize, PhysPa
 /// # Example
 ///
 /// ```rust
-/// use page_collections::page_box::PageBox;
+/// use page_tracking::collections::PageBox;
 /// use riscv_pages::{InternalClean, InternalDirty, Page};
 ///
 /// struct TestData {

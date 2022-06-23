@@ -22,7 +22,7 @@ use riscv_pages::{InternalClean, InternalDirty, PageAddr, PageSize, RawAddr, Seq
 ///
 /// ```rust
 /// use core::result::Result;
-/// use page_collections::page_vec::PageVec;
+/// use page_tracking::collections::PageVec;
 /// use riscv_pages::{InternalClean, InternalDirty, Page, PageSize, SequentialPages};
 ///
 /// fn sum_in_page<I>(

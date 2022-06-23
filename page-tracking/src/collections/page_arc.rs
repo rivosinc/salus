@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use riscv_pages::{InternalClean, Page, PageSize, PhysPage};
 
-use crate::page_box::PageBox;
+use crate::collections::PageBox;
 
 #[repr(C)]
 struct PageArcInner<T> {

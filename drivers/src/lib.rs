@@ -30,7 +30,7 @@ mod tests {
     use super::*;
     use alloc::{alloc::Global, vec::Vec};
     use device_tree::DeviceTree;
-    use riscv_page_tables::{HwMemMap, HwMemMapBuilder, HwMemRegionType};
+    use page_tracking::{HwMemMap, HwMemMapBuilder, HwMemRegionType};
     use riscv_pages::{DeviceMemType, PageAddr, PageSize, RawAddr};
 
     const NUM_CPUS: u32 = 4;

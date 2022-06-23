@@ -17,7 +17,7 @@ device_tree = { path = "./device-tree" }
 drivers = { path = "./drivers" }
 hyp_alloc = { path = "./hyp-alloc" }
 memoffset = { version = ">=0.6.5", features = ["unstable_const"] }
-page_collections = { path = "./page-collections" }
+page_tracking = { path = "./page-tracking" }
 riscv_page_tables = { path = "./riscv-page-tables" }
 riscv_pages = { path = "./riscv-pages" }
 riscv_regs = { path = "./riscv-regs" }

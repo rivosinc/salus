@@ -6,8 +6,9 @@ use core::arch::global_asm;
 use core::{mem::size_of, ops::Deref, ops::DerefMut};
 use drivers::{CpuId, CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
-use page_collections::page_vec::PageVec;
-use riscv_page_tables::{GuestStagePageTable, TlbVersion};
+use page_tracking::collections::PageVec;
+use page_tracking::TlbVersion;
+use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::{GuestPhysAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages};
 use riscv_regs::{hstatus, scounteren, sstatus};
 use riscv_regs::{

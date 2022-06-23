@@ -5,9 +5,8 @@
 use core::{mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
-use riscv_page_tables::{
-    GuestStagePageTable, HypPageAlloc, PageList, PageTracker, PlatformPageTable,
-};
+use page_tracking::{HypPageAlloc, PageList, PageTracker};
+use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::*;
 use riscv_regs::GprIndex;
 use s_mode_utils::abort::abort;

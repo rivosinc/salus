@@ -7,25 +7,14 @@
 //! ## Key types
 //!
 //! - `Page` is the basic building block, representing pages of host supervisor memory. Provided by
-//!   the `riscv-pages` crate.
+//! the `riscv-pages` crate.
+//! - `PageTracker` tracks per-page ownership and typing information, and is used to verify the
+//! safety of page table operations. Provided by the `page-tracking` crate.
 //! - `PlatformPageTable` is a top-level page table structures used to manipulate address translation
 //! and protection.
 //! - `PageTable` provides a generic implementation of a single level of multi-level translation.
 //! - `Sv48x4`, `Sv48`, etc. define standard RISC-V translation modes for 1st or 2nd-stage translation
 //! tables.
-//! - `PageTracker` - Contains information about active VMs (page owners), manages allocation of
-//! unique owner IDs, and per-page state such as current and previous owner. This is system-wide
-//! state updated whenever a page owner changes or a VM starts or stops.
-//! - `PageMap` - Per-page state (tracks the owner).
-//! - `HypPageAlloc` - Initial manager of physical memory. The hypervisor allocates pages from
-//! here to store local state. It's turned in to a `PageTracker` and a pool of ram for the host VM.
-//! - `HwMemMap` - Map of system memory, used to determine address ranges to create `Page`s from.
-//!
-//! ## Initialization
-//!
-//! `HwMemMap` -> `HypPageAlloc` ---> `PageTracker`
-//!                                 \
-//!                                  -------> `SequentialPages`
 //!
 //! ## Safety
 //!
@@ -38,17 +27,10 @@
 //! address translation). Interacting directly with memory currently mapped to a VM will lead to
 //! pain so the interfaces don't support that.
 #![no_std]
-#![feature(allocator_api, let_chains)]
 
 extern crate alloc;
 
-mod hw_mem_map;
-mod page_info;
-/// Implements a linked-list of pages using `PageTracker`.
-pub mod page_list;
 mod page_table;
-/// Handles tracking the owner and state of each page.
-pub mod page_tracking;
 /// Provides access to the fields of a riscv PTE.
 mod pte;
 /// Interfaces to build and manage sv48 page tables for S and U mode access.
@@ -58,22 +40,13 @@ pub mod sv48x4;
 /// Provides low-level TLB management functions such as fencing.
 pub mod tlb;
 
-pub use hw_mem_map::Error as MemMapError;
-pub use hw_mem_map::Result as MemMapResult;
-pub use hw_mem_map::{HwMemMap, HwMemMapBuilder, HwMemRegion, HwMemRegionType, HwReservedMemType};
-pub use page_info::MAX_PAGE_OWNERS;
-pub use page_list::{LockedPageList, PageList};
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
 pub use page_table::{
     FirstStagePageTable, GuestStagePageTable, PageTableMapper, PagingMode, PlatformPageTable,
 };
-pub use page_tracking::Error as PageTrackingError;
-pub use page_tracking::Result as PageTrackingResult;
-pub use page_tracking::{HypPageAlloc, PageTracker};
 pub use sv48::Sv48;
 pub use sv48x4::Sv48x4;
-pub use tlb::TlbVersion;
 
 #[cfg(test)]
 #[macro_use]
@@ -82,6 +55,7 @@ extern crate std;
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
+    use page_tracking::*;
     use riscv_pages::*;
     use std::{mem, slice};
 
@@ -225,26 +199,5 @@ mod tests {
         let clean_page = converted_pages.next().unwrap().clean();
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
-    }
-
-    #[test]
-    fn page_list() {
-        let state = stub_sys_memory();
-        let first_page_addr = state.pte_pages.base();
-        {
-            let mut pte_list = PageList::new(state.page_tracker.clone());
-            for p in state.pte_pages {
-                pte_list.push(p).unwrap();
-            }
-            // Not safe -- just a test.
-            let already_linked: Page<InternalClean> = unsafe { Page::new(first_page_addr) };
-            assert!(pte_list.push(already_linked).is_err());
-        }
-        let mut new_list = PageList::new(state.page_tracker);
-        for p in state.root_pages {
-            new_list.push(p).unwrap();
-        }
-        let was_linked: Page<InternalClean> = unsafe { Page::new(first_page_addr) };
-        new_list.push(was_linked).unwrap();
     }
 }

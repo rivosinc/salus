@@ -2,9 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-#![no_std]
-#![feature(try_reserve_kind)]
-
 //! Type wrappers that are backed by whole pages.
 //!
 //! When working without an allocator, but with a set of available whole pages, it is useful to to
@@ -25,3 +22,7 @@ pub mod page_arc;
 pub mod page_box;
 /// A Page-backed version of std::collections::Vec.
 pub mod page_vec;
+
+pub use page_arc::PageArc;
+pub use page_box::PageBox;
+pub use page_vec::PageVec;

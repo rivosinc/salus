@@ -79,7 +79,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "device_tree",
- "riscv_page_tables",
+ "page_tracking",
  "riscv_pages",
  "riscv_regs",
  "spin",
@@ -176,10 +176,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "page_collections"
+name = "page_tracking"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "riscv_pages",
+ "spin",
 ]
 
 [[package]]
@@ -204,8 +206,7 @@ dependencies = [
 name = "riscv_page_tables"
 version = "0.1.0"
 dependencies = [
- "arrayvec",
- "page_collections",
+ "page_tracking",
  "riscv_pages",
  "spin",
 ]
@@ -249,7 +250,7 @@ dependencies = [
  "drivers",
  "hyp_alloc",
  "memoffset",
- "page_collections",
+ "page_tracking",
  "riscv_page_tables",
  "riscv_pages",
  "riscv_regs",

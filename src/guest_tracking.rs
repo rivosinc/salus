@@ -178,19 +178,26 @@ impl<T: GuestStagePageTable> Guests<T> {
 
     /// Removes the guest with the given ID if there are no outstanding references to it.
     pub fn remove(&self, id: PageOwnerId) -> Result<()> {
-        let mut guests = self.guests.lock();
-        let (index, guest) = guests
-            .iter()
-            .enumerate()
-            .find(|(_, g)| g.page_owner_id() == id)
-            .ok_or(Error::InvalidGuestId)?;
-        // This use of ref_count() is sound since we hold the lock on self.guests and no new
-        // references can be created if we hold the only reference.
-        if PageArc::ref_count(&guest.inner) != 1 {
-            return Err(Error::GuestInUse);
-        }
+        // Pull the last reference to this guest out of the vector first so we don't do the final
+        // drop under the lock.
+        let _guest = {
+            let mut guests = self.guests.lock();
+            let (index, guest) = guests
+                .iter()
+                .enumerate()
+                .find(|(_, g)| g.page_owner_id() == id)
+                .ok_or(Error::InvalidGuestId)?;
+            // This use of ref_count() is sound since we hold the lock on self.guests and no new
+            // references can be created if we hold the only reference.
+            if PageArc::ref_count(&guest.inner) != 1 {
+                return Err(Error::GuestInUse);
+            }
+            let last = guest.clone();
+            guests.remove(index);
+            last
+        };
+        // TODO: Remove the guest ID as part of GuestState's drop().
         self.page_tracker.rm_active_guest(id);
-        guests.remove(index);
         Ok(())
     }
 

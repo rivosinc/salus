@@ -12,7 +12,9 @@ panic = "abort"
 
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
+attestation = { path = "./attestation" }
 data_measure = { path = "./data-measure" }
+der = "0.6.0"
 device_tree = { path = "./device-tree" }
 drivers = { path = "./drivers" }
 hyp_alloc = { path = "./hyp-alloc" }

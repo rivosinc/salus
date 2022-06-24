@@ -2,8 +2,10 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use attestation::{request::CertReq, MAX_CSR_LEN};
 use core::{mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
+use der::Decode;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
@@ -351,7 +353,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             SbiMessage::Measurement(measurement_func) => {
                 EcallAction::Continue(self.handle_measurement_msg(measurement_func, active_pages))
             }
-            SbiMessage::Attestation(_) => todo!(),
+            SbiMessage::Attestation(attestation_func) => {
+                EcallAction::Continue(self.handle_attestation_msg(attestation_func, active_pages))
+            }
         }
     }
 
@@ -507,6 +511,37 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                     GUEST_ID_SELF_MEASUREMENT,
                     active_pages,
                 )
+                .into(),
+        }
+    }
+
+    fn handle_attestation_msg(
+        &self,
+        attestation_func: AttestationFunction,
+        active_pages: &ActiveVmPages<T>,
+    ) -> SbiReturn {
+        use AttestationFunction::*;
+        match attestation_func {
+            GetEvidence {
+                csr_addr,
+                csr_len,
+                cert_addr,
+                cert_len,
+            } => self
+                .guest_get_evidence(
+                    csr_addr,
+                    csr_len as usize,
+                    cert_addr,
+                    cert_len as usize,
+                    active_pages,
+                )
+                .into(),
+
+            ExtendMeasurement {
+                measurement_addr,
+                len,
+            } => self
+                .guest_extend_measurement(measurement_addr, len as usize, active_pages)
                 .into(),
         }
     }
@@ -857,6 +892,45 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             .copy_to_guest(gpa, &bytes)
             .map_err(|_| SbiError::InvalidAddress)?;
         Ok(bytes.len() as u64)
+    }
+
+    fn guest_get_evidence(
+        &self,
+        csr_addr: u64,
+        csr_len: usize,
+        _cert_addr: u64,
+        _cert_len: usize,
+        active_pages: &ActiveVmPages<T>,
+    ) -> sbi::Result<u64> {
+        if csr_len > MAX_CSR_LEN {
+            return Err(SbiError::InvalidParam);
+        }
+
+        let mut csr_bytes = [0u8; MAX_CSR_LEN];
+        let csr_gpa = RawAddr::guest(csr_addr, self.vm_pages.page_owner_id());
+        active_pages
+            .copy_from_guest(&mut csr_bytes.as_mut_slice()[..csr_len], csr_gpa)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        println!("CSR len {}", csr_len);
+
+        let csr = CertReq::from_der(&csr_bytes[..csr_len]).map_err(|_| SbiError::InvalidParam)?;
+        println!(
+            "CSR version {:?} Signature algorithm {:?}",
+            csr.info.version, csr.algorithm.oid
+        );
+
+        csr.verify().map_err(|_| SbiError::InvalidParam)?;
+
+        Ok(0)
+    }
+
+    fn guest_extend_measurement(
+        &self,
+        _msmt_addr: u64,
+        _len: usize,
+        _active_pages: &ActiveVmPages<T>,
+    ) -> sbi::Result<u64> {
+        Err(SbiError::NotSupported)
     }
 
     /// Destroys this `Vm`.

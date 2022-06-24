@@ -161,11 +161,10 @@ pub struct VmPagesMapper<'a, T: GuestStagePageTable, S> {
 impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
     /// Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr`.
     fn new(vm_pages: &'a VmPages<T, S>, page_addr: GuestPageAddr, num_pages: u64) -> Result<Self> {
-        let mut pte_pages = vm_pages.pte_pages.lock();
         let inner = vm_pages
             .root
             .map_range(page_addr, PageSize::Size4k, num_pages, &mut || {
-                pte_pages.pop()
+                vm_pages.pte_pages.pop()
             })
             .map_err(Error::Paging)?;
         Ok(Self { inner, vm_pages })
@@ -348,6 +347,42 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
     }
 }
 
+/// A pool of page-table pages for a VM. Left over pages are released when the pool is dropped.
+struct PtePagePool {
+    pages: Mutex<PageList<Page<InternalClean>>>,
+}
+
+impl PtePagePool {
+    /// Creates an empty `PtePagePool`.
+    fn new(page_tracker: PageTracker) -> Self {
+        Self {
+            pages: Mutex::new(PageList::new(page_tracker)),
+        }
+    }
+
+    /// Adds `page` to the pool.
+    fn push(&self, page: Page<InternalClean>) {
+        // Unwrap ok, we must uniquely own the page and it isn't on another list.
+        self.pages.lock().push(page).unwrap();
+    }
+
+    /// Pops a page from the pool, if any are present.
+    fn pop(&self) -> Option<Page<InternalClean>> {
+        self.pages.lock().pop()
+    }
+}
+
+impl Drop for PtePagePool {
+    fn drop(&mut self) {
+        let pages = self.pages.get_mut();
+        let page_tracker = pages.page_tracker();
+        for p in pages {
+            // Unwrap ok, the page was assigned to us so we must be able to release it.
+            page_tracker.release_page(p).unwrap();
+        }
+    }
+}
+
 /// VmPages is the single management point for memory used by virtual machines.
 ///
 /// After initial setup all memory not used for Hypervisor purposes is managed by a VmPages
@@ -363,7 +398,7 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     nesting: usize,
     root: PlatformPageTable<T>,
     measurement: Mutex<Sha256Measure>,
-    pte_pages: Mutex<PageList<Page<InternalClean>>>,
+    pte_pages: PtePagePool,
     phantom: PhantomData<S>,
 }
 
@@ -601,7 +636,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
             nesting,
             root,
             measurement: Mutex::new(Sha256Measure::new()),
-            pte_pages: Mutex::new(PageList::new(page_tracker)),
+            pte_pages: PtePagePool::new(page_tracker),
             phantom: PhantomData,
         }
     }
@@ -612,9 +647,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         if page.size() != PageSize::Size4k {
             return Err(Error::UnsupportedPageSize(page.size()));
         }
-        let mut pte_pages = self.pte_pages.lock();
-        // Unwrap ok, we uniquely own the page so it can't be on another list.
-        pte_pages.push(page).unwrap();
+        self.pte_pages.push(page);
         Ok(())
     }
 

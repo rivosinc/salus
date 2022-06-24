@@ -109,6 +109,11 @@ impl<P: PhysPage> PageList<P> {
         }
         true
     }
+
+    /// Returns the `PageTracker` this list is using.
+    pub fn page_tracker(&self) -> PageTracker {
+        self.page_tracker.clone()
+    }
 }
 
 impl<P: PhysPage> Iterator for PageList<P> {

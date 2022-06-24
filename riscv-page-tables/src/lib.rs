@@ -27,6 +27,7 @@
 //! address translation). Interacting directly with memory currently mapped to a VM will lead to
 //! pain so the interfaces don't support that.
 #![no_std]
+#![feature(let_chains)]
 
 extern crate alloc;
 
@@ -148,9 +149,11 @@ mod tests {
         let dirty_page = converted_pages.next().unwrap();
         assert_eq!(dirty_page.addr(), page_addrs[0]);
         assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
+        page_tracker.put_converted_page(dirty_page).unwrap();
         let clean_page = converted_pages.next().unwrap().clean();
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
+        page_tracker.put_converted_page(clean_page).unwrap();
     }
 
     #[test]
@@ -196,8 +199,10 @@ mod tests {
         let dirty_page = converted_pages.next().unwrap();
         assert_eq!(dirty_page.addr(), page_addrs[0]);
         assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
+        page_tracker.put_converted_page(dirty_page).unwrap();
         let clean_page = converted_pages.next().unwrap().clean();
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
+        page_tracker.put_converted_page(clean_page).unwrap();
     }
 }

@@ -27,6 +27,8 @@ pub enum Error {
     UnownedPage,
     /// Attempt to modify the owner of a reserved page.
     ReservedPage,
+    /// The page is not owned by the specified owner.
+    OwnerMismatch,
     /// The page is not in a state where it can be converted.
     PageNotConvertible,
     /// The page is not in a state where it can be assigned.
@@ -216,6 +218,22 @@ impl PageTracker {
         let mut page_tracker = self.inner.lock();
         // Don't lazily clean up exited owners since we're releasing ownership here exclusively.
         let info = page_tracker.pages.get_mut(page.addr()).unwrap();
+        info.release()?;
+        Ok(())
+    }
+
+    /// Releases the page at `addr` back to its previous owner if it's currently owned by `owner`
+    /// and is in a releasable state.
+    pub fn release_page_by_addr(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        // Don't lazily clean up exited owners since we're releasing ownership here exclusively.
+        let info = page_tracker
+            .pages
+            .get_mut(addr)
+            .ok_or(Error::InvalidPage(addr))?;
+        if info.owner() != Some(owner) {
+            return Err(Error::OwnerMismatch);
+        }
         info.release()?;
         Ok(())
     }

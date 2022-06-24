@@ -26,6 +26,8 @@ pub enum Error {
     PageSizeNotSupported(PageSize),
     /// Attempt to create a mapping over an existing one.
     MappingExists,
+    /// The requested range isn't mapped.
+    PageNotMapped,
     /// The requested range couldn't be removed from the page table.
     PageNotUnmappable,
     /// Attempt to access a non-converted page as confidential.
@@ -63,18 +65,33 @@ pub trait PageTableLevel: Sized + Clone + Copy + PartialEq {
     fn is_leaf(&self) -> bool;
 }
 
-// The possible states of a page table entry.
-enum InvalidEntry {}
+/// An invalid page table entry that is not being used for any purpose.
+enum UnusedEntry {}
+
+/// A page table entry that was valid but was later invalidated (e.g. for conversion). The PFN of
+/// the page table entry holds the PFN of the page that was previously mapped.
+enum InvalidatedEntry {}
+
+/// An invalid page table entry that has been locked in prepartion for mapping.
+enum LockedEntry {}
+
+/// A valid page table entry that provides translation for a page of memory.
 enum LeafEntry {}
+
+/// A valid page table entry that points to a next level page table.
 enum NextTableEntry {}
 
 // Convenience aliases for the various types of PTEs.
-type InvalidPte<'a, T> = TableEntryMut<'a, T, InvalidEntry>;
+type UnusedPte<'a, T> = TableEntryMut<'a, T, UnusedEntry>;
+type InvalidatedPte<'a, T> = TableEntryMut<'a, T, InvalidatedEntry>;
+type LockedPte<'a, T> = TableEntryMut<'a, T, LockedEntry>;
 type LeafPte<'a, T> = TableEntryMut<'a, T, LeafEntry>;
 type PageTablePte<'a, T> = TableEntryMut<'a, T, NextTableEntry>;
 
 enum TableEntryType<'a, T: PagingMode> {
-    Invalid(InvalidPte<'a, T>),
+    Unused(UnusedPte<'a, T>),
+    Invalidated(InvalidatedPte<'a, T>),
+    Locked(LockedPte<'a, T>),
     Leaf(LeafPte<'a, T>),
     Table(PageTablePte<'a, T>),
 }
@@ -84,49 +101,17 @@ impl<'a, T: PagingMode> TableEntryType<'a, T> {
     fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
         use TableEntryType::*;
         if !pte.valid() {
-            Invalid(InvalidPte::new(pte, level))
+            if pte.locked() {
+                Locked(LockedPte::new(pte, level))
+            } else if pte.pfn().bits() != 0 {
+                Invalidated(InvalidatedPte::new(pte, level))
+            } else {
+                Unused(UnusedPte::new(pte, level))
+            }
         } else if !pte.leaf() {
             Table(PageTablePte::new(pte, level))
         } else {
             Leaf(LeafPte::new(pte, level))
-        }
-    }
-
-    /// Returns the entry as an inavlid `TableEntryMut` if it's an invalid PTE.
-    fn as_invalid_pte(entry: TableEntryType<'a, T>) -> Option<InvalidPte<'a, T>> {
-        if let TableEntryType::Invalid(i) = entry {
-            Some(i)
-        } else {
-            None
-        }
-    }
-
-    /// Returns the entry as a valid leaf `TableEntryMut` if it's a valid leaf PTE.
-    fn as_leaf_pte(entry: TableEntryType<'a, T>) -> Option<LeafPte<'a, T>> {
-        if let TableEntryType::Leaf(l) = entry {
-            Some(l)
-        } else {
-            None
-        }
-    }
-
-    /// Returns the `PageTableLevel` this entry is at.
-    fn level(&self) -> T::Level {
-        use TableEntryType::*;
-        match self {
-            Invalid(i) => i.level(),
-            Leaf(l) => l.level(),
-            Table(t) => t.level(),
-        }
-    }
-
-    /// Unlocks the page table entry.
-    fn unlock(&mut self) -> Result<()> {
-        use TableEntryType::*;
-        match self {
-            Invalid(i) => i.unlock(),
-            Leaf(l) => l.unlock(),
-            Table(t) => t.unlock(),
         }
     }
 }
@@ -152,33 +137,44 @@ impl<'a, T: PagingMode, S> TableEntryMut<'a, T, S> {
     fn level(&self) -> T::Level {
         self.level
     }
+}
 
-    /// Returns the physical address of the page this entry maps if it's a valid leaf, or would
-    /// map if it were valid.
-    fn page_addr(&self) -> Option<SupervisorPageAddr> {
-        PageAddr::from_pfn(self.pte.pfn(), self.level.leaf_page_size())
+impl<'a, T: PagingMode> UnusedPte<'a, T> {
+    /// Marks this invalid PTE as valid and maps it to a next-level page table at `table_paddr`.
+    /// Returns this entry as a valid table entry.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `table_paddr` references a page-table page uniquely owned by
+    /// the root `PlatformPageTable`.
+    unsafe fn map_table(self, table_paddr: SupervisorPageAddr) -> PageTablePte<'a, T> {
+        self.pte.set(table_paddr.pfn(), &PteFieldBits::non_leaf());
+        PageTablePte::new(self.pte, self.level)
     }
 
-    /// Marks the page table entry as locked if it isn't locked already.
-    fn lock(&mut self) -> Result<()> {
-        if self.pte.locked() {
-            return Err(Error::PteLocked);
-        }
+    /// Locks the PTE for mapping.
+    fn lock(self) -> LockedPte<'a, T> {
         self.pte.lock();
-        Ok(())
-    }
-
-    /// Unlocks the page table entry.
-    fn unlock(&mut self) -> Result<()> {
-        if !self.pte.locked() {
-            return Err(Error::PteNotLocked);
-        }
-        self.pte.unlock();
-        Ok(())
+        LockedPte::new(self.pte, self.level)
     }
 }
 
-impl<'a, T: PagingMode> InvalidPte<'a, T> {
+impl<'a, T: PagingMode> InvalidatedPte<'a, T> {
+    /// Returns the physical address of the page this PTE would map if it were valid.
+    fn page_addr(&self) -> SupervisorPageAddr {
+        // Unwrap ok since this must have been a valid PTE at some point, in which case the PFN must
+        // be properly aligned for the level.
+        PageAddr::from_pfn(self.pte.pfn(), self.level.leaf_page_size()).unwrap()
+    }
+
+    /// Locks the PTE for mapping.
+    fn lock(self) -> LockedPte<'a, T> {
+        self.pte.lock();
+        LockedPte::new(self.pte, self.level)
+    }
+}
+
+impl<'a, T: PagingMode> LockedPte<'a, T> {
     /// Marks this PTE as valid and maps it to `paddr` with the specified permissions. Returns this
     /// entry as a valid leaf entry.
     ///
@@ -197,28 +193,39 @@ impl<'a, T: PagingMode> InvalidPte<'a, T> {
         LeafPte::new(self.pte, self.level)
     }
 
-    /// Marks this invalid PTE as valid and maps it to a next-level page table at `table_paddr`.
-    /// Returns this entry as a valid table entry.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that `table_paddr` references a page-table page uniquely owned by
-    /// the root `PlatformPageTable`.
-    unsafe fn map_table(self, table_paddr: SupervisorPageAddr) -> PageTablePte<'a, T> {
-        self.pte.set(table_paddr.pfn(), &PteFieldBits::non_leaf());
-        PageTablePte::new(self.pte, self.level)
+    /// Unlocks this PTE, returning it to either an unused (zero) PTE, or invalidated PTE.
+    fn unlock(self) -> TableEntryType<'a, T> {
+        self.pte.unlock();
+        use TableEntryType::*;
+        if self.pte.pfn().bits() == 0 {
+            Unused(UnusedPte::new(self.pte, self.level))
+        } else {
+            Invalidated(InvalidatedPte::new(self.pte, self.level))
+        }
     }
 }
 
 impl<'a, T: PagingMode> LeafPte<'a, T> {
+    /// Returns the physical address of the page this PTE maps.
+    fn page_addr(&self) -> SupervisorPageAddr {
+        // Unwrap ok since a valid PTE must contain a valid PFN for this level.
+        PageAddr::from_pfn(self.pte.pfn(), self.level.leaf_page_size()).unwrap()
+    }
+
     /// Inavlidates this PTE, returning it as an invalid entry.
-    fn invalidate(self) -> InvalidPte<'a, T> {
+    fn invalidate(self) -> InvalidatedPte<'a, T> {
         self.pte.invalidate();
-        InvalidPte::new(self.pte, self.level)
+        InvalidatedPte::new(self.pte, self.level)
     }
 }
 
 impl<'a, T: PagingMode> PageTablePte<'a, T> {
+    /// Returns the base address of the page table this PTE points to.
+    fn table_addr(&self) -> SupervisorPageAddr {
+        // Unwrap ok, PFNs are always 4kB-aligned.
+        PageAddr::from_pfn(self.pte.pfn(), PageSize::Size4k).unwrap()
+    }
+
     /// Returns the `PageTable` that this PTE points to.
     fn table(self) -> PageTable<'a, T> {
         // Safe to create a `PageTable` from the page pointed to by this entry since:
@@ -274,10 +281,10 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
         self.level
     }
 
-    /// Returns a mutable reference to the entry at the given guest address.
-    fn entry_mut(&mut self, addr: RawAddr<T::MappedAddressSpace>) -> &'a mut Pte {
-        let index = self.index_from_addr(addr).index(); // Guaranteed to be in range.
-        let pte_addr = self.table_addr.bits() + index * (core::mem::size_of::<Pte>() as u64);
+    /// Returns a mutable reference to the raw PTE at the given guest address.
+    fn entry_mut(&mut self, index: PageTableIndex<T>) -> &'a mut Pte {
+        let pte_addr =
+            self.table_addr.bits() + index.index() * (core::mem::size_of::<Pte>() as u64);
         let pte = unsafe { (pte_addr as *mut Pte).as_mut().unwrap() };
         pte
     }
@@ -293,7 +300,13 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
         addr: RawAddr<T::MappedAddressSpace>,
     ) -> TableEntryType<'a, T> {
         let level = self.level;
-        TableEntryType::from_pte(self.entry_mut(addr), level)
+        TableEntryType::from_pte(self.entry_mut(self.index_from_addr(addr)), level)
+    }
+
+    /// Returns a mutable reference to the entry at this level for the specified index.
+    fn entry_for_index_mut(&mut self, index: PageTableIndex<T>) -> TableEntryType<'a, T> {
+        let level = self.level;
+        TableEntryType::from_pte(self.entry_mut(index), level)
     }
 
     /// Returns the next page table level for the given address to translate.
@@ -306,17 +319,56 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
         use TableEntryType::*;
         let table_pte = match self.entry_for_addr_mut(addr) {
             Table(t) => t,
-            Leaf(_) => return Err(Error::LeafEntryNotTable),
-            Invalid(i) => {
+            Unused(u) => {
                 // TODO: Verify ownership of PTE pages.
                 let pt_page = get_pte_page().ok_or(Error::InsufficientPtePages)?;
                 unsafe {
                     // Safe since we have unique ownership of `pt_page`.
-                    i.map_table(pt_page.addr())
+                    u.map_table(pt_page.addr())
                 }
+            }
+            _ => {
+                return Err(Error::MappingExists);
             }
         };
         Ok(table_pte.table())
+    }
+
+    /// Releases the pages mapped by this page table, recursing through the paging hierarchy if any
+    /// next-level table pointers are encountered.
+    fn release_pages(&mut self, page_tracker: PageTracker, owner: PageOwnerId) {
+        let iter = PageTableIndexIter::new(self.level);
+        for index in iter {
+            let entry = self.entry_for_index_mut(index);
+            use TableEntryType::*;
+            match entry {
+                Table(t) => {
+                    let table_addr = t.table_addr();
+                    // Recursively release the pages in the pointed-to table before dropping the
+                    // table itself.
+                    t.table().release_pages(page_tracker.clone(), owner);
+                    // Safe since we must uniquely own the page if we're using it as a page-table page.
+                    let table_page: Page<InternalDirty> = unsafe { Page::new(table_addr) };
+                    // Unwrap ok since the page must have been assigned to us.
+                    page_tracker.release_page(table_page).unwrap();
+                }
+                Leaf(l) => {
+                    // Unwrap ok since by virtue of being mapped into this page table, we must
+                    // uniquely own the page and it must be in a releasable state.
+                    page_tracker
+                        .release_page_by_addr(l.page_addr(), owner)
+                        .unwrap();
+                }
+                Invalidated(i) => {
+                    // Unwrap ok since the only usage of invalid PTEs we currently have is for
+                    // converted pages.
+                    page_tracker
+                        .release_page_by_addr(i.page_addr(), owner)
+                        .unwrap();
+                }
+                _ => (),
+            }
+        }
     }
 }
 
@@ -354,6 +406,39 @@ impl<T: PagingMode> PageTableIndex<T> {
 impl<T: PagingMode> PteIndex for PageTableIndex<T> {
     fn index(&self) -> u64 {
         self.index
+    }
+}
+
+struct PageTableIndexIter<T: PagingMode> {
+    index: u64,
+    end: u64,
+    level: PhantomData<T::Level>,
+}
+
+impl<T: PagingMode> PageTableIndexIter<T> {
+    fn new(level: T::Level) -> Self {
+        Self {
+            index: 0,
+            end: 1 << level.addr_width(),
+            level: PhantomData,
+        }
+    }
+}
+
+impl<T: PagingMode> Iterator for PageTableIndexIter<T> {
+    type Item = PageTableIndex<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.end {
+            let index = self.index;
+            self.index += 1;
+            Some(PageTableIndex {
+                index,
+                level: PhantomData,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -423,45 +508,15 @@ impl<T: PagingMode> PageTableInner<T> {
         })
     }
 
-    /// Walks the page table from the root for `vaddr` until `pred` returns true. Returns `None` if
-    /// a leaf is reached without `pred` being met.
-    fn walk_until<P>(
-        &mut self,
-        vaddr: RawAddr<T::MappedAddressSpace>,
-        mut pred: P,
-    ) -> Option<TableEntryType<T>>
-    where
-        P: FnMut(&TableEntryType<T>) -> bool,
-    {
-        use TableEntryType::*;
+    /// Walks the page table from the root for `vaddr` until an invalid entry or a valid leaf entry is
+    /// encountered.
+    fn walk(&mut self, vaddr: RawAddr<T::MappedAddressSpace>) -> TableEntryType<T> {
         let mut entry = PageTable::from_root(self).entry_for_addr_mut(vaddr);
-        while !pred(&entry) {
-            if let Table(t) = entry {
-                entry = t.table().entry_for_addr_mut(vaddr);
-            } else {
-                return None;
-            }
+        use TableEntryType::*;
+        while let Table(t) = entry {
+            entry = t.table().entry_for_addr_mut(vaddr);
         }
-        Some(entry)
-    }
-
-    /// Walks the page table to a valid leaf entry mapping `vaddr`. Returns `None` if `vaddr` is not
-    /// mapped.
-    fn walk_to_leaf(&mut self, vaddr: RawAddr<T::MappedAddressSpace>) -> Option<LeafPte<T>> {
-        use TableEntryType::*;
-        self.walk_until(vaddr, |e| matches!(e, Leaf(_)))
-            .and_then(TableEntryType::as_leaf_pte)
-    }
-
-    /// Walks the page table until an invalid entry that would map `vaddr` is encountered. Returns
-    /// `None` if `vaddr` is mapped.
-    fn walk_until_invalid(
-        &mut self,
-        vaddr: RawAddr<T::MappedAddressSpace>,
-    ) -> Option<InvalidPte<T>> {
-        use TableEntryType::*;
-        self.walk_until(vaddr, |e| matches!(e, Invalid(_)))
-            .and_then(TableEntryType::as_invalid_pte)
+        entry
     }
 
     /// Creates a translation for `vaddr` to `paddr` with the given permissions.
@@ -476,14 +531,20 @@ impl<T: PagingMode> PageTableInner<T> {
         paddr: SupervisorPageAddr,
         perms: PteLeafPerms,
     ) -> Result<()> {
-        let entry = self
-            .walk_until_invalid(RawAddr::from(vaddr))
-            .ok_or(Error::MappingExists)?;
-        if !entry.level().is_leaf() {
-            return Err(Error::PageSizeNotSupported(entry.level().leaf_page_size()));
+        let entry = self.walk(RawAddr::from(vaddr));
+        use TableEntryType::*;
+        match entry {
+            Locked(l) => {
+                if !l.level().is_leaf() {
+                    return Err(Error::PageSizeNotSupported(l.level().leaf_page_size()));
+                }
+                l.map_leaf(paddr, perms);
+                Ok(())
+            }
+            Unused(_) | Invalidated(_) => Err(Error::PteNotLocked),
+            Leaf(_) => Err(Error::MappingExists),
+            Table(_) => unreachable!(),
         }
-        entry.map_leaf(paddr, perms);
-        Ok(())
     }
 
     /// Locks the invalid leaf PTE mapping `vaddr`, filling in any missing intermediate page tables
@@ -498,17 +559,33 @@ impl<T: PagingMode> PageTableInner<T> {
             table = table.next_level_or_fill_fn(RawAddr::from(vaddr), get_pte_page)?;
         }
         let entry = table.entry_for_addr_mut(RawAddr::from(vaddr));
-        TableEntryType::as_invalid_pte(entry)
-            .ok_or(Error::MappingExists)?
-            .lock()
+        use TableEntryType::*;
+        match entry {
+            Invalidated(i) => {
+                i.lock();
+                Ok(())
+            }
+            Unused(u) => {
+                u.lock();
+                Ok(())
+            }
+            Locked(_) => Err(Error::PteLocked),
+            Leaf(_) => Err(Error::MappingExists),
+            Table(_) => unreachable!(),
+        }
     }
 
     /// Unlocks the leaf PTE mapping `vaddr`.
     fn unlock_4k_leaf(&mut self, vaddr: PageAddr<T::MappedAddressSpace>) -> Result<()> {
-        let mut entry = self
-            .walk_until(RawAddr::from(vaddr), |e| e.level().is_leaf())
-            .ok_or(Error::PteNotLocked)?;
-        entry.unlock()
+        let entry = self.walk(RawAddr::from(vaddr));
+        use TableEntryType::*;
+        match entry {
+            Locked(l) => {
+                l.unlock();
+                Ok(())
+            }
+            _ => Err(Error::PteNotLocked),
+        }
     }
 
     /// Returns the valid 4kB leaf PTE mapping `vaddr` if the mapped page matches the specified
@@ -520,18 +597,20 @@ impl<T: PagingMode> PageTableInner<T> {
     ) -> Result<LeafPte<T>> {
         let page_tracker = self.page_tracker.clone();
         let owner = self.owner;
-        let entry = self
-            .walk_to_leaf(RawAddr::from(vaddr))
-            .ok_or(Error::PageNotUnmappable)?;
-        if !entry.level().is_leaf() {
-            return Err(Error::PageSizeNotSupported(entry.level().leaf_page_size()));
+        let entry = self.walk(RawAddr::from(vaddr));
+        use TableEntryType::*;
+        match entry {
+            Leaf(l) => {
+                if !l.level().is_leaf() {
+                    return Err(Error::PageSizeNotSupported(l.level().leaf_page_size()));
+                }
+                if !page_tracker.is_mapped_page(l.page_addr(), owner, mem_type) {
+                    return Err(Error::PageNotUnmappable);
+                }
+                Ok(l)
+            }
+            _ => Err(Error::PageNotMapped),
         }
-        // Unwrap ok since we've already verified this a valid leaf.
-        let paddr = entry.page_addr().unwrap();
-        if !page_tracker.is_mapped_page(paddr, owner, mem_type) {
-            return Err(Error::PageNotUnmappable);
-        }
-        Ok(entry)
     }
 
     /// Returns the invalid 4kB leaf PTE mapping `vaddr` if the PFN the PTE references is a
@@ -541,20 +620,43 @@ impl<T: PagingMode> PageTableInner<T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         mem_type: MemType,
         tlb_version: TlbVersion,
-    ) -> Result<InvalidPte<T>> {
+    ) -> Result<InvalidatedPte<T>> {
         let page_tracker = self.page_tracker.clone();
         let owner = self.owner;
-        let entry = self
-            .walk_until_invalid(RawAddr::from(vaddr))
-            .ok_or(Error::PageNotConverted)?;
-        if !entry.level().is_leaf() {
-            return Err(Error::PageSizeNotSupported(entry.level().leaf_page_size()));
+        let entry = self.walk(RawAddr::from(vaddr));
+        use TableEntryType::*;
+        match entry {
+            Invalidated(i) => {
+                if !i.level().is_leaf() {
+                    return Err(Error::PageSizeNotSupported(i.level().leaf_page_size()));
+                }
+                if !page_tracker.is_converted_page(i.page_addr(), owner, mem_type, tlb_version) {
+                    return Err(Error::PageNotConverted);
+                }
+                Ok(i)
+            }
+            _ => Err(Error::PageNotConverted),
         }
-        let paddr = entry.page_addr().ok_or(Error::PageNotConverted)?;
-        if !page_tracker.is_converted_page(paddr, owner, mem_type, tlb_version) {
-            return Err(Error::PageNotConverted);
+    }
+}
+
+impl<T: PagingMode> Drop for PageTableInner<T> {
+    fn drop(&mut self) {
+        // Walk the page table starting from the root, freeing any referenced pages.
+        let page_tracker = self.page_tracker.clone();
+        let owner = self.owner;
+        let mut table = PageTable::from_root(self);
+        table.release_pages(page_tracker, owner);
+
+        // Safe since we uniquely own the pages in self.root.
+        let root_pages: SequentialPages<InternalDirty> = unsafe {
+            SequentialPages::from_mem_range(self.root.base(), PageSize::Size4k, self.root.len())
         }
-        Ok(entry)
+        .unwrap();
+        for p in root_pages {
+            // Unwrap ok, the page must've been assigned to us to begin with.
+            self.page_tracker.release_page(p).unwrap();
+        }
     }
 }
 
@@ -651,12 +753,10 @@ impl<T: PagingMode> PlatformPageTable<T> {
         for a in addr.iter_from().take(num_pages as usize) {
             // We verified above that we can safely unwrap here.
             let entry = inner.get_mapped_4k_leaf(a, P::mem_type()).unwrap();
-            // Unwrap ok, PFN must have been properly aligned in order to have been mapped.
-            let paddr = entry.page_addr().unwrap();
-            entry.invalidate();
+            let invalidated = entry.invalidate();
             let page = unsafe {
                 // Safe since we've verified the typing of the page.
-                P::new(paddr)
+                P::new(invalidated.page_addr())
             };
             // Unwrap ok, a just-invalidated page can't be on any other PageList.
             pages.push(page).unwrap();
@@ -685,8 +785,7 @@ impl<T: PagingMode> PlatformPageTable<T> {
         for a in addr.iter_from().take(num_pages as usize) {
             let paddr = inner
                 .get_converted_4k_leaf(a, P::mem_type(), tlb_version)?
-                .page_addr()
-                .unwrap();
+                .page_addr();
             // Unwrap ok since we've already verified that this page is owned and converted.
             let page = page_tracker
                 .get_converted_page::<P>(paddr, inner.owner, tlb_version)
@@ -751,8 +850,10 @@ impl<'a, T: PagingMode> Drop for PageTableMapper<'a, T> {
     fn drop(&mut self) {
         let mut inner = self.owner.inner.lock();
         for a in self.vaddr.iter_from().take(self.num_pages as usize) {
-            // Unwrap ok, the PTEs in this range must have been locked by construction.
-            inner.unlock_4k_leaf(a).unwrap();
+            // Ignore the return value since this is expected to fail if the PTE was successfully
+            // mapped (which will unlock the PTE), but may succeed if the holder of the PageTableMapper
+            // bailed before having filled the entire range (e.g. because of another failure).
+            let _ = inner.unlock_4k_leaf(a);
         }
     }
 }

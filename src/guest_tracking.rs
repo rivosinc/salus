@@ -55,7 +55,7 @@ impl<T: GuestStagePageTable> GuestStateInner<T> {
         match self {
             Self::Init(vm) => vm.page_owner_id(),
             Self::Running(vm) => vm.page_owner_id(),
-            _ => unreachable!(),
+            Self::Temp => unreachable!(),
         }
     }
 
@@ -72,6 +72,16 @@ impl<T: GuestStagePageTable> GuestStateInner<T> {
         };
         core::mem::swap(self, &mut running);
         Ok(())
+    }
+
+    /// Destroys `self`.
+    fn destroy(&mut self) {
+        // TODO: Use Drop instead, which is currently not possible due to a move from self in finalize.
+        match self {
+            Self::Init(ref mut v) => v.destroy(),
+            Self::Running(ref mut v) => v.destroy(),
+            Self::Temp => unreachable!(),
+        };
     }
 }
 
@@ -149,15 +159,13 @@ impl<T: GuestStagePageTable> GuestState<T> {
 /// Tracks the guest VMs for a host VM.
 pub struct Guests<T: GuestStagePageTable> {
     guests: Mutex<PageVec<GuestState<T>>>,
-    page_tracker: PageTracker,
 }
 
 impl<T: GuestStagePageTable> Guests<T> {
     /// Creates a new `Guests` using `vec_pages` as storage.
     pub fn new(vec_pages: SequentialPages<InternalClean>, page_tracker: PageTracker) -> Self {
         Self {
-            guests: Mutex::new(PageVec::new(vec_pages, page_tracker.clone())),
-            page_tracker,
+            guests: Mutex::new(PageVec::new(vec_pages, page_tracker)),
         }
     }
 
@@ -181,7 +189,7 @@ impl<T: GuestStagePageTable> Guests<T> {
     pub fn remove(&self, id: PageOwnerId) -> Result<()> {
         // Pull the last reference to this guest out of the vector first so we don't do the final
         // drop under the lock.
-        let _guest = {
+        let guest = {
             let mut guests = self.guests.lock();
             let (index, guest) = guests
                 .iter()
@@ -197,8 +205,7 @@ impl<T: GuestStagePageTable> Guests<T> {
             guests.remove(index);
             last
         };
-        // TODO: Remove the guest ID as part of GuestState's drop().
-        self.page_tracker.rm_active_guest(id);
+        guest.inner.write().destroy();
         Ok(())
     }
 

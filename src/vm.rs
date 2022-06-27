@@ -181,6 +181,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
             guests: self.guests,
         }
     }
+
+    /// Destroys this `Vm`.
+    pub fn destroy(&mut self) {
+        let page_tracker = self.vm_pages.page_tracker();
+        page_tracker.rm_active_guest(self.vm_pages.page_owner_id());
+    }
 }
 
 impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
@@ -850,6 +856,18 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             .copy_to_guest(gpa, &bytes)
             .map_err(|_| SbiError::InvalidAddress)?;
         Ok(bytes.len() as u64)
+    }
+
+    /// Destroys this `Vm`.
+    pub fn destroy(&mut self) {
+        // Recursively destroy this VM's children before we drop() this VM so that any donated pages
+        // are guaranteed to have been returned before we destroy this VM's page table. This could
+        // also be done by implementing Drop for Guests, but doing explicitly avoids relying on struct
+        // field ordering for proper drop() ordering.
+        self.guests = None;
+
+        let page_tracker = self.vm_pages.page_tracker();
+        page_tracker.rm_active_guest(self.vm_pages.page_owner_id());
     }
 }
 

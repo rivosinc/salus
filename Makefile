@@ -35,7 +35,6 @@ run_tellus_gdb: tellus_bin salus_debug
 		     -s -S \
 		     ${MACH_ARGS} -smp ${NCPU} -m ${MEM_SIZE} \
 		     -nographic \
-		     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
 		     -kernel target/riscv64gc-unknown-none-elf/debug/salus \
 		     -device guest-loader,kernel=tellus_guestvm,addr=0xc0200000
 
@@ -44,7 +43,6 @@ run_tellus: tellus_bin salus
 		     ${GDB_ARGS} \
 		     ${MACH_ARGS} -smp ${NCPU} -m ${MEM_SIZE} \
 		     -nographic \
-		     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
 		     -kernel target/riscv64gc-unknown-none-elf/release/salus \
 		     -device guest-loader,kernel=tellus_guestvm,addr=0xc0200000
 
@@ -53,7 +51,6 @@ run_linux: salus
 		     ${GDB_ARGS} \
 		     ${MACH_ARGS} -smp ${NCPU} -m ${MEM_SIZE} \
 		     -nographic \
-		     -bios ../opensbi/build/platform/generic/firmware/fw_jump.bin \
 		     -kernel target/riscv64gc-unknown-none-elf/release/salus \
 		     -device guest-loader,kernel=../linux/arch/riscv/boot/Image,addr=0xc0200000 \
 		     -append "console=ttyS0 earlycon=sbi keep_bootcon bootmem_debug"

@@ -13,21 +13,31 @@ cargo build
 
 There is a `Makefile` provided with targets for running various hosts in qemu.
 
-A recent qemu-system-riscv64 is required as is a copy of openSBI firmware and a
-linux kernel if that is the desired payload. The paths to the various
-components can be seen in the Makefile.
+### Prerequisites
+
+- rust toolchain from [rustup](rustup.rs)
+- rustup target add riscv64gc-unknown-none-elf
+- install `gcc-riscv64-unknown-elf` for `riscv64-unknown-elf-objcopy`
+- qemu-system-riscv64 - build using  qemu
+  [instructions](https://wiki.qemu.org/Hosts/Linux) with
+  `--target-list=riscv64-softmmu`
 
 ## Test VM
 
+A pair of test VMs are located in `test-workloads`.
+
 `tellus` is a target build with `cargo build --bin=tellus` that runs in VS mode
 and provides the ability to send test API calls to `salus` running in HS mode.
+
+`guestvm` is a test confidential guest. It is started by `tellus` and used for
+testing the guest side of the TSM API.
 
 A makefile shortcut is provided:
 
 `make run_tellus`
 
-This will build salus and tellus, then boot them with the system-install qemu.
-A built copy of openSBI is required to be in the expected path.
+This will build salus, tellus, and the guestvm then boot them with the
+system-installed qemu.
 
 # Overview - Initial prototype
 
@@ -91,7 +101,7 @@ The code in this repository. An HS-mode hypervisor.
 - starts the host and guests
 - manages stage-2 translations and IOMMU configuration for guest isolation
 - delegates some tasks such as attestation to u-mode helpers
-- measured by the trusted firmware/RoT 
+- measured by the trusted firmware/RoT
 
 ### Firmware
 

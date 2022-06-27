@@ -153,18 +153,6 @@ impl PageInfo {
         }
     }
 
-    /// Pops owners while the provided `check` function returns true or there are no more owners.
-    pub fn release_while<F>(&mut self, check: F)
-    where
-        F: Fn(&PageOwnerId) -> bool,
-    {
-        while let Some(o) = self.owner() {
-            if !check(&o) || self.release().is_err() {
-                break;
-            }
-        }
-    }
-
     /// Assigns the page to `owner` with state `new_state`. The page must be locked for assingment.
     pub fn assign(&mut self, owner: PageOwnerId, new_state: PageState) -> PageTrackingResult<()> {
         use PageState::*;

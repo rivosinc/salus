@@ -55,19 +55,13 @@ struct PageTrackerInner {
     pages: PageMap,
 }
 
-// TODO: Release pages from a VM explicitly upon destruction so that we don't have to prune the exited
-// owners from a PageInfo every time we look it up.
 impl PageTrackerInner {
     fn get_mut(&mut self, addr: SupervisorPageAddr) -> Result<&mut PageInfo> {
-        let page = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
-        page.release_while(|id| !self.active_guests.contains(id));
-        Ok(page)
+        self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))
     }
 
     fn get(&mut self, addr: SupervisorPageAddr) -> Result<&PageInfo> {
-        let page = self.pages.get_mut(addr).ok_or(Error::InvalidPage(addr))?;
-        page.release_while(|id| !self.active_guests.contains(id));
-        Ok(page)
+        self.pages.get(addr).ok_or(Error::InvalidPage(addr))
     }
 }
 
@@ -216,8 +210,7 @@ impl PageTracker {
     /// Relases `page` back to its previous owner.
     pub fn release_page<P: PhysPage>(&self, page: P) -> Result<()> {
         let mut page_tracker = self.inner.lock();
-        // Don't lazily clean up exited owners since we're releasing ownership here exclusively.
-        let info = page_tracker.pages.get_mut(page.addr()).unwrap();
+        let info = page_tracker.get_mut(page.addr()).unwrap();
         info.release()?;
         Ok(())
     }
@@ -226,11 +219,7 @@ impl PageTracker {
     /// and is in a releasable state.
     pub fn release_page_by_addr(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
         let mut page_tracker = self.inner.lock();
-        // Don't lazily clean up exited owners since we're releasing ownership here exclusively.
-        let info = page_tracker
-            .pages
-            .get_mut(addr)
-            .ok_or(Error::InvalidPage(addr))?;
+        let info = page_tracker.get_mut(addr)?;
         if info.owner() != Some(owner) {
             return Err(Error::OwnerMismatch);
         }

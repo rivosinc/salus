@@ -49,6 +49,8 @@ pub fn poweroff() -> ! {
     abort()
 }
 
+const PAGE_SIZE_4K: u64 = 4096;
+
 fn convert_pages(addr: u64, num_pages: u64) {
     let msg = SbiMessage::Tee(sbi::TeeFunction::TsmConvertPages {
         page_addr: addr,
@@ -76,13 +78,21 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
     // Safety: The referenced pages are made accessible again, which is safe since we haven't
     // done anything with them since they were converted.
     unsafe { ecall_send(&msg).expect("TsmReclaimPages failed") };
+
+    for i in 0u64..((num_pages * PAGE_SIZE_4K) / 8) {
+        let m = (addr + i) as *const u64;
+        unsafe {
+            if core::ptr::read_volatile(m) != 0 {
+                panic!("Tellus - Read back non-zero at qword offset {i:x} after exiting from TVM!");
+            }
+        }
+    }
 }
 
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
-    const PAGE_SIZE_4K: u64 = 4096;
     const NUM_VCPUS: u64 = 1;
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_GUEST_DATA_PAGES: u64 = 10;
@@ -127,7 +137,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     convert_pages(next_page, tvm_create_pages);
 
     // Now create the TVM.
-    let tvm_page_directory_addr = next_page;
+    let state_pages_base = next_page;
+    let tvm_page_directory_addr = state_pages_base;
     let tvm_state_addr = tvm_page_directory_addr + 4 * PAGE_SIZE_4K;
     let tvm_vcpu_addr = tvm_state_addr + tsm_info.tvm_state_pages * PAGE_SIZE_4K;
     let tvm_create_params = sbi::TvmCreateParams {
@@ -301,14 +312,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         donated_pages_base,
         NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES,
     );
-    for i in 0u64..((NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K) / 8 {
-        let m = (donated_pages_base + i) as *const u64;
-        unsafe {
-            if core::ptr::read_volatile(m) != 0 {
-                panic!("Tellus - Read back non-zero at qword offset {i:x} after exiting from TVM!");
-            }
-        }
-    }
+    reclaim_pages(state_pages_base, tvm_create_pages);
 
     println!("Tellus - All OK");
 

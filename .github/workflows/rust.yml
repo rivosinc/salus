@@ -1,0 +1,32 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install riscv64 target
+      run: rustup target add riscv64gc-unknown-none-elf
+    - name: Install clippy
+      run: rustup component add clippy
+    - name: Install rustfmt
+      run: rustup component add rustfmt
+    - name: Build
+      run: cargo build --verbose
+    - name: Lint
+      run: cargo clippy -- -D warnings  -Wmissing-docs
+    - name: Format
+      run: cargo fmt -- --check --config format_code_in_doc_comments=true
+    - name: Run tests
+      run: cargo test --target x86_64-unknown-linux-gnu --workspace --exclude test_workloads --lib

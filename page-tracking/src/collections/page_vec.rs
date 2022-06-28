@@ -159,8 +159,14 @@ impl<T> From<SequentialPages<InternalClean>> for RawPageVec<T> {
 impl<T> Deref for RawPageVec<T> {
     type Target = [T];
 
-    fn deref(&self) -> &[T] {
-        unsafe { core::slice::from_raw_parts(self.0.as_ptr(), self.0.len()) }
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
+    }
+}
+
+impl<T> DerefMut for RawPageVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut_slice()
     }
 }
 

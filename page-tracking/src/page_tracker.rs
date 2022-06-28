@@ -29,12 +29,19 @@ pub enum Error {
     ReservedPage,
     /// The page is not owned by the specified owner.
     OwnerMismatch,
+    /// Attempt to modify the owner of a shared page.
+    /// At present, all shared pages are owned by the host
+    SharedPage,
     /// The page is not in a state where it can be converted.
     PageNotConvertible,
     /// The page is not in a state where it can be assigned.
     PageNotAssignable,
     /// The page cannot be mapped back into the owner's address space.
     PageNotReclaimable,
+    /// The page cannot be shared.
+    PageNotShareable,
+    /// The page isn't in Shared state.
+    PageNotShared,
     /// Attempt to intiate an invalid page state transition.
     InvalidStateTransition,
     /// Attempt to assign or reclaim a page that is not locked.
@@ -43,6 +50,10 @@ pub enum Error {
     PageLocked,
     /// Attempt to create a link from a page that is already linked.
     PageAlreadyLinked,
+    /// The ref count was at u64::MAX.
+    RefCountOverflow,
+    /// The ref count was already 0.
+    RefCountUnderflow,
 }
 
 /// Holds the result of page tracking operations.
@@ -220,7 +231,8 @@ impl PageTracker {
     pub fn release_page_by_addr(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(addr)?;
-        if info.owner() != Some(owner) {
+        // Shared pages might be owned by the parent
+        if info.owner() != Some(owner) && !info.is_shared() {
             return Err(Error::OwnerMismatch);
         }
         info.release()?;
@@ -274,8 +286,8 @@ impl PageTracker {
         Ok(unsafe { P::DirtyPage::new(addr) })
     }
 
-    /// Releases an exclusive reference to a converted and locked page.
-    pub fn put_converted_page<P: ConvertedPhysPage>(&self, page: P) -> Result<()> {
+    /// Releases an exclusive reference to a locked page
+    pub fn unlock_page<P: PhysPage>(&self, page: P) -> Result<()> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr())?;
         info.unlock()
@@ -295,6 +307,34 @@ impl PageTracker {
                 && info.state() == PageState::Mapped
         } else {
             false
+        }
+    }
+
+    /// Acquires an exclusive reference to the shareable page at `addr` if it's owned by owner,
+    /// and in Mapped or Shared state
+    pub fn get_shared_page<P: PhysPage>(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+    ) -> Result<P> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr)?;
+        if info.owner() != Some(owner)
+            || info.mem_type() != P::mem_type()
+            || !matches!(info.state(), PageState::Mapped | PageState::Shared(_))
+        {
+            return Err(Error::PageNotShareable);
+        }
+        info.lock_for_assignment()?;
+        if info.share_page().is_ok() {
+            // Safe since we've taken exclusive ownership of the page, verified its typing, and that it is
+            //
+            // TODO: Page size
+            Ok(unsafe { P::new(addr) })
+        } else {
+            // This must be an improbable RC overflow
+            info.unlock()?;
+            Err(Error::RefCountOverflow)
         }
     }
 

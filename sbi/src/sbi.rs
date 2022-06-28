@@ -448,6 +448,13 @@ pub enum TvmCpuExitCode {
     /// be safely delegated to the host. The value of the SCAUSE register is stored in `ExitCause0`.
     /// The vCPU is no longer runnable.
     UnhandledException = 7,
+
+    /// The vCPU encountered a guest page fault in a shared memory region. The faulting guest
+    /// physical address is stored in `ExitCause0`. The vCPU will resume at the faulting instruction
+    /// the next time it is run.
+    ///
+    /// TODO: Do we need to differentiate between the type (fetch/load/store) of page fault?
+    SharedPageFault = 8,
 }
 
 impl TvmCpuExitCode {
@@ -463,6 +470,7 @@ impl TvmCpuExitCode {
             5 => Ok(MmioPageFault),
             6 => Ok(WaitForInterrupt),
             7 => Ok(UnhandledException),
+            8 => Ok(SharedPageFault),
             _ => Err(Error::InvalidParam),
         }
     }
@@ -838,6 +846,34 @@ pub enum TeeFunction {
     ///
     /// a6 = 15
     TsmLocalFence,
+    /// Marks the specified range of guest physical address space as reserved for the mapping of
+    /// shared memory. The region is initially unpopulated. Pages of shared memory may
+    /// be inserted with `TvmAddSharedPages`. Both `guest_addr` and `len` must be 4kB-aligned.
+    ///
+    /// a6 = 19
+    TvmAddSharedMemoryRegion {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = start of the shared memory region
+        guest_addr: u64,
+        /// a2 = length of the shared memory region
+        len: u64,
+    },
+    /// Maps non-confidential shared pages in a range previously defined by `TvmAddSharedMemoryRegion`.
+    /// The call may be made before or after TVM finalization, and shared pages can be mapped-in on demand.
+    /// a6 = 20
+    TvmAddSharedPages {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = start of the shared memory region
+        page_addr: u64,
+        /// a2 = page size (must be Page4k for now)
+        page_type: TsmPageType,
+        /// a3 = number of pages
+        num_pages: u64,
+        /// a4 = guest physical address
+        guest_addr: u64,
+    },
 }
 
 impl TeeFunction {
@@ -921,6 +957,18 @@ impl TeeFunction {
                 guest_id: args[0],
                 guest_addr: args[1],
                 len: args[2],
+            }),
+            19 => Ok(TvmAddSharedMemoryRegion {
+                guest_id: args[0],
+                guest_addr: args[1],
+                len: args[2],
+            }),
+            20 => Ok(TvmAddSharedPages {
+                guest_id: args[0],
+                page_addr: args[1],
+                page_type: TsmPageType::from_reg(args[2])?,
+                num_pages: args[3],
+                guest_addr: args[4],
             }),
             _ => Err(Error::NotSupported),
         }
@@ -1008,6 +1056,18 @@ impl SbiFunction for TeeFunction {
                 guest_addr: _,
                 len: _,
             } => 18,
+            TvmAddSharedMemoryRegion {
+                guest_id: _,
+                guest_addr: _,
+                len: _,
+            } => 19,
+            TvmAddSharedPages {
+                guest_id: _,
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
+                guest_addr: _,
+            } => 20,
         }
     }
 
@@ -1086,6 +1146,18 @@ impl SbiFunction for TeeFunction {
                 guest_addr: _,
                 len: _,
             } => *guest_id,
+            TvmAddSharedMemoryRegion {
+                guest_id,
+                guest_addr: _,
+                len: _,
+            } => *guest_id,
+            TvmAddSharedPages {
+                guest_id,
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
+                guest_addr: _,
+            } => *guest_id,
             _ => 0,
         }
     }
@@ -1163,6 +1235,18 @@ impl SbiFunction for TeeFunction {
                 guest_addr,
                 len: _,
             } => *guest_addr,
+            TvmAddSharedMemoryRegion {
+                guest_id: _,
+                guest_addr,
+                len: _,
+            } => *guest_addr,
+            TvmAddSharedPages {
+                guest_id: _,
+                page_addr,
+                page_type: _,
+                num_pages: _,
+                guest_addr: _,
+            } => *page_addr,
             _ => 0,
         }
     }
@@ -1227,6 +1311,18 @@ impl SbiFunction for TeeFunction {
                 guest_addr: _,
                 len,
             } => *len,
+            TvmAddSharedMemoryRegion {
+                guest_id: _,
+                guest_addr: _,
+                len,
+            } => *len,
+            TvmAddSharedPages {
+                guest_id: _,
+                page_addr: _,
+                page_type,
+                num_pages: _,
+                guest_addr: _,
+            } => *page_type as u64,
             _ => 0,
         }
     }
@@ -1261,6 +1357,13 @@ impl SbiFunction for TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_type as u64,
+            TvmAddSharedPages {
+                guest_id: _,
+                page_addr: _,
+                page_type: _,
+                num_pages,
+                guest_addr: _,
+            } => *num_pages,
             _ => 0,
         }
     }
@@ -1283,6 +1386,13 @@ impl SbiFunction for TeeFunction {
                 num_pages,
                 guest_addr: _,
             } => *num_pages,
+            TvmAddSharedPages {
+                guest_id: _,
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
+                guest_addr,
+            } => *guest_addr,
             _ => 0,
         }
     }

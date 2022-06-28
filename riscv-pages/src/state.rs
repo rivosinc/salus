@@ -111,3 +111,16 @@ impl InternalData for InternalDirty {}
 impl Cleanable for InternalDirty {
     type Cleaned = InternalClean;
 }
+
+/// A mapped page that is eligible for conversion to a Shared page
+#[derive(Debug)]
+pub enum MappableDirty {}
+impl State for MappableDirty {}
+impl Mappable<MeasureOptional> for MappableDirty {}
+
+/// A mapped page that is eligible for conversion to a Shared page
+#[derive(Debug)]
+pub enum Shareable {}
+impl State for Shareable {}
+impl Mappable<MeasureOptional> for Shareable {}
+impl Converted for Shareable {}

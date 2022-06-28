@@ -393,6 +393,9 @@ pub trait AssignablePhysPage<M: MeasureRequirement>: ConvertedPhysPage {
 /// by unmapping a previously-mapped page in a VM's address space.
 pub trait InvalidatedPhysPage: PhysPage {}
 
+/// Trait representing a mapped page that's eligible for conversion to a Shared state
+pub trait ShareablePhysPage: PhysPage {}
+
 /// Trait representing a converted page that is eligible to be reclaimed by the owner. Pages
 /// transition from converted to reclaimable once they have been cleaned.
 pub trait ReclaimablePhysPage: ConvertedPhysPage {
@@ -569,6 +572,8 @@ impl InvalidatedPhysPage for Page<Invalidated> {}
 impl ReclaimablePhysPage for Page<ConvertedClean> {
     type MappablePage = Page<MappableClean>;
 }
+
+impl ShareablePhysPage for Page<Shareable> {}
 
 /// An iterator of the 64-bit words contained in a page.
 pub struct U64Iter<'a, S: State> {

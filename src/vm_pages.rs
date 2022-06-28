@@ -38,6 +38,7 @@ pub enum Error {
     OverlappingVmRegion,
     InsufficientVmRegionSpace,
     InvalidMapRegion,
+    SharedPageNotMapped,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -161,6 +162,8 @@ impl TlbTracker {
 pub enum VmRegionType {
     /// Memory that is private to this VM.
     Confidential,
+    /// Memory that is shared with the parent
+    Shared,
 }
 
 /// A contiguous region of guest physical address space.
@@ -218,15 +221,19 @@ impl VmRegionList {
             .map_err(|_| Error::InsufficientVmRegionSpace)?;
         regions.insert(index, region);
 
-        // Coalesce with same-typed regions before and after this one, if possible.
-        if let Some(ref mut before) = regions.get_mut(index - 1) {
-            if before.end == start && before.region_type == region_type {
-                before.end = end;
-                start = before.start;
-                regions.remove(index);
-                index -= 1;
+        // Avoid the potential underflow in the index - 1 expression below
+        if index > 0 {
+            // Coalesce with same-typed regions before and after this one, if possible.
+            if let Some(ref mut before) = regions.get_mut(index - 1) {
+                if before.end == start && before.region_type == region_type {
+                    before.end = end;
+                    start = before.start;
+                    regions.remove(index);
+                    index -= 1;
+                }
             }
         }
+
         if let Some(ref mut after) = regions.get_mut(index + 1) {
             if after.start == end && after.region_type == region_type {
                 after.start = start;
@@ -325,6 +332,10 @@ pub enum PageFaultType {
     /// A page fault taken when accessing a confidential memory region. The host may handle these
     /// faults by inserting a confidential page into the guest's address space.
     Confidential(GuestPhysAddr),
+
+    /// A page fault taken when accessing a shared memory region. The host may handle these faults
+    /// by inserting a page into the guest's address space.
+    Shared(GuestPhysAddr),
 
     /// A page fault taken when accessing memory outside of any valid region of guest physical address
     /// space. These faults are not resolvable.
@@ -458,7 +469,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
                 Ok(p) => initialized_pages.push(p).unwrap(),
                 Err((e, p)) => {
                     // Unwrap ok since the page must have been locked.
-                    self.page_tracker.put_converted_page(p).unwrap();
+                    self.page_tracker.unlock_page(p).unwrap();
                     return Err(e);
                 }
             };
@@ -483,6 +494,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
     pub fn get_page_fault_cause(&self, exception: Exception, addr: GuestPhysAddr) -> PageFaultType {
         match self.regions.find(addr) {
             Some(VmRegionType::Confidential) => PageFaultType::Confidential(addr),
+            Some(VmRegionType::Shared) => PageFaultType::Shared(addr),
             None => PageFaultType::Unmapped(exception, addr),
         }
     }
@@ -587,6 +599,30 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     /// can be used to insert (and measure, if necessary) the pages.
     pub fn map_pages(&self, page_addr: GuestPageAddr, count: u64) -> Result<VmPagesMapper<T, S>> {
         VmPagesMapper::new_in_region(self, page_addr, count, VmRegionType::Confidential)
+    }
+
+    /// Maps num_pages of shared 4Kb pages starting at page_addr. The range must fit in
+    /// a range declared by a call to `add_shared_memory_region`.
+    pub fn add_shared_pages(
+        &self,
+        from_addr: GuestPageAddr,
+        num_pages: u64,
+        from: &VmPages<T, VmStateFinalized>,
+        guest_addr: GuestPageAddr,
+    ) -> Result<()> {
+        let shared_list = from
+            .root
+            .get_shareable_range::<Page<Shareable>>(from_addr, PageSize::Size4k, num_pages)
+            .map_err(|_| Error::SharedPageNotMapped)?;
+
+        let mapper =
+            VmPagesMapper::new_in_region(self, guest_addr, num_pages, VmRegionType::Shared)?;
+
+        for (page, addr) in shared_list.zip(guest_addr.iter_from()) {
+            // Unwrap OK since we have exclusive ownership and have already filled in the PTE
+            mapper.map_page(addr, page).unwrap();
+        }
+        Ok(())
     }
 }
 
@@ -798,7 +834,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         }
     }
 
-    /// Adds a confidential memory of `len` bytes starting at `page_addr` to this VM's address space.
+    /// Adds a confidential memory region of `len` bytes starting at `page_addr` to this VM's address space.
     pub fn add_confidential_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
         let end = PageAddr::new(
             RawAddr::from(page_addr)
@@ -807,6 +843,17 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         )
         .ok_or(Error::UnalignedAddress)?;
         self.regions.add(page_addr, end, VmRegionType::Confidential)
+    }
+
+    /// Adds a shared memory region of `len` bytes starting at `page_addr` to this VM's address space.
+    pub fn add_shared_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+        self.regions.add(page_addr, end, VmRegionType::Shared)
     }
 
     /// Consumes this `VmPages`, returning a finalized one.

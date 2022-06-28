@@ -328,13 +328,23 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
         let mapper = to.map_pages(to_addr, count)?;
+
+        // Make sure we can initialize the full set of pages before mapping them.
+        let mut initialized_pages = LockedPageList::new(self.page_tracker.clone());
+        for (dirty, src_addr) in converted_pages.zip(src_addr.iter_from()) {
+            match dirty.try_initialize(|bytes| self.copy_from_guest(bytes, src_addr.into())) {
+                Ok(p) => initialized_pages.push(p).unwrap(),
+                Err((e, p)) => {
+                    // Unwrap ok since the page must have been locked.
+                    self.page_tracker.put_converted_page(p).unwrap();
+                    return Err(e);
+                }
+            };
+        }
+
+        // Now map & measure the pages.
         let new_owner = to.page_owner_id();
-        for (dirty, (src_addr, to_addr)) in
-            converted_pages.zip(src_addr.iter_from().zip(to_addr.iter_from()))
-        {
-            let initialized = dirty
-                .try_initialize(|bytes| self.copy_from_guest(bytes, src_addr.into()))
-                .map_err(|(e, _)| e)?;
+        for (initialized, to_addr) in initialized_pages.zip(to_addr.iter_from()) {
             // Unwrap ok since we've guaranteed there's space for another owner.
             let mappable = self
                 .page_tracker
@@ -343,6 +353,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
             // Unwrap ok since the address is in range and we haven't mapped it yet.
             mapper.map_page_with_measurement(to_addr, mappable).unwrap();
         }
+
         Ok(count)
     }
 }

@@ -26,7 +26,7 @@ use crate::vm_id::VmId;
 pub enum Error {
     GuestId(PageTrackingError),
     Paging(PageTableError),
-    PageFaultHandling, // TODO - individual errors from sv48x4
+    UnhandledPageFault,
     NestingTooDeep,
     // Page table root must be aligned to 16k to be used for sv48x4 mappings
     UnalignedVmPages(GuestPageAddr),
@@ -475,8 +475,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         })
     }
 
-    /// Uses `copy_fn` to copy `len` bytes between `guest_addr` and `host_ptr`. Attempts to handle
-    /// any page faults that occur during the copy.
+    /// Uses `copy_fn` to copy `len` bytes between `guest_addr` and `host_ptr`.
     fn do_guest_copy<F>(
         &self,
         guest_addr: GuestPhysAddr,
@@ -488,26 +487,16 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         F: FnMut(GuestPhysAddr, *const u8, usize) -> usize,
     {
         let this_cpu = PerCpu::this_cpu();
-        let mut copied = 0;
-        let mut cur_gpa = guest_addr;
-        let mut cur_ptr = host_ptr;
-        while copied < len {
-            this_cpu.enter_guest_memcpy();
-            let bytes = copy_fn(cur_gpa, cur_ptr, len - copied);
-            this_cpu.exit_guest_memcpy();
-            copied += bytes;
-            if copied < len {
-                // Partial copy: we encountered a page fault. See if we can handle it and retry.
-                cur_gpa = cur_gpa
-                    .checked_increment(bytes as u64)
-                    .ok_or(Error::AddressOverflow)?;
-                self.vm_pages.handle_page_fault(cur_gpa)?;
-
-                // Safety: cur_ptr + bytes must be less than the original host_ptr + len.
-                cur_ptr = unsafe { cur_ptr.add(bytes) };
-            }
+        this_cpu.enter_guest_memcpy();
+        let bytes = copy_fn(guest_addr, host_ptr, len);
+        this_cpu.exit_guest_memcpy();
+        if bytes == len {
+            Ok(())
+        } else {
+            // TODO: Report faulting address and region so that the caller can turn it into a VM
+            // exit code and allow the host to handle the page fault.
+            Err(Error::UnhandledPageFault)
         }
-        Ok(())
     }
 
     /// Copies `count` pages from `src_addr` in the current guest to the converted pages starting at
@@ -819,7 +808,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         if self.root.do_fault(addr) {
             Ok(())
         } else {
-            Err(Error::PageFaultHandling)
+            Err(Error::UnhandledPageFault)
         }
     }
 

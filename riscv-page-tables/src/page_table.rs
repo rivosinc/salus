@@ -2,12 +2,11 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 use core::marker::PhantomData;
 use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
 use riscv_pages::*;
 use spin::Mutex;
-
-use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
 
 pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 
@@ -38,6 +37,8 @@ pub enum Error {
     PteNotLocked,
     /// The page was not in the range that the `PageTableMapper` covers.
     OutOfMapRange,
+    /// The page cannot be shared
+    PageNotShareable,
 }
 /// Hold the result of page table operations.
 pub type Result<T> = core::result::Result<T, Error>;
@@ -790,6 +791,36 @@ impl<T: PagingMode> PlatformPageTable<T> {
             let page = page_tracker
                 .get_converted_page::<P>(paddr, inner.owner, tlb_version)
                 .unwrap();
+            // Unwrap ok since we have unique ownership of the page and therefore it can't be on
+            // any other list.
+            pages.push(page).unwrap();
+        }
+
+        Ok(pages)
+    }
+
+    /// Returns a list of shareable pages for the given range. Gurantees that the full range of pages
+    /// are shareable
+    pub fn get_shareable_range<P: ShareablePhysPage>(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
+        num_pages: u64,
+    ) -> Result<LockedPageList<P>> {
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
+        }
+
+        let mut inner = self.inner.lock();
+        let mut pages = LockedPageList::new(inner.page_tracker.clone());
+        for a in addr.iter_from().take(num_pages as usize) {
+            let entry = inner.get_mapped_4k_leaf(a, P::mem_type())?;
+            // Unwrap ok, PFN must have been properly aligned in order to have been mapped.
+            let paddr = entry.page_addr();
+            let page = inner
+                .page_tracker
+                .get_shareable_page::<P>(paddr, inner.owner)
+                .map_err(|_| Error::PageNotShareable)?;
             // Unwrap ok since we have unique ownership of the page and therefore it can't be on
             // any other list.
             pages.push(page).unwrap();

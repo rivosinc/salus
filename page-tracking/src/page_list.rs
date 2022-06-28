@@ -4,7 +4,7 @@
 
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-use riscv_pages::{ConvertedPhysPage, PhysPage, SupervisorPageAddr};
+use riscv_pages::{PhysPage, SupervisorPageAddr};
 
 use crate::{PageTracker, PageTrackingResult};
 
@@ -136,13 +136,13 @@ impl<P: PhysPage> Drop for PageList<P> {
     }
 }
 
-/// Like `PageList`, but for converted pages that are locked for assignemnt or reclaim. Pages are
-/// released back to the "Converted" state when the list is dropped, in addition to unlinking them.
-pub struct LockedPageList<P: ConvertedPhysPage> {
+/// Like `PageList`, but for pages that are locked for assignment or reclaim. Pages are
+/// unlocked when the list is dropped, in addition to unlinking them.
+pub struct LockedPageList<P: PhysPage> {
     inner: PageList<P>,
 }
 
-impl<P: ConvertedPhysPage> LockedPageList<P> {
+impl<P: PhysPage> LockedPageList<P> {
     /// Creates an empty `LockedPageList`.
     pub fn new(page_tracker: PageTracker) -> Self {
         Self {
@@ -151,7 +151,7 @@ impl<P: ConvertedPhysPage> LockedPageList<P> {
     }
 }
 
-impl<P: ConvertedPhysPage> Iterator for LockedPageList<P> {
+impl<P: PhysPage> Iterator for LockedPageList<P> {
     type Item = P;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -163,20 +163,19 @@ impl<P: ConvertedPhysPage> Iterator for LockedPageList<P> {
     }
 }
 
-impl<P: ConvertedPhysPage> ExactSizeIterator for LockedPageList<P> {}
+impl<P: PhysPage> ExactSizeIterator for LockedPageList<P> {}
 
-impl<P: ConvertedPhysPage> Drop for LockedPageList<P> {
+impl<P: PhysPage> Drop for LockedPageList<P> {
     fn drop(&mut self) {
         while let Some(p) = self.inner.pop() {
-            // Unwrap ok since pages on the list must be uniquely-owned ConvertedPhysPages to be
-            // on the list and all unqiuely-owned ConvertedPhysPages must by definition be in the
-            // "ConvertedLocked" state.
-            self.page_tracker.put_converted_page(p).unwrap();
+            // Unwrap ok since pages on the list must be uniquely-owned and locked PhysPage to be
+            // on the list.
+            self.inner.page_tracker.unlock_page(p).unwrap();
         }
     }
 }
 
-impl<P: ConvertedPhysPage> Deref for LockedPageList<P> {
+impl<P: PhysPage> Deref for LockedPageList<P> {
     type Target = PageList<P>;
 
     fn deref(&self) -> &Self::Target {
@@ -184,7 +183,7 @@ impl<P: ConvertedPhysPage> Deref for LockedPageList<P> {
     }
 }
 
-impl<P: ConvertedPhysPage> DerefMut for LockedPageList<P> {
+impl<P: PhysPage> DerefMut for LockedPageList<P> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }

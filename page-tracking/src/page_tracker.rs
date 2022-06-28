@@ -29,12 +29,19 @@ pub enum Error {
     ReservedPage,
     /// The page is not owned by the specified owner.
     OwnerMismatch,
+    /// Attempt to modify the owner of a shared page.
+    /// At present, all shared pages are owned by the host
+    SharedPage,
     /// The page is not in a state where it can be converted.
     PageNotConvertible,
     /// The page is not in a state where it can be assigned.
     PageNotAssignable,
     /// The page cannot be mapped back into the owner's address space.
     PageNotReclaimable,
+    /// The page cannot be shared.
+    PageNotShareable,
+    /// The page isn't in Shared state.
+    PageNotShared,
     /// Attempt to intiate an invalid page state transition.
     InvalidStateTransition,
     /// Attempt to assign or reclaim a page that is not locked.
@@ -43,6 +50,10 @@ pub enum Error {
     PageLocked,
     /// Attempt to create a link from a page that is already linked.
     PageAlreadyLinked,
+    /// The ref count was at u64::MAX.
+    RefCountOverflow,
+    /// The ref count was already 0.
+    RefCountUnderflow,
 }
 
 /// Holds the result of page tracking operations.
@@ -193,6 +204,22 @@ impl PageTracker {
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
 
+    /// Consumes the shared `page`, returning a page that can then be mapped into
+    /// a page table.
+    pub fn share_page<P>(&self, page: P, owner: PageOwnerId) -> Result<P::MappablePage>
+    where
+        P: ShareablePhysPage,
+    {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(page.addr()).unwrap();
+        if info.owner() != Some(owner) || info.mem_type() != P::mem_type() || !info.is_shareable() {
+            return Err(Error::PageNotShareable);
+        }
+        info.share()?;
+        // Safe since we own the page and have updated its state.
+        Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
+    }
+
     /// Assigns `page` as an internal state page for `owner`, returning a page that is eligible to
     /// be used with various internal collection types (e.g. `PageBox<>`).
     pub fn assign_page_for_internal_state(
@@ -220,7 +247,8 @@ impl PageTracker {
     pub fn release_page_by_addr(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(addr)?;
-        if info.owner() != Some(owner) {
+        // Shared pages might be owned by the parent
+        if info.owner() != Some(owner) && !info.is_shared() {
             return Err(Error::OwnerMismatch);
         }
         info.release()?;
@@ -274,8 +302,8 @@ impl PageTracker {
         Ok(unsafe { P::DirtyPage::new(addr) })
     }
 
-    /// Releases an exclusive reference to a converted and locked page.
-    pub fn put_converted_page<P: ConvertedPhysPage>(&self, page: P) -> Result<()> {
+    /// Releases an exclusive reference to a locked page
+    pub fn unlock_page<P: PhysPage>(&self, page: P) -> Result<()> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr())?;
         info.unlock()
@@ -296,6 +324,25 @@ impl PageTracker {
         } else {
             false
         }
+    }
+
+    /// Acquires an exclusive reference to the shareable page at `addr` if it's owned by owner,
+    /// and in Mapped or Shared state.
+    pub fn get_shareable_page<P: ShareablePhysPage>(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+    ) -> Result<P> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr)?;
+        if info.owner() != Some(owner) || info.mem_type() != P::mem_type() || !info.is_shareable() {
+            return Err(Error::PageNotShareable);
+        }
+
+        info.lock_for_assignment()?;
+        // Safe since we've taken exclusive ownership of the page, verified its typing.
+        // TODO: Page size
+        Ok(unsafe { P::new(addr) })
     }
 
     /// Returns true if and only if `addr` is a page owned by `owner` with type `mem_type` and
@@ -377,9 +424,9 @@ impl HypPageAlloc {
         let mut tail: Option<SupervisorPageAddr> = None;
         while let Some(next) = self.next_page {
             let info = self.pages.get_mut(next).unwrap();
-            info.assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
+            info.assign(PageOwnerId::hypervisor(), PageState::Converted)
                 .unwrap();
-
+            info.lock_for_assignment().unwrap();
             // Safe to create this page as it was previously free and we just took ownership.
             let page: Page<ConvertedDirty> = unsafe { Page::new(next) };
             page.clean();
@@ -441,9 +488,11 @@ impl HypPageAlloc {
             if let Some(page_info) = self.pages.get_mut(page) {
                 if page_info.is_free() {
                     // OK to unwrap as this struct is new and must have space for one owner.
+                    // Free pages can be assigned without locking
                     page_info
-                        .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
+                        .assign(PageOwnerId::hypervisor(), PageState::Converted)
                         .unwrap();
+                    page_info.lock_for_assignment().unwrap();
                 }
             }
         }

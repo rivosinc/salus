@@ -50,6 +50,7 @@ enum VmExitCause {
     CpuStart(u64),
     CpuStop,
     ConfidentialPageFault(GuestPageAddr),
+    SharedPageFault(GuestPageAddr),
     UnhandledTrap(u64),
 }
 
@@ -61,6 +62,7 @@ impl VmExitCause {
             CpuStart(_) => TvmCpuExitCode::HartStart,
             CpuStop => TvmCpuExitCode::HartStop,
             ConfidentialPageFault(_) => TvmCpuExitCode::ConfidentialPageFault,
+            SharedPageFault(_) => TvmCpuExitCode::SharedPageFault,
             UnhandledTrap(_) => TvmCpuExitCode::UnhandledException,
         }
     }
@@ -71,6 +73,7 @@ impl VmExitCause {
             PowerOff(reset_type, _) => Some(*reset_type as u64),
             CpuStart(hart_id) => Some(*hart_id),
             ConfidentialPageFault(addr) => Some(addr.bits()),
+            SharedPageFault(addr) => Some(addr.bits()),
             UnhandledTrap(scause) => Some(*scause),
             _ => None,
         }
@@ -93,6 +96,9 @@ impl From<PageFaultType> for VmExitCause {
                 // Mask off the page offset to avoid revealing more information than necessary to
                 // the host.
                 ConfidentialPageFault(PageAddr::with_round_down(addr, PageSize::Size4k))
+            }
+            PageFaultType::Shared(addr) => {
+                SharedPageFault(PageAddr::with_round_down(addr, PageSize::Size4k))
             }
             PageFaultType::Unmapped(e, _) => UnhandledTrap(Trap::Exception(e).to_scause()),
         }
@@ -553,6 +559,22 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                     guest_id,
                     active_pages,
                 )
+                .into(),
+            TvmAddSharedMemoryRegion {
+                guest_id,
+                guest_addr,
+                len,
+            } => self
+                .guest_add_shared_memory_region(guest_id, guest_addr, len)
+                .into(),
+            TvmAddSharedPages {
+                guest_id,
+                page_addr,
+                page_type,
+                num_pages,
+                guest_addr,
+            } => self
+                .guest_add_shared_pages(guest_id, page_addr, page_type, num_pages, guest_addr)
                 .into(),
         }
     }
@@ -1064,6 +1086,56 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 
         let page_tracker = self.vm_pages.page_tracker();
         page_tracker.rm_active_guest(self.vm_pages.page_owner_id());
+    }
+
+    fn guest_add_shared_memory_region(
+        &self,
+        guest_id: u64,
+        guest_addr: u64,
+        len: u64,
+    ) -> EcallResult<u64> {
+        let page_addr = self.guest_addr_from_raw(guest_addr)?;
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        guest_vm
+            .vm_pages
+            .add_shared_memory_region(page_addr, len)
+            .map_err(EcallError::from)?;
+        Ok(len)
+    }
+
+    fn guest_add_shared_pages(
+        &self,
+        guest_id: u64,
+        page_addr: u64,
+        page_type: sbi::TsmPageType,
+        num_pages: u64,
+        guest_addr: u64,
+    ) -> EcallResult<u64> {
+        if page_type != TsmPageType::Page4k || num_pages == 0 {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
+        let page_addr = self.guest_addr_from_raw(page_addr)?;
+        let guest = self.guest_by_id(guest_id)?;
+        if let Some(guest_vm) = guest.as_initializing_vm() {
+            let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+            guest_vm
+                .vm_pages
+                .add_shared_pages(page_addr, num_pages, &self.vm_pages, guest_addr)
+                .map_err(EcallError::from)?;
+        } else if let Some(guest_vm) = guest.as_finalized_vm() {
+            let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+            guest_vm
+                .vm_pages
+                .add_shared_pages(page_addr, num_pages, &self.vm_pages, guest_addr)
+                .map_err(EcallError::from)?;
+        } else {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
+
+        Ok(num_pages)
     }
 }
 

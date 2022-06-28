@@ -28,6 +28,11 @@ pub enum PageState {
     /// Page is mapped into the address space of the current owner.
     Mapped,
 
+    /// Page is mapped into the address space of the current owner, but has been shared with
+    /// a child-VM. Shared pages cannot be converted, and are reverted to the Mapped state when
+    /// the reference count maintained by the inner u64 drops to 0.
+    Shared(u64),
+
     /// Page is used to store hypervisor-internal state for the current owner, e.g. to back per-VM
     /// data structures or as a page-table page for the VM.
     VmState,
@@ -38,9 +43,6 @@ pub enum PageState {
     /// Page has completed the conversion operation and is eligible for assignment or to be reclaimed.
     /// The page must be locked exclusively before it can be assigned or reclaimed.
     Converted,
-
-    /// Page has completed the conversion operation and is locked pending assignment or reclaim.
-    ConvertedLocked,
 }
 
 /// The maximum length for an ownership chain. Enough for the host VM to assign to a guest VM
@@ -55,6 +57,8 @@ pub struct PageInfo {
     owners: PageOwnerVec,
     // Address of the next page in the list if != None.
     link: Option<NonZeroU64>,
+    // True if the page has been locked for exclusive ownership
+    locked: bool,
 }
 
 impl PageInfo {
@@ -65,6 +69,7 @@ impl PageInfo {
             state: PageState::Free,
             owners: PageOwnerVec::new(),
             link: None,
+            locked: false,
         }
     }
 
@@ -72,9 +77,10 @@ impl PageInfo {
     pub fn new_hypervisor_owned() -> Self {
         Self {
             mem_type: MemType::Ram,
-            state: PageState::ConvertedLocked,
+            state: PageState::Converted,
             owners: PageOwnerVec::new(),
             link: None,
+            locked: true,
         }
     }
 
@@ -85,6 +91,7 @@ impl PageInfo {
             state: PageState::Reserved,
             owners: PageOwnerVec::new(),
             link: None,
+            locked: false,
         }
     }
 
@@ -92,9 +99,10 @@ impl PageInfo {
     pub fn new_mmio(dev_type: DeviceMemType) -> Self {
         Self {
             mem_type: MemType::Mmio(dev_type),
-            state: PageState::ConvertedLocked,
+            state: PageState::Converted,
             owners: PageOwnerVec::new(),
             link: None,
+            locked: true,
         }
     }
 
@@ -102,7 +110,7 @@ impl PageInfo {
     pub fn owner(&self) -> Option<PageOwnerId> {
         use PageState::*;
         match self.state {
-            Converting(_) | Converted | ConvertedLocked | Mapped | VmState => {
+            Converting(_) | Converted | Mapped | VmState | Shared(_) => {
                 if !self.owners.is_empty() {
                     Some(self.owners[self.owners.len() - 1])
                 } else {
@@ -135,28 +143,42 @@ impl PageInfo {
     }
 
     /// Pops the current owner if there is one, returning the page to the previous owner.
-    pub fn release(&mut self) -> PageTrackingResult<PageOwnerId> {
+    pub fn release(&mut self) -> PageTrackingResult<()> {
         use PageState::*;
         match self.state {
             Mapped | VmState | Converted | Converting(_) => {
+                // Locked pages cannot be released
+                if self.locked {
+                    return Err(PageTrackingError::PageLocked);
+                }
                 if self.owners.is_empty() {
                     Err(PageTrackingError::OwnerUnderflow) // Can't pop the last owner.
                 } else {
-                    let owner = self.owners.pop().unwrap();
+                    self.owners.pop().unwrap();
                     self.state = Converted;
-                    Ok(owner)
+                    Ok(())
                 }
             }
-            ConvertedLocked => Err(PageTrackingError::PageLocked),
+            Shared(rc) => {
+                // Shared pages start with a RC of 1, so RC is always > 0 here
+                if let Some(rc) = rc.checked_sub(1) {
+                    self.state = if rc == 0 { Mapped } else { Shared(rc) };
+                    // Unwrap ok: Shared pages must have an owner
+                    Ok(())
+                } else {
+                    Err(PageTrackingError::RefCountUnderflow)
+                }
+            }
             Reserved => Err(PageTrackingError::ReservedPage),
             Free => Err(PageTrackingError::UnownedPage),
         }
     }
 
-    /// Assigns the page to `owner` with state `new_state`. The page must be locked for assingment.
+    /// Assigns the page to `owner` with state `new_state`. A page in Converted state must be locked for
+    /// assignment, and the lock is automatically released on success.
     pub fn assign(&mut self, owner: PageOwnerId, new_state: PageState) -> PageTrackingResult<()> {
         use PageState::*;
-        if !matches!(new_state, Mapped | VmState | Converted | ConvertedLocked) {
+        if !matches!(new_state, Mapped | VmState | Converted) {
             // Going back to free/reserved isn't allowed, nor does it make sense for a page to
             // immediately enter the "Converting" state.
             return Err(PageTrackingError::InvalidStateTransition);
@@ -171,8 +193,12 @@ impl PageInfo {
                 self.state = new_state;
                 Ok(())
             }
-            ConvertedLocked => {
-                if matches!(new_state, Converted | ConvertedLocked) {
+            Converted => {
+                // Pages must be locked for assignment
+                if !self.locked {
+                    return Err(PageTrackingError::PageNotLocked);
+                }
+                if matches!(new_state, Converted) {
                     // A page converted by a VM can't immediately become a converted page in a child
                     // VM.
                     return Err(PageTrackingError::InvalidStateTransition);
@@ -181,9 +207,9 @@ impl PageInfo {
                     .try_push(owner)
                     .map_err(|_| PageTrackingError::OwnerOverflow)?;
                 self.state = new_state;
+                self.unlock().unwrap();
                 Ok(())
             }
-            Converted => Err(PageTrackingError::PageNotLocked),
             _ => Err(PageTrackingError::PageNotAssignable),
         }
     }
@@ -226,41 +252,82 @@ impl PageInfo {
         }
     }
 
-    /// Transitions the page to the ConvertedLocked state from Converted, indicating that an exclusive
-    /// reference has been taken to the page in preparation for assignment or reclaim.
+    /// Returns if the page can be Shared.
+    pub fn is_shareable(&self) -> bool {
+        use PageState::*;
+        match self.state() {
+            Shared(rc) if rc == u64::MAX => false,
+            Shared(_) | PageState::Mapped => true,
+            _ => false,
+        }
+    }
+
+    /// Returns if the page is Shared
+    pub fn is_shared(&self) -> bool {
+        use PageState::*;
+        matches!(self.state, Shared(_))
+    }
+
+    /// Obtains an exclusive reference on a page in an assignable state in preparation
+    /// for assignment, reclaim, or sharing.
     pub fn lock_for_assignment(&mut self) -> PageTrackingResult<()> {
         use PageState::*;
         match self.state {
-            Converted => {
-                self.state = ConvertedLocked;
-                Ok(())
+            Converted | Mapped | Shared(_) => {
+                if !self.locked {
+                    self.locked = true;
+                    Ok(())
+                } else {
+                    Err(PageTrackingError::PageLocked)
+                }
             }
-            ConvertedLocked => Err(PageTrackingError::PageLocked),
             _ => Err(PageTrackingError::PageNotAssignable),
         }
     }
 
-    /// Drops the exclusive lock on the a converted page.
+    /// Drops the exclusive lock on a page.
     pub fn unlock(&mut self) -> PageTrackingResult<()> {
+        if self.locked {
+            self.locked = false;
+            Ok(())
+        } else {
+            Err(PageTrackingError::PageNotLocked)
+        }
+    }
+
+    /// Transitions a locked page from Mapped to Shared, or increments the RC on a Shared page.
+    /// The lock is dropped on success.
+    pub fn share(&mut self) -> PageTrackingResult<()> {
         use PageState::*;
         match self.state {
-            ConvertedLocked => {
-                self.state = Converted;
+            Mapped => {
+                self.unlock()?;
+                self.state = Shared(1);
                 Ok(())
             }
-            _ => Err(PageTrackingError::PageNotLocked),
+            Shared(rc) => {
+                if let Some(rc) = rc.checked_add(1) {
+                    self.unlock()?;
+                    self.state = Shared(rc);
+                    Ok(())
+                } else {
+                    Err(PageTrackingError::RefCountOverflow)
+                }
+            }
+            _ => Err(PageTrackingError::PageNotShareable),
         }
     }
 
     /// Reclaims the converted and locked, but unassigned, page as a Mapped page for the current owner.
+    /// The lock is dropped on success.
     pub fn reclaim(&mut self) -> PageTrackingResult<()> {
         use PageState::*;
         match self.state {
-            ConvertedLocked => {
+            Converted => {
+                self.unlock()?;
                 self.state = Mapped;
                 Ok(())
             }
-            Converted => Err(PageTrackingError::PageNotLocked),
             // TODO: Reclaim pages that are converting but not yet fully converted?
             _ => Err(PageTrackingError::PageNotReclaimable),
         }
@@ -633,8 +700,9 @@ mod tests {
         let mut page = PageInfo::new();
         assert!(page.is_free());
         assert!(page
-            .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
+            .assign(PageOwnerId::hypervisor(), PageState::Converted)
             .is_ok());
+        assert!(page.lock_for_assignment().is_ok());
         assert!(page.assign(PageOwnerId::host(), PageState::Mapped).is_ok());
         assert_eq!(page.owner().unwrap(), PageOwnerId::host());
         let version = TlbVersion::new();
@@ -647,9 +715,9 @@ mod tests {
         assert!(page.lock_for_assignment().is_ok());
         let guest_id = PageOwnerId::new(2).unwrap();
         assert!(page.assign(guest_id, PageState::Mapped).is_ok());
-        assert_eq!(page.release().unwrap(), guest_id);
+        assert_eq!(page.release().unwrap(), ());
         assert!(page.lock_for_assignment().is_ok());
-        assert_eq!(page.state(), PageState::ConvertedLocked);
+        assert_eq!(page.state(), PageState::Converted);
         assert!(page.reclaim().is_ok());
 
         let mut page = PageInfo::new_reserved();

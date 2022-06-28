@@ -6,6 +6,7 @@ use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
 use data_measure::sha256::Sha256Measure;
+use page_tracking::collections::PageVec;
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
 };
@@ -36,13 +37,19 @@ pub enum Error {
     TlbCountUnderflow,
     InvalidTlbVersion,
     TlbFenceInProgress,
+    InvalidRegionType,
+    OverlappingVmRegion,
+    InsufficientVmRegionSpace,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// The number of pages for the `VmRegionList` vector.
+pub const TVM_REGION_LIST_PAGES: u64 = 1;
+
 /// The base number of state pages required to be donated for creating a new VM. For now, we just need
-/// one page to hold the VM state itself.
-pub const TVM_STATE_PAGES: u64 = 1;
+/// one page to hold the VM state itself and whatever is required to hold the `VmRegionList`.
+pub const TVM_STATE_PAGES: u64 = 1 + TVM_REGION_LIST_PAGES;
 
 global_asm!(include_str!("guest_mem.S"));
 
@@ -151,23 +158,203 @@ impl TlbTracker {
     }
 }
 
+/// Types of regions in a VM's guest physical address space.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VmRegionType {
+    /// Regions of private memory that have been fully populated during VM creation.
+    PreMapped,
+    /// Placeholder region type to reserve a range of guest physical address space while the region
+    /// is mapped.
+    Reserved,
+}
+
+/// A contiguous region of guest physical address space.
+struct VmRegion {
+    start: GuestPageAddr,
+    end: GuestPageAddr,
+    region_type: VmRegionType,
+}
+
+/// Represents a reserved region in `VmRegionList` that has yet to be committed. Removes the reserved
+/// region if dropped without being passed to `VmRegionList::commit()`.
+struct VmReservedRegion<'a> {
+    owner: &'a VmRegionList,
+    start: GuestPageAddr,
+    region_type: VmRegionType,
+}
+
+impl<'a> VmReservedRegion<'a> {
+    /// Creates a new reserved region holder in `owner` for the region beginning at `start` with
+    /// type `region_type`.
+    fn new(owner: &'a VmRegionList, start: GuestPageAddr, region_type: VmRegionType) -> Self {
+        Self {
+            owner,
+            start,
+            region_type,
+        }
+    }
+}
+
+impl<'a> Drop for VmReservedRegion<'a> {
+    fn drop(&mut self) {
+        let mut regions = self.owner.regions.lock();
+        regions.retain(|r| r.start != self.start);
+    }
+}
+
+/// The regions of guest physical address space for a VM. Used to track which parts of the address
+/// space are designated for a particular purpose. The region list is created during VM initialization
+/// and remains static after the VM is finalized.
+///
+/// Regions are added to the `VmRegionList` in two steps: first the region is reserved in the address
+/// map with `prepare()` and then, after whatever work is necessary to populate the region is done,
+/// the region is committed with `commit()`. This is done in order to guarantee that a region can
+/// be added to the address map before more expensive operations are carried out (e.g. zeroing pages,
+/// filling in pages tables) while allowing for easy error cleanup should a subsequent step fail.
+///
+/// Example usage:
+///
+/// ```rust,ignore
+/// fn expensive_map_operation(start: GuestPageAddr, end: GuestPageAddr) -> Result<()> { ... }
+///
+/// fn add_region(regions: &VmRegionList, start: GuestPageAddr, end: GuestPageAddr) -> Result<()> {
+///     let region = regions.prepare(start, end, VmRegionType::PreMapped)?;
+///     expensive_map_operation(start, end)?;
+///     regions.commit(region);
+/// }
+/// ```
+pub struct VmRegionList {
+    regions: Mutex<PageVec<VmRegion>>,
+}
+
+impl VmRegionList {
+    /// Creates a new `VmRegionList` using `pages` as the backing store.
+    pub fn new(pages: SequentialPages<InternalClean>, page_tracker: PageTracker) -> Self {
+        Self {
+            regions: Mutex::new(PageVec::new(pages, page_tracker)),
+        }
+    }
+
+    /// Reserves a region at [`start`, `end`) of type `region_type`, returning a `VmReservedRegion`
+    /// object if it does not conflict with any existing regions. The `VmReservedRegion` should
+    /// be passed to `commit()` to finalize addition of the region to this `VmRegionList`. If the
+    /// `VmReservedRegion` is dropped before it is committed, the reservation is removed.
+    fn prepare(
+        &self,
+        start: GuestPageAddr,
+        end: GuestPageAddr,
+        region_type: VmRegionType,
+    ) -> Result<VmReservedRegion> {
+        if region_type == VmRegionType::Reserved {
+            return Err(Error::InvalidRegionType);
+        }
+        let mut regions = self.regions.lock();
+        // Keep the list sorted, inserting a reserved region in the requested spot as long as it
+        // doesn't overlap with anything else.
+        let mut index = 0;
+        for other in regions.iter() {
+            if other.start > start {
+                if other.start < end {
+                    return Err(Error::OverlappingVmRegion);
+                }
+                break;
+            } else if other.end > start {
+                return Err(Error::OverlappingVmRegion);
+            }
+            index += 1;
+        }
+        let region = VmRegion {
+            start,
+            end,
+            region_type: VmRegionType::Reserved,
+        };
+        regions
+            .try_reserve(1)
+            .map_err(|_| Error::InsufficientVmRegionSpace)?;
+        regions.insert(index, region);
+        Ok(VmReservedRegion::new(self, start, region_type))
+    }
+
+    /// Commits `region` to this `VmRegionList`. Coalesces adjacent regions of the same type.
+    fn commit(&self, region: VmReservedRegion) {
+        let mut regions = self.regions.lock();
+        // Unwrap ok, the reserved region must already be in the list.
+        let (mut index, mut r) = regions
+            .iter_mut()
+            .enumerate()
+            .find(|(_, r)| r.start == region.start)
+            .unwrap();
+
+        // Coalesce with same-typed regions before and after this one, if possible.
+        let mut start = r.start;
+        let end = r.end;
+        let region_type = region.region_type;
+        r.region_type = region_type;
+        if let Some(ref mut before) = regions.get_mut(index - 1) {
+            if before.end == start && before.region_type == region_type {
+                before.end = end;
+                start = before.start;
+                regions.remove(index);
+                index -= 1;
+            }
+        }
+        if let Some(ref mut after) = regions.get_mut(index + 1) {
+            if after.start == end && after.region_type == region_type {
+                after.start = start;
+                regions.remove(index);
+            }
+        }
+        core::mem::forget(region);
+    }
+}
+
 /// Wrapper for a `PageTableMapper` created from the page table of `VmPages`. Measures pages as
 /// they are inserted, if necessary.
 pub struct VmPagesMapper<'a, T: GuestStagePageTable, S> {
-    inner: PageTableMapper<'a, T>,
+    mapper: PageTableMapper<'a, T>,
+    region: Option<VmReservedRegion<'a>>,
     vm_pages: &'a VmPages<T, S>,
 }
 
 impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
     /// Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr`.
     fn new(vm_pages: &'a VmPages<T, S>, page_addr: GuestPageAddr, num_pages: u64) -> Result<Self> {
-        let inner = vm_pages
+        let mapper = vm_pages
             .root
             .map_range(page_addr, PageSize::Size4k, num_pages, &mut || {
                 vm_pages.pte_pages.pop()
             })
             .map_err(Error::Paging)?;
-        Ok(Self { inner, vm_pages })
+        Ok(Self {
+            mapper,
+            region: None,
+            vm_pages,
+        })
+    }
+
+    /// Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr` in a new region of type
+    /// `region_type`.
+    fn with_new_region(
+        vm_pages: &'a VmPages<T, S>,
+        page_addr: GuestPageAddr,
+        num_pages: u64,
+        region_type: VmRegionType,
+    ) -> Result<Self> {
+        let end = page_addr
+            .checked_add_pages(num_pages)
+            .ok_or(Error::AddressOverflow)?;
+        let region = vm_pages.regions.prepare(page_addr, end, region_type)?;
+        let mapper = vm_pages
+            .root
+            .map_range(page_addr, PageSize::Size4k, num_pages, &mut || {
+                vm_pages.pte_pages.pop()
+            })
+            .map_err(Error::Paging)?;
+        Ok(Self {
+            mapper,
+            region: Some(region),
+            vm_pages,
+        })
     }
 
     /// Maps an unmeasured page into the guest's address space.
@@ -175,7 +362,14 @@ impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
     where
         P: MappablePhysPage<MeasureOptional>,
     {
-        self.inner.map_page(to_addr, page).map_err(Error::Paging)
+        self.mapper.map_page(to_addr, page).map_err(Error::Paging)
+    }
+
+    /// Completes the mapping operation, finishing insertion of the new region if necessary.
+    pub fn finish(self) {
+        if let Some(region) = self.region {
+            self.vm_pages.regions.commit(region);
+        }
     }
 }
 
@@ -194,7 +388,7 @@ impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
             let mut measurement = self.vm_pages.measurement.lock();
             measurement.add_page(to_addr.bits(), page.as_bytes());
         }
-        self.inner.map_page(to_addr, page).map_err(Error::Paging)
+        self.mapper.map_page(to_addr, page).map_err(Error::Paging)
     }
 }
 
@@ -353,6 +547,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
             // Unwrap ok since the address is in range and we haven't mapped it yet.
             mapper.map_page_with_measurement(to_addr, mappable).unwrap();
         }
+        mapper.finish();
 
         Ok(count)
     }
@@ -405,6 +600,7 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     page_owner_id: PageOwnerId,
     page_tracker: PageTracker,
     tlb_tracker: TlbTracker,
+    regions: VmRegionList,
     // How many nested TVMs deep this VM is, with 0 being the host.
     nesting: usize,
     root: PlatformPageTable<T>,
@@ -492,6 +688,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             let mappable = self.page_tracker.reclaim_page(page.clean()).unwrap();
             mapper.map_page(addr, mappable).unwrap();
         }
+        mapper.finish();
         Ok(())
     }
 
@@ -554,16 +751,21 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
         let guest_root =
             PlatformPageTable::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
-        let state_page = self.assign_state_pages_for(state_pages, id).next().unwrap();
+
+        let mut state_pages = self.assign_state_pages_for(state_pages, id);
+        let box_page = state_pages.next().unwrap();
+        let region_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
+        let region_vec = VmRegionList::new(region_vec_pages, self.page_tracker.clone());
+
         let vcpu_pages =
             SequentialPages::from_pages(self.assign_state_pages_for(vcpu_pages, id)).unwrap();
 
         Ok((
             Vm::new(
-                VmPages::new(guest_root, self.nesting + 1),
+                VmPages::new(guest_root, region_vec, self.nesting + 1),
                 VmCpus::new(id, vcpu_pages, self.page_tracker.clone()).unwrap(),
             ),
-            state_page,
+            box_page,
         ))
     }
 
@@ -608,6 +810,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             // Unwrap ok since the address is in range and we haven't mapped it yet.
             mapper.map_page(guest_addr, mappable).unwrap();
         }
+        mapper.finish();
         Ok(count)
     }
 
@@ -638,12 +841,13 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
 
 impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
     /// Creates a new `VmPages` from the given root page table.
-    pub fn new(root: PlatformPageTable<T>, nesting: usize) -> Self {
+    pub fn new(root: PlatformPageTable<T>, regions: VmRegionList, nesting: usize) -> Self {
         let page_tracker = root.page_tracker();
         Self {
             page_owner_id: root.page_owner_id(),
             page_tracker: page_tracker.clone(),
             tlb_tracker: TlbTracker::new(),
+            regions,
             nesting,
             root,
             measurement: Mutex::new(Sha256Measure::new()),
@@ -669,7 +873,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<VmPagesMapper<T, VmStateInitializing>> {
-        VmPagesMapper::new(self, page_addr, count)
+        VmPagesMapper::with_new_region(self, page_addr, count, VmRegionType::PreMapped)
     }
 
     /// Consumes this `VmPages`, returning a finalized one.
@@ -678,6 +882,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
             page_owner_id: self.page_owner_id,
             page_tracker: self.page_tracker,
             tlb_tracker: self.tlb_tracker,
+            regions: self.regions,
             nesting: self.nesting,
             root: self.root,
             measurement: self.measurement,

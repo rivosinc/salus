@@ -19,7 +19,9 @@ use crate::guest_tracking::{GuestState, Guests};
 use crate::print_util::*;
 use crate::smp;
 use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
-use crate::vm_pages::{self, ActiveVmPages, VmPages, TVM_STATE_PAGES};
+use crate::vm_pages::{
+    self, ActiveVmPages, VmPages, VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
+};
 use crate::{print, println};
 
 const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
@@ -966,6 +968,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             .take_pages_for_host_state(num_pte_pages as usize)
             .into_iter();
         let guest_tracking_pages = hyp_mem.take_pages_for_host_state(2);
+        let region_vec_pages = hyp_mem.take_pages_for_host_state(TVM_REGION_LIST_PAGES as usize);
 
         // Pages for the array of vCPUs.
         let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * MAX_CPUS as u64);
@@ -975,7 +978,8 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let root =
             PlatformPageTable::new(root_table_pages, PageOwnerId::host(), page_tracker.clone())
                 .unwrap();
-        let vm_pages = VmPages::new(root, 0);
+        let region_vec = VmRegionList::new(region_vec_pages, page_tracker.clone());
+        let vm_pages = VmPages::new(root, region_vec, 0);
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();
         }
@@ -1029,6 +1033,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
                 .unwrap();
             mapper.map_page_with_measurement(vm_addr, mappable).unwrap();
         }
+        mapper.finish();
     }
 
     /// Add pages which need not be measured to the host page tables. For RAM pages, requires that
@@ -1059,6 +1064,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
                 .unwrap();
             mapper.map_page(vm_addr, mappable).unwrap();
         }
+        mapper.finish();
     }
 
     /// Completes intialization of the host, returning it in a finalized state.

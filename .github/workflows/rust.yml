@@ -24,6 +24,10 @@ jobs:
       run: rustup component add rustfmt
     - name: Build
       run: cargo build --verbose
+    - name: Build tellus
+      run: cargo build --package test_workloads --bin tellus --verbose
+    - name: Build guestvm
+      run: cargo build --package test_workloads --bin guestvm --verbose
     - name: Lint
       run: cargo clippy -- -D warnings  -Wmissing-docs
     - name: Format

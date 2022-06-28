@@ -84,6 +84,11 @@ impl<T> RawPageVec<T> {
         self.0.retain(f)
     }
 
+    /// See `std::vec::insert`
+    pub fn insert(&mut self, index: usize, element: T) {
+        self.0.insert(index, element);
+    }
+
     /// See `std::vec::remove`
     pub fn remove(&mut self, index: usize) -> T {
         self.0.remove(index)

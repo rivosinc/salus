@@ -150,6 +150,7 @@ pub struct HostVmLoader<T: GuestStagePageTable, A: Allocator + Clone> {
     fdt_pages: FdtPages,
     zero_pages: PageList<Page<ConvertedClean>>,
     guest_ram_base: GuestPhysAddr,
+    ram_size: u64,
 }
 
 impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
@@ -176,6 +177,14 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
 
         let (zero_pages, vm) = HostVm::from_hyp_mem(page_alloc, guest_phys_size);
 
+        // Now that the hypervisor is done claiming memory, determine the actual size of the host's
+        // address space.
+        let ram_size = zero_pages.len() as u64 * PageSize::Size4k as u64
+            + fdt_pages.length_bytes()
+            + kernel.size()
+            + initramfs.map(|r| r.size()).unwrap_or(0);
+        assert!(ram_size >= FDT_OFFSET + fdt_pages.length_bytes());
+
         Self {
             hypervisor_dt,
             kernel,
@@ -184,6 +193,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             fdt_pages: FdtPages::Clean(fdt_pages),
             zero_pages,
             guest_ram_base,
+            ram_size,
         }
     }
 
@@ -195,14 +205,6 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
             _ => panic!("Device tree already written"),
         };
 
-        // Now that the hypervisor is done claiming memory, determine the actual size of the host's
-        // address space.
-        let ram_size = self.zero_pages.len() as u64 * PageSize::Size4k as u64
-            + fdt_pages.length_bytes()
-            + self.kernel.size()
-            + self.initramfs.map(|r| r.size()).unwrap_or(0);
-        assert!(ram_size >= FDT_OFFSET + fdt_pages.length_bytes());
-
         // Construct a stripped-down device-tree for the host VM.
         //
         // We map the IMSIC at the same location in the guest address space as it is in the
@@ -210,7 +212,7 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         let imsic_base = RawAddr::guest(Imsic::get().base_addr().bits(), PageOwnerId::host());
         let mut host_dt_builder = HostDtBuilder::new(&self.hypervisor_dt)
             .unwrap()
-            .add_memory_node(self.guest_ram_base, ram_size)
+            .add_memory_node(self.guest_ram_base, self.ram_size)
             .unwrap()
             .add_cpu_nodes()
             .unwrap()
@@ -261,6 +263,16 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
                 PageOwnerId::host(),
             ))
             .unwrap();
+
+            // Add a confidential memory region covering this IMSIC.
+            //
+            // TODO: The IMSIC pages will eventually need special treatment and should probably be
+            // in their own region.
+            self.vm.add_confidential_memory_region(
+                imsic_gpa,
+                imsic.guests_per_hart() as u64 * PageSize::Size4k as u64,
+            );
+
             let page = imsic.take_guest_file(cpu_id, ImsicGuestId::HostVm).unwrap();
             self.vm.add_pages(imsic_gpa, [page].into_iter());
             imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
@@ -279,6 +291,9 @@ impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
         //
         // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
         let mut current_gpa = PageAddr::new(self.guest_ram_base).unwrap();
+        self.vm
+            .add_confidential_memory_region(current_gpa, self.ram_size);
+
         let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
         self.vm.add_pages(
             current_gpa,

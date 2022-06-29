@@ -196,6 +196,18 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
     let donated_pages_base = next_page;
+
+    // Declare the confidential region of the guest's physical address space.
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddConfidentialMemoryRegion {
+        guest_id: vmid,
+        guest_addr: USABLE_RAM_START_ADDRESS,
+        len: (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K,
+    });
+    // Safety: `TvmAddConfidentialMemoryRegion` doesn't access our memory at all.
+    unsafe {
+        ecall_send(&msg).expect("Tellus - TvmAddConfidentialMemoryRegion failed");
+    }
+
     // Add data pages
     convert_pages(next_page, NUM_GUEST_DATA_PAGES);
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddMeasuredPages {

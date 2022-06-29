@@ -246,7 +246,7 @@ pub enum VmCpuExit {
     /// ECALLs from VS mode.
     Ecall(Option<SbiMessage>),
     /// G-stage page faults.
-    PageFault(GuestPhysAddr),
+    PageFault(Exception, GuestPhysAddr),
     /// An exception which we expected to handle directly at VS, but trapped to HS instead.
     DelegatedException(Exception, u64),
     /// Everything else that we currently don't or can't handle.
@@ -328,7 +328,10 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
                     self.state.trap_csrs.htval << 2 | self.state.trap_csrs.stval & 0x03,
                     self.guest_id,
                 );
-                VmCpuExit::PageFault(fault_addr)
+                VmCpuExit::PageFault(
+                    Exception::from_scause_reason(self.state.trap_csrs.scause).unwrap(),
+                    fault_addr,
+                )
             }
             Trap::Exception(e) => {
                 if e.to_hedeleg_field()

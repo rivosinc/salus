@@ -427,11 +427,12 @@ pub enum TvmCpuExitCode {
     /// The vCPU made a sbi_hart_stop() call. The vCPU is no longer runnable.
     HartStop = 3,
 
-    /// The vCPU encountered a guest page fault. The faulting guest physical address is stored in
-    /// `ExitCause0`. The vCPU will resume at the faulting instruction the next time it is run.
+    /// The vCPU encountered a guest page fault in a confidential memory region. The faulting guest
+    /// physical address is stored in `ExitCause0`. The vCPU will resume at the faulting instruction
+    /// the next time it is run.
     ///
     /// TODO: Do we need to differentiate between the type (fetch/load/store) of page fault?
-    GuestPageFault = 4,
+    ConfidentialPageFault = 4,
 
     /// The vCPU executed a WFI instruction.
     WaitForInterupt = 5,
@@ -589,8 +590,24 @@ pub enum TeeFunction {
         /// a2 = number of pages
         num_pages: u64,
     },
+    /// Marks the specified range of guest physical address space as reserved for the mapping of
+    /// confidential memory. The region is initially unpopulated. Pages of confidential memory may
+    /// be inserted with `TvmAddZeroPages` and `TvmAddMeasuredPages`. Both `guest_addr` and `len`
+    /// must be 4kB-aligend.
+    ///
+    /// a6 = 17
+    TvmAddConfidentialMemoryRegion {
+        /// a0 = guest_id
+        guest_id: u64,
+        /// a1 = start of the confidential memory region
+        guest_addr: u64,
+        /// a2 = length of the confidential memory region
+        len: u64,
+    },
     /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
-    /// specified guest's address space at `guest_addr`.
+    /// specified guest's address space at `guest_addr`. The mapping must lie within a region of
+    /// confidential memory created with `TvmAddConfidentialMemoryRegion`. Zero pages may be added
+    /// at any time.
     ///
     /// a6 = 3
     TvmAddZeroPages {
@@ -607,7 +624,9 @@ pub enum TeeFunction {
     },
     /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
     /// memory at `dest_addr`, then measures and maps the pages at `dest_addr` into the specified
-    /// guest's address space at `guest_addr`.
+    /// guest's address space at `guest_addr`. The mapping must lie within a region of confidential
+    /// memory created with `TvmAddConfidentialMemoryRegion`. Measured pages may only be added prior
+    /// to TVM finalization.
     ///
     /// a6 = 11
     TvmAddMeasuredPages {
@@ -812,6 +831,11 @@ impl TeeFunction {
                 vcpu_id: args[1],
                 register: TvmCpuRegister::from_reg(args[2])?,
             }),
+            17 => Ok(TvmAddConfidentialMemoryRegion {
+                guest_id: args[0],
+                guest_addr: args[1],
+                len: args[2],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -888,6 +912,11 @@ impl SbiFunction for TeeFunction {
                 vcpu_id: _,
                 register: _,
             } => 16,
+            TvmAddConfidentialMemoryRegion {
+                guest_id: _,
+                guest_addr: _,
+                len: _,
+            } => 17,
         }
     }
 
@@ -956,6 +985,11 @@ impl SbiFunction for TeeFunction {
                 vcpu_id: _,
                 register: _,
             } => *guest_id,
+            TvmAddConfidentialMemoryRegion {
+                guest_id,
+                guest_addr: _,
+                len: _,
+            } => *guest_id,
             _ => 0,
         }
     }
@@ -1023,6 +1057,11 @@ impl SbiFunction for TeeFunction {
                 vcpu_id,
                 register: _,
             } => *vcpu_id,
+            TvmAddConfidentialMemoryRegion {
+                guest_id: _,
+                guest_addr,
+                len: _,
+            } => *guest_addr,
             _ => 0,
         }
     }
@@ -1077,6 +1116,11 @@ impl SbiFunction for TeeFunction {
                 vcpu_id: _,
                 register,
             } => *register as u64,
+            TvmAddConfidentialMemoryRegion {
+                guest_id: _,
+                guest_addr: _,
+                len,
+            } => *len,
             _ => 0,
         }
     }

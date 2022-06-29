@@ -26,7 +26,7 @@ use crate::vm_id::VmId;
 pub enum Error {
     GuestId(PageTrackingError),
     Paging(PageTableError),
-    UnhandledPageFault,
+    PageFault(PageFaultType),
     NestingTooDeep,
     UnalignedAddress,
     UnsupportedPageSize(PageSize),
@@ -400,9 +400,13 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
     pub fn copy_to_guest(&self, dest: GuestPhysAddr, src: &[u8]) -> Result<()> {
         // Safety: _copy_to_guest internally detects and handles an invalid guest physical
         // address in `dest`.
-        self.do_guest_copy(dest, src.as_ptr(), src.len(), |gpa, ptr, len| unsafe {
-            _copy_to_guest(gpa.bits(), ptr, len)
-        })
+        self.do_guest_copy(
+            dest,
+            src.as_ptr(),
+            src.len(),
+            |gpa, ptr, len| unsafe { _copy_to_guest(gpa.bits(), ptr, len) },
+            Exception::GuestStorePageFault,
+        )
     }
 
     /// Copies from the guest physical address in `src` to `dest`. Returns an error if a fault was
@@ -410,9 +414,13 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
     pub fn copy_from_guest(&self, dest: &mut [u8], src: GuestPhysAddr) -> Result<()> {
         // Safety: _copy_from_guest internally detects and handles an invalid guest physical address
         // in `src`.
-        self.do_guest_copy(src, dest.as_ptr(), dest.len(), |gpa, ptr, len| unsafe {
-            _copy_from_guest(ptr as *mut u8, gpa.bits(), len)
-        })
+        self.do_guest_copy(
+            src,
+            dest.as_ptr(),
+            dest.len(),
+            |gpa, ptr, len| unsafe { _copy_from_guest(ptr as *mut u8, gpa.bits(), len) },
+            Exception::GuestLoadPageFault,
+        )
     }
 
     /// Uses `copy_fn` to copy `len` bytes between `guest_addr` and `host_ptr`.
@@ -422,6 +430,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         host_ptr: *const u8,
         len: usize,
         mut copy_fn: F,
+        fault_type: Exception,
     ) -> Result<()>
     where
         F: FnMut(GuestPhysAddr, *const u8, usize) -> usize,
@@ -433,9 +442,10 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         if bytes == len {
             Ok(())
         } else {
-            // TODO: Report faulting address and region so that the caller can turn it into a VM
-            // exit code and allow the host to handle the page fault.
-            Err(Error::UnhandledPageFault)
+            let fault_addr = guest_addr.checked_increment(bytes as u64).unwrap();
+            Err(Error::PageFault(
+                self.get_page_fault_cause(fault_type, fault_addr),
+            ))
         }
     }
 

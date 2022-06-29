@@ -318,7 +318,6 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
         match Trap::from_scause(self.state.trap_csrs.scause).unwrap() {
             Trap::Exception(VirtualSupervisorEnvCall) => {
                 let sbi_msg = SbiMessage::from_regs(&self.state.guest_regs.gprs).ok();
-                self.state.guest_regs.sepc += 4;
                 VmCpuExit::Ecall(sbi_msg)
             }
             Trap::Exception(GuestInstructionPageFault)
@@ -474,8 +473,9 @@ impl VmCpu {
         }
     }
 
-    /// Updates A0/A1 with the result of an SBI call.
+    /// Increments SEPC and Updates A0/A1 with the result of an SBI call.
     pub fn set_ecall_result(&mut self, result: SbiReturnType) {
+        self.state.guest_regs.sepc += 4;
         match result {
             SbiReturnType::Legacy(a0) => {
                 self.set_gpr(GprIndex::A0, a0);

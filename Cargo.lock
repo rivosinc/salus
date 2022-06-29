@@ -107,6 +107,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "data_model"
+version = "0.1.0"
+dependencies = [
+ "assertions",
+]
+
+[[package]]
 name = "der"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -407,6 +414,7 @@ dependencies = [
  "assertions",
  "attestation",
  "data_measure",
+ "data_model",
  "der",
  "device_tree",
  "drivers",

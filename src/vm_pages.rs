@@ -626,6 +626,16 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     pub fn page_tracker(&self) -> PageTracker {
         self.page_tracker.clone()
     }
+
+    /// Add a page to be used for building the guest's page tables.
+    /// Currently only supports 4k pages.
+    pub fn add_pte_page(&self, page: Page<InternalClean>) -> Result<()> {
+        if page.size() != PageSize::Size4k {
+            return Err(Error::UnsupportedPageSize(page.size()));
+        }
+        self.pte_pages.push(page);
+        Ok(())
+    }
 }
 
 impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
@@ -758,12 +768,12 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         ))
     }
 
-    /// Adds pages to be used for building page table entries
-    pub fn add_pte_pages_builder(
+    /// Adds pages to be used for building page table entries to a guest of this VM.
+    pub fn add_pte_pages_to<S>(
         &self,
         from_addr: GuestPageAddr,
         count: u64,
-        to: &VmPages<T, VmStateInitializing>,
+        to: &VmPages<T, S>,
     ) -> Result<()> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
         let new_owner = to.page_owner_id();
@@ -843,16 +853,6 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
             pte_pages: PtePagePool::new(page_tracker),
             phantom: PhantomData,
         }
-    }
-
-    /// Add a page to be used for building the guest's page tables.
-    /// Currently only supports 4k pages.
-    pub fn add_pte_page(&self, page: Page<InternalClean>) -> Result<()> {
-        if page.size() != PageSize::Size4k {
-            return Err(Error::UnsupportedPageSize(page.size()));
-        }
-        self.pte_pages.push(page);
-        Ok(())
     }
 
     /// Locks `count` 4kB pages starting at `page_addr` for mapping, returning a `VmPagesMapper` that

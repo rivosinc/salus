@@ -554,6 +554,12 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
         self.pte_pages.push(page);
         Ok(())
     }
+
+    /// Locks `count` 4kB pages starting at `page_addr` for mapping, returning a `VmPagesMapper` that
+    /// can be used to insert (and measure, if necessary) the pages.
+    pub fn map_pages(&self, page_addr: GuestPageAddr, count: u64) -> Result<VmPagesMapper<T, S>> {
+        VmPagesMapper::new_in_region(self, page_addr, count, VmRegionType::Confidential)
+    }
 }
 
 impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
@@ -709,11 +715,11 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
     }
 
     /// Adds zero-filled pages to the given guest.
-    pub fn add_zero_pages_builder(
+    pub fn add_zero_pages_to<S>(
         &self,
         from_addr: GuestPageAddr,
         count: u64,
-        to: &VmPages<T, VmStateInitializing>,
+        to: &VmPages<T, S>,
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
@@ -773,16 +779,6 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         )
         .ok_or(Error::UnalignedAddress)?;
         self.regions.add(page_addr, end, VmRegionType::Confidential)
-    }
-
-    /// Locks `count` 4kB pages starting at `page_addr` for mapping, returning a `VmPagesMapper` that
-    /// can be used to insert (and measure, if necessary) the pages.
-    pub fn map_pages(
-        &self,
-        page_addr: GuestPageAddr,
-        count: u64,
-    ) -> Result<VmPagesMapper<T, VmStateInitializing>> {
-        VmPagesMapper::new_in_region(self, page_addr, count, VmRegionType::Confidential)
     }
 
     /// Consumes this `VmPages`, returning a finalized one.

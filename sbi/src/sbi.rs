@@ -435,12 +435,29 @@ pub enum TvmCpuExitCode {
     ConfidentialPageFault = 4,
 
     /// The vCPU executed a WFI instruction.
-    WaitForInterupt = 5,
+    WaitForInterrupt = 5,
 
     /// The vCPU encountered an exception that the TSM cannot handle internally and that cannot
     /// be safely delegated to the host. The value of the SCAUSE register is stored in `ExitCause0`.
     /// The vCPU is no longer runnable.
     UnhandledException = 6,
+}
+
+impl TvmCpuExitCode {
+    /// Creates a `TvmCpuExitCode` from the raw value as returned in A1.
+    pub fn from_reg(a1: u64) -> Result<Self> {
+        use TvmCpuExitCode::*;
+        match a1 {
+            0 => Ok(HostInterrupt),
+            1 => Ok(SystemReset),
+            2 => Ok(HartStart),
+            3 => Ok(HartStop),
+            4 => Ok(ConfidentialPageFault),
+            5 => Ok(WaitForInterrupt),
+            6 => Ok(UnhandledException),
+            _ => Err(Error::InvalidParam),
+        }
+    }
 }
 
 /// List of registers that can be read or written for a TVM's vCPU.

@@ -97,6 +97,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_GUEST_DATA_PAGES: u64 = 10;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
+    const PRE_FAULTED_ZERO_PAGES: u64 = 2;
     const NUM_GUEST_PAD_PAGES: u64 = 32;
 
     if hart_id != 0 {
@@ -265,20 +266,21 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         }
     }
 
-    // Add zeroed (non-measured) pages
-    // TODO: Make sure that these guest pages are actually zero
-    convert_pages(next_page, NUM_GUEST_ZERO_PAGES);
+    // Convert the zero pages and map a few of them up front. We'll fault the rest in as necessary.
+    let zero_pages_start = next_page;
+    convert_pages(zero_pages_start, NUM_GUEST_ZERO_PAGES);
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddZeroPages {
         guest_id: vmid,
-        page_addr: next_page,
+        page_addr: zero_pages_start,
         page_type: sbi::TsmPageType::Page4k,
-        num_pages: NUM_GUEST_ZERO_PAGES,
+        num_pages: PRE_FAULTED_ZERO_PAGES,
         guest_addr: USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
     });
     // Safety: `TvmAddZeroPages` only touches pages that we've already converted.
     unsafe {
-        ecall_send(&msg).expect("Tellus - AddPages Zeroed returned error");
+        ecall_send(&msg).expect("Tellus - TvmAddZeroPages failed");
     }
+    let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
     // Set the entry point.
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
@@ -304,13 +306,51 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         guest_id: vmid,
         vcpu_id: 0,
     });
-    // Safety: running a VM can't affect host memory as that memory isn't accessible to the VM.
-    match unsafe { ecall_send(&msg) } {
-        Err(e) => {
-            println!("Tellus - Run returned error {:?}", e);
-            panic!("Could not run guest VM");
+    loop {
+        // Safety: running a VM can't affect host memory as that memory isn't accessible to the VM.
+        match unsafe { ecall_send(&msg) } {
+            Err(e) => {
+                println!("Tellus - Run returned error {:?}", e);
+                panic!("Could not run guest VM");
+            }
+            Ok(exit_code) => {
+                let cause = sbi::TvmCpuExitCode::from_reg(exit_code).unwrap();
+                match cause {
+                    sbi::TvmCpuExitCode::ConfidentialPageFault => {
+                        // Figure out where the fault occurred.
+                        let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuGetRegister {
+                            guest_id: vmid,
+                            vcpu_id: 0,
+                            register: sbi::TvmCpuRegister::ExitCause0,
+                        });
+                        // Safety: `TvmCpuGetRegister` doesn't access our memory.
+                        let fault_addr =
+                            unsafe { ecall_send(&msg).expect("Tellus - TvmCpuGetRegister failed") };
+
+                        // Now fault in the page.
+                        if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
+                            panic!("Ran out of pages to fault in");
+                        }
+                        let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddZeroPages {
+                            guest_id: vmid,
+                            page_addr: zero_pages_start + zero_pages_added * PAGE_SIZE_4K,
+                            page_type: sbi::TsmPageType::Page4k,
+                            num_pages: 1,
+                            guest_addr: fault_addr & !(PAGE_SIZE_4K - 1),
+                        });
+                        // Safety: `TvmAddZeroPages` only touches pages that we've already converted.
+                        unsafe {
+                            ecall_send(&msg).expect("Tellus - TvmAddZeroPages failed");
+                        }
+                        zero_pages_added += 1;
+                    }
+                    _ => {
+                        println!("Tellus - Guest exited with status {:?}", cause);
+                        break;
+                    }
+                }
+            }
         }
-        Ok(exit_code) => println!("Tellus - Guest exited with status {:}", exit_code),
     }
 
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmDestroy { guest_id: vmid });

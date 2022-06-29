@@ -807,11 +807,20 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 
         let from_page_addr = self.guest_addr_from_raw(page_addr)?;
         let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
-        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        self.vm_pages
-            .add_zero_pages_builder(from_page_addr, num_pages, &guest_vm.vm_pages, to_page_addr)
-            .map_err(|_| SbiError::InvalidParam)?;
+        let to_page_addr = PageAddr::new(RawAddr::guest(guest_addr, guest.page_owner_id()))
+            .ok_or(SbiError::InvalidParam)?;
+
+        // Zero pages may be added to either running or initialized VMs.
+        if let Some(vm) = guest.as_initializing_vm() {
+            self.vm_pages
+                .add_zero_pages_to(from_page_addr, num_pages, &vm.vm_pages, to_page_addr)
+        } else if let Some(vm) = guest.as_finalized_vm() {
+            self.vm_pages
+                .add_zero_pages_to(from_page_addr, num_pages, &vm.vm_pages, to_page_addr)
+        } else {
+            return Err(SbiError::InvalidParam);
+        }
+        .map_err(|_| SbiError::InvalidAddress)?;
 
         Ok(num_pages)
     }

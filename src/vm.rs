@@ -778,13 +778,16 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     ) -> sbi::Result<u64> {
         let from_page_addr = self.guest_addr_from_raw(from_addr)?;
         let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
-        self.vm_pages
-            .add_pte_pages_builder(from_page_addr, num_pages, &guest_vm.vm_pages)
-            .map_err(|e| {
-                println!("Salus - pte_pages_builder error {e:?}");
-                SbiError::InvalidAddress
-            })?;
+        if let Some(vm) = guest.as_initializing_vm() {
+            self.vm_pages
+                .add_pte_pages_to(from_page_addr, num_pages, &vm.vm_pages)
+        } else if let Some(vm) = guest.as_finalized_vm() {
+            self.vm_pages
+                .add_pte_pages_to(from_page_addr, num_pages, &vm.vm_pages)
+        } else {
+            return Err(SbiError::InvalidParam);
+        }
+        .map_err(|_| SbiError::InvalidAddress)?;
 
         Ok(0)
     }

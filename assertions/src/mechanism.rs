@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 pub struct True;
 pub struct False;

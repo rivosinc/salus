@@ -47,19 +47,22 @@ const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 extern "C" fn kernel_init() {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const NUM_GUEST_DATA_PAGES: u64 = 10;
+    const NUM_GUEST_ZERO_PAGES: u64 = 10;
     const PAGE_SIZE_4K: u64 = 4096;
 
-    let measurement_page_addr = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
+    let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
+    let measurement_page_addr = next_page;
     let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {
         measurement_version: 1,
         measurement_type: 1,
         dest_addr: measurement_page_addr,
     });
+    next_page += PAGE_SIZE_4K;
 
     if TEST_CSR.len() > MAX_CSR_LEN as usize {
         panic!("Test CSR is too large")
     }
-    let csr_addr = measurement_page_addr + PAGE_SIZE_4K;
+    let csr_addr = next_page;
     // Align the cert address
     let csr_size_aligned = (TEST_CSR.len() + size_of::<u64>() - 1) & !(size_of::<u64>() - 1);
     let cert_addr = csr_addr + csr_size_aligned as u64;
@@ -74,6 +77,7 @@ extern "C" fn kernel_init() {
         cert_addr,
         cert_len: MAX_CERT_LEN as u64,
     });
+    next_page += PAGE_SIZE_4K;
 
     println!("*****************************************");
     println!("Hello world from Tellus guest            ");
@@ -102,6 +106,20 @@ extern "C" fn kernel_init() {
         Ok(cert_len) => {
             println!("Evidence cert is at 0x{:x} - len {}", cert_addr, cert_len);
         }
+    }
+
+    // Touch the rest of the data pages to force Tellus to fault them in.
+    let end =
+        USABLE_RAM_START_ADDRESS + (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K;
+    while next_page < end {
+        let ptr = (next_page + 2 * core::mem::size_of::<u64>() as u64) as *mut u64;
+        // Safety: next_page is properly aligned and should be a writable part of our address space.
+        unsafe {
+            core::ptr::write(ptr, 0xdeadbeef);
+            let val = core::ptr::read(ptr);
+            assert_eq!(val, 0xdeadbeef);
+        }
+        next_page += PAGE_SIZE_4K;
     }
 
     println!("Exiting guest by causing a fault         ");

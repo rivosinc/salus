@@ -20,7 +20,7 @@ use crate::print_util::*;
 use crate::smp;
 use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::{
-    ActiveVmPages, VmPages, VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
+    ActiveVmPages, PageFaultType, VmPages, VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
 };
 use crate::{print, println};
 
@@ -48,6 +48,7 @@ enum VmExitCause {
     PowerOff(ResetType, ResetReason),
     CpuStart(u64),
     CpuStop,
+    ConfidentialPageFault(GuestPageAddr),
     UnhandledTrap(u64),
 }
 
@@ -58,6 +59,7 @@ impl VmExitCause {
             PowerOff(_, _) => TvmCpuExitCode::SystemReset,
             CpuStart(_) => TvmCpuExitCode::HartStart,
             CpuStop => TvmCpuExitCode::HartStop,
+            ConfidentialPageFault(_) => TvmCpuExitCode::ConfidentialPageFault,
             UnhandledTrap(_) => TvmCpuExitCode::UnhandledException,
         }
     }
@@ -67,6 +69,7 @@ impl VmExitCause {
         match self {
             PowerOff(reset_type, _) => Some(*reset_type as u64),
             CpuStart(hart_id) => Some(*hart_id),
+            ConfidentialPageFault(addr) => Some(addr.bits()),
             UnhandledTrap(scause) => Some(*scause),
             _ => None,
         }
@@ -77,6 +80,20 @@ impl VmExitCause {
         match self {
             PowerOff(_, reset_reason) => Some(*reset_reason as u64),
             _ => None,
+        }
+    }
+}
+
+impl From<PageFaultType> for VmExitCause {
+    fn from(fault: PageFaultType) -> VmExitCause {
+        use VmExitCause::*;
+        match fault {
+            PageFaultType::Confidential(addr) => {
+                // Mask off the page offset to avoid revealing more information than necessary to
+                // the host.
+                ConfidentialPageFault(PageAddr::with_round_down(addr, PageSize::Size4k))
+            }
+            PageFaultType::Unmapped(e, _) => UnhandledTrap(Trap::Exception(e).to_scause()),
         }
     }
 }
@@ -297,10 +314,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                         active_vcpu
                             .set_ecall_result(Standard(SbiReturn::from(SbiError::NotSupported)));
                     }
-                    VmCpuExit::PageFault(e, _) => {
-                        // TODO: Check if the page fault is in a confidential memory region and report
-                        // it as a ConfidentialPageFault so that the host can fault in pages.
-                        break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
+                    VmCpuExit::PageFault(e, addr) => {
+                        let pf = active_vcpu.active_pages().get_page_fault_cause(e, addr);
+                        break pf.into();
                     }
                     VmCpuExit::DelegatedException(e, stval) => {
                         active_vcpu.inject_exception(e, stval);

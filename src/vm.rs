@@ -19,6 +19,7 @@ use crate::guest_tracking::{GuestState, Guests};
 use crate::print_util::*;
 use crate::smp;
 use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
+use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
     ActiveVmPages, PageFaultType, VmPages, VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
 };
@@ -98,12 +99,46 @@ impl From<PageFaultType> for VmExitCause {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum EcallError {
+    Sbi(SbiError),
+    PageFault(PageFaultType),
+}
+
+type EcallResult<T> = core::result::Result<T, EcallError>;
+
+impl From<VmPagesError> for EcallError {
+    fn from(error: VmPagesError) -> EcallError {
+        match error {
+            // Unhandleable page faults just result in an error to the caller.
+            VmPagesError::PageFault(PageFaultType::Unmapped(..)) => {
+                EcallError::Sbi(SbiError::InvalidAddress)
+            }
+            VmPagesError::PageFault(pf) => EcallError::PageFault(pf),
+            // TODO: Map individual error types. InvalidAddress is likely not the right value for
+            // each error.
+            _ => EcallError::Sbi(SbiError::InvalidAddress),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EcallAction {
     LegacyOk,
     Unhandled,
     Continue(SbiReturn),
     Break(VmExitCause, SbiReturn),
+    Retry(VmExitCause),
+}
+
+impl From<EcallResult<u64>> for EcallAction {
+    fn from(result: EcallResult<u64>) -> EcallAction {
+        match result {
+            Ok(val) => EcallAction::Continue(SbiReturn::success(val)),
+            Err(EcallError::Sbi(e)) => EcallAction::Continue(e.into()),
+            Err(EcallError::PageFault(pf)) => EcallAction::Retry(pf.into()),
+        }
+    }
 }
 
 /// A VM that is being run.
@@ -125,9 +160,9 @@ impl<T: GuestStagePageTable, S> Vm<T, S> {
     }
 
     /// Convenience function to turn a raw u64 from an SBI call to a `GuestPageAddr`.
-    fn guest_addr_from_raw(&self, guest_addr: u64) -> sbi::Result<GuestPageAddr> {
+    fn guest_addr_from_raw(&self, guest_addr: u64) -> EcallResult<GuestPageAddr> {
         PageAddr::new(RawAddr::guest(guest_addr, self.page_owner_id()))
-            .ok_or(SbiError::InvalidParam)
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))
     }
 }
 
@@ -148,44 +183,44 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     }
 
     /// Sets a vCPU register.
-    fn set_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister, value: u64) -> sbi::Result<()> {
+    fn set_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister, value: u64) -> EcallResult<()> {
         let vcpu = self
             .vcpus
             .get_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
         use TvmCpuRegister::*;
         match register {
             EntryPc => vcpu.set_sepc(value),
             EntryArg => vcpu.set_gpr(GprIndex::A1, value),
             _ => {
-                return Err(SbiError::InvalidParam);
+                return Err(EcallError::Sbi(SbiError::InvalidParam));
             }
         };
         Ok(())
     }
 
     /// Gets a vCPU register.
-    fn get_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister) -> sbi::Result<u64> {
+    fn get_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister) -> EcallResult<u64> {
         let vcpu = self
             .vcpus
             .get_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
         use TvmCpuRegister::*;
         match register {
             EntryPc => Ok(vcpu.get_sepc()),
             EntryArg => Ok(vcpu.get_gpr(GprIndex::A1)),
-            _ => Err(SbiError::InvalidParam),
+            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
         }
     }
 
     /// Adds a vCPU to this VM.
-    fn add_vcpu(&self, vcpu_id: u64) -> sbi::Result<()> {
+    fn add_vcpu(&self, vcpu_id: u64) -> EcallResult<()> {
         let vcpu = self
             .vcpus
             .add_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
         vcpu.set_gpr(GprIndex::A0, vcpu_id);
         Ok(())
@@ -209,11 +244,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
 
 impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     /// Binds the specified vCPU to an IMSIC interrupt file.
-    fn bind_vcpu(&self, vcpu_id: u64, interrupt_file: ImsicGuestId) -> sbi::Result<()> {
+    fn bind_vcpu(&self, vcpu_id: u64, interrupt_file: ImsicGuestId) -> EcallResult<()> {
         let vcpu = self
             .vcpus
             .get_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
         // TODO: Bind to this (physical) CPU as well.
         vcpu.set_interrupt_file(interrupt_file);
@@ -221,19 +256,19 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Makes the specified vCPU runnable.
-    fn power_on_vcpu(&self, vcpu_id: u64) -> sbi::Result<()> {
+    fn power_on_vcpu(&self, vcpu_id: u64) -> EcallResult<()> {
         self.vcpus
             .power_on_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         Ok(())
     }
 
     /// Sets the entry point of the specified vCPU and makes it runnable.
-    fn start_vcpu(&self, vcpu_id: u64, start_addr: u64, opaque: u64) -> sbi::Result<()> {
+    fn start_vcpu(&self, vcpu_id: u64, start_addr: u64, opaque: u64) -> EcallResult<()> {
         let vcpu = self
             .vcpus
             .power_on_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
         vcpu.set_sepc(start_addr);
         vcpu.set_gpr(GprIndex::A1, opaque);
@@ -241,43 +276,43 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Gets the state of the specified vCPU.
-    fn get_vcpu_status(&self, vcpu_id: u64) -> sbi::Result<u64> {
+    fn get_vcpu_status(&self, vcpu_id: u64) -> EcallResult<u64> {
         let vcpu_status = self
             .vcpus
             .get_vcpu_status(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let status = match vcpu_status {
             VmCpuStatus::Runnable | VmCpuStatus::Running => HartState::Started,
             VmCpuStatus::PoweredOff => HartState::Stopped,
             VmCpuStatus::NotPresent => {
-                return Err(SbiError::InvalidParam);
+                return Err(EcallError::Sbi(SbiError::InvalidParam));
             }
         };
         Ok(status as u64)
     }
 
     /// Gets a vCPU register.
-    fn get_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister) -> sbi::Result<u64> {
+    fn get_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister) -> EcallResult<u64> {
         let vcpu = self
             .vcpus
             .get_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
         use TvmCpuRegister::*;
         match register {
             ExitCause0 => Ok(vcpu.get_virt_reg(VirtualRegister::Cause0)),
             ExitCause1 => Ok(vcpu.get_virt_reg(VirtualRegister::Cause1)),
-            _ => Err(SbiError::InvalidParam),
+            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
         }
     }
 
     /// Run this guest until an unhandled exit is encountered.
-    fn run_vcpu(&self, vcpu_id: u64) -> sbi::Result<TvmCpuExitCode> {
+    fn run_vcpu(&self, vcpu_id: u64) -> EcallResult<TvmCpuExitCode> {
         // Take the vCPU out of self.vcpus, giving us exclusive ownership.
         let mut vcpu = self
             .vcpus
             .take_vcpu(vcpu_id)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let exit_code = {
             let mut vcpu = vcpu.lock();
 
@@ -305,6 +340,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                             }
                             EcallAction::Break(reason, sbi_ret) => {
                                 active_vcpu.set_ecall_result(Standard(sbi_ret));
+                                break reason;
+                            }
+                            EcallAction::Retry(reason) => {
                                 break reason;
                             }
                         }
@@ -362,14 +400,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             ),
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
-            SbiMessage::Tee(tee_func) => {
-                EcallAction::Continue(self.handle_tee_msg(tee_func, active_pages))
-            }
+            SbiMessage::Tee(tee_func) => self.handle_tee_msg(tee_func, active_pages),
             SbiMessage::Measurement(measurement_func) => {
-                EcallAction::Continue(self.handle_measurement_msg(measurement_func, active_pages))
+                self.handle_measurement_msg(measurement_func, active_pages)
             }
             SbiMessage::Attestation(attestation_func) => {
-                EcallAction::Continue(self.handle_attestation_msg(attestation_func, active_pages))
+                self.handle_attestation_msg(attestation_func, active_pages)
             }
         }
     }
@@ -405,15 +441,19 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 opaque,
             } => match self.start_vcpu(hart_id, start_addr, opaque) {
                 Ok(()) => EcallAction::Break(VmExitCause::CpuStart(hart_id), SbiReturn::success(0)),
-                Err(e) => EcallAction::Continue(SbiReturn::from(e)),
+                result @ Err(_) => result.map(|_| 0).into(),
             },
             HartStop => EcallAction::Break(VmExitCause::CpuStop, SbiReturn::success(0)),
-            HartStatus { hart_id } => EcallAction::Continue(self.get_vcpu_status(hart_id).into()),
+            HartStatus { hart_id } => self.get_vcpu_status(hart_id).into(),
             _ => EcallAction::Unhandled,
         }
     }
 
-    fn handle_tee_msg(&self, tee_func: TeeFunction, active_pages: &ActiveVmPages<T>) -> SbiReturn {
+    fn handle_tee_msg(
+        &self,
+        tee_func: TeeFunction,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallAction {
         use TeeFunction::*;
         match tee_func {
             TsmGetInfo { dest_addr, len } => self.get_tsm_info(dest_addr, len, active_pages).into(),
@@ -432,13 +472,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             TsmInitiateFence => self
                 .vm_pages
                 .initiate_fence()
-                .map_err(|_| SbiError::Failed)
+                .map_err(EcallError::from)
                 .map(|_| 0)
                 .into(),
             TsmLocalFence => {
                 // Nothing to do here as the fence itself will occur once we re-enter `VmPages` the
                 // next time we're run.
-                SbiReturn::success(0)
+                EcallAction::Continue(SbiReturn::success(0))
             }
             AddPageTablePages {
                 guest_id,
@@ -518,7 +558,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         &self,
         measurement_func: MeasurementFunction,
         active_pages: &ActiveVmPages<T>,
-    ) -> SbiReturn {
+    ) -> EcallAction {
         use MeasurementFunction::*;
         match measurement_func {
             GetSelfMeasurement {
@@ -541,7 +581,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         &self,
         attestation_func: AttestationFunction,
         active_pages: &ActiveVmPages<T>,
-    ) -> SbiReturn {
+    ) -> EcallAction {
         use AttestationFunction::*;
         match attestation_func {
             GetEvidence {
@@ -573,10 +613,10 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         dest_addr: u64,
         len: u64,
         active_pages: &ActiveVmPages<T>,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         let dest_addr = RawAddr::guest(dest_addr, self.vm_pages.page_owner_id());
         if len < mem::size_of::<sbi::TsmInfo>() as u64 {
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
         let len = mem::size_of::<sbi::TsmInfo>();
         // Since we're the hypervisor we're ready from boot.
@@ -592,7 +632,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             unsafe { slice::from_raw_parts((&tsm_info as *const sbi::TsmInfo).cast(), len) };
         active_pages
             .copy_to_guest(dest_addr, tsm_info_bytes)
-            .map_err(|_| SbiError::InvalidAddress)?;
+            .map_err(EcallError::from)?;
         Ok(len as u64)
     }
 
@@ -602,15 +642,15 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         page_addr: u64,
         page_type: sbi::TsmPageType,
         num_pages: u64,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         if page_type != sbi::TsmPageType::Page4k {
             // TODO: Support converting hugepages.
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
         let page_addr = self.guest_addr_from_raw(page_addr)?;
         self.vm_pages
             .convert_pages(page_addr, num_pages)
-            .map_err(|_| SbiError::InvalidAddress)?;
+            .map_err(EcallError::from)?;
         Ok(num_pages)
     }
 
@@ -620,15 +660,15 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         page_addr: u64,
         page_type: sbi::TsmPageType,
         num_pages: u64,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         if page_type != sbi::TsmPageType::Page4k {
             // TODO: Support converting hugepages.
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
         let page_addr = self.guest_addr_from_raw(page_addr)?;
         self.vm_pages
             .reclaim_pages(page_addr, num_pages)
-            .map_err(|_| SbiError::InvalidAddress)?;
+            .map_err(EcallError::from)?;
         Ok(num_pages)
     }
 
@@ -637,20 +677,21 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         params_addr: u64,
         len: u64,
         active_pages: &ActiveVmPages<T>,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         if self.guests.is_none() {
-            return Err(SbiError::InvalidParam); // TODO different error
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
         // Read the params from the VM's address space.
         let params_addr = RawAddr::guest(params_addr, self.vm_pages.page_owner_id());
         if len < mem::size_of::<sbi::TvmCreateParams>() as u64 {
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
         let mut param_bytes = [0u8; mem::size_of::<sbi::TvmCreateParams>()];
         active_pages
             .copy_from_guest(param_bytes.as_mut_slice(), params_addr)
-            .map_err(|_| SbiError::InvalidAddress)?;
+            .map_err(EcallError::from)?;
+
         // Safety: `param_bytes` points to `size_of::<TvmCreateParams>()` contiguous, initialized
         // bytes.
         let params: sbi::TvmCreateParams =
@@ -664,7 +705,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         let (guest_vm, state_page) = self
             .vm_pages
             .create_guest_vm(page_root_addr, state_addr, vcpu_addr, num_vcpu_pages)
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(EcallError::from)?;
         let id = guest_vm.page_owner_id();
 
         let guest_state = GuestState::new(guest_vm, state_page);
@@ -672,28 +713,28 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             .as_ref()
             .unwrap()
             .add(guest_state)
-            .map_err(|_| SbiError::Failed)?;
+            .map_err(|_| EcallError::Sbi(SbiError::Failed))?;
 
         Ok(id.raw())
     }
 
-    fn destroy_guest(&self, guest_id: u64) -> sbi::Result<u64> {
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+    fn destroy_guest(&self, guest_id: u64) -> EcallResult<u64> {
+        let guest_id = PageOwnerId::new(guest_id).ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         self.guests
             .as_ref()
             .and_then(|g| g.remove(guest_id).ok())
-            .ok_or(SbiError::InvalidParam)?;
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         Ok(0)
     }
 
     // converts the given guest from init to running
-    fn guest_finalize(&self, guest_id: u64) -> sbi::Result<u64> {
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+    fn guest_finalize(&self, guest_id: u64) -> EcallResult<u64> {
+        let guest_id = PageOwnerId::new(guest_id).ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let guest = self
             .guests
             .as_ref()
             .and_then(|g| g.finalize(guest_id).ok())
-            .ok_or(SbiError::InvalidParam)?;
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let guest_vm = guest.as_finalized_vm().unwrap();
 
         // Power on vCPU0 initially. Remaining vCPUs will get powered on by the VM itself via
@@ -705,20 +746,22 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Retrieves the guest VM with the ID `guest_id`.
-    fn guest_by_id(&self, guest_id: u64) -> sbi::Result<GuestState<T>> {
-        let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+    fn guest_by_id(&self, guest_id: u64) -> EcallResult<GuestState<T>> {
+        let guest_id = PageOwnerId::new(guest_id).ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let guest = self
             .guests
             .as_ref()
             .and_then(|g| g.get(guest_id))
-            .ok_or(SbiError::InvalidParam)?;
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         Ok(guest)
     }
 
     /// Adds a vCPU with `vcpu_id` to a guest VM.
-    fn guest_add_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
+    fn guest_add_vcpu(&self, guest_id: u64, vcpu_id: u64) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         guest_vm.add_vcpu(vcpu_id)?;
         Ok(0)
     }
@@ -730,10 +773,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         vcpu_id: u64,
         register: TvmCpuRegister,
         value: u64,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
         // The only writeable registers are writeable only during initialization.
-        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         guest_vm.set_vcpu_reg(vcpu_id, register, value)?;
         Ok(0)
     }
@@ -744,16 +789,20 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         guest_id: u64,
         vcpu_id: u64,
         register: TvmCpuRegister,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
         use TvmCpuRegister::*;
         let value = match register {
             EntryArg | EntryPc => {
-                let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
+                let guest_vm = guest
+                    .as_initializing_vm()
+                    .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
                 guest_vm.get_vcpu_reg(vcpu_id, register)?
             }
             ExitCause0 | ExitCause1 => {
-                let guest_vm = guest.as_finalized_vm().ok_or(SbiError::InvalidParam)?;
+                let guest_vm = guest
+                    .as_finalized_vm()
+                    .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
                 guest_vm.get_vcpu_reg(vcpu_id, register)?
             }
         };
@@ -761,9 +810,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Runs a guest VM's vCPU.
-    fn guest_run_vcpu(&self, guest_id: u64, vcpu_id: u64) -> sbi::Result<u64> {
+    fn guest_run_vcpu(&self, guest_id: u64, vcpu_id: u64) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest.as_finalized_vm().ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let exit_code = guest_vm.run_vcpu(vcpu_id)?;
         Ok(exit_code as u64)
     }
@@ -773,7 +824,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         guest_id: u64,
         from_addr: u64,
         num_pages: u64,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         let from_page_addr = self.guest_addr_from_raw(from_addr)?;
         let guest = self.guest_by_id(guest_id)?;
         if let Some(vm) = guest.as_initializing_vm() {
@@ -783,9 +834,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             self.vm_pages
                 .add_pte_pages_to(from_page_addr, num_pages, &vm.vm_pages)
         } else {
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
-        .map_err(|_| SbiError::InvalidAddress)?;
+        .map_err(EcallError::from)?;
 
         Ok(0)
     }
@@ -796,14 +847,16 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         guest_id: u64,
         guest_addr: u64,
         len: u64,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         guest_vm
             .vm_pages
             .add_confidential_memory_region(page_addr, len)
-            .map_err(|_| SbiError::InvalidAddress)?;
+            .map_err(EcallError::from)?;
         Ok(0)
     }
 
@@ -814,17 +867,17 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         page_type: sbi::TsmPageType,
         num_pages: u64,
         guest_addr: u64,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         if page_type != sbi::TsmPageType::Page4k {
             // TODO - support huge pages.
             // TODO - need to break up mappings if given address that's part of a huge page.
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
         let from_page_addr = self.guest_addr_from_raw(page_addr)?;
         let guest = self.guest_by_id(guest_id)?;
         let to_page_addr = PageAddr::new(RawAddr::guest(guest_addr, guest.page_owner_id()))
-            .ok_or(SbiError::InvalidParam)?;
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
 
         // Zero pages may be added to either running or initialized VMs.
         if let Some(vm) = guest.as_initializing_vm() {
@@ -834,9 +887,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             self.vm_pages
                 .add_zero_pages_to(from_page_addr, num_pages, &vm.vm_pages, to_page_addr)
         } else {
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
-        .map_err(|_| SbiError::InvalidAddress)?;
+        .map_err(EcallError::from)?;
 
         Ok(num_pages)
     }
@@ -851,17 +904,19 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         num_pages: u64,
         guest_addr: u64,
         active_pages: &ActiveVmPages<T>,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         if page_type != sbi::TsmPageType::Page4k {
             // TODO - support huge pages.
             // TODO - need to break up mappings if given address that's part of a huge page.
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
         let src_page_addr = self.guest_addr_from_raw(src_addr)?;
         let from_page_addr = self.guest_addr_from_raw(dest_addr)?;
         let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         active_pages
             .copy_and_add_data_pages_builder(
@@ -871,7 +926,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 &guest_vm.vm_pages,
                 to_page_addr,
             )
-            .map_err(|_| SbiError::InvalidParam)?;
+            .map_err(EcallError::from)?;
 
         Ok(num_pages)
     }
@@ -884,9 +939,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         dest_addr: u64,
         guest_id: u64,
         active_pages: &ActiveVmPages<T>,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         if (measurement_version != 1) || (measurement_type != 1) {
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
         // TODO: Define a compile-time constant for the maximum length of any measurement we
@@ -897,12 +952,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             // measurements for self.
             self.vm_pages.get_measurement(&mut bytes)
         } else {
-            let guest_id = PageOwnerId::new(guest_id).ok_or(SbiError::InvalidParam)?;
+            let guest_id =
+                PageOwnerId::new(guest_id).ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
             let guest = self
                 .guests
                 .as_ref()
                 .and_then(|g| g.get(guest_id))
-                .ok_or(SbiError::InvalidParam)?;
+                .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
             let result = if let Some(vm) = guest.as_finalized_vm() {
                 vm.vm_pages.get_measurement(&mut bytes)
             } else {
@@ -914,12 +970,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             };
             result
         }
-        .map_err(|_| SbiError::Failed)?;
+        .map_err(EcallError::from)?;
 
         let gpa = RawAddr::guest(dest_addr, self.vm_pages.page_owner_id());
         active_pages
             .copy_to_guest(gpa, &bytes)
-            .map_err(|_| SbiError::InvalidAddress)?;
+            .map_err(EcallError::from)?;
         Ok(bytes.len() as u64)
     }
 
@@ -930,25 +986,27 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         _cert_addr: u64,
         _cert_len: usize,
         active_pages: &ActiveVmPages<T>,
-    ) -> sbi::Result<u64> {
+    ) -> EcallResult<u64> {
         if csr_len > MAX_CSR_LEN {
-            return Err(SbiError::InvalidParam);
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
         let mut csr_bytes = [0u8; MAX_CSR_LEN];
         let csr_gpa = RawAddr::guest(csr_addr, self.vm_pages.page_owner_id());
         active_pages
             .copy_from_guest(&mut csr_bytes.as_mut_slice()[..csr_len], csr_gpa)
-            .map_err(|_| SbiError::InvalidAddress)?;
+            .map_err(EcallError::from)?;
         println!("CSR len {}", csr_len);
 
-        let csr = CertReq::from_der(&csr_bytes[..csr_len]).map_err(|_| SbiError::InvalidParam)?;
+        let csr = CertReq::from_der(&csr_bytes[..csr_len])
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         println!(
             "CSR version {:?} Signature algorithm {:?}",
             csr.info.version, csr.algorithm.oid
         );
 
-        csr.verify().map_err(|_| SbiError::InvalidParam)?;
+        csr.verify()
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
 
         Ok(0)
     }
@@ -958,8 +1016,8 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         _msmt_addr: u64,
         _len: usize,
         _active_pages: &ActiveVmPages<T>,
-    ) -> sbi::Result<u64> {
-        Err(SbiError::NotSupported)
+    ) -> EcallResult<u64> {
+        Err(EcallError::Sbi(SbiError::NotSupported))
     }
 
     /// Destroys this `Vm`.

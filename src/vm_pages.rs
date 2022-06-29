@@ -14,7 +14,7 @@ use riscv_page_tables::{
     tlb, GuestStagePageTable, PageTableError, PageTableMapper, PlatformPageTable,
 };
 use riscv_pages::*;
-use riscv_regs::{hgatp, LocalRegisterCopy, Writeable, CSR};
+use riscv_regs::{hgatp, Exception, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
 
 use crate::smp::PerCpu;
@@ -250,6 +250,15 @@ impl VmRegionList {
             .iter()
             .any(|r| r.start <= start && r.end >= end && r.region_type == region_type)
     }
+
+    /// Returns the type of the region that `addr` resides in, or `None` if it's not in any region.
+    fn find(&self, addr: GuestPhysAddr) -> Option<VmRegionType> {
+        let regions = self.regions.lock();
+        regions
+            .iter()
+            .find(|r| r.start.bits() <= addr.bits() && r.end.bits() > addr.bits())
+            .map(|r| r.region_type)
+    }
 }
 
 /// Wrapper for a `PageTableMapper` created from the page table of `VmPages`. Measures pages as
@@ -309,6 +318,18 @@ impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
         }
         self.mapper.map_page(to_addr, page).map_err(Error::Paging)
     }
+}
+
+/// The possible sources of a guest page fault.
+#[derive(Clone, Copy, Debug)]
+pub enum PageFaultType {
+    /// A page fault taken when accessing a confidential memory region. The host may handle these
+    /// faults by inserting a confidential page into the guest's address space.
+    Confidential(GuestPhysAddr),
+
+    /// A page fault taken when accessing memory outside of any valid region of guest physical address
+    /// space. These faults are not resolvable.
+    Unmapped(Exception, GuestPhysAddr),
 }
 
 /// Represents a reference to the current VM address space. The previous address space is restored
@@ -457,6 +478,14 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         }
 
         Ok(count)
+    }
+
+    /// Returns the page fault type that corresponds to having taken `exception` at `addr`.
+    pub fn get_page_fault_cause(&self, exception: Exception, addr: GuestPhysAddr) -> PageFaultType {
+        match self.regions.find(addr) {
+            Some(VmRegionType::Confidential) => PageFaultType::Confidential(addr),
+            None => PageFaultType::Unmapped(exception, addr),
+        }
     }
 }
 

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![no_std]
+
 //! Macros that assert properties of code at compile time.
 //!
 //! A static assertion is particularly appropriate when unsafe code relies on
@@ -22,9 +24,7 @@ pub use crate::mechanism::*;
 /// ```rust
 /// use assertions::const_assert;
 ///
-/// fn main() {
-///     const_assert!(std::mem::size_of::<String>() == 24);
-/// }
+/// const_assert!(core::mem::size_of::<String>() == 24);
 /// ```
 ///
 /// # Example that fails to compile
@@ -32,10 +32,8 @@ pub use crate::mechanism::*;
 /// ```rust,compile_fail
 /// use assertions::const_assert;
 ///
-/// fn main() {
-///     // fails to compile:
-///     const_assert!(std::mem::size_of::<String>() == 8);
-/// }
+/// // fails to compile:
+/// const_assert!(core::mem::size_of::<String>() == 8);
 /// ```
 #[macro_export]
 macro_rules! const_assert {

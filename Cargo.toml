@@ -12,6 +12,7 @@ panic = "abort"
 
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
+assertions = { path = "./assertions" }
 attestation = { path = "./attestation" }
 data_measure = { path = "./data-measure" }
 der = "0.6.0"

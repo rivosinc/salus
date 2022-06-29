@@ -1,10 +1,12 @@
 // Copyright 2017 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+//! Provides basic data types for working with volatile and device memory.
 
-use std::io;
-use std::mem::{size_of, MaybeUninit};
-use std::slice::{from_raw_parts, from_raw_parts_mut};
+#![no_std]
+
+use core::mem::size_of;
+use core::slice::{from_raw_parts, from_raw_parts_mut};
 
 /// Types for which it is safe to initialize from raw data.
 ///
@@ -70,20 +72,6 @@ pub unsafe trait DataInit: Copy + Send + Sync {
             ([], [mid], []) => Some(mid),
             _ => None,
         }
-    }
-
-    /// Creates an instance of `Self` by copying raw data from an io::Read stream.
-    fn from_reader<R: io::Read>(mut read: R) -> io::Result<Self> {
-        // Allocate on the stack via `MaybeUninit` to ensure proper alignment.
-        let mut out = MaybeUninit::zeroed();
-
-        // Safe because the pointer is valid and points to `size_of::<Self>()` bytes of zeroes,
-        // which is a properly initialized value for `u8`.
-        let buf = unsafe { from_raw_parts_mut(out.as_mut_ptr() as *mut u8, size_of::<Self>()) };
-        read.read_exact(buf)?;
-
-        // Safe because any bit pattern is considered a valid value for `Self`.
-        Ok(unsafe { out.assume_init() })
     }
 
     /// Converts a reference to `self` into a slice of bytes.
@@ -183,8 +171,7 @@ pub use crate::endian::*;
 pub mod volatile_memory;
 pub use crate::volatile_memory::*;
 
-mod flexible_array;
-pub use flexible_array::{vec_with_array_field, FlexibleArray, FlexibleArrayWrapper};
-
-mod sys;
-pub use sys::{create_iobuf, IoBuf, IoBufMut};
+// Pull std for unit tests
+#[cfg(test)]
+#[macro_use]
+extern crate std;

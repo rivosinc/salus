@@ -10,7 +10,7 @@ use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::*;
-use riscv_regs::GprIndex;
+use riscv_regs::{GprIndex, Trap};
 use s_mode_utils::abort::abort;
 use sbi::Error as SbiError;
 use sbi::*;
@@ -20,7 +20,7 @@ use crate::print_util::*;
 use crate::smp;
 use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::{
-    self, ActiveVmPages, VmPages, VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
+    ActiveVmPages, VmPages, VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
 };
 use crate::{print, println};
 
@@ -48,7 +48,6 @@ enum VmExitCause {
     PowerOff(ResetType, ResetReason),
     CpuStart(u64),
     CpuStop,
-    PageFault(GuestPhysAddr),
     UnhandledTrap(u64),
 }
 
@@ -59,7 +58,6 @@ impl VmExitCause {
             PowerOff(_, _) => TvmCpuExitCode::SystemReset,
             CpuStart(_) => TvmCpuExitCode::HartStart,
             CpuStop => TvmCpuExitCode::HartStop,
-            PageFault(_) => TvmCpuExitCode::GuestPageFault,
             UnhandledTrap(_) => TvmCpuExitCode::UnhandledException,
         }
     }
@@ -69,7 +67,6 @@ impl VmExitCause {
         match self {
             PowerOff(reset_type, _) => Some(*reset_type as u64),
             CpuStart(hart_id) => Some(*hart_id),
-            PageFault(fault_addr) => Some(fault_addr.bits()),
             UnhandledTrap(scause) => Some(*scause),
             _ => None,
         }
@@ -300,10 +297,10 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                         active_vcpu
                             .set_ecall_result(Standard(SbiReturn::from(SbiError::NotSupported)));
                     }
-                    VmCpuExit::PageFault(addr) => {
-                        if self.handle_guest_fault(addr).is_err() {
-                            break VmExitCause::PageFault(addr);
-                        }
+                    VmCpuExit::PageFault(e, _) => {
+                        // TODO: Check if the page fault is in a confidential memory region and report
+                        // it as a ConfidentialPageFault so that the host can fault in pages.
+                        break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
                     }
                     VmCpuExit::DelegatedException(e, stval) => {
                         active_vcpu.inject_exception(e, stval);
@@ -434,6 +431,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             } => self
                 .guest_add_page_table_pages(guest_id, page_addr, num_pages)
                 .into(),
+            TvmAddConfidentialMemoryRegion {
+                guest_id,
+                guest_addr,
+                len,
+            } => self
+                .guest_add_confidential_memory_region(guest_id, guest_addr, len)
+                .into(),
             TvmAddZeroPages {
                 guest_id,
                 page_addr,
@@ -546,28 +550,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 .guest_extend_measurement(measurement_addr, len as usize, active_pages)
                 .into(),
         }
-    }
-
-    // Handle access faults. For example, when a returned page needs to be demand-faulted back to
-    // the page table.
-    fn handle_guest_fault(&self, fault_addr: GuestPhysAddr) -> vm_pages::Result<()> {
-        self.vm_pages.handle_page_fault(fault_addr)?;
-
-        // Get instruction that caused the fault
-        //   - disable ints
-        //   - load hstatus with value from guest
-        //   - set stvec to catch traps during access
-        //   - read instruction using HLV.HU (or tow for 32 bit).
-        //   - reset stvec
-        //   - reset hstatus
-        //   - re-enable ints
-
-        // Determine width of faulting access
-        // determine destination/source register
-        // Check how to service access (device emulation for example) and run.
-        // if load, set destination register
-
-        Ok(())
     }
 
     fn get_tsm_info(
@@ -792,6 +774,23 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         Ok(0)
     }
 
+    /// Adds a region of confidential memory to the specified guest.
+    fn guest_add_confidential_memory_region(
+        &self,
+        guest_id: u64,
+        guest_addr: u64,
+        len: u64,
+    ) -> sbi::Result<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest.as_initializing_vm().ok_or(SbiError::InvalidParam)?;
+        let page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        guest_vm
+            .vm_pages
+            .add_confidential_memory_region(page_addr, len)
+            .map_err(|_| SbiError::InvalidAddress)?;
+        Ok(0)
+    }
+
     fn guest_add_zero_pages(
         &self,
         guest_id: u64,
@@ -1010,6 +1009,14 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             .unwrap();
     }
 
+    /// Adds a region of confidential memory to the host VM.
+    pub fn add_confidential_memory_region(&mut self, addr: GuestPageAddr, len: u64) {
+        self.inner
+            .vm_pages
+            .add_confidential_memory_region(addr, len)
+            .unwrap();
+    }
+
     /// Adds data pages that are measured and mapped to the page tables for the host. Requires
     /// that the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
     pub fn add_measured_pages<I, S, M>(&mut self, to_addr: GuestPageAddr, pages: I)
@@ -1036,7 +1043,6 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
                 .unwrap();
             mapper.map_page_with_measurement(vm_addr, mappable).unwrap();
         }
-        mapper.finish();
     }
 
     /// Add pages which need not be measured to the host page tables. For RAM pages, requires that
@@ -1067,7 +1073,6 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
                 .unwrap();
             mapper.map_page(vm_addr, mappable).unwrap();
         }
-        mapper.finish();
     }
 
     /// Completes intialization of the host, returning it in a finalized state.

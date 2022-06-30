@@ -23,6 +23,10 @@ pub(crate) const MAX_CSR_RDN: usize = 8;
 pub(crate) const MAX_CSR_RDN_LEN: usize = MAX_CSR_ATV * MAX_CSR_ATV_LEN;
 pub(crate) const MAX_CSR_RDN_SEQUENCE_LEN: usize = MAX_CSR_RDN * MAX_CSR_RDN_LEN;
 
+pub(crate) const MAX_CERT_EXTENSIONS: usize = 8;
+pub(crate) const MAX_CERT_ATV: usize = MAX_CSR_ATV;
+pub(crate) const MAX_CERT_RDN: usize = MAX_CSR_RDN;
+
 /// Attestation errors
 #[derive(Debug)]
 pub enum Error<'a> {
@@ -40,6 +44,9 @@ pub enum Error<'a> {
 
     /// Invalid digital signature
     InvalidSignature,
+
+    /// Invalid Key bytes
+    InvalidKey,
 
     /// Unsupported signing algorithm
     UnsupportedAlgorithm(spki::AlgorithmIdentifier<'a>),
@@ -121,7 +128,11 @@ macro_rules! impl_newtype {
 }
 
 mod attr;
+/// x.509 certificate module
+pub mod certificate;
+mod extensions;
 mod name;
 /// Certificate Signing Resquest module
 pub mod request;
+mod time;
 mod verify;

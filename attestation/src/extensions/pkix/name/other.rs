@@ -26,6 +26,7 @@ pub struct OtherName<'a> {
 
 #[test]
 #[cfg(test)]
+#[cfg(feature = "alloc")]
 fn test() {
     use alloc::string::ToString;
     use der::{Decode, Encode};

@@ -126,7 +126,7 @@ impl<AS: AddressSpace> PartialOrd for RawAddr<AS> {
 }
 
 /// An address of a Page in an address space. It is guaranteed to be aligned to a page boundary.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PageAddr<AS: AddressSpace> {
     addr: RawAddr<AS>,
 }
@@ -214,12 +214,6 @@ impl<AS: AddressSpace> PageAddr<AS> {
     /// Gets the index of the page in the system (the linear page count from address 0).
     pub fn index(&self) -> usize {
         self.pfn().bits() as usize
-    }
-}
-
-impl<AS: AddressSpace> PartialEq for PageAddr<AS> {
-    fn eq(&self, other: &Self) -> bool {
-        self.addr == other.addr
     }
 }
 

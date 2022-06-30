@@ -11,7 +11,7 @@ use crate::page_info::{PageInfo, PageMap, PageState};
 use crate::{HwMemMap, PageList, TlbVersion};
 
 /// Errors related to managing physical page information.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// Too many guests started by the host at once.
     GuestOverflow,

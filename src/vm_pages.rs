@@ -164,6 +164,8 @@ pub enum VmRegionType {
     Confidential,
     /// Memory that is shared with the parent
     Shared,
+    /// Emulated MMIO region; accesses always cause a fault that is forwarded to the VM's host.
+    Mmio,
 }
 
 /// A contiguous region of guest physical address space.
@@ -493,6 +495,10 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         match self.regions.find(addr) {
             Some(VmRegionType::Confidential) => PageFaultType::Confidential(addr),
             Some(VmRegionType::Shared) => PageFaultType::Shared(addr),
+            Some(VmRegionType::Mmio) => {
+                // TODO: Add a page fault type for emulated MMIO accesses.
+                PageFaultType::Unmapped(exception, addr)
+            }
             None => PageFaultType::Unmapped(exception, addr),
         }
     }
@@ -853,6 +859,17 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
         )
         .ok_or(Error::UnalignedAddress)?;
         self.regions.add(page_addr, end, VmRegionType::Shared)
+    }
+
+    /// Adds an emulated MMIO region of `len` bytes starting at `page_addr` to this VM's address space.
+    pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+        self.regions.add(page_addr, end, VmRegionType::Mmio)
     }
 
     /// Consumes this `VmPages`, returning a finalized one.

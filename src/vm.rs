@@ -500,9 +500,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             } => self
                 .guest_add_confidential_memory_region(guest_id, guest_addr, len)
                 .into(),
-            TvmAddEmulatedMmioRegion { .. } => {
-                EcallAction::Continue(SbiReturn::from(SbiError::NotSupported))
-            }
+            TvmAddEmulatedMmioRegion {
+                guest_id,
+                guest_addr,
+                len,
+            } => self.guest_add_mmio_region(guest_id, guest_addr, len).into(),
             TvmAddZeroPages {
                 guest_id,
                 page_addr,
@@ -881,6 +883,20 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         guest_vm
             .vm_pages
             .add_confidential_memory_region(page_addr, len)
+            .map_err(EcallError::from)?;
+        Ok(0)
+    }
+
+    /// Adds an emulated MMIO region to the specified guest.
+    fn guest_add_mmio_region(&self, guest_id: u64, guest_addr: u64, len: u64) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        guest_vm
+            .vm_pages
+            .add_mmio_region(page_addr, len)
             .map_err(EcallError::from)?;
         Ok(0)
     }

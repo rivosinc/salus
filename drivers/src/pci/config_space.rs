@@ -8,7 +8,7 @@ use core::ops::Range;
 use data_model::Le32;
 use device_tree::DeviceTree;
 use page_tracking::HwMemMap;
-use riscv_pages::{DeviceMemType, PageSize, RawAddr, SupervisorPageAddr, SupervisorPhys};
+use riscv_pages::{DeviceMemType, PageAddr, PageSize, RawAddr, SupervisorPageAddr};
 
 use super::address::{Address, Bus, Device, Function, Segment};
 use super::header::Header;
@@ -67,7 +67,7 @@ impl PciConfigSpace {
             .value_u64();
 
         let config_addr_raw = regs.next().ok_or(Error::NoConfigBase)?;
-        let config_base = SupervisorPageAddr::new(RawAddr::new(config_addr_raw, SupervisorPhys))
+        let config_base = PageAddr::new(RawAddr::supervisor(config_addr_raw))
             .ok_or(Error::ConfigSpaceMisaligned(config_addr_raw))?;
 
         let config_size = regs.next().ok_or(Error::NoConfigSize)?;
@@ -280,8 +280,7 @@ mod tests {
         config_slice[1024] = 0xffff_ffff;
 
         let config_space = PciConfigSpace {
-            config_base: SupervisorPageAddr::new(RawAddr::new(config_start, SupervisorPhys))
-                .unwrap(),
+            config_base: PageAddr::new(RawAddr::supervisor(config_start)).unwrap(),
             config_size: 8192,
             segment: Segment::default(),
             start_bus: Bus::default(),

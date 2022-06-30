@@ -7,7 +7,9 @@ use core::marker::PhantomData;
 use core::slice;
 
 use crate::state::*;
-use crate::{AddressSpace, GuestPhys, MemType, PageOwnerId, SupervisorPhys, SupervisorVirt};
+use crate::{
+    AddressSpace, GuestPhys, GuestVirt, MemType, PageOwnerId, SupervisorPhys, SupervisorVirt,
+};
 
 // PFN constants, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
@@ -86,17 +88,17 @@ impl<AS: AddressSpace> RawAddr<AS> {
 
 impl RawAddr<SupervisorPhys> {
     /// Creates a `RawAddr` in the `SupervisorPhys` address space.
-    /// Short for `RawAddr::new(addr, SupervisorPhys)`.
+    /// Short for `RawAddr::new(addr, SupervisorPhys::default())`.
     pub fn supervisor(addr: u64) -> Self {
-        Self(addr, SupervisorPhys)
+        Self(addr, SupervisorPhys::default())
     }
 }
 
 impl RawAddr<SupervisorVirt> {
     /// Creates a `RawAddr` in the `SupervisorVirt` address space.
-    /// Short for `RawAddr::new(addr, SupervisorVirt)`.
+    /// Short for `RawAddr::new(addr, SupervisorVirt::default())`.
     pub fn supervisor_virt(addr: u64) -> Self {
-        Self(addr, SupervisorVirt)
+        Self(addr, SupervisorVirt::default())
     }
 }
 
@@ -108,10 +110,20 @@ impl RawAddr<GuestPhys> {
     }
 }
 
+impl RawAddr<GuestVirt> {
+    /// Creates a `RawAddr` in the `GuestVirt` address space of the VM provided by `PageOwnerId`.
+    /// Short for `RawAddr::new(addr, GuestVirt::new(id))`.
+    pub fn guest_virt(addr: u64, id: PageOwnerId) -> Self {
+        Self(addr, GuestVirt::new(id))
+    }
+}
+
 /// Convenience type alias for supervisor-physical addresses.
 pub type SupervisorPhysAddr = RawAddr<SupervisorPhys>;
 /// Convenience type alias for guest-physical addresses.
 pub type GuestPhysAddr = RawAddr<GuestPhys>;
+/// Convenience type alias for guest-virtual addresses.
+pub type GuestVirtAddr = RawAddr<GuestVirt>;
 
 impl<AS: AddressSpace> From<PageAddr<AS>> for RawAddr<AS> {
     fn from(p: PageAddr<AS>) -> RawAddr<AS> {
@@ -291,7 +303,7 @@ impl<AS: AddressSpace> Pfn<AS> {
 impl Pfn<SupervisorPhys> {
     /// Creates a PFN from raw bits.
     pub fn supervisor(bits: u64) -> Self {
-        Pfn(bits, SupervisorPhys)
+        Pfn(bits, SupervisorPhys::default())
     }
 }
 

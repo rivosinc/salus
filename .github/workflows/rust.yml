@@ -33,4 +33,4 @@ jobs:
     - name: Format
       run: cargo fmt -- --check --config format_code_in_doc_comments=true
     - name: Run tests
-      run: cargo test --target x86_64-unknown-linux-gnu --workspace --exclude test_workloads --lib
+      run: make check

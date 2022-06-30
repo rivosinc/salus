@@ -8,7 +8,17 @@ ifdef LOCAL_PATH
 LOCAL_PATH:=${LOCAL_PATH}/
 endif
 
+HOST_TRIPLET := $(shell cargo -Vv | grep '^host:' | awk ' { print $$2; } ') 
+
 all: salus tellus guestvm
+
+.PHONY: check
+check:
+	cargo test \
+		--target $(HOST_TRIPLET) \
+		--workspace \
+		--exclude test_workloads \
+		--lib
 
 .PHONY: salus
 salus:

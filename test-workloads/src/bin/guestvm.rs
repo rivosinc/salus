@@ -44,12 +44,14 @@ const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
-extern "C" fn kernel_init() {
+extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const NUM_GUEST_DATA_PAGES: u64 = 160;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
     const PAGE_SIZE_4K: u64 = 4096;
-
+    // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
+    const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
+    const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
     let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
     let measurement_page_addr = next_page;
     let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {
@@ -144,6 +146,15 @@ extern "C" fn kernel_init() {
             assert_eq!(val, 0xdeadbeef);
         }
         next_page += PAGE_SIZE_4K;
+    }
+
+    println!("Accessing shared page at 0x{shared_page_addr:x}     ");
+    // Safety: We are assuming that the shared_page_addr is valid, and will be mapped in on a fault
+    unsafe {
+        if core::ptr::read_volatile(shared_page_addr as *const u64) == GUEST_SHARE_PING {
+            // Write a known value for verification purposes
+            core::ptr::write_volatile(shared_page_addr as *mut u64, GUEST_SHARE_PONG);
+        }
     }
 
     println!("Exiting guest by causing a fault         ");

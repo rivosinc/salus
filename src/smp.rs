@@ -31,7 +31,7 @@ pub struct PerCpu {
 }
 
 /// The number of pages we allocate per CPU: the CPU's stack + it's `PerCpu` structure.
-const PER_CPU_PAGES: u64 = 4;
+const PER_CPU_PAGES: u64 = 8;
 
 /// The base address of the per-CPU memory region.
 static PER_CPU_BASE: Once<SupervisorPageAddr> = Once::new();

@@ -41,7 +41,7 @@ SECTIONS
     } >ram AT>ram :bss
 
     PROVIDE(_stack_start = _bss_end);
-    PROVIDE(_stack_end = _stack_start + 0x6000);
+    PROVIDE(_stack_end = _stack_start + 0x30000);
 
     /DISCARD/ : {
         *(.eh_frame)

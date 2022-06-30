@@ -95,7 +95,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const NUM_VCPUS: u64 = 1;
     const NUM_TEE_PTE_PAGES: u64 = 10;
-    const NUM_GUEST_DATA_PAGES: u64 = 10;
+    const NUM_GUEST_DATA_PAGES: u64 = 160;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
     const PRE_FAULTED_ZERO_PAGES: u64 = 2;
     const NUM_GUEST_PAD_PAGES: u64 = 32;

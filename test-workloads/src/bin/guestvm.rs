@@ -46,7 +46,7 @@ const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init() {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
-    const NUM_GUEST_DATA_PAGES: u64 = 10;
+    const NUM_GUEST_DATA_PAGES: u64 = 160;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
     const PAGE_SIZE_4K: u64 = 4096;
 

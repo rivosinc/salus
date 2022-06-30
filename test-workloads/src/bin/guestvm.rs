@@ -44,7 +44,7 @@ const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
-extern "C" fn kernel_init() {
+extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const NUM_GUEST_DATA_PAGES: u64 = 160;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
@@ -144,6 +144,15 @@ extern "C" fn kernel_init() {
             assert_eq!(val, 0xdeadbeef);
         }
         next_page += PAGE_SIZE_4K;
+    }
+
+    println!("Accessing shared page at 0x{shared_page_addr:x}     ");
+    // Safety: We are assuming that the shared_page_addr is valid, and will be mapped in on a fault
+    unsafe {
+        if core::ptr::read_volatile(shared_page_addr as *const u64) == shared_page_addr + 1 {
+            // Write a known value for verification purposes
+            core::ptr::write_volatile(shared_page_addr as *mut u64, shared_page_addr);
+        }
     }
 
     println!("Exiting guest by causing a fault         ");

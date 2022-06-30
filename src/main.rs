@@ -33,7 +33,7 @@ mod vm_id;
 mod vm_pages;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{CpuInfo, Imsic};
+use drivers::{pci::probe_pci, CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;
@@ -309,6 +309,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         imsic.guests_per_hart()
     );
     Imsic::setup_this_cpu();
+
+    // Probe for a PCI bus
+    probe_pci(&hyp_dt, &mut mem_map, |header| {
+        println!(
+            "found func {header} type: {}",
+            header.header_type().unwrap()
+        );
+    })
+    .expect("pci scan failure");
 
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);

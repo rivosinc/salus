@@ -434,13 +434,20 @@ pub enum TvmCpuExitCode {
     /// TODO: Do we need to differentiate between the type (fetch/load/store) of page fault?
     ConfidentialPageFault = 4,
 
+    /// The vCPU encountered a guest page fault in an emulated MMIO memory region. The faulting
+    /// guest physical address is stored in `ExitCause0` and the type of memory operation the vCPU
+    /// was attempting to execute is stored in `ExitCause1`. The `MmioLoadValue` and `MmioStoreValue`
+    /// registers are used to complete an emulated MMIO access; see `TvmMmioOpCode` for more details.
+    /// The vCPU resumes at the following instruction the next time it is run.
+    MmioPageFault = 5,
+
     /// The vCPU executed a WFI instruction.
-    WaitForInterrupt = 5,
+    WaitForInterrupt = 6,
 
     /// The vCPU encountered an exception that the TSM cannot handle internally and that cannot
     /// be safely delegated to the host. The value of the SCAUSE register is stored in `ExitCause0`.
     /// The vCPU is no longer runnable.
-    UnhandledException = 6,
+    UnhandledException = 7,
 }
 
 impl TvmCpuExitCode {
@@ -453,11 +460,43 @@ impl TvmCpuExitCode {
             2 => Ok(HartStart),
             3 => Ok(HartStop),
             4 => Ok(ConfidentialPageFault),
-            5 => Ok(WaitForInterrupt),
-            6 => Ok(UnhandledException),
+            5 => Ok(MmioPageFault),
+            6 => Ok(WaitForInterrupt),
+            7 => Ok(UnhandledException),
             _ => Err(Error::InvalidParam),
         }
     }
+}
+
+/// List of possible operations a TVM's vCPU can make when accessing an emulated MMIO region.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TvmMmioOpCode {
+    /// Loads a 64-bit value. The result of the emulated MMIO load can be written to `MmioLoadValue`.
+    Load64 = 0,
+    /// Loads and sign-extends a 32-bit value.
+    Load32 = 1,
+    /// Loads and zero-extends a 32-bit value.
+    Load32U = 2,
+    /// Loads and sign-extends a 16-bit value.
+    Load16 = 3,
+    /// Loads and zero-extends a 16-bit value.
+    Load16U = 4,
+    /// Loads and sign-extends an 8-bit value.
+    Load8 = 5,
+    /// Loads and zero-extends an 8-bit value.
+    Load8U = 6,
+
+    /// Stores a 64-bit value. The value to be stored by the emulated MMIO store can be read from
+    /// `MmioStoreValue`.
+    Store64 = 7,
+    /// Stores a 32-bit value.
+    Store32 = 8,
+    /// Stores a 16-bit value.
+    Store16 = 9,
+    /// Stores an 8-bit value.
+    Store8 = 10,
+    // TODO: AMO instructions?
 }
 
 /// List of registers that can be read or written for a TVM's vCPU.
@@ -478,6 +517,14 @@ pub enum TvmCpuRegister {
 
     /// An additional exit cause register with the same access properties as `ExitCause0`.
     ExitCause1 = 3,
+
+    /// Value used to complete an emulated MMIO load by a TVM CPU. Read-write, and only accessible
+    /// after the TVM has started.
+    MmioLoadValue = 4,
+
+    /// Value stored by a TVM CPU to an emulated MMIO region. Read-only, and only accessilbe after
+    /// the TVM has started.
+    MmioStoreValue = 5,
 }
 
 impl TvmCpuRegister {
@@ -489,6 +536,8 @@ impl TvmCpuRegister {
             1 => Ok(EntryArg),
             2 => Ok(ExitCause0),
             3 => Ok(ExitCause1),
+            4 => Ok(MmioLoadValue),
+            5 => Ok(MmioStoreValue),
             _ => Err(Error::InvalidParam),
         }
     }
@@ -610,7 +659,8 @@ pub enum TeeFunction {
     /// Marks the specified range of guest physical address space as reserved for the mapping of
     /// confidential memory. The region is initially unpopulated. Pages of confidential memory may
     /// be inserted with `TvmAddZeroPages` and `TvmAddMeasuredPages`. Both `guest_addr` and `len`
-    /// must be 4kB-aligend.
+    /// must be 4kB-aligned. Confidential memory regions may only be added to TVMs prior to
+    /// finalization.
     ///
     /// a6 = 17
     TvmAddConfidentialMemoryRegion {
@@ -619,6 +669,20 @@ pub enum TeeFunction {
         /// a1 = start of the confidential memory region
         guest_addr: u64,
         /// a2 = length of the confidential memory region
+        len: u64,
+    },
+    /// Marks the specified range of guest physical address space as used for emulated MMIO.
+    /// The region is unpopulated; attempts by a TVM vCPU to access this region will cause a
+    /// `MmioPageFault` exit from `TvmCpuRun`. Both `guest_addr` and `len` must be 4kB-aligned.
+    /// Emulated MMIO regions may only be added to TVMs prior to finalization.
+    ///
+    /// a6 = 18
+    TvmAddEmulatedMmioRegion {
+        /// a0 = guest_id
+        guest_id: u64,
+        /// a1 = start of the emulated MMIO region
+        guest_addr: u64,
+        /// a2 = length of the emulated MMIO region
         len: u64,
     },
     /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
@@ -853,6 +917,11 @@ impl TeeFunction {
                 guest_addr: args[1],
                 len: args[2],
             }),
+            18 => Ok(TvmAddEmulatedMmioRegion {
+                guest_id: args[0],
+                guest_addr: args[1],
+                len: args[2],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -934,6 +1003,11 @@ impl SbiFunction for TeeFunction {
                 guest_addr: _,
                 len: _,
             } => 17,
+            TvmAddEmulatedMmioRegion {
+                guest_id: _,
+                guest_addr: _,
+                len: _,
+            } => 18,
         }
     }
 
@@ -1003,6 +1077,11 @@ impl SbiFunction for TeeFunction {
                 register: _,
             } => *guest_id,
             TvmAddConfidentialMemoryRegion {
+                guest_id,
+                guest_addr: _,
+                len: _,
+            } => *guest_id,
+            TvmAddEmulatedMmioRegion {
                 guest_id,
                 guest_addr: _,
                 len: _,
@@ -1079,6 +1158,11 @@ impl SbiFunction for TeeFunction {
                 guest_addr,
                 len: _,
             } => *guest_addr,
+            TvmAddEmulatedMmioRegion {
+                guest_id: _,
+                guest_addr,
+                len: _,
+            } => *guest_addr,
             _ => 0,
         }
     }
@@ -1134,6 +1218,11 @@ impl SbiFunction for TeeFunction {
                 register,
             } => *register as u64,
             TvmAddConfidentialMemoryRegion {
+                guest_id: _,
+                guest_addr: _,
+                len,
+            } => *len,
+            TvmAddEmulatedMmioRegion {
                 guest_id: _,
                 guest_addr: _,
                 len,

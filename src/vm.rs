@@ -494,6 +494,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             } => self
                 .guest_add_confidential_memory_region(guest_id, guest_addr, len)
                 .into(),
+            TvmAddEmulatedMmioRegion { .. } => {
+                EcallAction::Continue(SbiReturn::from(SbiError::NotSupported))
+            }
             TvmAddZeroPages {
                 guest_id,
                 page_addr,
@@ -799,7 +802,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                     .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
                 guest_vm.get_vcpu_reg(vcpu_id, register)?
             }
-            ExitCause0 | ExitCause1 => {
+            _ => {
                 let guest_vm = guest
                     .as_finalized_vm()
                     .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;

@@ -7,12 +7,12 @@
 #![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::mem::size_of;
+use der::Decode;
 
 extern crate alloc;
 extern crate test_workloads;
 
-use attestation::{MAX_CERT_LEN, MAX_CSR_LEN};
+use attestation::{certificate::Certificate, MAX_CERT_LEN, MAX_CSR_LEN};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
@@ -62,10 +62,9 @@ extern "C" fn kernel_init() {
     if TEST_CSR.len() > MAX_CSR_LEN as usize {
         panic!("Test CSR is too large")
     }
+
     let csr_addr = next_page;
-    // Align the cert address
-    let csr_size_aligned = (TEST_CSR.len() + size_of::<u64>() - 1) & !(size_of::<u64>() - 1);
-    let cert_addr = csr_addr + csr_size_aligned as u64;
+    let cert_bytes = [0u8; MAX_CERT_LEN];
 
     // Safety: csr_addr is the unique reference to the CSR page.
     unsafe {
@@ -74,8 +73,8 @@ extern "C" fn kernel_init() {
     let attestation_msg = SbiMessage::Attestation(sbi::AttestationFunction::GetEvidence {
         csr_addr,
         csr_len: TEST_CSR.len() as u64,
-        cert_addr,
-        cert_len: MAX_CERT_LEN as u64,
+        cert_addr: cert_bytes.as_ptr() as u64,
+        cert_len: cert_bytes.len() as u64,
     });
     next_page += PAGE_SIZE_4K;
 
@@ -98,13 +97,38 @@ extern "C" fn kernel_init() {
 
     // Safety: msg contains a unique reference to the CSR and certificate pages
     // and SBI is safe to write to that page.
-    match unsafe { ecall_send(&attestation_msg) } {
+    let cert_len = match unsafe { ecall_send(&attestation_msg) } {
         Err(e) => {
             println!("Attestation error {e:?}");
             panic!("Guest evidence call failed");
         }
-        Ok(cert_len) => {
-            println!("Evidence cert is at 0x{:x} - len {}", cert_addr, cert_len);
+        Ok(cert_len) => cert_len,
+    };
+
+    println!(
+        "Evidence certificate is at 0x{:x} - len {}",
+        cert_bytes.as_ptr() as u64,
+        cert_len
+    );
+
+    // This is mostly as a good practice, because the TSM implementation
+    // should return an error if the provided certificate buffer is too small.
+    if cert_len > cert_bytes.len() as u64 {
+        panic!("Generated certificate is too large")
+    }
+
+    match Certificate::from_der(&cert_bytes[..cert_len as usize]) {
+        Err(e) => {
+            println!("Attestation error {e:?}");
+            panic!("Cert parsing error");
+        }
+        Ok(cert) => {
+            println!(
+                "Certificate version:{:?} Issuer:{} Signature algorithm:{}",
+                cert.tbs_certificate.version,
+                cert.tbs_certificate.issuer,
+                cert.signature_algorithm.oid
+            );
         }
     }
 

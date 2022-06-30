@@ -539,6 +539,7 @@ name = "test_workloads"
 version = "0.1.0"
 dependencies = [
  "attestation",
+ "der",
  "device_tree",
  "s_mode_utils",
  "sbi",

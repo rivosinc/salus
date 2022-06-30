@@ -148,7 +148,7 @@ impl AttributeTypeAndValue<'_> {
         let mut atv_bytes = ArrayVec::<u8, MAX_CSR_ATV_LEN>::new();
 
         let mut _atv_slice = [0u8; MAX_CSR_ATV_LEN];
-        let atv_slice = self.encode_to_slice(&mut _atv_slice).unwrap();
+        let atv_slice = self.encode_to_slice(&mut _atv_slice)?;
 
         for b in atv_slice {
             atv_bytes.try_push(*b).map_err(|_| {

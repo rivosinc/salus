@@ -128,7 +128,7 @@ impl RelativeDistinguishedName<'_> {
 
         let mut rdn_bytes = ArrayVec::<u8, MAX_CSR_RDN_LEN>::new();
         for atv in atvs.iter() {
-            for b in atv.to_array().unwrap().iter() {
+            for b in atv.to_array()?.iter() {
                 rdn_bytes.try_push(*b).map_err(|_| {
                     Error::new(ErrorKind::Overlength, Length::new(MAX_CSR_RDN_LEN as u16))
                 })?;

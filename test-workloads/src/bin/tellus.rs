@@ -89,17 +89,32 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
     }
 }
 
+fn get_fault_address(vmid: u64) -> u64 {
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuGetRegister {
+        guest_id: vmid,
+        vcpu_id: 0,
+        register: sbi::TvmCpuRegister::ExitCause0,
+    });
+    // Safety: `TvmCpuGetRegister` doesn't access our memory.
+    let fault_addr = unsafe { ecall_send(&msg).expect("Tellus - TvmCpuGetRegister failed") };
+    fault_addr
+}
+
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
+    const SHARED_PAGES_START_ADDRESS: u64 = 0x1_0000_0000;
     const NUM_VCPUS: u64 = 1;
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_GUEST_DATA_PAGES: u64 = 160;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
     const PRE_FAULTED_ZERO_PAGES: u64 = 2;
     const NUM_GUEST_PAD_PAGES: u64 = 32;
-
+    const NUM_GUEST_SHARED_PAGES: u64 = 1;
+    // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
+    const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
+    const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
     if hart_id != 0 {
         // TODO handle more than 1 cpu
         abort();
@@ -284,6 +299,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         num_pages: PRE_FAULTED_ZERO_PAGES,
         guest_addr: USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
     });
+
+    next_page += NUM_GUEST_ZERO_PAGES * PAGE_SIZE_4K;
+    let shared_page_base = next_page;
+
     // Safety: `TvmAddZeroPages` only touches pages that we've already converted.
     unsafe {
         ecall_send(&msg).expect("Tellus - TvmAddZeroPages failed");
@@ -302,8 +321,34 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         ecall_send(&msg).expect("Tellus - TvmCpuSetRegister returned error");
     }
 
-    // TODO test that access to pages crashes somehow
+    // Set the kernel_init() parameter.
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
+        guest_id: vmid,
+        vcpu_id: 0,
+        register: sbi::TvmCpuRegister::EntryArg,
+        value: SHARED_PAGES_START_ADDRESS,
+    });
+    // Safety: Setting a guest register doesn't affect host memory safety.
+    unsafe {
+        ecall_send(&msg).expect("Tellus - TvmCpuSetRegister returned error");
+    }
 
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddSharedMemoryRegion {
+        guest_id: vmid,
+        guest_addr: SHARED_PAGES_START_ADDRESS,
+        len: NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+    });
+    // Safety: `TvmAddSharedMemoryRegion` doesn't affect host memory
+    unsafe {
+        ecall_send(&msg).expect("Tellus -- TvmAddSharedMemoryRegion returned error");
+    }
+
+    // Safety: `TvmAddSharedMemoryRegion` doesn't affect host memory
+    unsafe {
+        ecall_send(&msg).expect_err("Tellus -- TvmAddSharedMemoryRegion succeeded second time");
+    }
+
+    // TODO test that access to pages crashes somehow
     let msg = SbiMessage::Tee(sbi::TeeFunction::Finalize { guest_id: vmid });
     // Safety: `Finalize` doesn't touch memory.
     unsafe {
@@ -326,15 +371,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 match cause {
                     sbi::TvmCpuExitCode::ConfidentialPageFault => {
                         // Figure out where the fault occurred.
-                        let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuGetRegister {
-                            guest_id: vmid,
-                            vcpu_id: 0,
-                            register: sbi::TvmCpuRegister::ExitCause0,
-                        });
-                        // Safety: `TvmCpuGetRegister` doesn't access our memory.
-                        let fault_addr =
-                            unsafe { ecall_send(&msg).expect("Tellus - TvmCpuGetRegister failed") };
-
+                        let fault_addr = get_fault_address(vmid);
                         // Now fault in the page.
                         if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
                             panic!("Ran out of pages to fault in");
@@ -352,6 +389,34 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         }
                         zero_pages_added += 1;
                     }
+                    sbi::TvmCpuExitCode::SharedPageFault => {
+                        // Figure out where the fault occurred.
+                        let fault_addr = get_fault_address(vmid);
+                        if fault_addr != SHARED_PAGES_START_ADDRESS {
+                            panic!("Unexpected shared page fault address at {fault_addr:x}");
+                        }
+                        let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddSharedPages {
+                            guest_id: vmid,
+                            page_addr: shared_page_base,
+                            page_type: sbi::TsmPageType::Page4k,
+                            num_pages: NUM_GUEST_SHARED_PAGES,
+                            guest_addr: fault_addr,
+                        });
+                        // Safety: `TvmAddSharedPages` only touches pages owned by us
+                        unsafe {
+                            ecall_send(&msg).expect("Tellus -- TvmAddSharedPages failed");
+                        }
+
+                        // Safety: We own the page, and are writing a value expected by the guest
+                        // Note that any access to shared pages must use volatile memory semantics
+                        // to guard against the compiler's no-aliasing assumptions.
+                        unsafe {
+                            core::ptr::write_volatile(
+                                shared_page_base as *mut u64,
+                                GUEST_SHARE_PING,
+                            );
+                        }
+                    }
                     _ => {
                         println!("Tellus - Guest exited with status {:?}", cause);
                         break;
@@ -367,6 +432,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         ecall_send(&msg).expect("Tellus - TvmDestroy returned error");
     }
 
+    // Safety: We own the page.
+    // Note that any access to shared pages must use volatile memory semantics
+    // to guard against the compiler's no-aliasing assumptions.
+    let guest_written_value = unsafe { core::ptr::read_volatile(shared_page_base as *mut u64) };
+    if guest_written_value != GUEST_SHARE_PONG {
+        println!("Tellus - unexpected value from guest shared page: 0x{guest_written_value:x}");
+    }
     // Check that we can reclaim previously-converted pages and that they have been cleared.
     reclaim_pages(
         donated_pages_base,

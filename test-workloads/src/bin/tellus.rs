@@ -133,6 +133,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         + ((NUM_VCPUS * tsm_info.tvm_bytes_per_vcpu) + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
     println!("Donating {} pages for TVM creation", tvm_create_pages);
 
+    // Make sure TsmGetInfo fails if we pass it a bogus address.
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmGetInfo {
+        dest_addr: 0x1000,
+        len: tsm_info_size,
+    });
+    // Safety: The passed info pointer is bogus and nothing should be written to our memory.
+    unsafe { ecall_send(&msg).expect_err("TsmGetInfo succeeded with an invalid pointer") };
+
     // Donate the pages necessary to create the TVM.
     let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
     convert_pages(next_page, tvm_create_pages);

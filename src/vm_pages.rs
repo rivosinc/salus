@@ -17,7 +17,6 @@ use riscv_pages::*;
 use riscv_regs::{hgatp, Exception, LocalRegisterCopy, Writeable, CSR};
 use spin::Mutex;
 
-use crate::smp::PerCpu;
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
 use crate::vm_cpu::VmCpus;
 use crate::vm_id::VmId;
@@ -398,54 +397,44 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
     /// Copies from `src` to the guest physical address in `dest`. Returns an error if a fault was
     /// encountered while copying.
     pub fn copy_to_guest(&self, dest: GuestPhysAddr, src: &[u8]) -> Result<()> {
+        // Need to disable any translation in VSATP since we're dealing with guest physical addresses.
+        let old_vsatp = CSR.vsatp.atomic_replace(0);
         // Safety: _copy_to_guest internally detects and handles an invalid guest physical
         // address in `dest`.
-        self.do_guest_copy(
-            dest,
-            src.as_ptr(),
-            src.len(),
-            |gpa, ptr, len| unsafe { _copy_to_guest(gpa.bits(), ptr, len) },
-            Exception::GuestStorePageFault,
-        )
+        let bytes = unsafe { _copy_to_guest(dest.bits(), src.as_ptr(), src.len()) };
+        CSR.vsatp.set(old_vsatp);
+        if bytes == src.len() {
+            Ok(())
+        } else {
+            let fault_addr = dest
+                .checked_increment(bytes as u64)
+                .ok_or(Error::AddressOverflow)?;
+            Err(Error::PageFault(self.get_page_fault_cause(
+                Exception::GuestStorePageFault,
+                fault_addr,
+            )))
+        }
     }
 
     /// Copies from the guest physical address in `src` to `dest`. Returns an error if a fault was
     /// encountered while copying.
     pub fn copy_from_guest(&self, dest: &mut [u8], src: GuestPhysAddr) -> Result<()> {
+        // Need to disable any translation in VSATP since we're dealing with guest physical addresses.
+        let old_vsatp = CSR.vsatp.atomic_replace(0);
         // Safety: _copy_from_guest internally detects and handles an invalid guest physical address
         // in `src`.
-        self.do_guest_copy(
-            src,
-            dest.as_ptr(),
-            dest.len(),
-            |gpa, ptr, len| unsafe { _copy_from_guest(ptr as *mut u8, gpa.bits(), len) },
-            Exception::GuestLoadPageFault,
-        )
-    }
-
-    /// Uses `copy_fn` to copy `len` bytes between `guest_addr` and `host_ptr`.
-    fn do_guest_copy<F>(
-        &self,
-        guest_addr: GuestPhysAddr,
-        host_ptr: *const u8,
-        len: usize,
-        mut copy_fn: F,
-        fault_type: Exception,
-    ) -> Result<()>
-    where
-        F: FnMut(GuestPhysAddr, *const u8, usize) -> usize,
-    {
-        let this_cpu = PerCpu::this_cpu();
-        this_cpu.enter_guest_memcpy();
-        let bytes = copy_fn(guest_addr, host_ptr, len);
-        this_cpu.exit_guest_memcpy();
-        if bytes == len {
+        let bytes = unsafe { _copy_from_guest(dest.as_mut_ptr(), src.bits(), dest.len()) };
+        CSR.vsatp.set(old_vsatp);
+        if bytes == dest.len() {
             Ok(())
         } else {
-            let fault_addr = guest_addr.checked_increment(bytes as u64).unwrap();
-            Err(Error::PageFault(
-                self.get_page_fault_cause(fault_type, fault_addr),
-            ))
+            let fault_addr = src
+                .checked_increment(bytes as u64)
+                .ok_or(Error::AddressOverflow)?;
+            Err(Error::PageFault(self.get_page_fault_cause(
+                Exception::GuestLoadPageFault,
+                fault_addr,
+            )))
         }
     }
 

@@ -11,7 +11,6 @@ use riscv_regs::{
 };
 
 use crate::print_util::*;
-use crate::smp::PerCpu;
 use crate::{print, println};
 
 /// Stores the trap context as pushed onto the stack by the trap handler.
@@ -22,9 +21,13 @@ struct TrapFrame {
     sepc: u64,
 }
 
-// The assembly entry point for handling traps.
 extern "C" {
+    // The assembly entry point for handling traps.
     fn _trap_entry();
+
+    // The location of the exception table.
+    static _extable_start: u8;
+    static _extable_end: u8;
 }
 
 const fn gpr_offset(index: GprIndex) -> usize {
@@ -89,6 +92,36 @@ fn handle_interrupt(irq: Interrupt) -> bool {
     }
 }
 
+/// An entry in the `.extable` section of the binary. Each entry corresponds to an instruction that
+/// could generate an exception in supervisor mode (e.g. when copying to/from guest memory). Exceptions
+/// that are taken on these instructions are recovered from by:
+///   - setting SEPC to the value stored in T0 when the trap was taken
+///   - setting T1 to the value of SCAUSE
+///   - returning from the trap
+///
+/// TODO: Put recovery address in exception table too.
+#[repr(C)]
+struct ExceptionTableEntry {
+    // The PC of the potentially-faulting instruction
+    pc: u64,
+}
+
+/// Returns the exception table as a slice of `ExceptionTableEntry` structs.
+fn extable() -> &'static [ExceptionTableEntry] {
+    // Safety: we trust that the linker placed the .extable section correctly, along with the
+    // _extable_{start,end} symbols.
+    unsafe {
+        let start = core::ptr::addr_of!(_extable_start) as *const ExceptionTableEntry;
+        let end = core::ptr::addr_of!(_extable_end) as *const ExceptionTableEntry;
+        core::slice::from_raw_parts(start, end.sub_ptr(start))
+    }
+}
+
+/// Returns if `pc` is in the exception table.
+fn pc_in_extable(pc: u64) -> bool {
+    extable().iter().any(|e| e.pc == pc)
+}
+
 /// The rust entry point for handling traps. The only traps we expect to take in HS mode are IPIs
 /// (to wake the receiving CPU from WFI) and guest page faults while copying to/from guest memory.
 /// For everything else we just dump state and panic.
@@ -101,7 +134,6 @@ extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
     let mut tf = unsafe { tf_ptr.as_mut().unwrap() };
     let scause = CSR.scause.get();
 
-    let this_cpu = PerCpu::this_cpu();
     if let Ok(t) = Trap::from_scause(scause) {
         match t {
             Trap::Interrupt(i) => {
@@ -109,11 +141,12 @@ extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
                     return;
                 }
             }
-            Trap::Exception(e) => {
-                if this_cpu.in_guest_memcpy() && e.is_guest_page_fault() {
-                    // We took a guest page fault while copying to/from guest memory.
-                    // _copy_{to,from}_guest set T0 to where they want to jump to on a fault.
+            Trap::Exception(_) => {
+                if pc_in_extable(tf.sepc) {
+                    // We took an exception on an instruction in the exception table. Follow the
+                    // defined recovery procedure; see ExceptionTableEntry above.
                     tf.sepc = tf.gprs.reg(GprIndex::T0);
+                    tf.gprs.set_reg(GprIndex::T1, scause);
                     return;
                 }
             }

@@ -30,6 +30,13 @@ SECTIONS
         *(.rodata .rodata.*)
     } >ram AT>ram :text
 
+    .extable : {
+        . = ALIGN(8);
+	PROVIDE(_extable_start = .);
+	KEEP(*(.extable))
+	PROVIDE(_extable_end = .);
+    } >ram AT>ram :text
+
     .data : {
         . = ALIGN(4096);
         *(.sdata .sdata.*) *(.data .data.*)

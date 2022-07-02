@@ -199,7 +199,17 @@ impl PageTracker {
     {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.assign(owner, PageState::Mapped)?;
+        let was_locked = info.is_locked();
+        if !was_locked {
+            info.lock_for_assignment()?;
+        }
+        info.assign(owner, PageState::Mapped).map_err(|error| {
+            if !was_locked {
+                info.unlock().unwrap();
+            }
+            error
+        })?;
+
         // Safe since we own the page and have updated its state.
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
@@ -417,9 +427,8 @@ impl HypPageAlloc {
         let mut tail: Option<SupervisorPageAddr> = None;
         while let Some(next) = self.next_page {
             let info = self.pages.get_mut(next).unwrap();
-            info.assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
+            info.assign(PageOwnerId::hypervisor(), PageState::Converted)
                 .unwrap();
-
             // Safe to create this page as it was previously free and we just took ownership.
             let page: Page<ConvertedDirty> = unsafe { Page::new(next) };
             page.clean();
@@ -481,8 +490,9 @@ impl HypPageAlloc {
             if let Some(page_info) = self.pages.get_mut(page) {
                 if page_info.is_free() {
                     // OK to unwrap as this struct is new and must have space for one owner.
+                    // Free pages can be assigned without locking
                     page_info
-                        .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
+                        .assign(PageOwnerId::hypervisor(), PageState::Converted)
                         .unwrap();
                 }
             }
@@ -509,6 +519,7 @@ impl HypPageAlloc {
         let assignable_pages = self.take_pages(count, align);
         SequentialPages::from_pages(assignable_pages.into_iter().map(|p| {
             let page_info = self.pages.get_mut(p.addr()).unwrap();
+            page_info.lock_page().unwrap();
             page_info
                 .assign(PageOwnerId::host(), PageState::VmState)
                 .unwrap();

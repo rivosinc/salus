@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
+data_model = { path = "../data-model" }
 device_tree = { path = "../device-tree" }
 page_tracking = { path = "../page-tracking" }
 riscv_pages = { path = "../riscv-pages" }

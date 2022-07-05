@@ -167,6 +167,7 @@ name = "drivers"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "data_model",
  "device_tree",
  "page_tracking",
  "riscv_pages",

@@ -19,6 +19,8 @@ pub enum MemType {
 pub enum DeviceMemType {
     /// An IMSIC interrupt file page.
     Imsic,
+    /// PCI Root config space.
+    PciRoot,
     // TODO: Add more types here.
 }
 
@@ -35,6 +37,7 @@ impl fmt::Display for DeviceMemType {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match &self {
             DeviceMemType::Imsic => write!(f, "IMSIC"),
+            DeviceMemType::PciRoot => write!(f, "PCI"),
         }
     }
 }

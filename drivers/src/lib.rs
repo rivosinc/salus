@@ -18,6 +18,8 @@ extern crate std;
 pub mod cpu;
 /// Provides the driver for the IMSIC from the AIA spec.
 pub mod imsic;
+/// Provides PCI bus scanning and device discovery.
+pub mod pci;
 
 pub use cpu::{CpuId, CpuInfo, MAX_CPUS};
 pub use imsic::{

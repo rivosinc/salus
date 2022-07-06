@@ -9,18 +9,20 @@ use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};
 use riscv_page_tables::GuestStagePageTable;
-use riscv_pages::{GuestPhysAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages};
+use riscv_pages::{
+    GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages,
+};
 use riscv_regs::{hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
-    Readable, Trap, Writeable, CSR,
+    PrivilegeLevel, Readable, Trap, Writeable, CSR,
 };
-use sbi::{SbiMessage, SbiReturnType};
+use sbi::{SbiMessage, SbiReturnType, TvmMmioOpCode};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
 use crate::vm_id::VmId;
-use crate::vm_pages::{ActiveVmPages, VmPages};
+use crate::vm_pages::{ActiveVmPages, MmioOperation, VmPages};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {
@@ -246,9 +248,14 @@ pub enum VmCpuExit {
     /// ECALLs from VS mode.
     Ecall(Option<SbiMessage>),
     /// G-stage page faults.
-    PageFault(Exception, GuestPhysAddr),
+    PageFault {
+        exception: Exception,
+        fault_addr: GuestPhysAddr,
+        fault_pc: GuestVirtAddr,
+        priv_level: PrivilegeLevel,
+    },
     /// An exception which we expected to handle directly at VS, but trapped to HS instead.
-    DelegatedException(Exception, u64),
+    DelegatedException { exception: Exception, stval: u64 },
     /// Everything else that we currently don't or can't handle.
     Other(VmCpuTrapState),
     // TODO: Add other exit causes as needed.
@@ -263,6 +270,8 @@ pub struct ActiveVmCpu<'vcpu, 'pages, T: GuestStagePageTable> {
 impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
     /// Runs this vCPU until it exits.
     pub fn run_to_exit(&mut self) -> VmCpuExit {
+        self.complete_pending_mmio_op();
+
         // Load the vCPU CSRs. Safe as these don't take effect until V=1.
         CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
         CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
@@ -327,10 +336,18 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
                     self.state.trap_csrs.htval << 2 | self.state.trap_csrs.stval & 0x03,
                     self.guest_id,
                 );
-                VmCpuExit::PageFault(
-                    Exception::from_scause_reason(self.state.trap_csrs.scause).unwrap(),
+                VmCpuExit::PageFault {
+                    exception: Exception::from_scause_reason(self.state.trap_csrs.scause).unwrap(),
                     fault_addr,
-                )
+                    // Note that this address is not necessarily guest virtual as the guest may or
+                    // may not have 1st-stage translation enabled in VSATP. We still use GuestVirtAddr
+                    // here though to distinguish it from addresses (e.g. in HTVAL, or passed via a
+                    // TEECALL) which are exclusively guest-physical. Furthermore we only access guest
+                    // instructions via the HLVX instruction, which will take the VSATP translation
+                    // mode into account.
+                    fault_pc: RawAddr::guest_virt(self.state.guest_regs.sepc, self.guest_id),
+                    priv_level: PrivilegeLevel::from_hstatus(self.state.guest_regs.hstatus),
+                }
             }
             Trap::Exception(e) => {
                 if e.to_hedeleg_field()
@@ -338,7 +355,10 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
                 {
                     // Even if we intended to delegate this exception it might not be set in
                     // medeleg, in which case firmware may send it our way instead.
-                    VmCpuExit::DelegatedException(e, self.state.trap_csrs.stval)
+                    VmCpuExit::DelegatedException {
+                        exception: e,
+                        stval: self.state.trap_csrs.stval,
+                    }
                 } else {
                     VmCpuExit::Other(self.state.trap_csrs.clone())
                 }
@@ -350,6 +370,46 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
     /// Returns this active vCPU's `ActiveVmPages`.
     pub fn active_pages(&self) -> &ActiveVmPages<'pages, T> {
         &self.active_pages
+    }
+
+    /// Completes any pending MMIO operation for this CPU.
+    fn complete_pending_mmio_op(&mut self) {
+        if let Some(mmio_op) = self.pending_mmio_op {
+            let val = self.get_virt_reg(VirtualRegister::MmioLoad);
+            use TvmMmioOpCode::*;
+            // Complete any pending load operations.
+            match mmio_op.opcode() {
+                Load8 => {
+                    self.set_gpr(mmio_op.register(), val as i8 as u64);
+                }
+                Load8U => {
+                    self.set_gpr(mmio_op.register(), val as u8 as u64);
+                }
+                Load16 => {
+                    self.set_gpr(mmio_op.register(), val as i16 as u64);
+                }
+                Load16U => {
+                    self.set_gpr(mmio_op.register(), val as u16 as u64);
+                }
+                Load32 => {
+                    self.set_gpr(mmio_op.register(), val as i32 as u64);
+                }
+                Load32U => {
+                    self.set_gpr(mmio_op.register(), val as u32 as u64);
+                }
+                Load64 => {
+                    self.set_gpr(mmio_op.register(), val);
+                }
+                _ => (),
+            };
+
+            self.pending_mmio_op = None;
+            self.set_virt_reg(VirtualRegister::MmioLoad, 0);
+            self.set_virt_reg(VirtualRegister::MmioStore, 0);
+
+            // Advance SEPC past the faulting instruction.
+            self.state.guest_regs.sepc += mmio_op.len() as u64;
+        }
     }
 }
 
@@ -381,6 +441,10 @@ pub enum VirtualRegister {
     Cause0,
     /// 2nd detailed exit cause register. Usage depends on the exit code.
     Cause1,
+    /// xxx
+    MmioLoad,
+    /// xxx
+    MmioStore,
 }
 
 /// Virtual register state of a vCPU.
@@ -388,6 +452,8 @@ pub enum VirtualRegister {
 struct VirtualRegisters {
     cause0: u64,
     cause1: u64,
+    mmio_load: u64,
+    mmio_store: u64,
 }
 
 /// Represents a single virtual CPU of a VM.
@@ -398,6 +464,7 @@ pub struct VmCpu {
     // TODO: interrupt_file should really be part of CurrentCpu, but we have no way to migrate it
     // at present.
     interrupt_file: Option<ImsicGuestId>,
+    pending_mmio_op: Option<MmioOperation>,
     guest_id: PageOwnerId,
 }
 
@@ -426,6 +493,7 @@ impl VmCpu {
             state,
             virt_regs: VirtualRegisters::default(),
             current_cpu: None,
+            pending_mmio_op: None,
             interrupt_file: None,
             guest_id,
         }
@@ -461,6 +529,12 @@ impl VmCpu {
             Cause1 => {
                 self.virt_regs.cause1 = value;
             }
+            MmioLoad => {
+                self.virt_regs.mmio_load = value;
+            }
+            MmioStore => {
+                self.virt_regs.mmio_store = value;
+            }
         }
     }
 
@@ -470,6 +544,8 @@ impl VmCpu {
         match reg {
             Cause0 => self.virt_regs.cause0,
             Cause1 => self.virt_regs.cause1,
+            MmioLoad => self.virt_regs.mmio_load,
+            MmioStore => self.virt_regs.mmio_store,
         }
     }
 
@@ -496,6 +572,27 @@ impl VmCpu {
             LocalRegisterCopy::<u64, hstatus::Register>::new(self.state.guest_regs.hstatus);
         hstatus.modify(hstatus::vgein.val(interrupt_file.to_raw_index() as u64));
         self.state.guest_regs.hstatus = hstatus.get();
+    }
+
+    /// Sets up access to the virtual MMIO registers for `mmio_op`.
+    ///
+    /// If `mmio_op` is a load instruction, writes to `MmioLoadValue` will be forwarded to the actual
+    /// destination register the next time this `VmCpu` is run. If `mmio_op` is a store instruction,
+    /// reads from `MmioStoreValue` will return the value from the source register of the store
+    /// instruction until the next time this `VmCpu` is run.
+    pub fn set_pending_mmio_op(&mut self, mmio_op: MmioOperation) {
+        self.pending_mmio_op = Some(mmio_op);
+
+        // Populate MmioStoreValue with whatever the VM was trying to store.
+        use TvmMmioOpCode::*;
+        let val = match mmio_op.opcode() {
+            Store8 => self.get_gpr(mmio_op.register()) as u8 as u64,
+            Store16 => self.get_gpr(mmio_op.register()) as u16 as u64,
+            Store32 => self.get_gpr(mmio_op.register()) as u32 as u64,
+            Store64 => self.get_gpr(mmio_op.register()),
+            _ => 0,
+        };
+        self.set_virt_reg(VirtualRegister::MmioStore, val);
     }
 
     /// Delivers the given exception to the vCPU, setting up its register state to handle the trap

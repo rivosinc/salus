@@ -60,3 +60,41 @@ _copy_from_guest:
 _ret_from_copy:
     mv    a0, t2
     ret
+
+// Fetch an instruction from guest memory using HLVX. Only supports 2 or 4 byte instructions.
+//
+// Arguments:
+//   A0: Guest address of the instruction to fetch, using the translation modes/tables currently
+//       programmed in HGATP and VSATP.
+//   A1: Pointer to a u32 where the instruction will be written.
+//
+// Returns -1 on error.
+.global _fetch_guest_instruction
+_fetch_guest_instruction:
+    // handle_trap assumes t0 holds the address of where we want to jump to when we encounter
+    // a fault and will stick SCAUSE in t1.
+    la    t0, 4f
+    // HLVX.HU encoding:
+    //   0110010 00011 rs1[4:0] 100 rd[4:0] 1110011
+1:
+    .word 0x643543f3 // hlvx.hu t2, (a0)
+    add_extable 1b
+    sw    t2, (a1)
+    addi  a0, a0, 2
+    addi  a1, a1, 2
+    // If it's a compressed instrution (bits [1:0] != 'b11) then we're done.
+    li    t3, 3
+    and   t2, t2, t3
+    bne   t2, t3, 3f
+    // Load the next half-word.
+2:
+    .word 0x643543f3 // hlvx.hu t2, (a0)
+    add_extable 2b
+    sw    t2, (a1)
+3:
+    mv    a0, zero
+    ret
+4:
+    // Took a fault, return -1.
+    not   a0, zero
+    ret

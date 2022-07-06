@@ -507,6 +507,27 @@ pub enum TvmMmioOpCode {
     // TODO: AMO instructions?
 }
 
+impl TvmMmioOpCode {
+    /// Returns the `TvmMmioOpCode` specified by the raw value.
+    pub fn from_reg(cause1: u64) -> Result<Self> {
+        use TvmMmioOpCode::*;
+        match cause1 {
+            0 => Ok(Load64),
+            1 => Ok(Load32),
+            2 => Ok(Load32U),
+            3 => Ok(Load16),
+            4 => Ok(Load16U),
+            5 => Ok(Load8),
+            6 => Ok(Load8U),
+            7 => Ok(Store64),
+            8 => Ok(Store32),
+            9 => Ok(Store16),
+            10 => Ok(Store8),
+            _ => Err(Error::InvalidParam),
+        }
+    }
+}
+
 /// List of registers that can be read or written for a TVM's vCPU.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

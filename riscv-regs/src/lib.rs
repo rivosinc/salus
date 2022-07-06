@@ -10,11 +10,14 @@
 //! inst - auto-generated register definitions
 //! regs - RV64 General Purpose Registers (GPRs), 0-31.
 //! csrs - (H)S-mode CSRs
+//! decode - basic RV64 instruction decoding
 
 mod csrs;
+mod decode;
 mod inst;
 mod regs;
 
 pub use csrs::*;
+pub use decode::*;
 pub use inst::*;
 pub use regs::*;

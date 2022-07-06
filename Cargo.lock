@@ -370,6 +370,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90bde5296fc891b0cef12a6d03ddccc162ce7b2aff54160af9338f8d40df6d19"
 
 [[package]]
+name = "riscv-decode"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bec7a6dc0b0bb96a4d23271864a45c0d24dcd9dde2a1b630a35f79fa29c588bf"
+
+[[package]]
 name = "riscv_page_tables"
 version = "0.1.0"
 dependencies = [
@@ -386,6 +392,7 @@ version = "0.1.0"
 name = "riscv_regs"
 version = "0.1.0"
 dependencies = [
+ "riscv-decode",
  "riscv_page_tables",
  "riscv_pages",
  "tock-registers",

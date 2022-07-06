@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{hedeleg, hideleg, hie, hip, hvip, reason, scause, sie, sip};
+use crate::{hedeleg, hideleg, hie, hip, hstatus, hvip, reason, scause, sie, sip};
 use core::{fmt, result};
 use tock_registers::fields::FieldValue;
 use tock_registers::LocalRegisterCopy;
@@ -18,6 +18,26 @@ pub enum Error {
 }
 
 pub type Result<T> = result::Result<T, Error>;
+
+/// The privilege level at the time a trap occurred, as reported in sstatus.SPP or hstatus.SPVP.
+#[derive(Copy, Clone, Debug)]
+#[repr(u64)]
+pub enum PrivilegeLevel {
+    User = 0,
+    Supervisor = 1,
+}
+
+impl PrivilegeLevel {
+    /// Returns the previous privilege level from hstatus.SPVP.
+    pub fn from_hstatus(csr: u64) -> Self {
+        let val = LocalRegisterCopy::<u64, hstatus::Register>::new(csr);
+        match val.read(hstatus::spvp) {
+            0 => Self::User,
+            1 => Self::Supervisor,
+            _ => unreachable!(), // Field is only 1-bit wide.
+        }
+    }
+}
 
 /// Trap causes.
 #[derive(Copy, Clone, Debug)]

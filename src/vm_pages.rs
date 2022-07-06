@@ -14,7 +14,11 @@ use riscv_page_tables::{
     tlb, GuestStagePageTable, PageTableError, PageTableMapper, PlatformPageTable,
 };
 use riscv_pages::*;
-use riscv_regs::{hgatp, Exception, LocalRegisterCopy, Writeable, CSR};
+use riscv_regs::{
+    hgatp, hstatus, DecodedInstruction, Exception, GprIndex, Instruction, LocalRegisterCopy,
+    PrivilegeLevel, Readable, Writeable, CSR,
+};
+use sbi::TvmMmioOpCode;
 use spin::Mutex;
 
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
@@ -39,6 +43,9 @@ pub enum Error {
     InsufficientVmRegionSpace,
     InvalidMapRegion,
     SharedPageNotMapped,
+    FailedInstructionDecode(u32),
+    InstructionFetchFault,
+    UnsupportedMmioOp,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -56,6 +63,7 @@ global_asm!(include_str!("guest_mem.S"));
 extern "C" {
     fn _copy_to_guest(dest_gpa: u64, src: *const u8, len: usize) -> usize;
     fn _copy_from_guest(dest: *mut u8, src_gpa: u64, len: usize) -> usize;
+    fn _fetch_guest_instruction(src_gva: u64, raw_inst: *mut u32) -> isize;
 }
 
 /// A TLB version + reference count pair, used to track if a given TLB version is currently active.
@@ -326,20 +334,83 @@ impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
     }
 }
 
+/// A decoded MMIO operation.
+#[derive(Clone, Copy, Debug)]
+pub struct MmioOperation {
+    opcode: TvmMmioOpCode,
+    register: GprIndex,
+    len: usize,
+}
+
+impl MmioOperation {
+    /// Creates an `MmioOperation` from `instruction` if the MMIO is supported using that instruction.
+    fn from_instruction(instruction: DecodedInstruction) -> Result<Self> {
+        use Instruction::*;
+        let (opcode, reg_index) = match instruction.instruction() {
+            Lb(i) => (TvmMmioOpCode::Load8, i.rd()),
+            Lh(i) => (TvmMmioOpCode::Load16, i.rd()),
+            Lw(i) => (TvmMmioOpCode::Load32, i.rd()),
+            Lbu(i) => (TvmMmioOpCode::Load8U, i.rd()),
+            Lhu(i) => (TvmMmioOpCode::Load16U, i.rd()),
+            Lwu(i) => (TvmMmioOpCode::Load32U, i.rd()),
+            Ld(i) => (TvmMmioOpCode::Load64, i.rd()),
+            Sb(s) => (TvmMmioOpCode::Store8, s.rs2()),
+            Sh(s) => (TvmMmioOpCode::Store16, s.rs2()),
+            Sw(s) => (TvmMmioOpCode::Store32, s.rs2()),
+            Sd(s) => (TvmMmioOpCode::Store64, s.rs2()),
+            _ => {
+                return Err(Error::UnsupportedMmioOp);
+            }
+        };
+        Ok(Self {
+            opcode,
+            register: GprIndex::from_raw(reg_index).unwrap(),
+            len: instruction.len(),
+        })
+    }
+
+    /// Returns the operation as a `TvmMmioOpCode`.
+    pub fn opcode(&self) -> TvmMmioOpCode {
+        self.opcode
+    }
+
+    /// Returns the target register for the operation. Either 'rd' for load instructions, or 'rs2' for
+    /// store instructions.
+    pub fn register(&self) -> GprIndex {
+        self.register
+    }
+
+    /// Returns the length of the raw instruction.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
 /// The possible sources of a guest page fault.
 #[derive(Clone, Copy, Debug)]
 pub enum PageFaultType {
     /// A page fault taken when accessing a confidential memory region. The host may handle these
     /// faults by inserting a confidential page into the guest's address space.
     Confidential(GuestPhysAddr),
-
     /// A page fault taken when accessing a shared memory region. The host may handle these faults
     /// by inserting a page into the guest's address space.
     Shared(GuestPhysAddr),
-
+    /// A page fault taken to an emulated MMIO page.
+    Mmio(GuestPhysAddr, MmioOperation),
     /// A page fault taken when accessing memory outside of any valid region of guest physical address
     /// space. These faults are not resolvable.
-    Unmapped(Exception, GuestPhysAddr),
+    Unmapped(Exception),
+}
+
+/// The possible outcomes from handling a guest page fault.
+#[derive(Clone, Copy, Debug)]
+pub enum PageFaultAction {
+    /// The inner page fault type should be forwarded to the host for handling.
+    Forward(PageFaultType),
+    /// The faulting instruction should be immediately retried by the VM without host intervention.
+    Retry,
+    /// The fault should be redirected to the the VM with the given exception type and STVAL value.
+    Redirect(Exception, u64),
 }
 
 /// Represents a reference to the current VM address space. The previous address space is restored
@@ -420,7 +491,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
             let fault_addr = dest
                 .checked_increment(bytes as u64)
                 .ok_or(Error::AddressOverflow)?;
-            Err(Error::PageFault(self.get_page_fault_cause(
+            Err(Error::PageFault(self.get_internal_page_fault_cause(
                 Exception::GuestStorePageFault,
                 fault_addr,
             )))
@@ -442,7 +513,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
             let fault_addr = src
                 .checked_increment(bytes as u64)
                 .ok_or(Error::AddressOverflow)?;
-            Err(Error::PageFault(self.get_page_fault_cause(
+            Err(Error::PageFault(self.get_internal_page_fault_cause(
                 Exception::GuestLoadPageFault,
                 fault_addr,
             )))
@@ -490,16 +561,92 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         Ok(count)
     }
 
-    /// Returns the page fault type that corresponds to having taken `exception` at `addr`.
-    pub fn get_page_fault_cause(&self, exception: Exception, addr: GuestPhysAddr) -> PageFaultType {
-        match self.regions.find(addr) {
-            Some(VmRegionType::Confidential) => PageFaultType::Confidential(addr),
-            Some(VmRegionType::Shared) => PageFaultType::Shared(addr),
+    /// Fetches and decodes the instruction at `pc` in the guest's virtual address space.
+    fn fetch_guest_instruction(
+        &self,
+        pc: GuestVirtAddr,
+        priv_level: PrivilegeLevel,
+    ) -> Result<DecodedInstruction> {
+        // Set SPVP to reflect the privilege level we took the trap in so that
+        let old_hstatus = CSR.hstatus.get();
+        let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(old_hstatus);
+        hstatus.modify(hstatus::spvp.val(priv_level as u64));
+        CSR.hstatus.set(hstatus.get());
+
+        let mut raw_inst = 0u32;
+        // Safety: _fetch_guest_instruction internally detects and handles an invalid guest virtual
+        // address in `pc' and will only write up to 4 bytes to `raw_inst`.
+        let ret = unsafe { _fetch_guest_instruction(pc.bits(), &mut raw_inst) };
+        CSR.hstatus.set(old_hstatus);
+        if ret < 0 {
+            return Err(Error::InstructionFetchFault);
+        }
+
+        DecodedInstruction::from_raw(raw_inst).map_err(|_| Error::FailedInstructionDecode(raw_inst))
+    }
+
+    /// Returns the page fault type that corresponds to having taken `exception` at `fault_addr` while
+    /// accessing guest memory from within the TSM.
+    fn get_internal_page_fault_cause(
+        &self,
+        exception: Exception,
+        fault_addr: GuestPhysAddr,
+    ) -> PageFaultType {
+        match self.regions.find(fault_addr) {
+            Some(VmRegionType::Confidential) => PageFaultType::Confidential(fault_addr),
+            Some(VmRegionType::Shared) => PageFaultType::Shared(fault_addr),
+            // We don't allow taking MMIO faults while copying to/from guest memory.
+            _ => PageFaultType::Unmapped(exception),
+        }
+    }
+
+    /// Returns the action that should be taken in response to a page fault exit of type `exception`
+    /// at `fault_addr` from this VM. `fault_pc` holds the address of the faulting instruction and
+    /// `priv_level` is the privilege level the virtual CPU was executing at when the fault was taken.
+    pub fn handle_page_fault(
+        &self,
+        exception: Exception,
+        fault_addr: GuestPhysAddr,
+        fault_pc: GuestVirtAddr,
+        priv_level: PrivilegeLevel,
+    ) -> PageFaultAction {
+        use PageFaultAction::*;
+        match self.regions.find(fault_addr) {
+            Some(VmRegionType::Confidential) => Forward(PageFaultType::Confidential(fault_addr)),
+            Some(VmRegionType::Shared) => Forward(PageFaultType::Shared(fault_addr)),
             Some(VmRegionType::Mmio) => {
-                // TODO: Add a page fault type for emulated MMIO accesses.
-                PageFaultType::Unmapped(exception, addr)
+                match exception {
+                    Exception::GuestLoadPageFault | Exception::GuestStorePageFault => {
+                        match self.fetch_guest_instruction(fault_pc, priv_level) {
+                            Ok(inst) => {
+                                // Make sure that the instruction is actually valid for MMIO.
+                                if let Ok(mmio_op) = MmioOperation::from_instruction(inst) {
+                                    Forward(PageFaultType::Mmio(fault_addr, mmio_op))
+                                } else {
+                                    // If it's not an MMIO operation we support, inject an illegal
+                                    // instruction exception into the VM.
+                                    Redirect(Exception::IllegalInstruction, inst.raw() as u64)
+                                }
+                            }
+                            Err(Error::InstructionFetchFault) => {
+                                // If we took a fault while trying to fetch the instruction, then
+                                // something must have happened in between the load/store page fault
+                                // and now which caused the PC to become invalid. Let the VM retry the
+                                // instruction so that we can take and handle the instruction fetch
+                                // fault instead.
+                                Retry
+                            }
+                            Err(Error::FailedInstructionDecode(raw_inst)) => {
+                                Redirect(Exception::IllegalInstruction, raw_inst as u64)
+                            }
+                            Err(_) => Forward(PageFaultType::Unmapped(exception)),
+                        }
+                    }
+                    // We shouldn't be taking instruction fetch faults from MMIO.
+                    _ => Forward(PageFaultType::Unmapped(exception)),
+                }
             }
-            None => PageFaultType::Unmapped(exception, addr),
+            None => Forward(PageFaultType::Unmapped(exception)),
         }
     }
 }

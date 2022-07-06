@@ -21,7 +21,8 @@ use crate::smp;
 use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
-    ActiveVmPages, PageFaultType, VmPages, VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
+    ActiveVmPages, PageFaultAction, PageFaultType, VmPages, VmRegionList, TVM_REGION_LIST_PAGES,
+    TVM_STATE_PAGES,
 };
 use crate::{print, println};
 
@@ -51,6 +52,7 @@ enum VmExitCause {
     CpuStop,
     ConfidentialPageFault(GuestPageAddr),
     SharedPageFault(GuestPageAddr),
+    MmioPageFault(GuestPhysAddr, TvmMmioOpCode),
     UnhandledTrap(u64),
 }
 
@@ -63,6 +65,7 @@ impl VmExitCause {
             CpuStop => TvmCpuExitCode::HartStop,
             ConfidentialPageFault(_) => TvmCpuExitCode::ConfidentialPageFault,
             SharedPageFault(_) => TvmCpuExitCode::SharedPageFault,
+            MmioPageFault(_, _) => TvmCpuExitCode::MmioPageFault,
             UnhandledTrap(_) => TvmCpuExitCode::UnhandledException,
         }
     }
@@ -74,6 +77,7 @@ impl VmExitCause {
             CpuStart(hart_id) => Some(*hart_id),
             ConfidentialPageFault(addr) => Some(addr.bits()),
             SharedPageFault(addr) => Some(addr.bits()),
+            MmioPageFault(addr, _) => Some(addr.bits()),
             UnhandledTrap(scause) => Some(*scause),
             _ => None,
         }
@@ -83,6 +87,7 @@ impl VmExitCause {
         use VmExitCause::*;
         match self {
             PowerOff(_, reset_reason) => Some(*reset_reason as u64),
+            MmioPageFault(_, mmio_op) => Some(*mmio_op as u64),
             _ => None,
         }
     }
@@ -100,7 +105,8 @@ impl From<PageFaultType> for VmExitCause {
             PageFaultType::Shared(addr) => {
                 SharedPageFault(PageAddr::with_round_down(addr, PageSize::Size4k))
             }
-            PageFaultType::Unmapped(e, _) => UnhandledTrap(Trap::Exception(e).to_scause()),
+            PageFaultType::Mmio(addr, mmio_op) => MmioPageFault(addr, mmio_op.opcode()),
+            PageFaultType::Unmapped(e) => UnhandledTrap(Trap::Exception(e).to_scause()),
         }
     }
 }
@@ -200,7 +206,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
             EntryPc => vcpu.set_sepc(value),
             EntryArg => vcpu.set_gpr(GprIndex::A1, value),
             _ => {
-                return Err(EcallError::Sbi(SbiError::InvalidParam));
+                return Err(EcallError::Sbi(SbiError::Denied));
             }
         };
         Ok(())
@@ -217,7 +223,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
         match register {
             EntryPc => Ok(vcpu.get_sepc()),
             EntryArg => Ok(vcpu.get_gpr(GprIndex::A1)),
-            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
+            _ => Err(EcallError::Sbi(SbiError::Denied)),
         }
     }
 
@@ -297,6 +303,23 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         Ok(status as u64)
     }
 
+    /// Sets a vCPU register.
+    fn set_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister, value: u64) -> EcallResult<()> {
+        let vcpu = self
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        let mut vcpu = vcpu.lock();
+        use TvmCpuRegister::*;
+        match register {
+            MmioLoadValue => vcpu.set_virt_reg(VirtualRegister::MmioLoad, value),
+            _ => {
+                return Err(EcallError::Sbi(SbiError::Denied));
+            }
+        };
+        Ok(())
+    }
+
     /// Gets a vCPU register.
     fn get_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister) -> EcallResult<u64> {
         let vcpu = self
@@ -308,7 +331,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         match register {
             ExitCause0 => Ok(vcpu.get_virt_reg(VirtualRegister::Cause0)),
             ExitCause1 => Ok(vcpu.get_virt_reg(VirtualRegister::Cause1)),
-            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
+            MmioLoadValue => Ok(vcpu.get_virt_reg(VirtualRegister::MmioLoad)),
+            MmioStoreValue => Ok(vcpu.get_virt_reg(VirtualRegister::MmioStore)),
+            _ => Err(EcallError::Sbi(SbiError::Denied)),
         }
     }
 
@@ -358,12 +383,32 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                         active_vcpu
                             .set_ecall_result(Standard(SbiReturn::from(SbiError::NotSupported)));
                     }
-                    VmCpuExit::PageFault(e, addr) => {
-                        let pf = active_vcpu.active_pages().get_page_fault_cause(e, addr);
-                        break pf.into();
+                    VmCpuExit::PageFault {
+                        exception,
+                        fault_addr,
+                        fault_pc,
+                        priv_level,
+                    } => {
+                        let action = active_vcpu
+                            .active_pages()
+                            .handle_page_fault(exception, fault_addr, fault_pc, priv_level);
+                        match action {
+                            PageFaultAction::Forward(pf) => {
+                                if let PageFaultType::Mmio(_, mmio_op) = pf {
+                                    // Set up the vCPU to accept reads/writes to the virtual MMIO
+                                    // registers by the host.
+                                    active_vcpu.set_pending_mmio_op(mmio_op);
+                                }
+                                break pf.into();
+                            }
+                            PageFaultAction::Retry => continue,
+                            PageFaultAction::Redirect(exception, stval) => {
+                                active_vcpu.inject_exception(exception, stval)
+                            }
+                        };
                     }
-                    VmCpuExit::DelegatedException(e, stval) => {
-                        active_vcpu.inject_exception(e, stval);
+                    VmCpuExit::DelegatedException { exception, stval } => {
+                        active_vcpu.inject_exception(exception, stval);
                     }
                     VmCpuExit::Other(ref trap_csrs) => {
                         println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
@@ -802,11 +847,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         value: u64,
     ) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
-        // The only writeable registers are writeable only during initialization.
-        let guest_vm = guest
-            .as_initializing_vm()
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        guest_vm.set_vcpu_reg(vcpu_id, register, value)?;
+        if let Some(vm) = guest.as_initializing_vm() {
+            vm.set_vcpu_reg(vcpu_id, register, value)?;
+        } else if let Some(vm) = guest.as_finalized_vm() {
+            vm.set_vcpu_reg(vcpu_id, register, value)?;
+        } else {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
         Ok(0)
     }
 
@@ -818,21 +865,15 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         register: TvmCpuRegister,
     ) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
-        use TvmCpuRegister::*;
-        let value = match register {
-            EntryArg | EntryPc => {
-                let guest_vm = guest
-                    .as_initializing_vm()
-                    .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-                guest_vm.get_vcpu_reg(vcpu_id, register)?
+        let value = {
+            if let Some(vm) = guest.as_initializing_vm() {
+                vm.get_vcpu_reg(vcpu_id, register)
+            } else if let Some(vm) = guest.as_finalized_vm() {
+                vm.get_vcpu_reg(vcpu_id, register)
+            } else {
+                Err(EcallError::Sbi(SbiError::InvalidParam))
             }
-            _ => {
-                let guest_vm = guest
-                    .as_finalized_vm()
-                    .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-                guest_vm.get_vcpu_reg(vcpu_id, register)?
-            }
-        };
+        }?;
         Ok(value)
     }
 

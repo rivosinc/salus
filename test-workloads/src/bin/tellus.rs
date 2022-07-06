@@ -89,15 +89,25 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
     }
 }
 
-fn get_fault_address(vmid: u64) -> u64 {
+fn get_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister) -> u64 {
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuGetRegister {
         guest_id: vmid,
         vcpu_id: 0,
-        register: sbi::TvmCpuRegister::ExitCause0,
+        register,
     });
     // Safety: `TvmCpuGetRegister` doesn't access our memory.
-    let fault_addr = unsafe { ecall_send(&msg).expect("Tellus - TvmCpuGetRegister failed") };
-    fault_addr
+    unsafe { ecall_send(&msg).expect("Tellus - TvmCpuGetRegister failed") }
+}
+
+fn set_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister, value: u64) {
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
+        guest_id: vmid,
+        vcpu_id: 0,
+        register,
+        value,
+    });
+    // Safety: `TvmCpuSetRegister` doesn't access our memory.
+    unsafe { ecall_send(&msg).expect("Tellus - TvmCpuSetRegister failed") };
 }
 
 /// The entry point of the Rust part of the kernel.
@@ -112,9 +122,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const PRE_FAULTED_ZERO_PAGES: u64 = 2;
     const NUM_GUEST_PAD_PAGES: u64 = 32;
     const NUM_GUEST_SHARED_PAGES: u64 = 1;
+    const GUEST_MMIO_ADDRESS: u64 = 0x1000_8000;
     // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
     const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
     const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
+
     if hart_id != 0 {
         // TODO handle more than 1 cpu
         abort();
@@ -309,6 +321,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     }
     let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
+    // Add a page of emualted MMIO.
+    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddEmulatedMmioRegion {
+        guest_id: vmid,
+        guest_addr: GUEST_MMIO_ADDRESS,
+        len: PAGE_SIZE_4K,
+    });
+    // Safety: Doesn't affect host memory safety.
+    unsafe {
+        ecall_send(&msg).expect("Tellus - TvmAddEmulatedMmioRegion failed");
+    }
+
     // Set the entry point.
     let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
         guest_id: vmid,
@@ -370,9 +393,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 let cause = sbi::TvmCpuExitCode::from_reg(exit_code).unwrap();
                 match cause {
                     sbi::TvmCpuExitCode::ConfidentialPageFault => {
-                        // Figure out where the fault occurred.
-                        let fault_addr = get_fault_address(vmid);
-                        // Now fault in the page.
+                        let fault_addr = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
+                        // Fault in the page.
                         if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
                             panic!("Ran out of pages to fault in");
                         }
@@ -391,7 +413,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     }
                     sbi::TvmCpuExitCode::SharedPageFault => {
                         // Figure out where the fault occurred.
-                        let fault_addr = get_fault_address(vmid);
+                        let fault_addr = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
                         if fault_addr != SHARED_PAGES_START_ADDRESS {
                             panic!("Unexpected shared page fault address at {fault_addr:x}");
                         }
@@ -415,6 +437,25 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 shared_page_base as *mut u64,
                                 GUEST_SHARE_PING,
                             );
+                        }
+                    }
+                    sbi::TvmCpuExitCode::MmioPageFault => {
+                        let fault_addr = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
+                        let op = sbi::TvmMmioOpCode::from_reg(get_vcpu_reg(
+                            vmid,
+                            sbi::TvmCpuRegister::ExitCause1,
+                        ))
+                        .unwrap();
+                        // Handle the load or store.
+                        use sbi::TvmMmioOpCode::*;
+                        match op {
+                            Load8 | Load8U | Load16 | Load16U | Load32 | Load32U | Load64 => {
+                                set_vcpu_reg(vmid, sbi::TvmCpuRegister::MmioLoadValue, 0x42);
+                            }
+                            Store8 | Store16 | Store32 | Store64 => {
+                                let val = get_vcpu_reg(vmid, sbi::TvmCpuRegister::MmioStoreValue);
+                                println!("Guest says: 0x{:x} at 0x{:x}", val, fault_addr);
+                            }
                         }
                     }
                     _ => {

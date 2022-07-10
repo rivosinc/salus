@@ -6,7 +6,12 @@ MAX_TELLUS_SIZE=131072
 TELLUS_PATH=${1}
 GUESTVM_PATH=${2}
 OUTPUT_PATH=${3}
-TELLUS_SIZE=$( (stat -c "%s" "${TELLUS_PATH}" | xargs) )
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    TELLUS_SIZE=$( (stat -f "%z" "${TELLUS_PATH}" | xargs) )
+else
+    TELLUS_SIZE=$( (stat -c "%s" "${TELLUS_PATH}" | xargs) )
+fi
 
 if [ "${TELLUS_SIZE}" -gt "${MAX_TELLUS_SIZE}" ]; then
 	echo "The binary $TELLUS_PATH exceeds the max size (${MAX_TELLUS_SIZE})"

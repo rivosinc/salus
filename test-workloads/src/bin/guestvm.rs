@@ -176,14 +176,18 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     // Safety: WFI behavior is well-defined.
     unsafe { asm!("wfi", options(nomem, nostack)) };
 
-    println!("Exiting guest by causing a fault         ");
+    println!("Exiting guest");
     println!("*****************************************");
 
-    // TODO: Implement mechanism to gracefully exit guest
-    // Not safe, but deliberately intended to cause a fault
+    let msg = SbiMessage::Reset(sbi::ResetFunction::Reset {
+        reset_type: sbi::ResetType::Shutdown,
+        reason: sbi::ResetReason::NoReason,
+    });
+    // Safety: Reset terminates this VM.
     unsafe {
-        core::ptr::read_volatile(0 as *const u64);
+        ecall_send(&msg).expect("Guest shutdown failed");
     }
+    unreachable!();
 }
 
 #[no_mangle]

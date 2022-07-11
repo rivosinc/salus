@@ -10,7 +10,7 @@ use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::*;
-use riscv_regs::{GprIndex, Trap};
+use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::abort::abort;
 use sbi::Error as SbiError;
 use sbi::*;
@@ -21,8 +21,8 @@ use crate::smp;
 use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
-    ActiveVmPages, PageFaultAction, PageFaultType, VmPages, VmRegionList, TVM_REGION_LIST_PAGES,
-    TVM_STATE_PAGES,
+    ActiveVmPages, InstructionFetchError, PageFaultType, VmPages, VmRegionList,
+    TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
 };
 use crate::{print, println};
 
@@ -54,6 +54,58 @@ enum VmExitCause {
     SharedPageFault(GuestPageAddr),
     MmioPageFault(GuestPhysAddr, TvmMmioOpCode),
     UnhandledTrap(u64),
+}
+
+/// A decoded MMIO operation.
+#[derive(Clone, Copy, Debug)]
+pub struct MmioOperation {
+    opcode: TvmMmioOpCode,
+    register: GprIndex,
+    len: usize,
+}
+
+impl MmioOperation {
+    /// Creates an `MmioOperation` from `instruction` if the MMIO is supported using that instruction.
+    fn from_instruction(instruction: DecodedInstruction) -> Option<Self> {
+        use Instruction::*;
+        let (opcode, reg_index) = match instruction.instruction() {
+            Lb(i) => (TvmMmioOpCode::Load8, i.rd()),
+            Lh(i) => (TvmMmioOpCode::Load16, i.rd()),
+            Lw(i) => (TvmMmioOpCode::Load32, i.rd()),
+            Lbu(i) => (TvmMmioOpCode::Load8U, i.rd()),
+            Lhu(i) => (TvmMmioOpCode::Load16U, i.rd()),
+            Lwu(i) => (TvmMmioOpCode::Load32U, i.rd()),
+            Ld(i) => (TvmMmioOpCode::Load64, i.rd()),
+            Sb(s) => (TvmMmioOpCode::Store8, s.rs2()),
+            Sh(s) => (TvmMmioOpCode::Store16, s.rs2()),
+            Sw(s) => (TvmMmioOpCode::Store32, s.rs2()),
+            Sd(s) => (TvmMmioOpCode::Store64, s.rs2()),
+            _ => {
+                return None;
+            }
+        };
+        Some(Self {
+            opcode,
+            register: GprIndex::from_raw(reg_index).unwrap(),
+            len: instruction.len(),
+        })
+    }
+
+    /// Returns the operation as a `TvmMmioOpCode`.
+    pub fn opcode(&self) -> TvmMmioOpCode {
+        self.opcode
+    }
+
+    /// Returns the target register for the operation. Either 'rd' for load instructions, or 'rs2' for
+    /// store instructions.
+    pub fn register(&self) -> GprIndex {
+        self.register
+    }
+
+    /// Returns the length of the raw instruction.
+    pub fn len(&self) -> usize {
+        self.len
+    }
 }
 
 impl VmExitCause {
@@ -93,24 +145,6 @@ impl VmExitCause {
     }
 }
 
-impl From<PageFaultType> for VmExitCause {
-    fn from(fault: PageFaultType) -> VmExitCause {
-        use VmExitCause::*;
-        match fault {
-            PageFaultType::Confidential(addr) => {
-                // Mask off the page offset to avoid revealing more information than necessary to
-                // the host.
-                ConfidentialPageFault(PageAddr::with_round_down(addr, PageSize::Size4k))
-            }
-            PageFaultType::Shared(addr) => {
-                SharedPageFault(PageAddr::with_round_down(addr, PageSize::Size4k))
-            }
-            PageFaultType::Mmio(addr, mmio_op) => MmioPageFault(addr, mmio_op.opcode()),
-            PageFaultType::Unmapped(e) => UnhandledTrap(Trap::Exception(e).to_scause()),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum EcallError {
     Sbi(SbiError),
@@ -122,10 +156,6 @@ type EcallResult<T> = core::result::Result<T, EcallError>;
 impl From<VmPagesError> for EcallError {
     fn from(error: VmPagesError) -> EcallError {
         match error {
-            // Unhandleable page faults just result in an error to the caller.
-            VmPagesError::PageFault(PageFaultType::Unmapped(..)) => {
-                EcallError::Sbi(SbiError::InvalidAddress)
-            }
             VmPagesError::PageFault(pf) => EcallError::PageFault(pf),
             // TODO: Map individual error types. InvalidAddress is likely not the right value for
             // each error.
@@ -145,10 +175,20 @@ enum EcallAction {
 
 impl From<EcallResult<u64>> for EcallAction {
     fn from(result: EcallResult<u64>) -> EcallAction {
+        use EcallAction::*;
         match result {
-            Ok(val) => EcallAction::Continue(SbiReturn::success(val)),
-            Err(EcallError::Sbi(e)) => EcallAction::Continue(e.into()),
-            Err(EcallError::PageFault(pf)) => EcallAction::Retry(pf.into()),
+            Ok(val) => Continue(SbiReturn::success(val)),
+            Err(EcallError::Sbi(e)) => Continue(e.into()),
+            Err(EcallError::PageFault(pf)) => {
+                use PageFaultType::*;
+                match pf {
+                    // Unhandleable page faults or page faults in MMIO space just result in an error to
+                    // the caller.
+                    Unmapped(..) | Mmio(..) => Continue(SbiReturn::from(SbiError::InvalidAddress)),
+                    Confidential(addr) => Retry(VmExitCause::ConfidentialPageFault(addr)),
+                    Shared(addr) => Retry(VmExitCause::SharedPageFault(addr)),
+                }
+            }
         }
     }
 }
@@ -389,21 +429,62 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                         fault_pc,
                         priv_level,
                     } => {
-                        let action = active_vcpu
+                        let pf = active_vcpu
                             .active_pages()
-                            .handle_page_fault(exception, fault_addr, fault_pc, priv_level);
-                        match action {
-                            PageFaultAction::Forward(pf) => {
-                                if let PageFaultType::Mmio(_, mmio_op) = pf {
-                                    // Set up the vCPU to accept reads/writes to the virtual MMIO
-                                    // registers by the host.
-                                    active_vcpu.set_pending_mmio_op(mmio_op);
-                                }
-                                break pf.into();
+                            .get_page_fault_cause(exception, fault_addr);
+                        use PageFaultType::*;
+                        match pf {
+                            Confidential(addr) => {
+                                break VmExitCause::ConfidentialPageFault(addr);
                             }
-                            PageFaultAction::Retry => continue,
-                            PageFaultAction::Redirect(exception, stval) => {
-                                active_vcpu.inject_exception(exception, stval)
+                            Shared(addr) => {
+                                break VmExitCause::SharedPageFault(addr);
+                            }
+                            Mmio(addr) => {
+                                // We need the faulting instruction for MMIO faults.
+                                use InstructionFetchError::*;
+                                let inst = match active_vcpu
+                                    .active_pages()
+                                    .fetch_guest_instruction(fault_pc, priv_level)
+                                {
+                                    Ok(inst) => inst,
+                                    Err(FetchFault) => {
+                                        // If we took a fault while trying to fetch the instruction,
+                                        // then something must have happened in between the load/store
+                                        // page fault and now which caused the PC to become invalid.
+                                        // Let the VM retry the instruction so that we can take and
+                                        // handle the instruction fetch fault instead.
+                                        continue;
+                                    }
+                                    Err(FailedDecode(raw_inst)) => {
+                                        active_vcpu.inject_exception(
+                                            Exception::IllegalInstruction,
+                                            raw_inst as u64,
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                // Make sure that the instruction is actually valid for MMIO.
+                                let mmio_op = match MmioOperation::from_instruction(inst) {
+                                    Some(mmio_op) => mmio_op,
+                                    None => {
+                                        active_vcpu.inject_exception(
+                                            Exception::IllegalInstruction,
+                                            inst.raw() as u64,
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                // Set up the vCPU to accept reads/writes to the virtual MMIO
+                                // registers by the host.
+                                active_vcpu.set_pending_mmio_op(mmio_op);
+
+                                break VmExitCause::MmioPageFault(addr, mmio_op.opcode());
+                            }
+                            Unmapped(e) => {
+                                break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
                             }
                         };
                     }

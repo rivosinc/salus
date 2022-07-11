@@ -21,8 +21,9 @@ use sbi::{SbiMessage, SbiReturnType, TvmMmioOpCode};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
+use crate::vm::MmioOperation;
 use crate::vm_id::VmId;
-use crate::vm_pages::{ActiveVmPages, MmioOperation, VmPages};
+use crate::vm_pages::{ActiveVmPages, VmPages};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {

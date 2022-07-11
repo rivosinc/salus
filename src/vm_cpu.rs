@@ -255,6 +255,11 @@ pub enum VmCpuExit {
         fault_pc: GuestVirtAddr,
         priv_level: PrivilegeLevel,
     },
+    /// Instruction emulation trap.
+    VirtualInstruction {
+        fault_pc: GuestVirtAddr,
+        priv_level: PrivilegeLevel,
+    },
     /// An exception which we expected to handle directly at VS, but trapped to HS instead.
     DelegatedException { exception: Exception, stval: u64 },
     /// Everything else that we currently don't or can't handle.
@@ -350,6 +355,13 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
                     priv_level: PrivilegeLevel::from_hstatus(self.state.guest_regs.hstatus),
                 }
             }
+            Trap::Exception(VirtualInstruction) => {
+                VmCpuExit::VirtualInstruction {
+                    // See above re: this address being guest virtual.
+                    fault_pc: RawAddr::guest_virt(self.state.guest_regs.sepc, self.guest_id),
+                    priv_level: PrivilegeLevel::from_hstatus(self.state.guest_regs.hstatus),
+                }
+            }
             Trap::Exception(e) => {
                 if e.to_hedeleg_field()
                     .map_or(false, |f| CSR.hedeleg.matches_any(f))
@@ -409,7 +421,7 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
             self.set_virt_reg(VirtualRegister::MmioStore, 0);
 
             // Advance SEPC past the faulting instruction.
-            self.state.guest_regs.sepc += mmio_op.len() as u64;
+            self.inc_sepc(mmio_op.len() as u64);
         }
     }
 }
@@ -477,6 +489,11 @@ impl VmCpu {
         let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(0);
         hstatus.modify(hstatus::spv.val(1));
         hstatus.modify(hstatus::spvp::Supervisor);
+        if !guest_id.is_host() {
+            // Trap on WFI for non-host VMs. Trapping WFI for the host is pointless since all we'd do
+            // in the hypervisor is WFI ourselves.
+            hstatus.modify(hstatus::vtw.val(1));
+        }
         state.guest_regs.hstatus = hstatus.get();
 
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
@@ -508,6 +525,11 @@ impl VmCpu {
     /// Gets the current `sepc` CSR value of the vCPU.
     pub fn get_sepc(&mut self) -> u64 {
         self.state.guest_regs.sepc
+    }
+
+    /// Increments the current `sepc` CSR value by `value`.
+    pub fn inc_sepc(&mut self, value: u64) {
+        self.state.guest_regs.sepc += value;
     }
 
     /// Sets one of the vCPU's general-purpose registers.
@@ -552,7 +574,7 @@ impl VmCpu {
 
     /// Increments SEPC and Updates A0/A1 with the result of an SBI call.
     pub fn set_ecall_result(&mut self, result: SbiReturnType) {
-        self.state.guest_regs.sepc += 4;
+        self.inc_sepc(4); // ECALL is always a 4-byte instruction.
         match result {
             SbiReturnType::Legacy(a0) => {
                 self.set_gpr(GprIndex::A0, a0);

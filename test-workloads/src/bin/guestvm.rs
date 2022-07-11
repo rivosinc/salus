@@ -7,6 +7,7 @@
 #![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::arch::asm;
 use der::Decode;
 
 extern crate alloc;
@@ -169,6 +170,11 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     // Safety: read_ptr is properly aligned and a readable part of our address space.
     let val = unsafe { core::ptr::read_volatile(read_ptr) };
     println!("Host says: 0x{:x}", val);
+
+    // Make sure we return from WFI.
+    //
+    // Safety: WFI behavior is well-defined.
+    unsafe { asm!("wfi", options(nomem, nostack)) };
 
     println!("Exiting guest by causing a fault         ");
     println!("*****************************************");

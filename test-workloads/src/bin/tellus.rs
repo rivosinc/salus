@@ -458,6 +458,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             }
                         }
                     }
+                    sbi::TvmCpuExitCode::WaitForInterrupt => {
+                        continue;
+                    }
                     _ => {
                         println!("Tellus - Guest exited with status {:?}", cause);
                         break;

@@ -53,6 +53,7 @@ enum VmExitCause {
     ConfidentialPageFault(GuestPageAddr),
     SharedPageFault(GuestPageAddr),
     MmioPageFault(GuestPhysAddr, TvmMmioOpCode),
+    Wfi,
     UnhandledTrap(u64),
 }
 
@@ -118,6 +119,7 @@ impl VmExitCause {
             ConfidentialPageFault(_) => TvmCpuExitCode::ConfidentialPageFault,
             SharedPageFault(_) => TvmCpuExitCode::SharedPageFault,
             MmioPageFault(_, _) => TvmCpuExitCode::MmioPageFault,
+            Wfi => TvmCpuExitCode::WaitForInterrupt,
             UnhandledTrap(_) => TvmCpuExitCode::UnhandledException,
         }
     }
@@ -487,6 +489,47 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                                 break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
                             }
                         };
+                    }
+                    VmCpuExit::VirtualInstruction {
+                        fault_pc,
+                        priv_level,
+                    } => {
+                        use InstructionFetchError::*;
+                        let inst = match active_vcpu
+                            .active_pages()
+                            .fetch_guest_instruction(fault_pc, priv_level)
+                        {
+                            Ok(inst) => inst,
+                            Err(FetchFault) => {
+                                continue;
+                            }
+                            Err(FailedDecode(raw_inst)) => {
+                                active_vcpu.inject_exception(
+                                    Exception::IllegalInstruction,
+                                    raw_inst as u64,
+                                );
+                                continue;
+                            }
+                        };
+
+                        // We only emulate WFI for now. Everything else gets redirected as an illegal
+                        // instruction exception.
+                        match inst.instruction() {
+                            Instruction::Wfi => {
+                                // Just advance SEPC and exit. We place no constraints on when a vCPU
+                                // may be resumed from WFI since, per the privileged spec, it's only
+                                // a hint and it's perfectly valid for WFI to be a no-op.
+                                active_vcpu.inc_sepc(inst.len() as u64);
+                                break VmExitCause::Wfi;
+                            }
+                            _ => {
+                                active_vcpu.inject_exception(
+                                    Exception::IllegalInstruction,
+                                    inst.raw() as u64,
+                                );
+                                continue;
+                            }
+                        }
                     }
                     VmCpuExit::DelegatedException { exception, stval } => {
                         active_vcpu.inject_exception(exception, stval);

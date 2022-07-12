@@ -5,8 +5,6 @@
 use attestation::measurement::{AttestationManager, MeasurementIndex};
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
-use data_measure::data_measure::DataMeasure;
-use data_measure::sha256::Sha256Measure;
 use page_tracking::collections::PageVec;
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
@@ -615,7 +613,6 @@ pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
     // How many nested TVMs deep this VM is, with 0 being the host.
     nesting: usize,
     root: PlatformPageTable<T>,
-    measurement: Mutex<Sha256Measure>,
     pte_pages: PtePagePool,
     phantom: PhantomData<S>,
 }
@@ -881,7 +878,6 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
             regions,
             nesting,
             root,
-            measurement: Mutex::new(Sha256Measure::new()),
             pte_pages: PtePagePool::new(page_tracker),
             phantom: PhantomData,
         }
@@ -929,7 +925,6 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
             regions: self.regions,
             nesting: self.nesting,
             root: self.root,
-            measurement: self.measurement,
             pte_pages: self.pte_pages,
             phantom: PhantomData,
         }

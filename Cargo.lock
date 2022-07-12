@@ -103,13 +103,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data_measure"
-version = "0.1.0"
-dependencies = [
- "sha2 0.10.2",
-]
-
-[[package]]
 name = "data_model"
 version = "0.1.0"
 dependencies = [
@@ -425,7 +418,6 @@ dependencies = [
  "assertions",
  "attestation",
  "const-oid",
- "data_measure",
  "data_model",
  "der",
  "device_tree",

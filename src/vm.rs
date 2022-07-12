@@ -7,7 +7,6 @@ use attestation::{
     MAX_CSR_LEN,
 };
 use core::{mem, slice};
-use data_measure::sha256::SHA256_DIGEST_BYTES;
 use der::Decode;
 use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};

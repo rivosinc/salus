@@ -15,7 +15,6 @@ arrayvec = { version = "0.7.2", default-features = false }
 assertions = { path = "./assertions" }
 attestation = { path = "./attestation" }
 const-oid = { version = "0.9.0", features = ["db"] }
-data_measure = { path = "./data-measure" }
 data_model = { path = "./data-model" }
 der = "0.6.0"
 device_tree = { path = "./device-tree" }

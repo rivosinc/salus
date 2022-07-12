@@ -29,8 +29,6 @@ use crate::vm_pages::{
 };
 use crate::{print, println};
 
-const GUEST_ID_SELF_MEASUREMENT: u64 = 0;
-
 // What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
@@ -585,9 +583,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
             SbiMessage::Tee(tee_func) => self.handle_tee_msg(tee_func, active_pages),
-            SbiMessage::Measurement(measurement_func) => {
-                self.handle_measurement_msg(measurement_func, active_pages)
-            }
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_pages)
             }
@@ -726,20 +721,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 vcpu_id,
                 register,
             } => self.guest_get_vcpu_reg(guest_id, vcpu_id, register).into(),
-            GetGuestMeasurement {
-                measurement_version,
-                measurement_type,
-                dest_addr,
-                guest_id,
-            } => self
-                .guest_get_measurement(
-                    measurement_version,
-                    measurement_type,
-                    dest_addr,
-                    guest_id,
-                    active_pages,
-                )
-                .into(),
             TvmAddSharedMemoryRegion {
                 guest_id,
                 guest_addr,
@@ -755,29 +736,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 guest_addr,
             } => self
                 .guest_add_shared_pages(guest_id, page_addr, page_type, num_pages, guest_addr)
-                .into(),
-        }
-    }
-
-    fn handle_measurement_msg(
-        &self,
-        measurement_func: MeasurementFunction,
-        active_pages: &ActiveVmPages<T>,
-    ) -> EcallAction {
-        use MeasurementFunction::*;
-        match measurement_func {
-            GetSelfMeasurement {
-                measurement_version,
-                measurement_type,
-                dest_addr,
-            } => self
-                .guest_get_measurement(
-                    measurement_version,
-                    measurement_type,
-                    dest_addr,
-                    GUEST_ID_SELF_MEASUREMENT,
-                    active_pages,
-                )
                 .into(),
         }
     }
@@ -1145,54 +1103,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             .map_err(EcallError::from)?;
 
         Ok(num_pages)
-    }
-
-    // TODO: Add code to return actual measurements
-    fn guest_get_measurement(
-        &self,
-        measurement_version: u64,
-        measurement_type: u64,
-        dest_addr: u64,
-        guest_id: u64,
-        active_pages: &ActiveVmPages<T>,
-    ) -> EcallResult<u64> {
-        if (measurement_version != 1) || (measurement_type != 1) {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
-
-        // TODO: Define a compile-time constant for the maximum length of any measurement we
-        // would conceivably use.
-        let mut bytes = [0u8; SHA256_DIGEST_BYTES];
-        if guest_id == GUEST_ID_SELF_MEASUREMENT {
-            // The guest_id of 0 is a special identifier used to retrieve
-            // measurements for self.
-            self.vm_pages.get_measurement(&mut bytes)
-        } else {
-            let guest_id =
-                PageOwnerId::new(guest_id).ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-            let guest = self
-                .guests
-                .as_ref()
-                .and_then(|g| g.get(guest_id))
-                .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-            let result = if let Some(vm) = guest.as_finalized_vm() {
-                vm.vm_pages.get_measurement(&mut bytes)
-            } else {
-                guest
-                    .as_initializing_vm()
-                    .unwrap()
-                    .vm_pages
-                    .get_measurement(&mut bytes)
-            };
-            result
-        }
-        .map_err(EcallError::from)?;
-
-        let gpa = RawAddr::guest(dest_addr, self.vm_pages.page_owner_id());
-        active_pages
-            .copy_to_guest(gpa, &bytes)
-            .map_err(EcallError::from)?;
-        Ok(bytes.len() as u64)
     }
 
     fn guest_get_evidence(

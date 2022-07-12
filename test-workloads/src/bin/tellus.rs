@@ -227,9 +227,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         |=========================================
     */
 
-    let measurement_page_addr = next_page;
-    next_page += PAGE_SIZE_4K;
-
     let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
     let donated_pages_base = next_page;
 
@@ -261,45 +258,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         ecall_send(&msg).expect("Tellus - TvmAddMeasuredPages returned error");
     }
     next_page += PAGE_SIZE_4K * NUM_GUEST_DATA_PAGES;
-
-    let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {
-        measurement_version: 1,
-        measurement_type: 1,
-        dest_addr: measurement_page_addr,
-    });
-
-    // Safety: The measurement page is uniquely owned and can be written to safely by SBI
-    match unsafe { ecall_send(&msg) } {
-        Err(e) => {
-            println!("Host measurement error {e:?}");
-            panic!("Host measurement call failed");
-        }
-        Ok(_) => {
-            let measurement =
-                unsafe { core::ptr::read_volatile(measurement_page_addr as *const u64) };
-            println!("Host measurement was {measurement:x}");
-        }
-    }
-
-    let msg = SbiMessage::Tee(sbi::TeeFunction::GetGuestMeasurement {
-        guest_id: vmid,
-        measurement_version: 1,
-        measurement_type: 1,
-        dest_addr: measurement_page_addr,
-    });
-
-    // Safety: The measurement page is uniquely owned and can be written to safely by SBI
-    match unsafe { ecall_send(&msg) } {
-        Err(e) => {
-            println!("Guest measurement error {e:?}");
-            panic!("Guest measurement call failed");
-        }
-        Ok(_) => {
-            let measurement =
-                unsafe { core::ptr::read_volatile(measurement_page_addr as *const u64) };
-            println!("Guest measurement was {measurement:x}");
-        }
-    }
 
     // Convert the zero pages and map a few of them up front. We'll fault the rest in as necessary.
     let zero_pages_start = next_page;

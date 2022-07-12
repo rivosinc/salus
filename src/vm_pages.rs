@@ -34,7 +34,6 @@ pub enum Error {
     UnalignedAddress,
     UnsupportedPageSize(PageSize),
     NonContiguousPages,
-    MeasurementBufferTooSmall,
     AddressOverflow,
     TlbCountUnderflow,
     InvalidTlbVersion,
@@ -625,18 +624,6 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     /// Returns the `PageOwnerId` associated with the pages contained in this machine.
     pub fn page_owner_id(&self) -> PageOwnerId {
         self.page_owner_id
-    }
-
-    /// Copies the measurement for this guest into `dest`.
-    pub fn get_measurement(&self, dest: &mut [u8]) -> Result<()> {
-        let measurement = self.measurement.lock();
-        let src = measurement.get_measurement();
-        if src.len() > dest.len() {
-            return Err(Error::MeasurementBufferTooSmall);
-        }
-        let (left, _) = dest.split_at_mut(src.len());
-        left.copy_from_slice(src);
-        Ok(())
     }
 
     /// Returns the address of the root page table for this VM.

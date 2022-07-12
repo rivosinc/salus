@@ -61,13 +61,6 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
 
     let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
-    let measurement_page_addr = next_page;
-    let msg = SbiMessage::Measurement(sbi::MeasurementFunction::GetSelfMeasurement {
-        measurement_version: 1,
-        measurement_type: 1,
-        dest_addr: measurement_page_addr,
-    });
-    next_page += PAGE_SIZE_4K;
 
     if TEST_CSR.len() > MAX_CSR_LEN as usize {
         panic!("Test CSR is too large")
@@ -90,20 +83,6 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
 
     println!("*****************************************");
     println!("Hello world from Tellus guest            ");
-
-    // Safety: msg contains a unique reference to the measurement page and SBI is safe to write to
-    // that page.
-    match unsafe { ecall_send(&msg) } {
-        Err(e) => {
-            println!("Guest measurement error {e:?}");
-            panic!("Guest measurement call failed");
-        }
-        Ok(_) => {
-            let measurement =
-                unsafe { core::ptr::read_volatile(measurement_page_addr as *const u64) };
-            println!("Guest measurement was {measurement:x}");
-        }
-    }
 
     // Safety: msg contains a unique reference to the CSR and certificate pages
     // and SBI is safe to write to that page.

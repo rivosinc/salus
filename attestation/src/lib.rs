@@ -29,7 +29,7 @@ pub(crate) const MAX_CERT_RDN: usize = MAX_CSR_RDN;
 
 /// Attestation errors
 #[derive(Debug)]
-pub enum Error<'a> {
+pub enum Error {
     /// Invalid CSR
     InvalidCertReq(der::Error),
 
@@ -49,11 +49,11 @@ pub enum Error<'a> {
     InvalidKey,
 
     /// Unsupported signing algorithm
-    UnsupportedAlgorithm(spki::AlgorithmIdentifier<'a>),
+    UnsupportedAlgorithm(const_oid::ObjectIdentifier),
 }
 
 /// Custom attestation result.
-pub type Result<'a, T> = core::result::Result<T, Error<'a>>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// Implements the following traits for a newtype of a `der` decodable/encodable type:
 ///

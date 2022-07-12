@@ -130,7 +130,7 @@ impl<'a> Certificate<'a> {
         cdi_id: &'a [u8],
         key_pair: &'a [u8],
         certificate_buf: &'a mut [u8],
-    ) -> Result<'a, &'a [u8]> {
+    ) -> Result<&'a [u8]> {
         // The serial number is the CDI ID
         let serial_number = UIntRef::new(cdi_id).map_err(Error::InvalidDer)?;
 

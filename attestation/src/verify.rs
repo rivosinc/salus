@@ -58,6 +58,6 @@ pub fn verifier_from_algorithm(alg: AlgorithmIdentifier) -> Result<&'static dyn 
             Ok(&*ED25519_V)
         }
 
-        _ => return Err(Error::UnsupportedAlgorithm(alg)),
+        _ => Err(Error::UnsupportedAlgorithm(alg.oid)),
     }
 }

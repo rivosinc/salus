@@ -2,7 +2,10 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use attestation::{certificate::Certificate, request::CertReq, MAX_CERT_LEN, MAX_CSR_LEN};
+use attestation::{
+    certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CERT_LEN,
+    MAX_CSR_LEN,
+};
 use core::{mem, slice};
 use data_measure::sha256::SHA256_DIGEST_BYTES;
 use der::Decode;
@@ -195,11 +198,14 @@ impl From<EcallResult<u64>> for EcallAction {
     }
 }
 
+type AttestationSha384 = AttestationManager<sha2::Sha384>;
+
 /// A VM that is being run.
 pub struct Vm<T: GuestStagePageTable, S = VmStateFinalized> {
     vcpus: VmCpus,
     vm_pages: VmPages<T, S>,
     guests: Option<Guests<T>>,
+    attestation_mgr: AttestationSha384,
 }
 
 impl<T: GuestStagePageTable, S> Vm<T, S> {
@@ -227,6 +233,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
             vcpus,
             vm_pages,
             guests: None,
+            attestation_mgr: AttestationSha384::default(),
         }
     }
 
@@ -282,10 +289,12 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
 
     /// Completes intialization of the `Vm`, returning it in a finalized state.
     pub fn finalize(self) -> Vm<T, VmStateFinalized> {
+        self.attestation_mgr.finalize();
         Vm {
             vcpus: self.vcpus,
             vm_pages: self.vm_pages.finalize(),
             guests: self.guests,
+            attestation_mgr: self.attestation_mgr,
         }
     }
 
@@ -1131,6 +1140,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 num_pages,
                 &guest_vm.vm_pages,
                 to_page_addr,
+                &guest_vm.attestation_mgr,
             )
             .map_err(EcallError::from)?;
 
@@ -1232,8 +1242,14 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 
         let cert_gpa = RawAddr::guest(cert_addr, self.vm_pages.page_owner_id());
         let mut cert_bytes_buffer = [0u8; MAX_CERT_LEN];
-        let cert_bytes =
-            Certificate::from_csr(&csr, cdi, &key_pair, &mut cert_bytes_buffer).unwrap();
+        let cert_bytes = Certificate::from_csr(
+            &csr,
+            cdi,
+            &key_pair,
+            &self.attestation_mgr,
+            &mut cert_bytes_buffer,
+        )
+        .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let cert_bytes_len = cert_bytes.len();
 
         // Check that the guest gave us enough space
@@ -1411,7 +1427,9 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
-            mapper.map_page_with_measurement(vm_addr, mappable).unwrap();
+            mapper
+                .map_page_with_measurement(vm_addr, mappable, &self.inner.attestation_mgr)
+                .unwrap();
         }
     }
 

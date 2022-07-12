@@ -14,11 +14,14 @@ panic = "abort"
 arrayvec = { version = "0.7.2", default-features = false }
 assertions = { path = "./assertions" }
 attestation = { path = "./attestation" }
+const-oid = { version = "0.9.0", features = ["db"] }
 data_measure = { path = "./data-measure" }
 data_model = { path = "./data-model" }
 der = "0.6.0"
 device_tree = { path = "./device-tree" }
+digest = {version = "0.10.3", default-features = false }
 drivers = { path = "./drivers" }
+generic-array = "0.14.5"
 hyp_alloc = { path = "./hyp-alloc" }
 memoffset = { version = ">=0.6.5", features = ["unstable_const"] }
 page_tracking = { path = "./page-tracking" }
@@ -28,6 +31,7 @@ riscv_regs = { path = "./riscv-regs" }
 s_mode_utils = { path = "./s-mode-utils" }
 sbi = { path = "./sbi" }
 spin = { version = "*", default-features = false }
+sha2 = {version = "0.10", default-features = false }
 test_workloads = { path = "./test-workloads" }
 
 [workspace]

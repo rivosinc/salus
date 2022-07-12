@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use attestation::measurement::{AttestationManager, MeasurementIndex};
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use data_measure::data_measure::DataMeasure;
@@ -42,6 +43,7 @@ pub enum Error {
     InsufficientVmRegionSpace,
     InvalidMapRegion,
     SharedPageNotMapped,
+    Measurement(attestation::Error),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -283,7 +285,7 @@ impl VmRegionList {
 /// they are inserted, if necessary.
 pub struct VmPagesMapper<'a, T: GuestStagePageTable, S> {
     mapper: PageTableMapper<'a, T>,
-    vm_pages: &'a VmPages<T, S>,
+    phantom: PhantomData<S>,
 }
 
 impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
@@ -307,7 +309,10 @@ impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
                 vm_pages.pte_pages.pop()
             })
             .map_err(Error::Paging)?;
-        Ok(Self { mapper, vm_pages })
+        Ok(Self {
+            mapper,
+            phantom: PhantomData,
+        })
     }
 
     /// Maps an unmeasured page into the guest's address space.
@@ -321,19 +326,24 @@ impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
 
 impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
     /// Maps a page into the guest's address space and measures it.
-    pub fn map_page_with_measurement<S, M>(
+    pub fn map_page_with_measurement<S, M, D>(
         &self,
         to_addr: GuestPageAddr,
         page: Page<S>,
+        measurement: &AttestationManager<D>,
     ) -> Result<()>
     where
         S: Mappable<M>,
         M: MeasureRequirement,
+        D: digest::Digest,
     {
-        {
-            let mut measurement = self.vm_pages.measurement.lock();
-            measurement.add_page(to_addr.bits(), page.as_bytes());
-        }
+        measurement
+            .extend_msmt_register(
+                MeasurementIndex::TvmPage,
+                page.as_bytes(),
+                Some(to_addr.bits()),
+            )
+            .map_err(Error::Measurement)?;
         self.mapper.map_page(to_addr, page).map_err(Error::Paging)
     }
 }
@@ -463,13 +473,14 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
 
     /// Copies `count` pages from `src_addr` in the current guest to the converted pages starting at
     /// `from_addr`. The pages are then mapped into the child's address space at `to_addr`.
-    pub fn copy_and_add_data_pages_builder(
+    pub fn copy_and_add_data_pages_builder<D: digest::Digest>(
         &self,
         src_addr: GuestPageAddr,
         from_addr: GuestPageAddr,
         count: u64,
         to: &VmPages<T, VmStateInitializing>,
         to_addr: GuestPageAddr,
+        measurement: &AttestationManager<D>,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
         let mapper = to.map_pages(to_addr, count)?;
@@ -496,7 +507,9 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
                 .assign_page_for_mapping(initialized, new_owner)
                 .unwrap();
             // Unwrap ok since the address is in range and we haven't mapped it yet.
-            mapper.map_page_with_measurement(to_addr, mappable).unwrap();
+            mapper
+                .map_page_with_measurement(to_addr, mappable, measurement)
+                .unwrap();
         }
 
         Ok(count)

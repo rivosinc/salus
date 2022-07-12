@@ -8,12 +8,13 @@ use attestation::{
 };
 use core::{mem, slice};
 use der::Decode;
-use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
+use drivers::{pmu::PmuInfo, CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::abort::abort;
+use s_mode_utils::ecall::ecall_send;
 use sbi::Error as SbiError;
 use sbi::*;
 
@@ -585,6 +586,104 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_pages)
             }
+            SbiMessage::Pmu(pmu_func) => self.handle_pmu_msg(pmu_func),
+        }
+    }
+
+    fn handle_pmu_msg(&self, pmu_func: PmuFunction) -> EcallAction {
+        use PmuFunction::*;
+        let pmu_info = PmuInfo::get();
+        match pmu_func {
+            GetNumCounters => {
+                let num_counters = u64::try_from(pmu_info.counters_info.len()).unwrap_or(0);
+                EcallAction::Continue(SbiReturn::from(Ok(num_counters)))
+            }
+            GetCounterInfo(counter_index) => {
+                let result = if let Some(info) =
+                    pmu_info.counters_info.get(counter_index as usize) && info.1
+                {
+                    Ok(info.0.raw())
+                } else {
+                    Err(Error::InvalidParam)
+                };
+                EcallAction::Continue(SbiReturn::from(result))
+            }
+            StartCounters {
+                counter_index_base,
+                counter_index_mask,
+                start_flags,
+                initial_value,
+            } => {
+                let result =  if let Some(info) =
+                pmu_info.counters_info.get(counter_index_base as usize) && info.1 {
+                    let msg = SbiMessage::Pmu(PmuFunction::StartCounters {
+                        counter_index_base,
+                        counter_index_mask,
+                        start_flags,
+                        initial_value,
+                    });
+                    // Safety: PmuFunction does not touch memory.
+                    unsafe { ecall_send(&msg) }
+                } else {
+                    Err(Error::InvalidParam)
+                };
+                EcallAction::Continue(SbiReturn::from(result))
+            }
+            StopCounters {
+                counter_index_base,
+                counter_index_mask,
+                stop_flags,
+            } => {
+                let result = if let Some(info) =
+                                pmu_info.counters_info.get(counter_index_base as usize) && info.1 {
+                                let msg = SbiMessage::Pmu(PmuFunction::StopCounters {
+                                    counter_index_base,
+                                    counter_index_mask,
+                                    stop_flags,
+                                });
+                                // Safety: PmuFunction does not touch memory.
+                                unsafe { ecall_send(&msg) }
+                        } else {
+                            Err(Error::InvalidParam)
+                        };
+                EcallAction::Continue(SbiReturn::from(result))
+            }
+            ConfigureMatchingCounters {
+                counter_index_base,
+                counter_index_mask,
+                config_flags,
+                event_type,
+                event_data,
+            } => {
+                let result = if let Some(info) =
+                    pmu_info.counters_info.get(counter_index_base as usize) && info.1
+                {
+                    let msg = SbiMessage::Pmu(PmuFunction::ConfigureMatchingCounters {
+                        counter_index_base,
+                        counter_index_mask,
+                        config_flags,
+                        event_type,
+                        event_data,
+                    });
+                    // Safety: PmuFunction does not touch memory.
+                   unsafe { ecall_send(&msg)}
+                } else {
+                    Err(Error::InvalidParam)
+                };
+                EcallAction::Continue(SbiReturn::from(result))
+            }
+            ReadFirmwareCounter(counter_index) => {
+                let result = if let Some(info) =
+                    pmu_info.counters_info.get(counter_index as usize) && info.1
+                {
+                    let msg = SbiMessage::Pmu(PmuFunction::ReadFirmwareCounter(counter_index));
+                    // Safety: PmuFunction does not touch memory.
+                    unsafe { ecall_send(&msg) }
+                } else {
+                    Err(Error::InvalidParam)
+                };
+                EcallAction::Continue(SbiReturn::from(result))
+            }
         }
     }
 
@@ -600,7 +699,8 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 | sbi::EXT_HART_STATE
                 | sbi::EXT_RESET
                 | sbi::EXT_TEE
-                | sbi::EXT_MEASUREMENT => 1,
+                | sbi::EXT_MEASUREMENT
+                | sbi::EXT_PMU => 1,
                 _ => 0,
             },
             // TODO: 0 is valid result for the GetMachine* SBI calls but we should probably

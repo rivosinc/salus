@@ -14,3 +14,5 @@ page_tracking = { path = "../page-tracking" }
 riscv_pages = { path = "../riscv-pages" }
 riscv_regs = { path = "../riscv-regs" }
 spin = { version = "*", default-features = false, features = ["once"] }
+sbi = { path = "../sbi" }
+s_mode_utils = { path = "../s-mode-utils" }

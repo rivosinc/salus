@@ -12,7 +12,7 @@ use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::{
     GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages,
 };
-use riscv_regs::{hstatus, scounteren, sstatus};
+use riscv_regs::{hcounteren, hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
     PrivilegeLevel, Readable, Trap, Writeable, CSR,
@@ -50,6 +50,7 @@ struct HostCpuState {
     gprs: GeneralPurposeRegisters,
     sstatus: u64,
     hstatus: u64,
+    hcounteren: u64,
     scounteren: u64,
     stvec: u64,
     sscratch: u64,
@@ -64,6 +65,7 @@ struct GuestCpuState {
     fcsr: u64,
     sstatus: u64,
     hstatus: u64,
+    hcounteren: u64,
     scounteren: u64,
     sepc: u64,
 }
@@ -169,6 +171,7 @@ global_asm!(
     host_sp = const host_gpr_offset(GprIndex::SP),
     host_sstatus = const host_csr_offset!(sstatus),
     host_hstatus = const host_csr_offset!(hstatus),
+    host_hcounteren = const host_csr_offset!(hcounteren),
     host_scounteren = const host_csr_offset!(scounteren),
     host_stvec = const host_csr_offset!(stvec),
     host_sscratch = const host_csr_offset!(sscratch),
@@ -240,6 +243,7 @@ global_asm!(
     sstatus_fs_clean = const sstatus::fs::Clean.value,
     guest_sstatus = const guest_csr_offset!(sstatus),
     guest_hstatus = const guest_csr_offset!(hstatus),
+    guest_hcounteren = const guest_csr_offset!(hcounteren),
     guest_scounteren = const guest_csr_offset!(scounteren),
     guest_sepc = const guest_csr_offset!(sepc),
 );
@@ -500,6 +504,12 @@ impl VmCpu {
         sstatus.modify(sstatus::spp::Supervisor);
         sstatus.modify(sstatus::fs::Initial);
         state.guest_regs.sstatus = sstatus.get();
+
+        let mut hcounteren = LocalRegisterCopy::<u64, hcounteren::Register>::new(0);
+        hcounteren.modify(hcounteren::cycle.val(1));
+        hcounteren.modify(hcounteren::time.val(1));
+        hcounteren.modify(hcounteren::instret.val(1));
+        state.guest_regs.hcounteren = hcounteren.get();
 
         let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);
         scounteren.modify(scounteren::cycle.val(1));

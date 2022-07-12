@@ -34,7 +34,7 @@ mod vm_id;
 mod vm_pages;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{pci::PciDevice, pci::PcieRoot, CpuInfo, Imsic};
+use drivers::{pci::PciDevice, pci::PcieRoot, pmu::PmuInfo, CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;
@@ -332,6 +332,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             dev.header().header_type()
         );
     });
+
+    // Get platform PMU counter information
+    PmuInfo::init();
 
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);

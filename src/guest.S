@@ -43,6 +43,10 @@ _run_guest:
     csrrw t1, hstatus, t1
     sd    t1, ({host_hstatus})(a0)
 
+    ld    t1, ({guest_hcounteren})(a0)
+    csrrw t1, hcounteren, t1
+    sd    t1, ({host_hcounteren})(a0)
+
     ld    t1, ({guest_scounteren})(a0)
     csrrw t1, scounteren, t1
     sd    t1, ({host_scounteren})(a0)
@@ -227,6 +231,10 @@ _restore_csrs:
     ld    t1, ({host_hstatus})(a0)
     csrrw t1, hstatus, t1
     sd    t1, ({guest_hstatus})(a0)
+
+    ld    t1, ({host_hcounteren})(a0)
+    csrrw t1, hcounteren, t1
+    sd    t1, ({guest_hcounteren})(a0)
 
     ld    t1, ({host_scounteren})(a0)
     csrrw t1, scounteren, t1

@@ -39,6 +39,9 @@ pub enum Error {
     /// Invalid DER payload
     InvalidDer(der::Error),
 
+    /// Invalid X.509 extension DER
+    InvalidExtensionDer(der::Error),
+
     /// Invalid public key bytes
     InvalidPublicKey,
 
@@ -48,11 +51,20 @@ pub enum Error {
     /// Invalid digital signature
     InvalidSignature,
 
+    /// Invalid X.509 TCB info extension DER
+    InvalidTcbInfoExtensionDer(der::Error),
+
     /// Invalid Key bytes
     InvalidKey,
 
     /// Unsupported signing algorithm
     UnsupportedAlgorithm(const_oid::ObjectIdentifier),
+
+    /// Measurement register is locked
+    LockedMeasurementRegister(u8),
+
+    /// Invalid measurement register index
+    InvalidMeasurementRegisterIndex(usize),
 
     /// Invalid data digest
     InvalidDigest(der::Error),
@@ -136,7 +148,10 @@ macro_rules! impl_newtype {
 mod attr;
 /// x.509 certificate module
 pub mod certificate;
-mod extensions;
+/// x.509 certificate extensions
+pub mod extensions;
+/// TCB layer measurement module
+pub mod measurement;
 mod name;
 /// Certificate Signing Resquest module
 pub mod request;

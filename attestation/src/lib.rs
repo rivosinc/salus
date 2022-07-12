@@ -12,6 +12,9 @@ pub const MAX_CERT_LEN: usize = 4096;
 /// Maximum supported length for a CSR
 pub const MAX_CSR_LEN: usize = 4096;
 
+/// Maximum number of FW ID entries in the `TcbInfo` FWID array
+pub const MAX_TCBINFO_FWID: usize = 32;
+
 pub(crate) const MAX_CSR_ATV: usize = 8;
 pub(crate) const MAX_CSR_ATV_VALUE: usize = 8;
 pub(crate) const MAX_CSR_ATV_VALUE_LEN: usize = 64;
@@ -50,6 +53,9 @@ pub enum Error {
 
     /// Unsupported signing algorithm
     UnsupportedAlgorithm(const_oid::ObjectIdentifier),
+
+    /// Invalid data digest
+    InvalidDigest(der::Error),
 }
 
 /// Custom attestation result.

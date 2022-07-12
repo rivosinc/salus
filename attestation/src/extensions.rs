@@ -11,6 +11,8 @@ use spki::ObjectIdentifier;
 
 use crate::MAX_CERT_EXTENSIONS;
 
+/// TCG DICE extensions (DiceTcbInfo)
+pub mod dice;
 pub mod pkix;
 
 /// Extension as defined in [RFC 5280 Section 4.1.2.9].

@@ -4,18 +4,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use der::asn1::{BitStringRef, SequenceOf, SetOf, UIntRef, Utf8StringRef};
-use der::{AnyRef, Encode};
+use der::{AnyRef, Decode, Encode};
 use der::{Enumerated, Sequence};
 use ed25519_dalek::{Keypair, Signer};
 use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo};
 
 use crate::{
     attr::AttributeTypeAndValue,
-    extensions::Extensions,
+    extensions::{Extension, Extensions},
+    measurement::{AttestationManager, MAX_TCB_INFO_EXTN_LEN},
     name::{Name, RdnSequence, RelativeDistinguishedName},
     request::CertReq,
     time::{Time, Validity},
-    Error, Result, MAX_CERT_ATV, MAX_CERT_LEN, MAX_CERT_RDN,
+    Error, Result, MAX_CERT_ATV, MAX_CERT_EXTENSIONS, MAX_CERT_LEN, MAX_CERT_RDN,
 };
 
 /// Certificate `Version` as defined in [RFC 5280 Section 4.1].
@@ -124,11 +125,13 @@ impl<'a> Certificate<'a> {
     /// @csr: The CSR input
     /// @cdi_id: The CDI identifier of the certificate issuer (e.g. the TSM).
     /// @key_pair: The ED25519 key pair generated from the CDI.
+    /// @attestation_mgr: The attestation manager to provide the DiceTcbInfo extension
     /// @certificate_buffer: A buffer to hold the DER encoded certificate data.
-    pub fn from_csr(
+    pub fn from_csr<D: digest::Digest>(
         csr: &CertReq<'a>,
         cdi_id: &'a [u8],
         key_pair: &'a [u8],
+        attestation_mgr: &AttestationManager<D>,
         certificate_buf: &'a mut [u8],
     ) -> Result<&'a [u8]> {
         // The serial number is the CDI ID
@@ -157,6 +160,16 @@ impl<'a> Certificate<'a> {
             not_after: Time::never().map_err(Error::InvalidDer)?,
         };
 
+        // Certficate extensions
+        let mut extensions = SequenceOf::<_, MAX_CERT_EXTENSIONS>::new();
+
+        // Add the DiceTcbInfo extension
+        let mut extn_buffer = [0u8; MAX_TCB_INFO_EXTN_LEN];
+        let extn_bytes = attestation_mgr.encode_to_tcb_info_extension(&mut extn_buffer)?;
+        extensions
+            .add(Extension::from_der(extn_bytes).map_err(Error::InvalidDer)?)
+            .map_err(Error::InvalidDer)?;
+
         // We copy the public key information and subject from the CSR
         let tbs_certificate = TbsCertificate {
             version: Version::V3,
@@ -168,7 +181,7 @@ impl<'a> Certificate<'a> {
             subject_public_key_info: csr.info.public_key,
             issuer_unique_id: None,
             subject_unique_id: None,
-            extensions: None,
+            extensions: Some(extensions),
         };
 
         // We can now sign the TBS and generate the actual certificate

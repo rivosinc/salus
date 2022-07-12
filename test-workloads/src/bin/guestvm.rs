@@ -13,7 +13,12 @@ use der::Decode;
 extern crate alloc;
 extern crate test_workloads;
 
-use attestation::{certificate::Certificate, MAX_CERT_LEN, MAX_CSR_LEN};
+use attestation::{
+    certificate::Certificate,
+    extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
+    measurement::MeasurementIndex::TvmPage,
+    MAX_CERT_LEN, MAX_CSR_LEN,
+};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
@@ -122,20 +127,36 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
         panic!("Generated certificate is too large")
     }
 
-    match Certificate::from_der(&cert_bytes[..cert_len as usize]) {
-        Err(e) => {
-            println!("Attestation error {e:?}");
-            panic!("Cert parsing error");
+    let mut tcb_info_extn = DiceTcbInfo::default();
+    let cert = Certificate::from_der(&cert_bytes[..cert_len as usize]).expect("Cert parsing error");
+
+    // Look for a DiceTcbInfo extension
+    cert.tbs_certificate.extensions.as_ref().map(|extensions| {
+        for extn in extensions.iter() {
+            if extn.extn_id != TCG_DICE_TCB_INFO {
+                continue;
+            }
+
+            tcb_info_extn = DiceTcbInfo::from_der(extn.extn_value).expect("Invalid TCB DER");
         }
-        Ok(cert) => {
-            println!(
-                "Certificate version:{:?} Issuer:{} Signature algorithm:{}",
-                cert.tbs_certificate.version,
-                cert.tbs_certificate.issuer,
-                cert.signature_algorithm.oid
-            );
-        }
-    }
+    });
+
+    // Extract the TVM pages measurement register from the list of FwIds.
+    let tvm_fwid = tcb_info_extn
+        .fwids
+        .as_ref()
+        .map(|fwids| fwids.get(TvmPage as usize).expect("Missing TVM page fwid"))
+        .expect("Missing TVM fwids");
+
+    println!(
+        "Certificate version:{:?} Issuer:{} Signature algorithm:{} Guest measurement:{:x?} (Hash algorithm {} - {} bytes)",
+        cert.tbs_certificate.version,
+        cert.tbs_certificate.issuer,
+        cert.signature_algorithm.oid,
+        tvm_fwid.digest.as_bytes(),
+        tvm_fwid.hash_alg,
+        tvm_fwid.digest.as_bytes().len(),
+    );
 
     // Touch the rest of the data pages to force Tellus to fault them in.
     let end =

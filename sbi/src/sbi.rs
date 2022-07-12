@@ -767,20 +767,6 @@ pub enum TeeFunction {
         /// a1 = vCPU id
         vcpu_id: u64,
     },
-    /// Copies the measurements for the specified guest to the non-confidential physical address
-    /// `dest_addr`. The measurement version and type must be set to 1 for now.
-    ///
-    /// a6 = 7
-    GetGuestMeasurement {
-        /// a0 = measurement version
-        measurement_version: u64,
-        /// a1 = measurement type
-        measurement_type: u64,
-        /// a2 = dest_addr
-        dest_addr: u64,
-        /// a3 = guest id
-        guest_id: u64,
-    },
     /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`. vCPUs may not be added after the TVM
     /// is finalized.
     ///
@@ -924,12 +910,6 @@ impl TeeFunction {
                 guest_id: args[0],
                 vcpu_id: args[1],
             }),
-            7 => Ok(GetGuestMeasurement {
-                measurement_version: args[0],
-                measurement_type: args[1],
-                dest_addr: args[2],
-                guest_id: args[3],
-            }),
             8 => Ok(TvmCpuCreate {
                 guest_id: args[0],
                 vcpu_id: args[1],
@@ -1022,12 +1002,6 @@ impl SbiFunction for TeeFunction {
                 guest_id: _,
                 vcpu_id: _,
             } => 5,
-            GetGuestMeasurement {
-                measurement_type: _,
-                measurement_version: _,
-                dest_addr: _,
-                guest_id: _,
-            } => 7,
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id: _,
@@ -1117,12 +1091,6 @@ impl SbiFunction for TeeFunction {
                 guest_id,
                 vcpu_id: _,
             } => *guest_id,
-            GetGuestMeasurement {
-                measurement_version,
-                measurement_type: _,
-                dest_addr: _,
-                guest_id: _,
-            } => *measurement_version,
             TvmCpuCreate {
                 guest_id,
                 vcpu_id: _,
@@ -1206,12 +1174,6 @@ impl SbiFunction for TeeFunction {
                 guest_id: _,
                 vcpu_id,
             } => *vcpu_id,
-            GetGuestMeasurement {
-                measurement_version: _,
-                measurement_type,
-                dest_addr: _,
-                guest_id: _,
-            } => *measurement_type,
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id,
@@ -1287,12 +1249,6 @@ impl SbiFunction for TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_type as u64,
-            GetGuestMeasurement {
-                measurement_version: _,
-                measurement_type: _,
-                dest_addr,
-                guest_id: _,
-            } => *dest_addr,
             TvmCpuSetRegister {
                 guest_id: _,
                 vcpu_id: _,
@@ -1358,12 +1314,6 @@ impl SbiFunction for TeeFunction {
                 num_pages,
                 guest_addr: _,
             } => *num_pages,
-            GetGuestMeasurement {
-                measurement_version: _,
-                measurement_type: _,
-                dest_addr: _,
-                guest_id,
-            } => *guest_id,
             TvmCpuSetRegister {
                 guest_id: _,
                 vcpu_id: _,
@@ -1430,83 +1380,6 @@ impl SbiFunction for TeeFunction {
                 guest_addr,
             } => *guest_addr,
             _ => 0,
-        }
-    }
-}
-
-/// Functions provided by the measurement extension.
-#[derive(Copy, Clone)]
-pub enum MeasurementFunction {
-    /// Copies the measurements for the current VM to the (guest) physical address in `dest_addr`.
-    /// The measurement version and type must be set to 1 for now.
-    /// a6 = 0
-    GetSelfMeasurement {
-        /// a0 = measurement version
-        measurement_version: u64,
-        /// a1 = measurement type
-        measurement_type: u64,
-        /// a2 = dest_addr
-        dest_addr: u64,
-    },
-}
-
-impl MeasurementFunction {
-    /// Attempts to parse `Self` from the passed in `a0-a7`.
-    fn from_regs(args: &[u64]) -> Result<Self> {
-        use MeasurementFunction::*;
-        match args[6] {
-            0 => Ok(GetSelfMeasurement {
-                measurement_version: args[0],
-                measurement_type: args[1],
-                dest_addr: args[2],
-            }),
-            _ => Err(Error::NotSupported),
-        }
-    }
-}
-
-impl SbiFunction for MeasurementFunction {
-    fn a6(&self) -> u64 {
-        use MeasurementFunction::*;
-        match self {
-            GetSelfMeasurement {
-                measurement_version: _,
-                measurement_type: _,
-                dest_addr: _,
-            } => 0,
-        }
-    }
-
-    fn a0(&self) -> u64 {
-        use MeasurementFunction::*;
-        match self {
-            GetSelfMeasurement {
-                measurement_version,
-                measurement_type: _,
-                dest_addr: _,
-            } => *measurement_version,
-        }
-    }
-
-    fn a1(&self) -> u64 {
-        use MeasurementFunction::*;
-        match self {
-            GetSelfMeasurement {
-                measurement_version: _,
-                measurement_type,
-                dest_addr: _,
-            } => *measurement_type,
-        }
-    }
-
-    fn a2(&self) -> u64 {
-        use MeasurementFunction::*;
-        match self {
-            GetSelfMeasurement {
-                measurement_version: _,
-                measurement_type: _,
-                dest_addr,
-            } => *dest_addr,
         }
     }
 }
@@ -1726,8 +1599,6 @@ pub enum SbiMessage {
     Reset(ResetFunction),
     /// Provides capabilities for starting confidential virtual machines.
     Tee(TeeFunction),
-    /// Allows acquiring measurement of the system that booted the running code.
-    Measurement(MeasurementFunction),
     /// The extension for getting attestation evidences and extending measurements.
     Attestation(AttestationFunction),
 }
@@ -1744,9 +1615,6 @@ impl SbiMessage {
             EXT_HART_STATE => StateFunction::from_regs(gprs.a_regs()).map(SbiMessage::HartState),
             EXT_RESET => ResetFunction::from_regs(gprs.a_regs()).map(SbiMessage::Reset),
             EXT_TEE => TeeFunction::from_regs(gprs.a_regs()).map(SbiMessage::Tee),
-            EXT_MEASUREMENT => {
-                MeasurementFunction::from_regs(gprs.a_regs()).map(SbiMessage::Measurement)
-            }
             EXT_ATTESTATION => {
                 AttestationFunction::from_regs(gprs.a_regs()).map(SbiMessage::Attestation)
             }
@@ -1762,7 +1630,6 @@ impl SbiMessage {
             SbiMessage::HartState(_) => EXT_HART_STATE,
             SbiMessage::Reset(_) => EXT_RESET,
             SbiMessage::Tee(_) => EXT_TEE,
-            SbiMessage::Measurement(_) => EXT_MEASUREMENT,
             SbiMessage::Attestation(_) => EXT_ATTESTATION,
         }
     }
@@ -1775,7 +1642,6 @@ impl SbiMessage {
             SbiMessage::PutChar(_) => 0,
             SbiMessage::Reset(_) => 0,
             SbiMessage::Tee(f) => f.a6(),
-            SbiMessage::Measurement(f) => f.a6(),
             SbiMessage::Attestation(f) => f.a6(),
         }
     }
@@ -1810,7 +1676,6 @@ impl SbiMessage {
         match self {
             SbiMessage::HartState(f) => f.a2(),
             SbiMessage::Tee(f) => f.a2(),
-            SbiMessage::Measurement(f) => f.a2(),
             SbiMessage::Attestation(f) => f.a2(),
             _ => 0,
         }
@@ -1822,7 +1687,6 @@ impl SbiMessage {
             SbiMessage::Reset(r) => r.a1(),
             SbiMessage::HartState(f) => f.a1(),
             SbiMessage::Tee(f) => f.a1(),
-            SbiMessage::Measurement(f) => f.a1(),
             SbiMessage::Attestation(f) => f.a1(),
             _ => 0,
         }
@@ -1835,7 +1699,6 @@ impl SbiMessage {
             SbiMessage::PutChar(c) => *c,
             SbiMessage::HartState(f) => f.a0(),
             SbiMessage::Tee(f) => f.a0(),
-            SbiMessage::Measurement(f) => f.a0(),
             SbiMessage::Attestation(f) => f.a0(),
             _ => 0,
         }

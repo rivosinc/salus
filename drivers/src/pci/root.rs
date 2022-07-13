@@ -78,7 +78,7 @@ impl PcieRoot {
             // Any overlaps will be caught by `add_mmio_region` and the error will be propagated.
             mem_map
                 .add_mmio_region(
-                    DeviceMemType::PciRoot,
+                    DeviceMemType::PciConfig,
                     RawAddr::from(config_base),
                     config_size,
                 )

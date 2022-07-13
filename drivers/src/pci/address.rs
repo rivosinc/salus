@@ -84,6 +84,15 @@ impl AddressComponent for Bus {
 }
 address_type!(Bus);
 
+/// A range of PCI bus numbers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BusRange {
+    /// Start bus number.
+    pub start: Bus,
+    /// End bus number (inclusive).
+    pub end: Bus,
+}
+
 // Because Functions are only 3 bits, they are trivally valid Bus numbers(8 bits).
 impl From<Function> for Bus {
     fn from(f: Function) -> Self {

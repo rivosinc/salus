@@ -2,115 +2,47 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use core::alloc::Allocator;
 use core::ops::Range;
 
 use data_model::Le32;
-use device_tree::DeviceTree;
-use page_tracking::HwMemMap;
-use riscv_pages::{DeviceMemType, PageAddr, PageSize, RawAddr, SupervisorPageAddr};
+use riscv_pages::SupervisorPageAddr;
 
-use super::address::{Address, Bus, Device, Function, Segment};
+use super::address::*;
 use super::header::Header;
 
 // See PCI Express Base Specification
 const PCIE_ECAM_FN_SHIFT: u64 = 12;
 const PCIE_FUNCTION_HEADER_LEN: u64 = 0x40;
 
-/// Errors resulting parsing PCI from device tree.
-#[derive(Debug)]
-pub enum Error {
-    /// The PCI configuration space provided by device tree isn't aligned to 4k.
-    ConfigSpaceMisaligned(u64),
-    /// The PCI configuration size provided by device tree isn't divisible by 4k.
-    ConfigSpaceNotPageMultiple(u64),
-    /// The device tree contained an MMIO region that overlaps with other memory regions.
-    InvalidMmioRegion(page_tracking::MemMapError),
-    /// The device tree entry for the PCI host didn't provide a base register for Configuration
-    /// Space.
-    NoConfigBase,
-    /// No compatible PCI host controller found in the device tree.
-    NoCompatibleHostNode,
-    /// The device tree entry for the PCI host didn't provide a size register for Configuration
-    /// Space.
-    NoConfigSize,
-    /// The device tree entry for the PCI host didn't provide `reg` property.
-    NoRegProperty,
-    /// The device tree provided an invalid start bus in the `bus-range` property.
-    StartBusInvalid(u32),
-}
-/// Holds results for PCI probing from device tree.
-pub type Result<T> = core::result::Result<T, Error>;
-
-/// The configuration space for PCI starting at `self.start_bus`.
+/// A PCIe ECAM configuration space for a root port covering `self.bus_range`.
 pub struct PciConfigSpace {
     config_base: SupervisorPageAddr,
     config_size: u64,
     segment: Segment,
-    start_bus: Bus,
+    bus_range: BusRange,
 }
 
 impl PciConfigSpace {
-    /// Creates a `PciConfigSpace` by finding a supported configuration in the passed `DeviceTree`.
-    pub fn probe_from<A: Allocator + Clone>(
-        dt: &DeviceTree<A>,
-        mem_map: &mut HwMemMap,
-    ) -> Result<Self> {
-        let pci_node = dt
-            .iter()
-            .find(|n| n.compatible(["pci-host-ecam-generic"]) && !n.disabled())
-            .ok_or(Error::NoCompatibleHostNode)?;
-        let mut regs = pci_node
-            .props()
-            .find(|p| p.name() == "reg")
-            .ok_or(Error::NoRegProperty)?
-            .value_u64();
-
-        let config_addr_raw = regs.next().ok_or(Error::NoConfigBase)?;
-        let config_base = PageAddr::new(RawAddr::supervisor(config_addr_raw))
-            .ok_or(Error::ConfigSpaceMisaligned(config_addr_raw))?;
-
-        let config_size = regs.next().ok_or(Error::NoConfigSize)?;
-        if config_size % (PageSize::Size4k as u64) != 0 {
-            return Err(Error::ConfigSpaceNotPageMultiple(config_size));
-        }
-
-        // Checks for a `bus-range` property specifying a start bus.
-        let start_bus_index = pci_node
-            .props()
-            .find(|p| p.name() == "bus-range")
-            .and_then(|props| props.value_u32().next())
-            .unwrap_or(0);
-        let start_bus = start_bus_index
-            .try_into()
-            .map_err(|_| Error::StartBusInvalid(start_bus_index))?;
-
-        unsafe {
-            // Safety: Have to trust that the device tree points to valid PCI space.
-            // Any overlaps will be caught by `add_mmio_region` and the error will be propagated.
-            mem_map
-                .add_mmio_region(
-                    DeviceMemType::PciRoot,
-                    RawAddr::from(config_base),
-                    config_size,
-                )
-                .map_err(Error::InvalidMmioRegion)?;
-        }
-
-        Ok(Self {
+    /// Creates a new `PciConfigSpace` at `config_base` covering `bus_range` in `segment`.
+    pub fn new(
+        config_base: SupervisorPageAddr,
+        config_size: u64,
+        segment: Segment,
+        bus_range: BusRange,
+    ) -> Self {
+        Self {
             config_base,
             config_size,
-            // TODO create a config space per segment
-            segment: Segment::default(),
-            start_bus,
-        })
+            segment,
+            bus_range,
+        }
     }
 
     /// Returns an iterator across the top-level buses.
     pub fn busses(&self) -> HostControllersIter {
         let header_addr = Address::new(
             self.segment,
-            self.start_bus,
+            self.bus_range.start,
             Device::default(),
             Function::default(),
         );
@@ -152,7 +84,7 @@ impl PciConfigSpace {
     // Returns the offset of the given address within this PciConfigSpace.
     fn header_offset(&self, address: Address) -> Option<u64> {
         (address.bits() as u64)
-            .checked_sub(Address::bus_address(self.start_bus).bits() as u64)
+            .checked_sub(Address::bus_address(self.bus_range.start).bits() as u64)
             .map(|a| a << PCIE_ECAM_FN_SHIFT)
     }
 }
@@ -267,6 +199,7 @@ impl<'a> Iterator for FnIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use riscv_pages::{PageAddr, RawAddr};
 
     #[test]
     fn header_for() {
@@ -279,12 +212,12 @@ mod tests {
         config_slice[0] = 0x5555_6666;
         config_slice[1024] = 0xffff_ffff;
 
-        let config_space = PciConfigSpace {
-            config_base: PageAddr::new(RawAddr::supervisor(config_start)).unwrap(),
-            config_size: 8192,
-            segment: Segment::default(),
-            start_bus: Bus::default(),
-        };
+        let config_space = PciConfigSpace::new(
+            PageAddr::new(RawAddr::supervisor(config_start)).unwrap(),
+            8192,
+            Segment::default(),
+            BusRange::default(),
+        );
 
         let first_addr = Address::default();
         assert!(config_space.header_for(first_addr).is_some());

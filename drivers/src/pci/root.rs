@@ -277,16 +277,15 @@ impl PcieRoot {
 
     /// Walks the PCIe hierarchy, calling `f` on each device function.
     pub fn for_each_device<F: FnMut(&Header)>(&self, mut f: F) -> Result<()> {
-        for bus in self.config_space.busses() {
-            for dev in bus.devices() {
-                for header in dev.functions() {
-                    match header.header_type() {
-                        Some(HeaderType::Endpoint) => f(&header),
-                        // TODO: Assign and enumerate child busses.
-                        Some(HeaderType::PciBridge) => f(&header),
-                        Some(HeaderType::CardBusBridge) => (),
-                        None => return Err(Error::UnknownHeaderType(header.address())),
-                    }
+        let bus = self.config_space.root_bus();
+        for dev in bus.devices() {
+            for header in dev.functions() {
+                match header.header_type() {
+                    Some(HeaderType::Endpoint) => f(&header),
+                    // TODO: Assign and enumerate child busses.
+                    Some(HeaderType::PciBridge) => f(&header),
+                    Some(HeaderType::CardBusBridge) => (),
+                    None => return Err(Error::UnknownHeaderType(header.address())),
                 }
             }
         }

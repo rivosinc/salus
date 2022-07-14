@@ -38,8 +38,8 @@ impl PciConfigSpace {
         }
     }
 
-    /// Returns an iterator across the top-level buses.
-    pub fn busses(&self) -> HostControllersIter {
+    /// Returns the top-level bus.
+    pub fn root_bus(&self) -> BusConfig {
         let header_addr = Address::new(
             self.segment,
             self.bus_range.start,
@@ -47,10 +47,9 @@ impl PciConfigSpace {
             Function::default(),
         );
 
-        HostControllersIter {
+        BusConfig {
             config_space: self,
-            segment: self.segment,
-            fn_range: self.function_scan_range(header_addr),
+            addr: header_addr,
         }
     }
 
@@ -86,34 +85,6 @@ impl PciConfigSpace {
         (address.bits() as u64)
             .checked_sub(Address::bus_address(self.bus_range.start).bits() as u64)
             .map(|a| a << PCIE_ECAM_FN_SHIFT)
-    }
-}
-
-/// Iterates host controllers in a given config space.
-pub struct HostControllersIter<'a> {
-    config_space: &'a PciConfigSpace,
-    segment: Segment,
-    // The range of functions to check. If signle controller it's 0, or 0-7 if multi function.
-    fn_range: Range<u32>,
-}
-
-impl<'a> Iterator for HostControllersIter<'a> {
-    type Item = BusConfig<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let fn_idx = self.fn_range.next()?;
-        // fn_idx is guaranteed to be a valid function number.
-        let this_fn: Function = fn_idx.try_into().unwrap();
-        Some(BusConfig {
-            config_space: self.config_space,
-            addr: Address::new(
-                self.segment,
-                // The bus number is given by the function index.
-                this_fn.into(),
-                Device::default(),
-                Function::default(),
-            ),
-        })
     }
 }
 

@@ -7,4 +7,4 @@ mod config_space;
 mod header;
 mod root;
 
-pub use root::PcieRoot;
+pub use root::{PciBarSpace, PciBarType, PcieRoot};

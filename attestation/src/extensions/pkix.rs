@@ -8,6 +8,11 @@
 pub mod name;
 
 mod authkeyid;
+/// keyUsage X.509 extension module.
+/// This extension describes the intended usage for the subject public key
+/// information (a.k.a. the public key) a certificate is bound to: Key
+/// agreement, key wrapping, certificate signing authority, etc.
+pub mod keyusage;
 
 use crate::attr::AttributeTypeAndValue;
 

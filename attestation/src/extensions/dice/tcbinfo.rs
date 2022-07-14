@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use const_oid::{AssociatedOid, ObjectIdentifier};
-use der::asn1::{BitStringRef, OctetStringRef, SequenceOf, UIntRef, Utf8StringRef};
+use der::asn1::{OctetStringRef, SequenceOf, UIntRef, Utf8StringRef};
 use der::Sequence;
 use digest::{Digest, OutputSizeUser};
+use flagset::{flags, FlagSet};
 use generic_array::GenericArray;
 
 use crate::{Error, Result, MAX_TCBINFO_FWID};
@@ -19,9 +20,25 @@ pub(crate) const MAX_HASH_OUTPUT_LEN: usize = 64;
 pub(crate) const MAX_FWID_LEN: usize = ObjectIdentifier::MAX_SIZE + MAX_HASH_OUTPUT_LEN;
 pub(crate) const MAX_TCB_INFO_HEADER_LEN: usize = 128;
 
-/// A list of flags that enumerate potentially simultaneous operational
-/// states of the target TCB.
-pub type OperationalFlags<'a> = BitStringRef<'a>;
+flags! {
+    /// A list of flags that enumerate potentially simultaneous operational
+    /// states of the target TCB.
+    ///
+    /// ```text
+    /// OperationalFlags ::= BIT STRING {
+    ///      notConfigured (0),
+    ///      notSecure     (1),
+    ///      recovery      (2),
+    ///      debug         (3),
+    /// ```
+    #[allow(missing_docs)]
+    pub enum OperationalFlags: u8 {
+        NotConfigured = 1 << 0,
+        NotSecure     = 1 << 1,
+        Recovery      = 1 << 2,
+        Debug         = 1 << 3,
+    }
+}
 
 /// DiceTcbInfo as defined by the [DICE Attestation Architecture].
 ///
@@ -37,19 +54,6 @@ pub type OperationalFlags<'a> = BitStringRef<'a>;
 ///     flags      [7] IMPLICIT OperationalFlags OPTIONAL,
 ///     vendorInfo [8] IMPLICIT OCTET STRING OPTIONAL,
 ///     type       [9] IMPLICIT OCTET STRING OPTIONAL
-/// }
-///
-/// FWIDLIST ::== SEQUENCE SIZE (1..MAX) OF FWID
-/// FWID ::== SEQUENCE {
-///     hashAlg OBJECT IDENTIFIER,
-///     digest OCTET STRING
-/// }
-///
-/// OperationalFlags ::= BIT STRING {
-///     notConfigured (0),
-///     notSecure (1),
-///     recovery (2),
-///     debug (3)
 /// }
 /// ````
 /// [DICE Attestation Architecture]:https://trustedcomputinggroup.org/wp-content/uploads/DICE-Attestation-Architecture-r23-final.pdf
@@ -89,11 +93,7 @@ pub struct DiceTcbInfo<'a> {
     #[asn1(context_specific = "7", tag_mode = "IMPLICIT", optional = "true")]
     /// A list of flags that enumerate potentially simultaneous operational
     /// states of the target TCB:
-    /// * notConfigured (Bit 0)
-    /// * notSecure     (Bit 1)
-    /// * recovery      (Bit 2)
-    /// * debug         (Bit 3)
-    pub flags: Option<OperationalFlags<'a>>,
+    pub flags: Option<FlagSet<OperationalFlags>>,
 
     #[asn1(context_specific = "8", tag_mode = "IMPLICIT", optional = "true")]
     /// Vendor supplied values that encode vendor, model, or device specific state.
@@ -139,6 +139,10 @@ impl<'a> AssociatedOid for DiceTcbInfo<'a> {
 }
 
 /// A TCB layer hash, together with its hash algorithm.
+/// FWID ::== SEQUENCE {
+///     hashAlg OBJECT IDENTIFIER,
+///     digest OCTET STRING
+/// }
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
 pub struct FwId<'a> {
     /// Hash algorithm
@@ -148,4 +152,5 @@ pub struct FwId<'a> {
 }
 
 /// A list of TCB layer hashes.
+/// FWIDLIST ::== SEQUENCE SIZE (1..MAX) OF FWID
 pub type FwIdList<'a> = SequenceOf<FwId<'a>, MAX_TCBINFO_FWID>;

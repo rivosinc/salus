@@ -22,9 +22,10 @@ dependencies = [
  "digest 0.10.3",
  "ed25519",
  "ed25519-dalek",
+ "flagset",
  "generic-array",
  "lazy_static",
- "spin 0.5.2",
+ "spin 0.9.3",
  "spki",
 ]
 
@@ -117,6 +118,7 @@ checksum = "13dd2ae565c0a381dde7fade45fce95984c568bdcb4700a4fdbe3175e0380b2f"
 dependencies = [
  "const-oid",
  "der_derive",
+ "flagset",
 ]
 
 [[package]]
@@ -219,6 +221,12 @@ dependencies = [
  "static_assertions",
  "unsafe_unwrap",
 ]
+
+[[package]]
+name = "flagset"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cda653ca797810c02f7ca4b804b40b8b95ae046eb989d356bce17919a8c25499"
 
 [[package]]
 name = "generic-array"

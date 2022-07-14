@@ -7,10 +7,11 @@ edition = "2021"
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
 const-oid = { version = "0.9.0", features = ["db"] }
-der = { version = "0.6.0", features = ["derive", "oid"] }
+der = { version = "0.6.0", features = ["derive", "flagset", "oid"] }
 digest = {version = "0.10.3", default-features = false }
 ed25519 = { version = "1.5.2", default-features = false, features = ["pkcs8"] }
 ed25519-dalek = { version = "1.0.1", default-features = false, features = ["u64_backend"] }
+flagset = "0.4.3"
 generic-array = "0.14.5"
 lazy_static = { version = "1.4.0", default-features = false, features = ["spin_no_std"] }
 spin = { version = "*", default-features = false }

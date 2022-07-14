@@ -552,7 +552,14 @@ impl<'a, T, const N: usize> Iterator for DeviceTreePropIter<'a, T, N> {
         self.buf = right;
         Some(ret)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let items = self.buf.len() / N;
+        (items, Some(items))
+    }
 }
+
+impl<'a, T, const N: usize> ExactSizeIterator for DeviceTreePropIter<'a, T, N> {}
 
 impl<A: Allocator + Clone> fmt::Display for DeviceTree<A> {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {

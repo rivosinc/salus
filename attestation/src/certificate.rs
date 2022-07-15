@@ -3,6 +3,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use const_oid::AssociatedOid;
 use der::asn1::{BitStringRef, SequenceOf, SetOf, UIntRef, Utf8StringRef};
 use der::{AnyRef, Decode, Encode};
 use der::{Enumerated, Sequence};
@@ -11,7 +12,10 @@ use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo};
 
 use crate::{
     attr::AttributeTypeAndValue,
-    extensions::{Extension, Extensions},
+    extensions::{
+        pkix::keyusage::{KeyUsage, KeyUsageFlags, KEY_VALUE_EXTENSION_LEN},
+        Extension, Extensions,
+    },
     measurement::{AttestationManager, MAX_TCB_INFO_EXTN_LEN},
     name::{Name, RdnSequence, RelativeDistinguishedName},
     request::CertReq,
@@ -168,6 +172,25 @@ impl<'a> Certificate<'a> {
         let extn_bytes = attestation_mgr.encode_to_tcb_info_extension(&mut extn_buffer)?;
         extensions
             .add(Extension::from_der(extn_bytes).map_err(Error::InvalidDer)?)
+            .map_err(Error::InvalidDer)?;
+
+        // Add the keyUsage extension.
+        // The SubjecPublicKeyInfo passed through the CSR should be used for key
+        // agreement or wrapping.
+        let key_usage = KeyUsage::new(KeyUsageFlags::KeyEncipherment | KeyUsageFlags::KeyAgreement);
+        let mut key_usage_buffer = [0u8; KEY_VALUE_EXTENSION_LEN];
+        let key_usage_bytes = key_usage
+            .encode_to_slice(&mut key_usage_buffer)
+            .map_err(Error::InvalidDer)?;
+
+        let key_usage_extension = Extension {
+            extn_id: KeyUsage::OID,
+            critical: true,
+            extn_value: key_usage_bytes,
+        };
+
+        extensions
+            .add(key_usage_extension)
             .map_err(Error::InvalidDer)?;
 
         // We copy the public key information and subject from the CSR

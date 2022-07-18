@@ -12,6 +12,7 @@ struct HypAllocInner {
     mem: NonNull<[u8]>,
     end: usize,
     page_size: PageSize,
+    sealed: bool,
 }
 
 impl HypAllocInner {
@@ -23,6 +24,10 @@ impl HypAllocInner {
     }
 
     fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        if self.sealed {
+            return Err(AllocError);
+        }
+
         let align = layout.align();
         let size = layout.size();
         let capacity = self.capacity();
@@ -50,6 +55,10 @@ impl HypAllocInner {
         // SAFETY: block_slice is a non-null pointer to a valid slice.
         Ok(unsafe { NonNull::new_unchecked(block_slice) })
     }
+
+    fn seal(&mut self) {
+        self.sealed = true;
+    }
 }
 
 /// A simple thread-safe bump-pointer allocator backed by a fixed-length contiguous range of Pages.
@@ -69,6 +78,7 @@ impl HypAlloc {
             ),
             end: 0,
             page_size: pages.page_size(),
+            sealed: false,
         };
         HypAlloc {
             inner: Mutex::new(inner),
@@ -89,6 +99,11 @@ impl HypAlloc {
             )
             .unwrap()
         }
+    }
+
+    /// Seals the allocator, preventing any further allocations.
+    pub fn seal(&self) {
+        self.inner.lock().seal();
     }
 }
 
@@ -162,5 +177,16 @@ mod tests {
             assert_eq!(*five, 5);
         }
         let _ = alloc.to_pages();
+    }
+
+    #[test]
+    fn sealing() {
+        let alloc = stub_heap();
+        let mut vec_a = Vec::new_in(&alloc);
+        assert!(vec_a.try_reserve(10).is_ok());
+        vec_a.push(42);
+        alloc.seal();
+        let mut vec_b: Vec<u32, &HypAlloc> = Vec::new_in(&alloc);
+        assert!(vec_b.try_reserve(10).is_err());
     }
 }

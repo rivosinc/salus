@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use const_oid::AssociatedOid;
-use der::asn1::{BitStringRef, SequenceOf, SetOf, UIntRef, Utf8StringRef};
+use der::asn1::{BitStringRef, OctetStringRef, SequenceOf, SetOf, UIntRef, Utf8StringRef};
 use der::{AnyRef, Decode, Encode};
 use der::{Enumerated, Sequence};
 use ed25519_dalek::{Keypair, Signer};
@@ -13,8 +13,9 @@ use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo};
 use crate::{
     attr::AttributeTypeAndValue,
     extensions::{
-        pkix::keyusage::{KeyUsage, KeyUsageFlags, KEY_VALUE_EXTENSION_LEN},
+        pkix::authkeyid::{AuthorityKeyIdentifier, AUTH_KEY_ID_EXTENSION_LEN},
         pkix::basicconstraints::{BasicConstraints, BASIC_CONSTRAINTS_EXTENSION_LEN},
+        pkix::keyusage::{KeyUsage, KeyUsageFlags, KEY_VALUE_EXTENSION_LEN},
         Extension, Extensions,
     },
     measurement::{AttestationManager, MAX_TCB_INFO_EXTN_LEN},
@@ -212,6 +213,29 @@ impl<'a> Certificate<'a> {
 
         extensions
             .add(basic_constraints_extension)
+            .map_err(Error::InvalidDer)?;
+
+        // Add the authorityKeyIdentifier extension.
+        // We only set the keyIndentifier field to the CDI_ID.
+        // This is a non-critical but mandatory extension when using the
+        // DiceTcbinfo extension.
+        let auth_key_id = AuthorityKeyIdentifier {
+            key_identifier: Some(OctetStringRef::new(cdi_id).map_err(Error::InvalidDer)?),
+            authority_cert_issuer: None,
+            authority_cert_serial_number: None,
+        };
+        let mut auth_key_id_buffer = [0u8; AUTH_KEY_ID_EXTENSION_LEN];
+        let auth_key_id_bytes = auth_key_id
+            .encode_to_slice(&mut auth_key_id_buffer)
+            .map_err(Error::InvalidDer)?;
+        let auth_key_id_extension = Extension {
+            extn_id: AuthorityKeyIdentifier::OID,
+            critical: false,
+            extn_value: auth_key_id_bytes,
+        };
+
+        extensions
+            .add(auth_key_id_extension)
             .map_err(Error::InvalidDer)?;
 
         // We copy the public key information and subject from the CSR

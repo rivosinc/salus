@@ -7,7 +7,10 @@
 
 pub mod name;
 
-mod authkeyid;
+/// authorityKeyIdentifier extension module.
+/// This extension provides a means of identifying the public key corresponding
+/// to the private key used to sign a certificate.
+pub mod authkeyid;
 
 /// basiConstraints X.509 extension module.
 /// This extension identifies wether the subject of a certificate is a CA.

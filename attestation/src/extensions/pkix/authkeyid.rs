@@ -1,4 +1,7 @@
 // Copyright (c) 2021 The RustCrypto Project Developers
+// Copyright (c) 2022 by Rivos Inc.
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
 
 use super::name::GeneralNames;
 
@@ -6,6 +9,8 @@ use const_oid::db::rfc5280::ID_CE_AUTHORITY_KEY_IDENTIFIER;
 use const_oid::{AssociatedOid, ObjectIdentifier};
 use der::asn1::{OctetStringRef, UIntRef};
 use der::Sequence;
+
+pub(crate) const AUTH_KEY_ID_EXTENSION_LEN: usize = 32;
 
 /// AuthorityKeyIdentifier as defined in [RFC 5280 Section 4.2.1.1].
 ///

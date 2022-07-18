@@ -27,7 +27,6 @@
 //! address translation). Interacting directly with memory currently mapped to a VM will lead to
 //! pain so the interfaces don't support that.
 #![no_std]
-#![feature(let_chains)]
 
 extern crate alloc;
 

@@ -8,10 +8,16 @@
 pub mod name;
 
 mod authkeyid;
+
+/// basiConstraints X.509 extension module.
+/// This extension identifies wether the subject of a certificate is a CA.
+pub mod basicconstraints;
+
 /// keyUsage X.509 extension module.
 /// This extension describes the intended usage for the subject public key
 /// information (a.k.a. the public key) a certificate is bound to: Key
 /// agreement, key wrapping, certificate signing authority, etc.
+/// keyUsage extension module
 pub mod keyusage;
 
 use crate::attr::AttributeTypeAndValue;

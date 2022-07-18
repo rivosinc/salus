@@ -2,8 +2,9 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use alloc::alloc::Global;
 use alloc::vec::Vec;
-use core::{alloc::Allocator, fmt, mem, result, str};
+use core::{fmt, mem, result, str};
 use fdt_rs::base::parse::ParsedTok;
 use fdt_rs::prelude::*;
 use hyp_alloc::{Arena, ArenaId};
@@ -13,10 +14,7 @@ use crate::{DeviceTreeError, DeviceTreeResult, Fdt};
 /// Copies a string from `src` to `dest`, adding null termination if necessary.
 ///
 /// TODO: Consider using `cstr_core` or a similar crate for dealing with C-style strings.
-fn copy_string_with_null_termination<A: Allocator>(
-    dest: &mut Vec<u8, A>,
-    src: &str,
-) -> DeviceTreeResult<()> {
+fn copy_string_with_null_termination(dest: &mut Vec<u8>, src: &str) -> DeviceTreeResult<()> {
     let has_null = src.ends_with('\0');
     dest.truncate(0);
     dest.try_reserve(src.len() + if has_null { 0 } else { 1 })?;
@@ -31,25 +29,24 @@ fn copy_string_with_null_termination<A: Allocator>(
 /// pairs where the name is a NULL-terminated string and the value is an array of 0 or more bytes.
 /// How the value is interpreted is determined based on the property name and surrounding context,
 /// but is typically either a string or an array of u32s/u64s.
-pub struct DeviceTreeProp<A: Allocator + Clone> {
-    name: Vec<u8, A>,
-    buf: Vec<u8, A>,
+pub struct DeviceTreeProp {
+    name: Vec<u8>,
+    buf: Vec<u8>,
 }
 
 /// Represents a bus or device in the tree. Nodes in the tree must have a parent unless they are the
 /// root node and may have any number of child nodes or properties. Node names are NULL-termianted
 /// strings.
-pub struct DeviceTreeNode<A: Allocator + Clone> {
-    alloc: A,
-    id: Option<NodeId<A>>,
-    name: Vec<u8, A>,
-    parent: Option<NodeId<A>>,
-    children: Vec<NodeId<A>, A>,
-    props: Vec<DeviceTreeProp<A>, A>,
+pub struct DeviceTreeNode {
+    id: Option<NodeId>,
+    name: Vec<u8>,
+    parent: Option<NodeId>,
+    children: Vec<NodeId>,
+    props: Vec<DeviceTreeProp>,
 }
 
-pub type NodeArena<A> = Arena<DeviceTreeNode<A>, A>;
-pub type NodeId<A> = ArenaId<DeviceTreeNode<A>>;
+pub type NodeArena = Arena<DeviceTreeNode, Global>;
+pub type NodeId = ArenaId<DeviceTreeNode>;
 
 /// A tree representation of the hardware in a system based on v0.3 of the Devicetree Specification.
 /// This struct supports mutating the device-tree and constructing the device-tree from a flattened
@@ -59,26 +56,24 @@ pub type NodeId<A> = ArenaId<DeviceTreeNode<A>>;
 /// it does not guarantee that individual nodes or properties are semantically correct with respect
 /// to the Devicetree Specification (for example, `phandle` references or various `#*-cells`
 /// properties). It is up to the user to ensure that these are properly constructed.
-pub struct DeviceTree<A: Allocator + Clone> {
-    alloc: A,
-    node_arena: NodeArena<A>,
-    root: Option<NodeId<A>>,
+pub struct DeviceTree {
+    node_arena: NodeArena,
+    root: Option<NodeId>,
 }
 
-impl<A: Allocator + Clone> DeviceTree<A> {
-    /// Constructs an empty device-tree using the given allocator.
-    pub fn new(alloc: A) -> Self {
+impl DeviceTree {
+    /// Constructs an empty device-tree.
+    pub fn new() -> Self {
         Self {
-            alloc: alloc.clone(),
-            node_arena: NodeArena::new(alloc),
+            node_arena: NodeArena::new(Global),
             root: None,
         }
     }
 
     /// Constructs a device-tree form the given flattened device-tree (FDT) blob.
-    pub fn from(fdt: &Fdt, alloc: A) -> DeviceTreeResult<Self> {
+    pub fn from(fdt: &Fdt) -> DeviceTreeResult<Self> {
         let fdt = fdt.inner();
-        let mut tree = Self::new(alloc);
+        let mut tree = Self::new();
         let mut iter = fdt.parse_iter();
 
         let mut parent = None;
@@ -110,27 +105,23 @@ impl<A: Allocator + Clone> DeviceTree<A> {
     }
 
     /// Returns the ID of the root node.
-    pub fn root(&self) -> Option<NodeId<A>> {
+    pub fn root(&self) -> Option<NodeId> {
         self.root
     }
 
     /// Returns a reference to the node with the given ID.
-    pub fn get_node(&self, node_id: NodeId<A>) -> Option<&DeviceTreeNode<A>> {
+    pub fn get_node(&self, node_id: NodeId) -> Option<&DeviceTreeNode> {
         self.node_arena.get(node_id)
     }
 
     /// Returns a mutable reference to the node with the given ID.
-    pub fn get_mut_node(&mut self, node_id: NodeId<A>) -> Option<&mut DeviceTreeNode<A>> {
+    pub fn get_mut_node(&mut self, node_id: NodeId) -> Option<&mut DeviceTreeNode> {
         self.node_arena.get_mut(node_id)
     }
 
     /// Creates a new node in the tree with the given name and parent node. If parent is `None`,
     /// then the node is inserted as the root of the tree.
-    pub fn add_node(
-        &mut self,
-        name: &str,
-        parent: Option<NodeId<A>>,
-    ) -> DeviceTreeResult<NodeId<A>> {
+    pub fn add_node(&mut self, name: &str, parent: Option<NodeId>) -> DeviceTreeResult<NodeId> {
         let node = self.alloc_node(name)?;
         let id = node.id();
         if let Some(pid) = parent {
@@ -149,7 +140,7 @@ impl<A: Allocator + Clone> DeviceTree<A> {
     }
 
     /// Removes the node and all of its descendents from the tree.
-    pub fn remove_node(&mut self, id: NodeId<A>) -> DeviceTreeResult<()> {
+    pub fn remove_node(&mut self, id: NodeId) -> DeviceTreeResult<()> {
         let node = self
             .get_mut_node(id)
             .ok_or(DeviceTreeError::InvalidNodeId)?;
@@ -164,7 +155,7 @@ impl<A: Allocator + Clone> DeviceTree<A> {
         }
 
         // TODO: Can we avoid dynamic memory allocation / having to build a list of nodes?
-        let mut to_remove = Vec::new_in(self.alloc.clone());
+        let mut to_remove = Vec::new();
         // Unwrap ok: we already know the ID is valid.
         let num_nodes = self.iter_from(id).unwrap().count();
         to_remove.try_reserve(num_nodes)?;
@@ -179,13 +170,13 @@ impl<A: Allocator + Clone> DeviceTree<A> {
 
     /// Returns an iterator traversing the nodes in the tree in depth-first order, starting at the
     /// root node.
-    pub fn iter(&self) -> DeviceTreeIter<A> {
+    pub fn iter(&self) -> DeviceTreeIter {
         DeviceTreeIter::new(self, self.root)
     }
 
     /// Returns an iterator traversing the nodes in the tree in depth-first order, starting at the
     /// given node ID.
-    pub fn iter_from(&self, root: NodeId<A>) -> DeviceTreeResult<DeviceTreeIter<A>> {
+    pub fn iter_from(&self, root: NodeId) -> DeviceTreeResult<DeviceTreeIter> {
         let _ = self
             .node_arena
             .get(root)
@@ -193,37 +184,35 @@ impl<A: Allocator + Clone> DeviceTree<A> {
         Ok(DeviceTreeIter::new(self, Some(root)))
     }
 
-    /// Returns the allocator used by this device-tree.
-    pub fn alloc(&self) -> A {
-        self.alloc.clone()
-    }
-
-    fn alloc_node(&mut self, name: &str) -> DeviceTreeResult<&mut DeviceTreeNode<A>> {
-        let id = self
-            .node_arena
-            .try_insert(DeviceTreeNode::new(name, self.alloc.clone())?)?;
+    fn alloc_node(&mut self, name: &str) -> DeviceTreeResult<&mut DeviceTreeNode> {
+        let id = self.node_arena.try_insert(DeviceTreeNode::new(name)?)?;
         let node = self.get_mut_node(id).unwrap();
         node.set_id(id);
         Ok(node)
     }
 }
 
-impl<A: Allocator + Clone> DeviceTreeNode<A> {
-    fn new(name: &str, alloc: A) -> DeviceTreeResult<Self> {
+impl Default for DeviceTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeviceTreeNode {
+    fn new(name: &str) -> DeviceTreeResult<Self> {
         let mut node = Self {
-            alloc: alloc.clone(),
             id: None,
-            name: Vec::new_in(alloc.clone()),
+            name: Vec::new(),
             parent: None,
-            children: Vec::new_in(alloc.clone()),
-            props: Vec::new_in(alloc),
+            children: Vec::new(),
+            props: Vec::new(),
         };
         node.set_name(name)?;
         Ok(node)
     }
 
     /// Returns the ID of this ndoe.
-    pub fn id(&self) -> NodeId<A> {
+    pub fn id(&self) -> NodeId {
         self.id.unwrap()
     }
 
@@ -247,17 +236,17 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
     }
 
     /// Returns the node ID of this node's parent, if it has one.
-    pub fn parent(&self) -> Option<NodeId<A>> {
+    pub fn parent(&self) -> Option<NodeId> {
         self.parent
     }
 
     /// Returns an iterator over this node's child node IDs.
-    pub fn children(&self) -> impl ExactSizeIterator<Item = &NodeId<A>> {
+    pub fn children(&self) -> impl ExactSizeIterator<Item = &NodeId> {
         self.children.iter()
     }
 
     /// Inserts the given property into this node's set of properties.
-    pub fn insert_prop(&mut self, prop: DeviceTreeProp<A>) -> DeviceTreeResult<()> {
+    pub fn insert_prop(&mut self, prop: DeviceTreeProp) -> DeviceTreeResult<()> {
         self.props.try_reserve(1)?;
         self.props.push(prop);
         Ok(())
@@ -265,11 +254,10 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
 
     /// Creates a new property for this node with the given name, returning a mutable reference
     /// to the newly-created property.
-    pub fn add_prop(&mut self, name: &str) -> DeviceTreeResult<&mut DeviceTreeProp<A>> {
+    pub fn add_prop(&mut self, name: &str) -> DeviceTreeResult<&mut DeviceTreeProp> {
         let index = self.props.len();
         self.props.try_reserve(1)?;
-        self.props
-            .push(DeviceTreeProp::new(name, self.alloc.clone())?);
+        self.props.push(DeviceTreeProp::new(name)?);
         Ok(&mut self.props[index])
     }
 
@@ -286,7 +274,7 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
     /// Replaces this node's properties with those from the given iterator.
     pub fn set_props<I>(&mut self, props: I) -> DeviceTreeResult<()>
     where
-        I: IntoIterator<Item = DeviceTreeProp<A>>,
+        I: IntoIterator<Item = DeviceTreeProp>,
     {
         self.props.truncate(0);
         for p in props {
@@ -296,12 +284,12 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
     }
 
     /// Returns an iterator over this node's properties.
-    pub fn props(&self) -> impl ExactSizeIterator<Item = &DeviceTreeProp<A>> {
+    pub fn props(&self) -> impl ExactSizeIterator<Item = &DeviceTreeProp> {
         self.props.iter()
     }
 
     /// Returns a mutable iterator over this node's properties.
-    pub fn props_mut(&mut self) -> impl ExactSizeIterator<Item = &mut DeviceTreeProp<A>> {
+    pub fn props_mut(&mut self) -> impl ExactSizeIterator<Item = &mut DeviceTreeProp> {
         self.props.iter_mut()
     }
 
@@ -324,29 +312,25 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
         })
     }
 
-    fn set_id(&mut self, id: NodeId<A>) {
+    fn set_id(&mut self, id: NodeId) {
         self.id = Some(id);
     }
 
-    fn set_parent(&mut self, parent: Option<NodeId<A>>) {
+    fn set_parent(&mut self, parent: Option<NodeId>) {
         self.parent = parent;
     }
 
-    fn add_child(&mut self, child: NodeId<A>) -> DeviceTreeResult<()> {
+    fn add_child(&mut self, child: NodeId) -> DeviceTreeResult<()> {
         self.children.try_reserve(1)?;
         self.children.push(child);
         Ok(())
     }
 
-    fn remove_child(&mut self, child: NodeId<A>) {
+    fn remove_child(&mut self, child: NodeId) {
         self.children.retain(|&i| i != child);
     }
 
-    fn fmt_in(
-        &self,
-        tree: &DeviceTree<A>,
-        f: &mut fmt::Formatter,
-    ) -> result::Result<(), fmt::Error> {
+    fn fmt_in(&self, tree: &DeviceTree, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         // TODO: Use identation to make this prettier.
         writeln!(f, "{} {{", self.name())?;
         for p in self.props() {
@@ -360,11 +344,11 @@ impl<A: Allocator + Clone> DeviceTreeNode<A> {
     }
 }
 
-impl<A: Allocator + Clone> DeviceTreeProp<A> {
-    fn new(name: &str, alloc: A) -> DeviceTreeResult<Self> {
+impl DeviceTreeProp {
+    fn new(name: &str) -> DeviceTreeResult<Self> {
         let mut prop = Self {
-            name: Vec::new_in(alloc.clone()),
-            buf: Vec::new_in(alloc),
+            name: Vec::new(),
+            buf: Vec::new(),
         };
         prop.set_name(name)?;
         Ok(prop)
@@ -452,7 +436,7 @@ impl<A: Allocator + Clone> DeviceTreeProp<A> {
     }
 }
 
-impl<A: Allocator + Clone> Clone for DeviceTreeProp<A> {
+impl Clone for DeviceTreeProp {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
@@ -462,16 +446,16 @@ impl<A: Allocator + Clone> Clone for DeviceTreeProp<A> {
 }
 
 /// An iterator over a device-tree in depth-first order.
-pub struct DeviceTreeIter<'tree, A: Allocator + Clone> {
-    tree: &'tree DeviceTree<A>,
-    root: Option<NodeId<A>>,
-    current: Option<NodeId<A>>,
+pub struct DeviceTreeIter<'tree> {
+    tree: &'tree DeviceTree,
+    root: Option<NodeId>,
+    current: Option<NodeId>,
     depth: usize,
 }
 
-impl<'tree, A: Allocator + Clone> DeviceTreeIter<'tree, A> {
+impl<'tree> DeviceTreeIter<'tree> {
     /// Creates a new iterator starting at the given node.
-    pub fn new(tree: &'tree DeviceTree<A>, root: Option<NodeId<A>>) -> Self {
+    pub fn new(tree: &'tree DeviceTree, root: Option<NodeId>) -> Self {
         Self {
             tree,
             root,
@@ -487,7 +471,7 @@ impl<'tree, A: Allocator + Clone> DeviceTreeIter<'tree, A> {
         self.depth
     }
 
-    fn set_next_node(&mut self, node: &DeviceTreeNode<A>) {
+    fn set_next_node(&mut self, node: &DeviceTreeNode) {
         if node.children().len() > 0 {
             self.depth += 1;
             self.current = node.children().next().cloned();
@@ -518,8 +502,8 @@ impl<'tree, A: Allocator + Clone> DeviceTreeIter<'tree, A> {
     }
 }
 
-impl<'tree, A: Allocator + Clone> Iterator for DeviceTreeIter<'tree, A> {
-    type Item = &'tree DeviceTreeNode<A>;
+impl<'tree> Iterator for DeviceTreeIter<'tree> {
+    type Item = &'tree DeviceTreeNode;
 
     fn next(&mut self) -> Option<Self::Item> {
         let node = self.tree.get_node(self.current?)?;
@@ -561,7 +545,7 @@ impl<'a, T, const N: usize> Iterator for DeviceTreePropIter<'a, T, N> {
 
 impl<'a, T, const N: usize> ExactSizeIterator for DeviceTreePropIter<'a, T, N> {}
 
-impl<A: Allocator + Clone> fmt::Display for DeviceTree<A> {
+impl fmt::Display for DeviceTree {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self.root {
             Some(r) => {
@@ -574,7 +558,7 @@ impl<A: Allocator + Clone> fmt::Display for DeviceTree<A> {
     }
 }
 
-impl<A: Allocator + Clone> fmt::Display for DeviceTreeProp<A> {
+impl fmt::Display for DeviceTreeProp {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         // Consider a property printable as a string if its ASCII and doesn't contain repeated nulls.
         fn printable(s: &str) -> bool {
@@ -599,10 +583,9 @@ impl<A: Allocator + Clone> fmt::Display for DeviceTreeProp<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::alloc::Global;
 
-    fn stub_tree() -> DeviceTree<Global> {
-        let mut tree = DeviceTree::new(Global);
+    fn stub_tree() -> DeviceTree {
+        let mut tree = DeviceTree::new();
         // Create the following structure:
         //       root
         //       /   \

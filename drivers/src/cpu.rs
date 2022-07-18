@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::{ArrayString, ArrayVec};
-use core::{alloc::Allocator, fmt};
+use core::fmt;
 use device_tree::{DeviceTree, DeviceTreeNode, DeviceTreeResult};
 use spin::Once;
 
@@ -46,7 +46,7 @@ pub struct CpuInfo {
 
 static CPU_INFO: Once<CpuInfo> = Once::new();
 
-fn hart_id_from_cpu_node<A: Allocator + Clone>(node: &DeviceTreeNode<A>) -> u32 {
+fn hart_id_from_cpu_node(node: &DeviceTreeNode) -> u32 {
     node.props()
         .find(|p| p.name() == "reg")
         .expect("No 'reg' property in CPU node")
@@ -55,20 +55,14 @@ fn hart_id_from_cpu_node<A: Allocator + Clone>(node: &DeviceTreeNode<A>) -> u32 
         .unwrap()
 }
 
-fn intc_node_from_cpu_node<'a, A: Allocator + Clone>(
-    dt: &'a DeviceTree<A>,
-    node: &'_ DeviceTreeNode<A>,
-) -> &'a DeviceTreeNode<A> {
+fn intc_node_from_cpu_node<'a>(dt: &'a DeviceTree, node: &'_ DeviceTreeNode) -> &'a DeviceTreeNode {
     dt.iter_from(node.id())
         .unwrap()
         .find(|n| n.name() == "interrupt-controller")
         .expect("No CPU 'interrupt-controller' sub-node")
 }
 
-fn intc_phandle_from_cpu_node<A: Allocator + Clone>(
-    dt: &DeviceTree<A>,
-    node: &DeviceTreeNode<A>,
-) -> u32 {
+fn intc_phandle_from_cpu_node(dt: &DeviceTree, node: &DeviceTreeNode) -> u32 {
     let intc_node = intc_node_from_cpu_node(dt, node);
     intc_node
         .props()
@@ -82,7 +76,7 @@ fn intc_phandle_from_cpu_node<A: Allocator + Clone>(
 impl CpuInfo {
     /// Initializes the global `CpuInfo` state from the a device-tree. Must be called first before
     /// get(). Panics if the device-tree is malformed (missing CPU nodes or expected properties).
-    pub fn parse_from<A: Allocator + Clone>(dt: &DeviceTree<A>) {
+    pub fn parse_from(dt: &DeviceTree) {
         // Locate the /cpus node in the device-tree.
         let mut iter = dt.iter();
         let cpus_node = iter
@@ -202,10 +196,7 @@ impl CpuInfo {
     }
 
     /// Populates the host device-tree with CPU nodes.
-    pub fn add_host_cpu_nodes<A: Allocator + Clone>(
-        &self,
-        dt: &mut DeviceTree<A>,
-    ) -> DeviceTreeResult<()> {
+    pub fn add_host_cpu_nodes(&self, dt: &mut DeviceTree) -> DeviceTreeResult<()> {
         let cpus_id = dt.add_node("cpus", dt.root())?;
         let cpus_node = dt.get_mut_node(cpus_id).unwrap();
         cpus_node.add_prop("#address-cells")?.set_value_u32(&[1])?;

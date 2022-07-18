@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayString;
-use core::{alloc::Allocator, fmt, slice};
+use core::{fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
 use drivers::{CpuId, CpuInfo, Imsic, ImsicGuestId};
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList};
@@ -25,14 +25,14 @@ const FDT_OFFSET: u64 = 0x3f00_0000;
 /// A builder for the host VM's device-tree. Starting with the hypervisor's device-tree, makes the
 /// necessary modifications to create a device-tree that reflects the hardware available to the
 /// host VM.
-struct HostDtBuilder<A: Allocator + Clone> {
-    tree: DeviceTree<A>,
+struct HostDtBuilder {
+    tree: DeviceTree,
 }
 
-impl<A: Allocator + Clone> HostDtBuilder<A> {
+impl HostDtBuilder {
     /// Creates a new builder from the hypervisor device-tree.
-    pub fn new(hyp_dt: &DeviceTree<A>) -> DeviceTreeResult<Self> {
-        let mut host_dt = DeviceTree::new(hyp_dt.alloc());
+    pub fn new(hyp_dt: &DeviceTree) -> DeviceTreeResult<Self> {
+        let mut host_dt = DeviceTree::new();
         let hyp_root = hyp_dt.get_node(hyp_dt.root().unwrap()).unwrap();
         let host_root_id = host_dt.add_node("", None)?;
         let host_root = host_dt.get_mut_node(host_root_id).unwrap();
@@ -123,7 +123,7 @@ impl<A: Allocator + Clone> HostDtBuilder<A> {
         Ok(self)
     }
 
-    pub fn tree(self) -> DeviceTree<A> {
+    pub fn tree(self) -> DeviceTree {
         self.tree
     }
 }
@@ -142,8 +142,8 @@ enum FdtPages {
 /// creation (specifically, the root of the G-stage page-table), we guarantee that each
 /// contiguous T::TOP_LEVEL_ALIGN block of the guest physical address space of the host VM maps to
 /// a contiguous T::TOP_LEVEL_ALIGN block of the host physical address space.
-pub struct HostVmLoader<T: GuestStagePageTable, A: Allocator + Clone> {
-    hypervisor_dt: DeviceTree<A>,
+pub struct HostVmLoader<T: GuestStagePageTable> {
+    hypervisor_dt: DeviceTree,
     kernel: HwMemRegion,
     initramfs: Option<HwMemRegion>,
     vm: HostVm<T, VmStateInitializing>,
@@ -153,11 +153,11 @@ pub struct HostVmLoader<T: GuestStagePageTable, A: Allocator + Clone> {
     ram_size: u64,
 }
 
-impl<T: GuestStagePageTable, A: Allocator + Clone> HostVmLoader<T, A> {
+impl<T: GuestStagePageTable> HostVmLoader<T> {
     /// Creates a new loader with the given device-tree and kernel & initramfs images. Uses
     /// `page_alloc` to allocate any additional pages that are necessary to load the VM.
     pub fn new(
-        hypervisor_dt: DeviceTree<A>,
+        hypervisor_dt: DeviceTree,
         kernel: HwMemRegion,
         initramfs: Option<HwMemRegion>,
         guest_ram_base: GuestPhysAddr,

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::DeviceTree;
-use core::{alloc::Allocator, mem};
+use core::mem;
 
 const FDT_ALIGN: usize = 4;
 
@@ -206,13 +206,13 @@ impl<'a> FdtWriter<'a> {
 
 /// Helper for serializing a `DeviceTree` object to an FDT binary, as specified in v0.3 of the
 /// Devicetree Specification.
-pub struct DeviceTreeSerializer<'a, A: Allocator + Clone> {
+pub struct DeviceTreeSerializer<'a> {
     layout: FdtLayout,
-    tree: &'a DeviceTree<A>,
+    tree: &'a DeviceTree,
 }
 
-impl<'a, A: Allocator + Clone> DeviceTreeSerializer<'a, A> {
-    fn get_layout(tree: &DeviceTree<A>) -> FdtLayout {
+impl<'a> DeviceTreeSerializer<'a> {
+    fn get_layout(tree: &DeviceTree) -> FdtLayout {
         let mut struct_size = 0;
         let mut strings_size = 0;
         for node in tree.iter() {
@@ -234,7 +234,7 @@ impl<'a, A: Allocator + Clone> DeviceTreeSerializer<'a, A> {
     }
 
     /// Creates a new serializer using the given tree.
-    pub fn new(tree: &'a DeviceTree<A>) -> Self {
+    pub fn new(tree: &'a DeviceTree) -> Self {
         Self {
             layout: Self::get_layout(tree),
             tree,
@@ -309,12 +309,11 @@ impl<'a, A: Allocator + Clone> DeviceTreeSerializer<'a, A> {
 mod tests {
     use super::*;
     use crate::Fdt;
-    use alloc::alloc::Global;
     use alloc::vec;
 
-    fn stub_tree() -> DeviceTree<Global> {
+    fn stub_tree() -> DeviceTree {
         // Create a tree with basic 'memory' and 'chosen' nodes.
-        let mut tree = DeviceTree::new(Global);
+        let mut tree = DeviceTree::new();
         let root = tree.add_node("", None).unwrap();
         {
             let node = tree.get_mut_node(root).unwrap();

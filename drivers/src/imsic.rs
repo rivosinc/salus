@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::{ArrayString, ArrayVec};
-use core::{alloc::Allocator, fmt, marker::PhantomData};
+use core::{fmt, marker::PhantomData};
 use device_tree::{DeviceTree, DeviceTreeResult};
 use page_tracking::HwMemMap;
 use riscv_pages::*;
@@ -339,7 +339,7 @@ impl Imsic {
     /// -------------------------------------------------------------
     ///
     /// For more details about the system IMSIC layout, see the AIA specification.
-    pub fn probe_from<A: Allocator + Clone>(dt: &DeviceTree<A>, mem_map: &mut HwMemMap) {
+    pub fn probe_from(dt: &DeviceTree, mem_map: &mut HwMemMap) {
         // If both M and S level IMSICs are present in the device-tree the M-level IMSIC should
         // have its status set to "disabled" by firmware.
         let imsic_node = dt
@@ -574,9 +574,9 @@ impl Imsic {
     /// files dedicated to the host VM should be mapped to the supervisor interrupt file location in
     /// the guest physical address space. The caller is also responsible for masking guest interrupt
     /// files that are inaccessible to the host VM in HGEIE and other CSRs.
-    pub fn add_host_imsic_node<A: Allocator + Clone>(
+    pub fn add_host_imsic_node(
         &self,
-        dt: &mut DeviceTree<A>,
+        dt: &mut DeviceTree,
         guest_base_addr: GuestPhysAddr,
     ) -> DeviceTreeResult<()> {
         let imsic = self.inner.lock();

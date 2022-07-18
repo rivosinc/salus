@@ -17,7 +17,6 @@
     slice_ptr_get
 )]
 
-use alloc::alloc::Global;
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
 
@@ -293,9 +292,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Create a heap for boot-time memory allocations.
     create_heap(&mut mem_map);
-    let hyp_dt = DeviceTree::from(&hyp_fdt, Global).expect("Failed to construct device-tree");
 
-    // Discover supported CPU extensions.
+    // Discover the CPU topology.
+    let hyp_dt = DeviceTree::from(&hyp_fdt).expect("Failed to construct device-tree");
     CpuInfo::parse_from(&hyp_dt);
     let cpu_info = CpuInfo::get();
     if cpu_info.has_sstc() {

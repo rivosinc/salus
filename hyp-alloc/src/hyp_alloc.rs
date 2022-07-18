@@ -98,7 +98,7 @@ unsafe impl Sync for HypAlloc {}
 // Safety: HypAlloc uniquely owns the memory it manages, so we can safely transfer it between threads.
 unsafe impl Send for HypAlloc {}
 
-unsafe impl<'a> Allocator for &'a HypAlloc {
+unsafe impl Allocator for HypAlloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let align = layout.align();
         let size = layout.size();

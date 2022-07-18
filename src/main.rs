@@ -13,7 +13,6 @@
     lang_items,
     asm_const,
     const_ptr_offset_from,
-    let_chains,
     ptr_sub_ptr
 )]
 

@@ -30,7 +30,7 @@ pub use imsic::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{alloc::Global, vec::Vec};
+    use alloc::vec::Vec;
     use device_tree::DeviceTree;
     use page_tracking::{HwMemMap, HwMemMapBuilder, HwMemRegionType};
     use riscv_pages::{DeviceMemType, PageAddr, PageSize, RawAddr};
@@ -42,9 +42,9 @@ mod tests {
     const GUEST_BITS: u32 = 3;
     const GROUP_SHIFT: u32 = 24;
 
-    fn stub_tree() -> DeviceTree<Global> {
+    fn stub_tree() -> DeviceTree {
         // Create a tree with a couple of CPUs.
-        let mut tree = DeviceTree::new(Global);
+        let mut tree = DeviceTree::new();
         let root = tree.add_node("", None).unwrap();
         let root_node = tree.get_mut_node(root).unwrap();
         root_node

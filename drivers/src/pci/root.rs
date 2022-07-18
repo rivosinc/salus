@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
-use core::alloc::Allocator;
 use device_tree::DeviceTree;
 use page_tracking::HwMemMap;
 use riscv_pages::{DeviceMemType, PageAddr, PageSize, RawAddr, SupervisorPageAddr};
@@ -117,10 +116,7 @@ impl From<U64Cell> for u64 {
 
 impl PcieRoot {
     /// Creates a `PcieRoot` singleton by finding a supported configuration in the passed `DeviceTree`.
-    pub fn probe_from<A: Allocator + Clone>(
-        dt: &DeviceTree<A>,
-        mem_map: &mut HwMemMap,
-    ) -> Result<()> {
+    pub fn probe_from(dt: &DeviceTree, mem_map: &mut HwMemMap) -> Result<()> {
         let pci_node = dt
             .iter()
             .find(|n| n.compatible(["pci-host-ecam-generic"]) && !n.disabled())

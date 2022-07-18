@@ -14,6 +14,7 @@ use crate::{
     attr::AttributeTypeAndValue,
     extensions::{
         pkix::keyusage::{KeyUsage, KeyUsageFlags, KEY_VALUE_EXTENSION_LEN},
+        pkix::basicconstraints::{BasicConstraints, BASIC_CONSTRAINTS_EXTENSION_LEN},
         Extension, Extensions,
     },
     measurement::{AttestationManager, MAX_TCB_INFO_EXTN_LEN},
@@ -191,6 +192,26 @@ impl<'a> Certificate<'a> {
 
         extensions
             .add(key_usage_extension)
+            .map_err(Error::InvalidDer)?;
+
+        // Add the basicConstraints extension.
+        // We are not a CA.
+        let basic_constraints = BasicConstraints {
+            ca: false,
+            path_len_constraint: None,
+        };
+        let mut basic_constraints_buffer = [0u8; BASIC_CONSTRAINTS_EXTENSION_LEN];
+        let basic_constraints_bytes = basic_constraints
+            .encode_to_slice(&mut basic_constraints_buffer)
+            .map_err(Error::InvalidDer)?;
+        let basic_constraints_extension = Extension {
+            extn_id: BasicConstraints::OID,
+            critical: true,
+            extn_value: basic_constraints_bytes,
+        };
+
+        extensions
+            .add(basic_constraints_extension)
             .map_err(Error::InvalidDer)?;
 
         // We copy the public key information and subject from the CSR

@@ -13,10 +13,13 @@
     lang_items,
     asm_const,
     const_ptr_offset_from,
-    ptr_sub_ptr
+    ptr_sub_ptr,
+    slice_ptr_get
 )]
 
-use core::alloc::{GlobalAlloc, Layout};
+use alloc::alloc::Global;
+use core::alloc::{Allocator, GlobalAlloc, Layout};
+use core::ptr::NonNull;
 
 extern crate alloc;
 
@@ -57,16 +60,27 @@ extern "C" {
     static _stack_end: u8;
 }
 
-// Dummy global allocator - panic if anything tries to do an allocation.
+/// The allocator used for boot-time dynamic memory allocations.
+static HYPERVISOR_ALLOCATOR: Once<HypAlloc> = Once::new();
+
+// Implementation of GlobalAlloc that forwards allocations to the boot-time allocator.
 struct GeneralGlobalAlloc;
 
 unsafe impl GlobalAlloc for GeneralGlobalAlloc {
-    unsafe fn alloc(&self, _layout: Layout) -> *mut u8 {
-        abort()
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        HYPERVISOR_ALLOCATOR
+            .get()
+            .and_then(|a| a.allocate(layout).ok())
+            .map(|p| p.as_mut_ptr())
+            .unwrap_or(core::ptr::null_mut())
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        abort()
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // Unwrap ok, there must've been an allocator to allocate the pointer in the first place.
+        HYPERVISOR_ALLOCATOR
+            .get()
+            .unwrap()
+            .deallocate(NonNull::new(ptr).unwrap(), layout);
     }
 }
 
@@ -167,8 +181,8 @@ fn build_memory_map<T: GuestStagePageTable>(fdt: &Fdt) -> MemMapResult<HwMemMap>
     Ok(mem_map)
 }
 
-/// Creates a heapfrom the given `mem_map`, marking the region occupied by the heap as reserved.
-fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
+/// Creates a heap from the given `mem_map`, marking the region occupied by the heap as reserved.
+fn create_heap(mem_map: &mut HwMemMap) {
     const HEAP_SIZE: u64 = 16 * 1024 * 1024;
 
     let heap_base = mem_map
@@ -192,7 +206,7 @@ fn create_heap(mem_map: &mut HwMemMap) -> HypAlloc {
         )
         .unwrap()
     };
-    HypAlloc::from_pages(pages.clean())
+    HYPERVISOR_ALLOCATOR.call_once(|| HypAlloc::from_pages(pages.clean()));
 }
 
 /// Initialize (H)S-level CSRs to a reasonable state.
@@ -277,8 +291,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         })
         .cloned();
 
-    let heap = create_heap(&mut mem_map);
-    let hyp_dt = DeviceTree::from(&hyp_fdt, &heap).expect("Failed to construct device-tree");
+    // Create a heap for boot-time memory allocations.
+    create_heap(&mut mem_map);
+    let hyp_dt = DeviceTree::from(&hyp_fdt, Global).expect("Failed to construct device-tree");
 
     // Discover supported CPU extensions.
     CpuInfo::parse_from(&hyp_dt);
@@ -348,8 +363,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     )
     .build_device_tree()
     .build_address_space();
-    HOST_VM.call_once(|| host);
 
+    // Lock down the boot time allocator before allowing the host VM to be entered.
+    HYPERVISOR_ALLOCATOR.get().unwrap().seal();
+
+    HOST_VM.call_once(|| host);
     let cpu_id = PerCpu::this_cpu().cpu_id();
     HOST_VM.get().unwrap().run(cpu_id.raw() as u64);
 }

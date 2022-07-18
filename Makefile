@@ -8,7 +8,7 @@ ifdef LOCAL_PATH
 LOCAL_PATH:=${LOCAL_PATH}/
 endif
 
-HOST_TRIPLET := $(shell cargo -Vv | grep '^host:' | awk ' { print $$2; } ') 
+HOST_TRIPLET := $(shell cargo -Vv | grep '^host:' | awk ' { print $$2; } ')
 
 all: salus tellus guestvm
 
@@ -64,3 +64,14 @@ run_linux: salus
 		     -kernel target/riscv64gc-unknown-none-elf/release/salus \
 		     -device guest-loader,kernel=../linux/arch/riscv/boot/Image,addr=0xc0200000 \
 		     -append "console=ttyS0 earlycon=sbi keep_bootcon bootmem_debug"
+
+.PHONY: lint
+lint:
+	cargo clippy -- -D warnings  -Wmissing-docs
+
+.PHONY: format
+format:
+	cargo fmt -- --check --config format_code_in_doc_comments=true
+
+.PHONY: ci
+ci: salus guestvm tellus lint format check

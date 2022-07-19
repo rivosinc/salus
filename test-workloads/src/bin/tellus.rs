@@ -4,10 +4,16 @@
 
 #![no_main]
 #![no_std]
-#![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
+#![feature(
+    asm_const,
+    panic_info_message,
+    allocator_api,
+    alloc_error_handler,
+    lang_items
+)]
 
 use core::alloc::{GlobalAlloc, Layout};
-
+use core::arch::asm;
 extern crate alloc;
 extern crate test_workloads;
 
@@ -17,6 +23,10 @@ use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
 use sbi::api::{reset, tsm};
 use sbi::SbiMessage;
+use sbi::{
+    PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFunction,
+    PmuHardware,
+};
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -79,6 +89,19 @@ fn get_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister) -> u64 {
 
 fn set_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister, value: u64) {
     tsm::set_vcpu_reg(vmid, 0, register, value).expect("Tellus - TvmCpuGetRegister failed")
+}
+
+fn gen_mask(high: u64, low: u64) -> u64 {
+    (u64::MAX << low) & (u64::MAX >> (63 - high))
+}
+
+#[inline]
+fn read_csr<const V: u16>() -> u64 {
+    let r: u64;
+    unsafe {
+        asm!("csrr {rd}, {csr}", rd = out(reg) r, csr = const V);
+    }
+    r
 }
 
 /// The entry point of the Rust part of the kernel.
@@ -370,6 +393,56 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES,
     );
     reclaim_pages(state_pages_base, tvm_create_pages);
+
+    let msg = SbiMessage::Pmu(PmuFunction::GetNumCounters);
+    let num_counters = unsafe { ecall_send(&msg).expect("Tellus - GetNumCounters returned error") };
+
+    for i in 0u64..num_counters {
+        let msg = SbiMessage::Pmu(PmuFunction::GetCounterInfo(i));
+        // Safety: PmuFunction does not touch memory.
+        if let Err(result) = unsafe { ecall_send(&msg) } {
+            println!("GetCounterInfo for {i} failed with {result:?}");
+        }
+    }
+
+    let event_type = PmuEventType::Hardware(PmuHardware::CpuCycles);
+    let config_flags = PmuCounterConfigFlags::default();
+    let msg = SbiMessage::Pmu(PmuFunction::ConfigureMatchingCounters {
+        counter_index_base: 0,
+        counter_index_mask: gen_mask(num_counters - 1, 0),
+        config_flags,
+        event_type,
+        event_data: 0,
+    });
+    // Safety: PmuFunction does not touch memory.
+    if let Ok(counter_index_base) = unsafe { ecall_send(&msg) } {
+        let msg = SbiMessage::Pmu(PmuFunction::StopCounters {
+            counter_index_base,
+            counter_index_mask: 0xffff_ffff,
+            stop_flags: PmuCounterStopFlags::default(),
+        });
+        let result = unsafe { ecall_send(&msg) };
+        if result.is_err() {
+            println!("StopCounters failed");
+        }
+
+        let start_flags = PmuCounterStartFlags::default().set_start_set_init_value();
+        let msg = SbiMessage::Pmu(PmuFunction::StartCounters {
+            counter_index_base,
+            counter_index_mask: 0xffff_ffff,
+            start_flags,
+            initial_value: 0,
+        });
+
+        let result = unsafe { ecall_send(&msg) };
+        if result.is_err() {
+            println!("StartCounters failed");
+        }
+
+        let _ = read_csr::<0xC02>();
+    } else {
+        println!("Configured counter failed");
+    }
 
     println!("Tellus - All OK");
 

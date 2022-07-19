@@ -40,6 +40,8 @@ pub enum Error {
     OutOfBoundsBusNumber(Bus),
     /// Failed to allocate memory.
     AllocError,
+    /// Ran out of bus numbers while assigning buses.
+    OutOfBuses,
 }
 
 /// Holds results for PCI operations.

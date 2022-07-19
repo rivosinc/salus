@@ -38,19 +38,22 @@ impl PciConfigSpace {
         }
     }
 
-    /// Returns the top-level bus.
-    pub fn root_bus(&self) -> BusConfig {
+    /// Returns the `BusConfig` for the bus at `bus_num`.
+    pub fn bus(&self, bus_num: Bus) -> Option<BusConfig> {
+        if bus_num < self.bus_range.start || bus_num > self.bus_range.end {
+            return None;
+        }
+
         let header_addr = Address::new(
             self.segment,
-            self.bus_range.start,
+            bus_num,
             Device::default(),
             Function::default(),
         );
-
-        BusConfig {
+        Some(BusConfig {
             config_space: self,
             addr: header_addr,
-        }
+        })
     }
 
     /// Returns the configuration space for the function at the given address if the address is

@@ -2,19 +2,28 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use alloc::alloc::Global;
 use arrayvec::ArrayVec;
 use device_tree::DeviceTree;
+use hyp_alloc::{Arena, ArenaId};
 use page_tracking::HwMemMap;
 use riscv_pages::{DeviceMemType, PageAddr, PageSize, RawAddr, SupervisorPageAddr};
 use spin::Once;
 
 use super::address::*;
+use super::bus::PciBus;
 use super::config_space::PciConfigSpace;
+use super::device::*;
 use super::error::*;
-use super::header::*;
 
 // The maximum number of BAR resources we support at the root complex.
 const MAX_BAR_SPACES: usize = 4;
+
+/// An arena of PCI devices.
+pub type PciDeviceArena = Arena<PciDeviceType, Global>;
+
+/// Identifiers in the PCI device arena.
+pub type PciDeviceId = ArenaId<PciDeviceType>;
 
 /// PCI BAR resource types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,8 +74,10 @@ impl PciBarSpace {
 
 /// Represents a PCI-Express root complex.
 pub struct PcieRoot {
-    config_space: PciConfigSpace,
+    _config_space: PciConfigSpace,
     bar_spaces: ArrayVec<PciBarSpace, MAX_BAR_SPACES>,
+    root_bus: PciBus,
+    device_arena: PciDeviceArena,
 }
 
 static PCIE_ROOT: Once<PcieRoot> = Once::new();
@@ -224,9 +235,15 @@ impl PcieRoot {
             }
         }
 
+        // Enumerate the PCI hierarchy.
+        let mut device_arena = PciDeviceArena::new(Global);
+        let root_bus = PciBus::enumerate(&config_space, bus_range.start, &mut device_arena)?;
+
         PCIE_ROOT.call_once(|| Self {
-            config_space,
+            _config_space: config_space,
             bar_spaces,
+            root_bus,
+            device_arena,
         });
         Ok(())
     }
@@ -238,20 +255,26 @@ impl PcieRoot {
     }
 
     /// Walks the PCIe hierarchy, calling `f` on each device function.
-    pub fn for_each_device<F: FnMut(&Header)>(&self, mut f: F) -> Result<()> {
-        let bus = self.config_space.root_bus();
-        for dev in bus.devices() {
-            for header in dev.functions() {
-                match header.header_type() {
-                    HeaderType::Endpoint => f(&header),
-                    // TODO: Assign and enumerate child busses.
-                    HeaderType::PciBridge => f(&header),
-                    HeaderType::CardBusBridge => (),
-                    _ => return Err(Error::UnknownHeaderType(header.address())),
+    pub fn for_each_device<F: FnMut(&dyn PciDevice)>(&self, mut f: F) {
+        self.for_each_device_on(&self.root_bus, &mut f)
+    }
+
+    /// Calls `f` for each device on `bus`.
+    fn for_each_device_on<F: FnMut(&dyn PciDevice)>(&self, bus: &PciBus, f: &mut F) {
+        for id in bus.devices() {
+            // If the ID appears on a bus, it must be in the arena.
+            let dev = self.device_arena.get(id).unwrap();
+            match dev {
+                PciDeviceType::Endpoint(ep) => f(ep),
+                PciDeviceType::Bridge(bridge) => {
+                    f(bridge);
+                    // Recrusively walk the buses behind the bridge.
+                    bridge
+                        .child_bus()
+                        .inspect(|b| self.for_each_device_on(b, f));
                 }
-            }
+            };
         }
-        Ok(())
     }
 
     /// Returns an iterator over the root's PCI BAR spaces.

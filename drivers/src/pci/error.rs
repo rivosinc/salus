@@ -2,7 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::address::Address;
+use super::address::{Address, Bus};
+use super::header::HeaderType;
 
 /// Errors resulting from interacting with PCI devices.
 #[derive(Clone, Copy, Debug)]
@@ -34,7 +35,11 @@ pub enum Error {
     /// The device tree provided an invalid bus number in the `bus-range` property.
     InvalidBusNumber(u32),
     /// Invalid value in a PCI header at `address`.
-    UnknownHeaderType(Address),
+    UnsupportedHeaderType(Address, HeaderType),
+    /// Bus is not within the bounds of a config space.
+    OutOfBoundsBusNumber(Bus),
+    /// Failed to allocate memory.
+    AllocError,
 }
 
 /// Holds results for PCI operations.

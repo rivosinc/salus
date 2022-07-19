@@ -167,6 +167,7 @@ dependencies = [
  "arrayvec",
  "data_model",
  "device_tree",
+ "hyp_alloc",
  "page_tracking",
  "riscv_pages",
  "riscv_regs",

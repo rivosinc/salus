@@ -5,7 +5,7 @@
 //! # Hardware drivers
 
 #![no_std]
-#![feature(allocator_api, int_log)]
+#![feature(allocator_api, int_log, result_option_inspect)]
 
 extern crate alloc;
 

@@ -10,42 +10,8 @@ use spin::Once;
 
 use super::address::*;
 use super::config_space::PciConfigSpace;
+use super::error::*;
 use super::header::*;
-
-/// Errors resulting enumerating the PCIe hierarchy.
-#[derive(Debug)]
-pub enum Error {
-    /// The PCI configuration space provided by device tree isn't aligned to 4k.
-    ConfigSpaceMisaligned(u64),
-    /// The PCI configuration size provided by device tree isn't divisible by 4k.
-    ConfigSpaceNotPageMultiple(u64),
-    /// A PCI BAR resource provided by the device tree isn't aligned to 4k.
-    BarSpaceMisaligned(u64),
-    /// A PCI BAR resource provided by the device tree isn't divisible by 4k.
-    BarSpaceNotPageMultiple(u64),
-    /// The device tree contained an MMIO region that overlaps with other memory regions.
-    InvalidMmioRegion(page_tracking::MemMapError),
-    /// The device tree entry for the PCI host didn't provide a base register for Configuration
-    /// Space.
-    NoConfigBase,
-    /// No compatible PCI host controller found in the device tree.
-    NoCompatibleHostNode,
-    /// The device tree entry for the PCI host didn't provide a size register for Configuration
-    /// Space.
-    NoConfigSize,
-    /// The device tree entry for the PCI host didn't provide a `reg` property.
-    NoRegProperty,
-    /// The device tree entry for the PCI host didn't provide a `ranges` property.
-    NoRangesProperty,
-    /// Too many PCI resource ranges were specified in the device tree's `ranges` property.
-    TooManyBarSpaces,
-    /// The device tree provided an invalid bus number in the `bus-range` property.
-    InvalidBusNumber(u32),
-    /// Invalid value in a PCI header at `address`.
-    UnknownHeaderType(Address),
-}
-/// Holds results for PCI probing from device tree.
-pub type Result<T> = core::result::Result<T, Error>;
 
 // The maximum number of BAR resources we support at the root complex.
 const MAX_BAR_SPACES: usize = 4;

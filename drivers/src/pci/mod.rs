@@ -4,7 +4,10 @@
 
 mod address;
 mod config_space;
+mod error;
 mod header;
 mod root;
 
+pub use error::Error as PciError;
+pub use error::Result as PciResult;
 pub use root::{PciBarSpace, PciBarType, PcieRoot};

@@ -21,6 +21,11 @@ pub struct ArenaId<T> {
     phantom: PhantomData<*const T>,
 }
 
+// ArenaId<T> is trivially Send/Sync since it's just an integer. Access to the T it refers to must
+// be done through the Arena<T> interface, which itself is only Send/Sync if T is Send/Sync.
+unsafe impl<T> Send for ArenaId<T> {}
+unsafe impl<T> Sync for ArenaId<T> {}
+
 impl<T> Clone for ArenaId<T> {
     fn clone(&self) -> Self {
         ArenaId {

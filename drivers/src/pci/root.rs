@@ -243,11 +243,11 @@ impl PcieRoot {
         for dev in bus.devices() {
             for header in dev.functions() {
                 match header.header_type() {
-                    Some(HeaderType::Endpoint) => f(&header),
+                    HeaderType::Endpoint => f(&header),
                     // TODO: Assign and enumerate child busses.
-                    Some(HeaderType::PciBridge) => f(&header),
-                    Some(HeaderType::CardBusBridge) => (),
-                    None => return Err(Error::UnknownHeaderType(header.address())),
+                    HeaderType::PciBridge => f(&header),
+                    HeaderType::CardBusBridge => (),
+                    _ => return Err(Error::UnknownHeaderType(header.address())),
                 }
             }
         }

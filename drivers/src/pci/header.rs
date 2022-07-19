@@ -2,9 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use data_model::Le32;
-
 use super::address::Address;
+use super::config_space::PciFuncConfigSpace;
 
 use core::fmt;
 
@@ -33,9 +32,10 @@ pub struct SubClass(u8);
 /// The Header type of a PCI Header.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum HeaderType {
-    Endpoint = 0,
-    PciBridge = 1,
-    CardBusBridge = 2,
+    Endpoint,
+    PciBridge,
+    CardBusBridge,
+    Unknown(u8),
 }
 
 impl fmt::Display for HeaderType {
@@ -44,6 +44,7 @@ impl fmt::Display for HeaderType {
             HeaderType::Endpoint => write!(f, "Endpoint"),
             HeaderType::PciBridge => write!(f, "PciBridge"),
             HeaderType::CardBusBridge => write!(f, "CardBusBridge"),
+            HeaderType::Unknown(h) => write!(f, "Unknown(0x{:x})", h),
         }
     }
 }
@@ -52,31 +53,63 @@ impl fmt::Display for HeaderType {
 const HEADER_TYPE_MASK: u8 = 0x7f;
 const HEADER_MULTI_FUNCTION_MASK: u8 = 0x80;
 
-// Index of words in the PCI Configuration header for a function.
-enum HeaderWord {
+/// Index of words in the PCI Configuration header for a function.
+///
+/// TODO: Type-safe definition of the config space register map.
+pub enum HeaderWord {
+    /// Vendor ID and Device ID.
     Vendor = 0,
+    /// Class and subclass codes.
     Class = 2,
+    /// Header type (and other legacy bits).
     Type = 3,
 }
 
 /// The header for a PCI function in configuration space.
+#[derive(Clone, Debug)]
 pub struct Header {
     address: Address,
-    base_ptr: *mut Le32,
+    vendor_id: VendorId,
+    device_id: DeviceId,
+    class: Class,
+    subclass: SubClass,
+    multi_function: bool,
+    header_type: HeaderType,
 }
 
 impl Header {
-    /// Creates a new Header.
-    ///
-    /// # Safety: Caller must guarantee that base through base + the legnth of the header is valid
-    /// and that `Header` can read and write to that area safely.
-    pub unsafe fn new(address: Address, base_ptr: *mut Le32) -> Option<Self> {
-        let header = Self { address, base_ptr };
-        if !header.present() {
-            None
-        } else {
-            Some(header)
+    /// Reads a PCI configuration header from `func_config`.
+    pub fn new(func_config: &PciFuncConfigSpace) -> Option<Self> {
+        let id_dword = func_config.read_dword(HeaderWord::Vendor);
+        let vendor_id = VendorId((id_dword & 0x0000_ffff) as u16);
+        if vendor_id == VendorId::invalid() {
+            return None;
         }
+        let device_id = DeviceId((id_dword >> 16) as u16);
+
+        let class_dword = func_config.read_dword(HeaderWord::Class);
+        let class = Class((class_dword >> 24) as u8);
+        let subclass = SubClass((class_dword >> 16) as u8);
+
+        let type_dword = func_config.read_dword(HeaderWord::Type);
+        let multi_function = ((type_dword >> 16) as u8) & HEADER_MULTI_FUNCTION_MASK != 0;
+        let header_type = match ((type_dword >> 16) as u8) & HEADER_TYPE_MASK {
+            0 => HeaderType::Endpoint,
+            1 => HeaderType::PciBridge,
+            2 => HeaderType::CardBusBridge,
+            x => HeaderType::Unknown(x),
+        };
+
+        let header = Self {
+            address: func_config.address(),
+            vendor_id,
+            device_id,
+            class,
+            subclass,
+            multi_function,
+            header_type,
+        };
+        Some(header)
     }
 
     /// Rertuns the PCI Adress of this PCI header.
@@ -84,61 +117,34 @@ impl Header {
         self.address
     }
 
-    fn present(&self) -> bool {
-        self.vendor_id() != VendorId::invalid()
-    }
-
     /// Returns the vendor ID from this PCI header.
     pub fn vendor_id(&self) -> VendorId {
-        let header_word = self.read_u32(HeaderWord::Vendor);
-        let v = (header_word & 0x0000_ffff) as u16;
-        VendorId(v)
+        self.vendor_id
     }
 
     /// Returns the device ID from this PCI header.
     pub fn device_id(&self) -> DeviceId {
-        let header_word = self.read_u32(HeaderWord::Vendor);
-        let d = (header_word >> 16) as u16;
-        DeviceId(d)
+        self.device_id
     }
 
     /// Returns the device class from this PCI header.
     pub fn class(&self) -> Class {
-        let word = self.read_u32(HeaderWord::Class);
-        Class((word >> 24) as u8)
+        self.class
     }
 
     /// Returns the device subclass from this PCI header.
     pub fn subclass(&self) -> SubClass {
-        let word = self.read_u32(HeaderWord::Class);
-        SubClass((word >> 16) as u8)
+        self.subclass
     }
 
     /// Returns the header type from this PCI header.
-    pub fn header_type(&self) -> Option<HeaderType> {
-        let word = self.read_u32(HeaderWord::Type);
-        match ((word >> 16) as u8) & HEADER_TYPE_MASK {
-            0 => Some(HeaderType::Endpoint),
-            1 => Some(HeaderType::PciBridge),
-            2 => Some(HeaderType::CardBusBridge),
-            _ => None,
-        }
+    pub fn header_type(&self) -> HeaderType {
+        self.header_type
     }
 
     /// Returns true if the multi-function bit is set in the header type field of this header.
     pub fn multi_function(&self) -> bool {
-        let word = self.read_u32(HeaderWord::Type);
-        ((word >> 16) as u8) & HEADER_MULTI_FUNCTION_MASK != 0
-    }
-
-    fn read_u32(&self, word: HeaderWord) -> u32 {
-        unsafe {
-            // Safety: The target and self own their memory regions and the read call is bounded by
-            // those regions of memory and offset is guaranteed to be valid in the constructor as the
-            // backing area must span all `HeaderWord` values.
-            let word_ptr = self.base_ptr.add(word as usize);
-            core::ptr::read_volatile(word_ptr).to_native()
-        }
+        self.multi_function
     }
 }
 
@@ -159,43 +165,30 @@ impl core::fmt::Display for Header {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data_model::Le32;
     use std::vec::Vec;
 
     #[test]
     fn create() {
-        let mut test_config: [u32; 16] = [
-            0xa9a9_b8b8, // device and vendor id
-            0x0000_0000, // status and command
-            0xc7d6_e5f4, // class, subclass, prog IF, revision ID
-            0xde00_beef, // BIST, header type, latency time, cache line size
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-            0xdead_beef,
-        ];
+        let mut test_config: [u32; 128] = [0xdead_beef; 128];
+        test_config[0] = 0xa9a9_b8b8; // device and vendor id
+        test_config[1] = 0x0000_0000; // status and command
+        test_config[2] = 0xc7d6_e5f4; // class, subclass, prog IF, revision ID
+        test_config[3] = 0xde00_beef; // BIST, header type, latency time, cache line size
         let mut header_mem: Vec<u8> = test_config
             .iter()
             .map(|v| v.to_le_bytes())
             .flatten()
             .collect();
-        let header = unsafe {
-            Header::new(Address::default(), header_mem.as_mut_ptr() as *mut Le32)
-                .expect("can't create header")
+        let func_config = unsafe {
+            PciFuncConfigSpace::new(Address::default(), header_mem.as_mut_ptr() as *mut Le32)
         };
-        assert!(header.present());
+        let header = Header::new(&func_config).expect("can't create header");
         assert_eq!(header.vendor_id(), VendorId(0xb8b8));
         assert_eq!(header.device_id(), DeviceId(0xa9a9));
         assert_eq!(header.class(), Class(0xc7));
         assert_eq!(header.subclass(), SubClass(0xd6));
-        assert_eq!(header.header_type(), Some(HeaderType::Endpoint));
+        assert_eq!(header.header_type(), HeaderType::Endpoint);
         assert!(!header.multi_function());
 
         // Set multi-function bit.
@@ -205,11 +198,11 @@ mod tests {
             .map(|v| v.to_le_bytes())
             .flatten()
             .collect();
-        let header = unsafe {
-            Header::new(Address::default(), header_mem.as_mut_ptr() as *mut Le32)
-                .expect("can't create header")
+        let func_config = unsafe {
+            PciFuncConfigSpace::new(Address::default(), header_mem.as_mut_ptr() as *mut Le32)
         };
-        assert_eq!(header.header_type(), Some(HeaderType::Endpoint));
+        let header = Header::new(&func_config).expect("can't create header");
+        assert_eq!(header.header_type(), HeaderType::Endpoint);
         assert!(header.multi_function());
 
         // Invalid vendor ID should not produce a valid header
@@ -219,10 +212,9 @@ mod tests {
             .map(|v| v.to_le_bytes())
             .flatten()
             .collect();
-        unsafe {
-            assert!(
-                Header::new(Address::default(), header_mem.as_mut_ptr() as *mut Le32,).is_none()
-            );
-        }
+        let func_config = unsafe {
+            PciFuncConfigSpace::new(Address::default(), header_mem.as_mut_ptr() as *mut Le32)
+        };
+        assert!(Header::new(&func_config).is_none());
     }
 }

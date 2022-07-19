@@ -48,6 +48,16 @@ macro_rules! address_type {
             pub fn bits(&self) -> u32 {
                 self.0
             }
+
+            /// Returns the maximum possible value for this address component.
+            pub fn max() -> Self {
+                Self(Self::MAX_VAL)
+            }
+
+            /// Returns the next value for this address component.
+            pub fn next(&self) -> Option<Self> {
+                Self::try_from(self.0 + 1).ok()
+            }
         }
 
         unsigned_conversions!($T, u8, u16, u32, u64);

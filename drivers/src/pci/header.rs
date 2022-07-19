@@ -63,6 +63,8 @@ pub enum HeaderWord {
     Class = 2,
     /// Header type (and other legacy bits).
     Type = 3,
+    /// Primary/secondary/subordinate bus numbers (type 1 headers only).
+    BusNumber = 6,
 }
 
 /// The header for a PCI function in configuration space.

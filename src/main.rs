@@ -327,10 +327,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     PcieRoot::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up PCIe");
     PcieRoot::get()
         .for_each_device(|header| {
-            println!(
-                "found func {header} type: {}",
-                header.header_type().unwrap()
-            );
+            println!("found func {header} type: {}", header.header_type());
         })
         .expect("pci scan failure");
 

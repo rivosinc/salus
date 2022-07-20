@@ -8,12 +8,11 @@ use drivers::{CpuId, CpuInfo, Imsic};
 use page_tracking::{HwMemMap, HwMemRegionType, HwReservedMemType};
 use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
 use riscv_regs::{sstatus, ReadWriteable, CSR};
-use sbi::{SbiMessage, StateFunction};
+use sbi::api::state;
 use spin::Once;
 
 use crate::vm_id::VmIdTracker;
 use crate::{print_util::*, println};
-use s_mode_utils::ecall::ecall_send;
 
 // The secondary CPU entry point, defined in start.S.
 extern "C" {
@@ -153,15 +152,15 @@ pub fn start_secondary_cpus() {
 
         // Start the hart with it's PerCpu struct in A1; _secondary_start will stash it in TP.
         let pcpu = PerCpu::ptr_for_cpu(cpu_id);
-        let msg = SbiMessage::HartState(StateFunction::HartStart {
-            hart_id: cpu_info.cpu_to_hart_id(cpu_id).unwrap() as u64,
-            start_addr: (_secondary_start as *const fn()) as u64,
-            opaque: pcpu as u64,
-        });
-        // Safety: Passes one pointer to SBI, that pointer is guaranteed by the linker to be the
-        // code to start secondary CPUs.
+        // Safety: _secondary_start is guaranteed by the linker to be the code to start secondary
+        // CPUs. pcpu will only be shared with one cpu.
         unsafe {
-            ecall_send(&msg).expect("Failed to start CPU {i}");
+            state::hart_start(
+                cpu_info.cpu_to_hart_id(cpu_id).unwrap() as u64,
+                (_secondary_start as *const fn()) as u64,
+                pcpu as u64,
+            )
+            .expect("Failed to start CPU {i}");
         }
 
         // Synchronize with the CPU coming online. TODO: Timeout?

@@ -15,6 +15,7 @@ use device_tree::Fdt;
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
+use sbi::api::tsm;
 use sbi::SbiMessage;
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -51,33 +52,19 @@ pub fn poweroff() -> ! {
 
 const PAGE_SIZE_4K: u64 = 4096;
 
-fn convert_pages(addr: u64, num_pages: u64) {
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmConvertPages {
-        page_addr: addr,
-        page_type: sbi::TsmPageType::Page4k,
-        num_pages: num_pages,
-    });
-    // Safety: The passed-in pages are unmapped and we do not access them again until they're
-    // reclaimed.
-    unsafe { ecall_send(&msg).expect("TsmConvertPages failed") };
+// Safety: addr must point to `num_pages` of memory that isn't currently used by this program. This
+// memory will be overwritten and access will be removed.
+unsafe fn convert_pages(addr: u64, num_pages: u64) {
+    tsm::convert_pages(addr, num_pages).expect("TsmConvertPages failed");
 
     // Fence the pages we just converted.
     //
     // TODO: Boot secondary CPUs and test the invalidation flow with multiple CPUs.
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmInitiateFence);
-    // Safety: TsmInitiateFence doesn't read or write any memory we have access to.
-    unsafe { ecall_send(&msg).expect("TsmInitiateFence failed") };
+    tsm::initiate_fence().expect("Tellus - TsmInitiateFence failed");
 }
 
 fn reclaim_pages(addr: u64, num_pages: u64) {
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmReclaimPages {
-        page_addr: addr,
-        page_type: sbi::TsmPageType::Page4k,
-        num_pages: num_pages,
-    });
-    // Safety: The referenced pages are made accessible again, which is safe since we haven't
-    // done anything with them since they were converted.
-    unsafe { ecall_send(&msg).expect("TsmReclaimPages failed") };
+    tsm::reclaim_pages(addr, num_pages).expect("TsmReclaimPages failed");
 
     for i in 0u64..((num_pages * PAGE_SIZE_4K) / 8) {
         let m = (addr + i) as *const u64;
@@ -90,24 +77,11 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
 }
 
 fn get_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister) -> u64 {
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuGetRegister {
-        guest_id: vmid,
-        vcpu_id: 0,
-        register,
-    });
-    // Safety: `TvmCpuGetRegister` doesn't access our memory.
-    unsafe { ecall_send(&msg).expect("Tellus - TvmCpuGetRegister failed") }
+    tsm::get_vcpu_reg(vmid, 0, register).expect("Tellus - TvmCpuGetRegister failed")
 }
 
 fn set_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister, value: u64) {
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
-        guest_id: vmid,
-        vcpu_id: 0,
-        register,
-        value,
-    });
-    // Safety: `TvmCpuSetRegister` doesn't access our memory.
-    unsafe { ecall_send(&msg).expect("Tellus - TvmCpuSetRegister failed") };
+    tsm::set_vcpu_reg(vmid, 0, register, value).expect("Tellus - TvmCpuGetRegister failed")
 }
 
 /// The entry point of the Rust part of the kernel.
@@ -146,15 +120,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         mem_range.size()
     );
 
-    let mut tsm_info = sbi::TsmInfo::default();
-    let tsm_info_size = core::mem::size_of::<sbi::TsmInfo>() as u64;
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmGetInfo {
-        dest_addr: &mut tsm_info as *mut _ as u64,
-        len: tsm_info_size,
-    });
-    // Safety: The passed info pointer is uniquely owned so it's safe to modify in SBI.
-    let tsm_info_len = unsafe { ecall_send(&msg).expect("TsmGetInfo failed") };
-    assert_eq!(tsm_info_len, tsm_info_size);
+    let tsm_info = tsm::get_info().expect("Tellus - TsmGetInfo failed");
     let tvm_create_pages = 4
         + tsm_info.tvm_state_pages
         + ((NUM_VCPUS * tsm_info.tvm_bytes_per_vcpu) + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
@@ -163,56 +129,46 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Make sure TsmGetInfo fails if we pass it a bogus address.
     let msg = SbiMessage::Tee(sbi::TeeFunction::TsmGetInfo {
         dest_addr: 0x1000,
-        len: tsm_info_size,
+        len: core::mem::size_of::<sbi::TsmInfo>() as u64,
     });
     // Safety: The passed info pointer is bogus and nothing should be written to our memory.
     unsafe { ecall_send(&msg).expect_err("TsmGetInfo succeeded with an invalid pointer") };
 
     // Donate the pages necessary to create the TVM.
     let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
-    convert_pages(next_page, tvm_create_pages);
+    // Safety: The passed-in pages are unmapped and we do not access them again until they're
+    // reclaimed.
+    unsafe {
+        convert_pages(next_page, tvm_create_pages);
+    }
 
     // Now create the TVM.
     let state_pages_base = next_page;
     let tvm_page_directory_addr = state_pages_base;
     let tvm_state_addr = tvm_page_directory_addr + 4 * PAGE_SIZE_4K;
     let tvm_vcpu_addr = tvm_state_addr + tsm_info.tvm_state_pages * PAGE_SIZE_4K;
-    let tvm_create_params = sbi::TvmCreateParams {
+    let vmid = tsm::tvm_create(
         tvm_page_directory_addr,
         tvm_state_addr,
-        tvm_num_vcpus: NUM_VCPUS,
+        NUM_VCPUS,
         tvm_vcpu_addr,
-    };
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCreate {
-        params_addr: (&tvm_create_params as *const sbi::TvmCreateParams) as u64,
-        len: core::mem::size_of::<sbi::TvmCreateParams>() as u64,
-    });
-    // Safety: We trust the TSM to only read up to `len` bytes of the `TvmCreateParams` structure
-    // pointed to by `params_addr.
-    let vmid = unsafe { ecall_send(&msg).expect("Tellus - TvmCreate returned error") };
+    )
+    .expect("Tellus - TvmCreate returned error");
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");
     next_page += PAGE_SIZE_4K * tvm_create_pages;
 
     // Add pages for the page table
-    convert_pages(next_page, NUM_TEE_PTE_PAGES);
-    let msg = SbiMessage::Tee(sbi::TeeFunction::AddPageTablePages {
-        guest_id: vmid,
-        page_addr: next_page,
-        num_pages: NUM_TEE_PTE_PAGES,
-    });
-    // Safety: `AddPageTablePages` only accesses pages that have been previously converted.
-    unsafe { ecall_send(&msg).expect("Tellus - AddPageTablePages returned error") };
+    // Safety: The passed-in pages are unmapped and we do not access them again until they're
+    // reclaimed.
+    unsafe {
+        convert_pages(next_page, NUM_TEE_PTE_PAGES);
+    }
+    tsm::add_page_table_pages(vmid, next_page, NUM_TEE_PTE_PAGES)
+        .expect("Tellus - AddPageTablePages returned error");
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
     // Add vCPU0.
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuCreate {
-        guest_id: vmid,
-        vcpu_id: 0,
-    });
-    // Safety: Creating a vcpu doesn't touch any memory owned here.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - TvmCpuCreate returned error");
-    }
+    tsm::add_vcpu(vmid, 0).expect("Tellus - TvmCpuCreate returned error");
 
     /*
         The Tellus composite image includes the guest image
@@ -228,127 +184,103 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     */
 
     let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
+    // Safety: Safe to make a slice out of the guest image as it is read-only and not used by this
+    // program.
+    let guest_image = unsafe {
+        core::slice::from_raw_parts(
+            guest_image_base as *const u8,
+            (PAGE_SIZE_4K * NUM_GUEST_DATA_PAGES) as usize,
+        )
+    };
     let donated_pages_base = next_page;
 
     // Declare the confidential region of the guest's physical address space.
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddConfidentialMemoryRegion {
-        guest_id: vmid,
-        guest_addr: USABLE_RAM_START_ADDRESS,
-        len: (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K,
-    });
-    // Safety: `TvmAddConfidentialMemoryRegion` doesn't access our memory at all.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - TvmAddConfidentialMemoryRegion failed");
-    }
+    tsm::add_confidential_memory_region(
+        vmid,
+        USABLE_RAM_START_ADDRESS,
+        (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K,
+    )
+    .expect("Tellus - TvmAddConfidentialMemoryRegion failed");
 
     // Add data pages
-    convert_pages(next_page, NUM_GUEST_DATA_PAGES);
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddMeasuredPages {
-        guest_id: vmid,
-        src_addr: guest_image_base,
-        dest_addr: next_page,
-        page_type: sbi::TsmPageType::Page4k,
-        num_pages: NUM_GUEST_DATA_PAGES,
-        guest_addr: USABLE_RAM_START_ADDRESS,
-    });
-    // Safety: `TvmAddMeasuredPages` only writes pages that have already been converted, and only
-    // reads the pages pointed to by `src_addr`. This is safe because those pages are not used by
-    // this program.
+    // Safety: The passed-in pages are unmapped and we do not access them again until they're
+    // reclaimed.
     unsafe {
-        ecall_send(&msg).expect("Tellus - TvmAddMeasuredPages returned error");
+        convert_pages(next_page, NUM_GUEST_DATA_PAGES);
     }
+    tsm::add_measured_pages(
+        vmid,
+        guest_image,
+        next_page,
+        sbi::TsmPageType::Page4k,
+        USABLE_RAM_START_ADDRESS,
+    )
+    .expect("Tellus - TvmAddMeasuredPages returned error");
     next_page += PAGE_SIZE_4K * NUM_GUEST_DATA_PAGES;
 
     // Convert the zero pages and map a few of them up front. We'll fault the rest in as necessary.
     let zero_pages_start = next_page;
-    convert_pages(zero_pages_start, NUM_GUEST_ZERO_PAGES);
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddZeroPages {
-        guest_id: vmid,
-        page_addr: zero_pages_start,
-        page_type: sbi::TsmPageType::Page4k,
-        num_pages: PRE_FAULTED_ZERO_PAGES,
-        guest_addr: USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
-    });
+    // Safety: The passed-in pages are unmapped and we do not access them again until they're
+    // reclaimed.
+    unsafe {
+        convert_pages(next_page, NUM_GUEST_ZERO_PAGES);
+    }
+    tsm::add_zero_pages(
+        vmid,
+        zero_pages_start,
+        sbi::TsmPageType::Page4k,
+        PRE_FAULTED_ZERO_PAGES,
+        USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
+    )
+    .expect("Tellus - TvmAddZeroPages failed");
 
     next_page += NUM_GUEST_ZERO_PAGES * PAGE_SIZE_4K;
     let shared_page_base = next_page;
 
-    // Safety: `TvmAddZeroPages` only touches pages that we've already converted.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - TvmAddZeroPages failed");
-    }
     let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
     // Add a page of emualted MMIO.
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddEmulatedMmioRegion {
-        guest_id: vmid,
-        guest_addr: GUEST_MMIO_ADDRESS,
-        len: PAGE_SIZE_4K,
-    });
-    // Safety: Doesn't affect host memory safety.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - TvmAddEmulatedMmioRegion failed");
-    }
+    tsm::add_emulated_mmio_region(vmid, GUEST_MMIO_ADDRESS, PAGE_SIZE_4K)
+        .expect("Tellus - TvmAddEmulatedMmioRegion failed");
 
     // Set the entry point.
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
-        guest_id: vmid,
-        vcpu_id: 0,
-        register: sbi::TvmCpuRegister::EntryPc,
-        value: 0x8020_0000,
-    });
-    // Safety: Setting a guest register doesn't affect host memory safety.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - TvmCpuSetRegister returned error");
-    }
+    tsm::set_vcpu_reg(vmid, 0, sbi::TvmCpuRegister::EntryPc, 0x8020_0000)
+        .expect("Tellus - TvmCpuSetRegister returned error");
 
     // Set the kernel_init() parameter.
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuSetRegister {
-        guest_id: vmid,
-        vcpu_id: 0,
-        register: sbi::TvmCpuRegister::EntryArg,
-        value: SHARED_PAGES_START_ADDRESS,
-    });
-    // Safety: Setting a guest register doesn't affect host memory safety.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - TvmCpuSetRegister returned error");
-    }
+    tsm::set_vcpu_reg(
+        vmid,
+        0,
+        sbi::TvmCpuRegister::EntryArg,
+        SHARED_PAGES_START_ADDRESS,
+    )
+    .expect("Tellus - TvmCpuSetRegister returned error");
 
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddSharedMemoryRegion {
-        guest_id: vmid,
-        guest_addr: SHARED_PAGES_START_ADDRESS,
-        len: NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
-    });
-    // Safety: `TvmAddSharedMemoryRegion` doesn't affect host memory
-    unsafe {
-        ecall_send(&msg).expect("Tellus -- TvmAddSharedMemoryRegion returned error");
-    }
+    tsm::add_shared_memory_region(
+        vmid,
+        SHARED_PAGES_START_ADDRESS,
+        NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+    )
+    .expect("Tellus -- TvmAddSharedMemoryRegion returned error");
 
-    // Safety: `TvmAddSharedMemoryRegion` doesn't affect host memory
-    unsafe {
-        ecall_send(&msg).expect_err("Tellus -- TvmAddSharedMemoryRegion succeeded second time");
-    }
+    tsm::add_shared_memory_region(
+        vmid,
+        SHARED_PAGES_START_ADDRESS,
+        NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+    )
+    .expect_err("Tellus -- TvmAddSharedMemoryRegion succeeded second time");
 
     // TODO test that access to pages crashes somehow
-    let msg = SbiMessage::Tee(sbi::TeeFunction::Finalize { guest_id: vmid });
-    // Safety: `Finalize` doesn't touch memory.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - Finalize returned error");
-    }
+    tsm::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
 
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmCpuRun {
-        guest_id: vmid,
-        vcpu_id: 0,
-    });
     loop {
         // Safety: running a VM can't affect host memory as that memory isn't accessible to the VM.
-        match unsafe { ecall_send(&msg) } {
+        match tsm::tvm_run(vmid, 0) {
             Err(e) => {
                 println!("Tellus - Run returned error {:?}", e);
                 panic!("Could not run guest VM");
             }
-            Ok(exit_code) => {
-                let cause = sbi::TvmCpuExitCode::from_reg(exit_code).unwrap();
+            Ok(cause) => {
                 match cause {
                     sbi::TvmCpuExitCode::ConfidentialPageFault => {
                         let fault_addr = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
@@ -356,17 +288,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
                             panic!("Ran out of pages to fault in");
                         }
-                        let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddZeroPages {
-                            guest_id: vmid,
-                            page_addr: zero_pages_start + zero_pages_added * PAGE_SIZE_4K,
-                            page_type: sbi::TsmPageType::Page4k,
-                            num_pages: 1,
-                            guest_addr: fault_addr & !(PAGE_SIZE_4K - 1),
-                        });
-                        // Safety: `TvmAddZeroPages` only touches pages that we've already converted.
-                        unsafe {
-                            ecall_send(&msg).expect("Tellus - TvmAddZeroPages failed");
-                        }
+                        tsm::add_zero_pages(
+                            vmid,
+                            zero_pages_start + zero_pages_added * PAGE_SIZE_4K,
+                            sbi::TsmPageType::Page4k,
+                            1,
+                            fault_addr & !(PAGE_SIZE_4K - 1),
+                        )
+                        .expect("Tellus - TvmAddZeroPages failed");
                         zero_pages_added += 1;
                     }
                     sbi::TvmCpuExitCode::SharedPageFault => {
@@ -375,16 +304,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         if fault_addr != SHARED_PAGES_START_ADDRESS {
                             panic!("Unexpected shared page fault address at {fault_addr:x}");
                         }
-                        let msg = SbiMessage::Tee(sbi::TeeFunction::TvmAddSharedPages {
-                            guest_id: vmid,
-                            page_addr: shared_page_base,
-                            page_type: sbi::TsmPageType::Page4k,
-                            num_pages: NUM_GUEST_SHARED_PAGES,
-                            guest_addr: fault_addr,
-                        });
-                        // Safety: `TvmAddSharedPages` only touches pages owned by us
+                        // Safety: shared_page_base points to pages that will only be accessed as
+                        // volatile from here on.
                         unsafe {
-                            ecall_send(&msg).expect("Tellus -- TvmAddSharedPages failed");
+                            tsm::add_shared_pages(
+                                vmid,
+                                shared_page_base,
+                                sbi::TsmPageType::Page4k,
+                                NUM_GUEST_SHARED_PAGES,
+                                fault_addr,
+                            )
+                            .expect("Tellus -- TvmAddSharedPages failed");
                         }
 
                         // Safety: We own the page, and are writing a value expected by the guest
@@ -428,11 +358,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         }
     }
 
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TvmDestroy { guest_id: vmid });
-    // Safety: destroying a VM doesn't write to memory that's accessible from the host.
-    unsafe {
-        ecall_send(&msg).expect("Tellus - TvmDestroy returned error");
-    }
+    tsm::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
 
     // Safety: We own the page.
     // Note that any access to shared pages must use volatile memory semantics

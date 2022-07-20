@@ -10,6 +10,12 @@
 mod consts;
 pub use consts::*;
 
+/// Interfaces for invoking SBI functionality.
+pub mod api;
+
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+use core::arch::asm;
+
 /// Errors passed over the SBI protocol.
 ///
 /// Constants from the SBI [spec](https://github.com/riscv-non-isa/riscv-sbi-doc/releases).
@@ -646,6 +652,16 @@ impl TsmPageType {
             2 => Ok(Page1G),
             3 => Ok(Page512G),
             _ => Err(Error::InvalidParam),
+        }
+    }
+
+    /// Returns the size of this page type in bytes.
+    pub fn size_bytes(&self) -> u64 {
+        match self {
+            TsmPageType::Page4k => 4096,
+            TsmPageType::Page2M => 2 * 1024 * 1024,
+            TsmPageType::Page1G => 1024 * 1024 * 1024,
+            TsmPageType::Page512G => 512 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -1735,4 +1751,29 @@ impl SbiMessage {
             _ => ret.into(),
         }
     }
+}
+
+/// Send an ecall to the firmware or hypervisor.
+///
+/// # Safety
+///
+/// The caller must verify that any memory references contained in `msg` obey rust's memory
+/// safety rules. For example, any pointers to memory that will be modified in the handling of
+/// the ecall must be uniquely owned. Similarly any pointers read by the ecall must not be
+/// mutably borrowed.
+///
+/// In addition the caller is placing trust in the firmware or hypervisor to maintain the promises
+/// of the interface w.r.t. reading and writing only within the provided bounds.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub unsafe fn ecall_send(msg: &SbiMessage) -> Result<u64> {
+    // normally error code
+    let mut a0;
+    // normally return value
+    let mut a1;
+    asm!("ecall", inlateout("a0") msg.a0()=>a0, inlateout("a1")msg.a1()=>a1,
+                in("a2")msg.a2(), in("a3") msg.a3(),
+                in("a4")msg.a4(), in("a5") msg.a5(),
+                in("a6")msg.a6(), in("a7") msg.a7(), options(nostack));
+
+    msg.result(a0, a1)
 }

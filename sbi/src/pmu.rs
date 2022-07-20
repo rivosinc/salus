@@ -74,44 +74,84 @@ impl PmuCounterConfigFlags {
         self.0
     }
 
-    /// Sets the bit-flag to skip counter matching flag.
+    /// Sets the skip_match bit-flag (skips counter matching).
     pub fn set_skip_match(self) -> Self {
         PmuCounterConfigFlags(self.0 | 1)
     }
 
-    /// Sets the bit-flag to clear the counter value.
+    /// Returns if the skip_match bit-flag is set.
+    pub fn is_skip_match_set(&self) -> bool {
+        self.0 & 1 != 0
+    }
+
+    /// Sets the clear_value bit-flag (clears the counter value).
     pub fn set_clear_value(self) -> Self {
         PmuCounterConfigFlags(self.0 | (1 << 1))
     }
 
-    /// Sets the bit-flag to start the counter.
+    /// Returns if the clear_value bit-flag is set.
+    pub fn is_clear_value_set(&self) -> bool {
+        self.0 & (1 << 1) != 0
+    }
+
+    /// Sets the auto_start bit-flag (automatically starts the counter).
     pub fn set_auto_start(self) -> Self {
         PmuCounterConfigFlags(self.0 | (1 << 2))
     }
 
-    /// Sets the bit-flag to inhibit the counter in VU-mode.
+    /// Returns if the auto_start bit-flag is set.
+    pub fn is_auto_start_set(&self) -> bool {
+        self.0 & (1 << 2) != 0
+    }
+
+    /// Sets the vuinh bit-flag (inhibit counter in VU-mode).
     pub fn set_vuinh(self) -> Self {
         PmuCounterConfigFlags(self.0 | (1 << 3))
     }
 
-    /// Sets the bit-flag to inhibit the counter in VS-mode.
+    /// Returns if the vuinh bit-flag is set.
+    pub fn get_vuinh(&self) -> bool {
+        self.0 & (1 << 3) != 0
+    }
+
+    /// Sets the vsinh bit-flag (inhibit counter in VS-mode).
     pub fn set_vsinh(self) -> Self {
         PmuCounterConfigFlags(self.0 | (1 << 4))
     }
 
-    /// Sets the bit-flag to inhibit the counter in U-mode.
+    /// Returns if the vsinh bit-flag is set.
+    pub fn is_get_vsinh_set(&self) -> bool {
+        self.0 & (1 << 4) != 0
+    }
+
+    /// Sets the uinh bit-flag (inhibit counter in U-mode).
     pub fn set_uinh(self) -> Self {
         PmuCounterConfigFlags(self.0 | (1 << 5))
     }
 
-    /// Sets the bit-flag to inhibit the counter in S-mode.
+    /// Returns if the uinh bit-flag is set.
+    pub fn is_get_uinh_set(&self) -> bool {
+        self.0 & (1 << 5) != 0
+    }
+
+    /// Sets the sinh bit-flag (inhibit counter in S-mode).
     pub fn set_sinh(self) -> Self {
         PmuCounterConfigFlags(self.0 | (1 << 6))
     }
 
-    /// Sets the bit-flag to inhibit the counter in M-mode.
+    /// Returns if the sinh bit-flag is set.
+    pub fn is_get_sinh_set(&self) -> bool {
+        self.0 & (1 << 6) != 0
+    }
+
+    /// Sets the minh bit-flag (inhibit counter in M-mode).
     pub fn set_minh(self) -> Self {
         PmuCounterConfigFlags(self.0 | (1 << 7))
+    }
+
+    /// Returns if the minh bit-flag is set.
+    pub fn is_get_minh_set(&self) -> bool {
+        self.0 & (1 << 7) != 0
     }
 }
 
@@ -134,9 +174,14 @@ impl PmuCounterStartFlags {
         self.0
     }
 
-    /// Sets the bit flag to set the counter to the value specified by initial_value in StartCounters.
+    /// Sets the set_init_value bit-flag (set initial counter value).
     pub fn set_start_set_init_value(self) -> Self {
         PmuCounterStartFlags(self.0 | 1)
+    }
+
+    /// Returns if set_init_value bit-flag is set.
+    pub fn is_start_set_init_value_set(&self) -> bool {
+        self.0 & 1 != 0
     }
 }
 
@@ -159,9 +204,14 @@ impl PmuCounterStopFlags {
         self.0
     }
 
-    /// Sets the bit-flag to reset the counter.
+    /// Sets the stop_reset bit-flag (resets the counter after stopping).
     pub fn set_stop_flag_reset(self) -> Self {
         PmuCounterStopFlags(self.0 | 1)
+    }
+
+    /// Returns if the stop_reset bit flag is set.
+    pub fn is_stop_flag_reset_set(&self) -> bool {
+        self.0 & 1 != 0
     }
 }
 

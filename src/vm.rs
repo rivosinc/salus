@@ -21,7 +21,7 @@ use sbi::*;
 use crate::guest_tracking::{GuestState, Guests};
 use crate::print_util::*;
 use crate::smp;
-use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
+use crate::vm_cpu::{VirtualRegister, VmCpu, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
     ActiveVmPages, InstructionFetchError, PageFaultType, VmPages, VmRegionList,
@@ -406,7 +406,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 use SbiReturnType::*;
                 match exit {
                     VmCpuExit::Ecall(Some(sbi_msg)) => {
-                        match self.handle_ecall(sbi_msg, active_vcpu.active_pages()) {
+                        match self.handle_ecall(sbi_msg, &mut active_vcpu) {
                             EcallAction::LegacyOk => {
                                 active_vcpu.set_ecall_result(Legacy(0));
                             }
@@ -519,9 +519,17 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                             }
                         };
 
-                        // We only emulate WFI for now. Everything else gets redirected as an illegal
-                        // instruction exception.
+                        // We only emulate WFI and Crrss for PMU registers for now. Everything else
+                        // gets redirected as an illegal instruction exception.
                         match inst.instruction() {
+                            // Verify that this is a valid PMU CSR supported by the platform, and return
+                            // either the cached value (stopped counter), or the current value.
+                            Instruction::Csrrs(csr_type) if let Some(gpr_index) = GprIndex::from_raw(csr_type.rd()) &&
+                                let Some(value) = active_vcpu.read_pmu_csr(csr_type.csr().into())  => {
+                                active_vcpu.set_gpr(gpr_index, value);
+                                active_vcpu.inc_sepc(inst.len() as u64);
+                                continue;
+                            }
                             Instruction::Wfi => {
                                 // Just advance SEPC and exit. We place no constraints on when a vCPU
                                 // may be resumed from WFI since, per the privileged spec, it's only
@@ -569,7 +577,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Handles ecalls from the guest.
-    fn handle_ecall(&self, msg: SbiMessage, active_pages: &ActiveVmPages<T>) -> EcallAction {
+    fn handle_ecall(
+        &self,
+        msg: SbiMessage,
+        active_cpu: &mut crate::vm_cpu::ActiveVmCpu<T>,
+    ) -> EcallAction {
         match msg {
             SbiMessage::PutChar(c) => {
                 // put char - legacy command
@@ -582,15 +594,15 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             ),
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
-            SbiMessage::Tee(tee_func) => self.handle_tee_msg(tee_func, active_pages),
+            SbiMessage::Tee(tee_func) => self.handle_tee_msg(tee_func, active_cpu.active_pages()),
             SbiMessage::Attestation(attestation_func) => {
-                self.handle_attestation_msg(attestation_func, active_pages)
+                self.handle_attestation_msg(attestation_func, active_cpu.active_pages())
             }
-            SbiMessage::Pmu(pmu_func) => self.handle_pmu_msg(pmu_func),
+            SbiMessage::Pmu(pmu_func) => self.handle_pmu_msg(pmu_func, active_cpu),
         }
     }
 
-    fn handle_pmu_msg(&self, pmu_func: PmuFunction) -> EcallAction {
+    fn handle_pmu_msg(&self, pmu_func: PmuFunction, active_cpu: &mut VmCpu) -> EcallAction {
         use PmuFunction::*;
         let pmu_info = PmuInfo::get();
         match pmu_func {
@@ -623,7 +635,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                         initial_value,
                     });
                     // Safety: PmuFunction does not touch memory.
-                    unsafe { ecall_send(&msg) }
+                    let result = unsafe { ecall_send(&msg) };
+                    if result.is_ok() && counter_index_base < 32 {
+                        active_cpu.update_started_pmu_counters(counter_index_base, counter_index_mask);
+                    }
+                    result
                 } else {
                     Err(Error::InvalidParam)
                 };
@@ -642,7 +658,18 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                                     stop_flags,
                                 });
                                 // Safety: PmuFunction does not touch memory.
-                                unsafe { ecall_send(&msg) }
+                                match unsafe { ecall_send(&msg) } {
+                                    Ok(_) => {if counter_index_base < 32 {
+                                        active_cpu.update_stopped_pmu_counters(counter_index_base, counter_index_mask);
+                                    }; Ok(0)}
+                                    // Treat already stopped error as success
+                                    Err(e) if matches!(e, Error::AlreadyStopped) => {
+                                        {if counter_index_base < 32 {
+                                            active_cpu.update_stopped_pmu_counters(counter_index_base, counter_index_mask);
+                                        }; Ok(0)}
+                                    },
+                                    Err(e) => Err(e)
+                                }
                         } else {
                             Err(Error::InvalidParam)
                         };
@@ -658,6 +685,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 let result = if let Some(info) =
                     pmu_info.counters_info.get(counter_index_base as usize) && info.1
                 {
+                    // Unwrap ok: We are using the raw value from a valid type
+                    let config_flags = PmuCounterConfigFlags::from_regs(config_flags.raw())
+                        .unwrap()
+                        .set_sinh()
+                        .set_minh();
                     let msg = SbiMessage::Pmu(PmuFunction::ConfigureMatchingCounters {
                         counter_index_base,
                         counter_index_mask,
@@ -666,7 +698,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                         event_data,
                     });
                     // Safety: PmuFunction does not touch memory.
-                   unsafe { ecall_send(&msg)}
+                   let result = unsafe { ecall_send(&msg)};
+                   if let Ok(counter_index) = result && counter_index < 32 {
+                    active_cpu.update_configured_pmu_counters(counter_index, config_flags);
+                   }
+                   result
                 } else {
                     Err(Error::InvalidParam)
                 };

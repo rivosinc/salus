@@ -45,4 +45,11 @@ impl PmuInfo {
     pub fn get() -> &'static PmuInfo {
         PMU_INFO.get().unwrap()
     }
+
+    /// Returns the index of the specified CSR in counters_info array
+    pub fn get_csr_index(&self, csr: u64) -> Option<usize> {
+        self.counters_info
+            .iter()
+            .position(|info| info.1 && info.0.is_hardware_counter() && info.0.get_csr() == csr)
+    }
 }

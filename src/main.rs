@@ -11,6 +11,7 @@
     allocator_api,
     alloc_error_handler,
     lang_items,
+    if_let_guard,
     asm_const,
     const_ptr_offset_from,
     ptr_sub_ptr,

@@ -7,7 +7,7 @@ use const_oid::AssociatedOid;
 use der::asn1::{BitStringRef, OctetStringRef, SequenceOf, SetOf, UIntRef, Utf8StringRef};
 use der::{AnyRef, Decode, Encode};
 use der::{Enumerated, Sequence};
-use ed25519_dalek::{Keypair, Signer};
+use ed25519_dalek::Signer;
 use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo};
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
         pkix::keyusage::{KeyUsage, KeyUsageFlags, KEY_VALUE_EXTENSION_LEN},
         Extension, Extensions,
     },
-    measurement::{AttestationManager, MAX_TCB_INFO_EXTN_LEN},
+    measurement::{AttestationManager, CDI_ID_LEN, MAX_TCB_INFO_EXTN_LEN},
     name::{Name, RdnSequence, RelativeDistinguishedName},
     request::CertReq,
     time::{Time, Validity},
@@ -129,24 +129,24 @@ impl<'a> Certificate<'a> {
     /// Build a certificate from a CSR.
     ///
     /// @csr: The CSR input
-    /// @cdi_id: The CDI identifier of the certificate issuer (e.g. the TSM).
-    /// @key_pair: The ED25519 key pair generated from the CDI.
     /// @attestation_mgr: The attestation manager to provide the DiceTcbInfo extension
     /// @certificate_buffer: A buffer to hold the DER encoded certificate data.
-    pub fn from_csr<D: digest::Digest>(
+    pub fn from_csr<D: digest::Digest, H: hkdf::HmacImpl<D>>(
         csr: &CertReq<'a>,
-        cdi_id: &'a [u8],
-        key_pair: &'a [u8],
-        attestation_mgr: &AttestationManager<D>,
+        attestation_mgr: &AttestationManager<D, H>,
         certificate_buf: &'a mut [u8],
     ) -> Result<&'a [u8]> {
+        let key_pair = attestation_mgr.attestation_key_pair()?;
+        let mut cdi_id = [0u8; CDI_ID_LEN * 2];
+        attestation_mgr.attestation_cdi_id(key_pair.public.as_bytes(), &mut cdi_id)?;
+
         // The serial number is the CDI ID
-        let serial_number = UIntRef::new(cdi_id).map_err(Error::InvalidDer)?;
+        let serial_number = UIntRef::new(&cdi_id).map_err(Error::InvalidDer)?;
 
         // Issuer contains one ATV for one RDN: `SN=<CDI_ID>`
         let issuer_atv = AttributeTypeAndValue {
             oid: const_oid::db::rfc4519::SN,
-            value: AnyRef::from(Utf8StringRef::new(cdi_id).map_err(Error::InvalidDer)?),
+            value: AnyRef::from(Utf8StringRef::new(&cdi_id).map_err(Error::InvalidDer)?),
         };
         let mut atv_set = SetOf::<AttributeTypeAndValue, MAX_CERT_ATV>::new();
         atv_set.add(issuer_atv).map_err(Error::InvalidDer)?;
@@ -220,7 +220,7 @@ impl<'a> Certificate<'a> {
         // This is a non-critical but mandatory extension when using the
         // DiceTcbinfo extension.
         let auth_key_id = AuthorityKeyIdentifier {
-            key_identifier: Some(OctetStringRef::new(cdi_id).map_err(Error::InvalidDer)?),
+            key_identifier: Some(OctetStringRef::new(&cdi_id).map_err(Error::InvalidDer)?),
             authority_cert_issuer: None,
             authority_cert_serial_number: None,
         };
@@ -253,12 +253,11 @@ impl<'a> Certificate<'a> {
         };
 
         // We can now sign the TBS and generate the actual certificate
-        let key = Keypair::from_bytes(key_pair).map_err(|_| Error::InvalidKey)?;
         let mut tbs_bytes_buffer = [0u8; MAX_CERT_LEN];
         let tbs_bytes = tbs_certificate
             .encode_to_slice(&mut tbs_bytes_buffer)
             .map_err(Error::InvalidDer)?;
-        let signature = key.sign(tbs_bytes).to_bytes();
+        let signature = key_pair.sign(tbs_bytes).to_bytes();
 
         let certificate = Certificate {
             tbs_certificate,

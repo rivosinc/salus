@@ -9,104 +9,16 @@
 
 mod consts;
 pub use consts::*;
+mod error;
+pub use error::*;
+mod function;
+pub use function::*;
 
 /// Interfaces for invoking SBI functionality.
 pub mod api;
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use core::arch::asm;
-
-/// Errors passed over the SBI protocol.
-///
-/// Constants from the SBI [spec](https://github.com/riscv-non-isa/riscv-sbi-doc/releases).
-#[repr(i64)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
-    /// Generic failure in execution of the SBI call.
-    Failed = -1,
-    /// Extension or function is not supported.
-    NotSupported = -2,
-    /// Parameter passed isn't valid.
-    InvalidParam = -3,
-    /// Permission denied.
-    Denied = -4,
-    /// Address passed is invalid.
-    InvalidAddress = -5,
-    /// The given hart has already been started.
-    AlreadyAvailable = -6,
-    /// Some of the given counters have already been started.
-    AlreadyStarted = -7,
-    /// Some of the given counters have already been stopped.
-    AlreadyStopped = -8,
-}
-
-impl Error {
-    /// Parse the given error code to an `Error` enum.
-    pub fn from_code(e: i64) -> Self {
-        use Error::*;
-        match e {
-            -1 => Failed,
-            -2 => NotSupported,
-            -3 => InvalidParam,
-            -4 => Denied,
-            -5 => InvalidAddress,
-            -6 => AlreadyAvailable,
-            -7 => AlreadyStarted,
-            -8 => AlreadyStopped,
-            _ => Failed,
-        }
-    }
-}
-
-/// Holds the result of a TEE operation.
-pub type Result<T> = core::result::Result<T, Error>;
-
-/// A Trait for an SbiFunction. Implementers use this trait to specify how to parse from and
-/// serialize into the a0-a7 registers used to make SBI calls.
-pub trait SbiFunction {
-    /// Returns the `u64` value that should be stored in register a6 before making the ecall for
-    /// this function.
-    fn a6(&self) -> u64 {
-        0
-    }
-    /// Returns the `u64` value that should be stored in register a5 before making the ecall for
-    /// this function.
-    fn a5(&self) -> u64 {
-        0
-    }
-    /// Returns the `u64` value that should be stored in register a4 before making the ecall for
-    /// this function.
-    fn a4(&self) -> u64 {
-        0
-    }
-    /// Returns the `u64` value that should be stored in register a3 before making the ecall for
-    /// this function.
-    fn a3(&self) -> u64 {
-        0
-    }
-    /// Returns the `u64` value that should be stored in register a2 before making the ecall for
-    /// this function.
-    fn a2(&self) -> u64 {
-        0
-    }
-    /// Returns the `u64` value that should be stored in register a1 before making the ecall for
-    /// this function.
-    fn a1(&self) -> u64 {
-        0
-    }
-    /// Returns the `u64` value that should be stored in register a0 before making the ecall for
-    /// this function.
-    fn a0(&self) -> u64 {
-        0
-    }
-    /// Returns a result parsed from the a0 and a1 return value registers.
-    fn result(&self, a0: u64, a1: u64) -> Result<u64> {
-        match a0 {
-            0 => Ok(a1),
-            e => Err(Error::from_code(e as i64)),
-        }
-    }
-}
 
 /// Functions defined for the Base extension
 #[derive(Clone, Copy)]

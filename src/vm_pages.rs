@@ -323,16 +323,17 @@ impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
 
 impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
     /// Maps a page into the guest's address space and measures it.
-    pub fn map_page_with_measurement<S, M, D>(
+    pub fn map_page_with_measurement<S, M, D, H>(
         &self,
         to_addr: GuestPageAddr,
         page: Page<S>,
-        measurement: &AttestationManager<D>,
+        measurement: &AttestationManager<D, H>,
     ) -> Result<()>
     where
         S: Mappable<M>,
         M: MeasureRequirement,
         D: digest::Digest,
+        H: hkdf::HmacImpl<D>,
     {
         measurement
             .extend_msmt_register(
@@ -470,14 +471,14 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
 
     /// Copies `count` pages from `src_addr` in the current guest to the converted pages starting at
     /// `from_addr`. The pages are then mapped into the child's address space at `to_addr`.
-    pub fn copy_and_add_data_pages_builder<D: digest::Digest>(
+    pub fn copy_and_add_data_pages_builder<D: digest::Digest, H: hkdf::HmacImpl<D>>(
         &self,
         src_addr: GuestPageAddr,
         from_addr: GuestPageAddr,
         count: u64,
         to: &VmPages<T, VmStateInitializing>,
         to_addr: GuestPageAddr,
-        measurement: &AttestationManager<D>,
+        measurement: &AttestationManager<D, H>,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
         let mapper = to.map_pages(to_addr, count)?;

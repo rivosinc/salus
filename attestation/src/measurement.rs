@@ -3,10 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
-use const_oid::{db::rfc5912::ID_SHA_384, ObjectIdentifier};
+use const_oid::ObjectIdentifier;
+use core::marker::PhantomData;
 use der::Encode;
 use digest::{Digest, OutputSizeUser};
+use ed25519_dalek::{Keypair, SecretKey, SECRET_KEY_LENGTH};
 use generic_array::GenericArray;
+use hkdf::{Hkdf, HmacImpl};
 use spin::RwLock;
 
 use crate::{
@@ -27,6 +30,12 @@ const MSMT_REGISTERS: usize = STATIC_MSMT_REGISTERS + DYNAMIC_MSMT_REGISTERS;
 
 /// Largest possible DiceTcbInfo extension length
 pub const MAX_TCB_INFO_EXTN_LEN: usize = (MSMT_REGISTERS * MAX_FWID_LEN) + MAX_TCB_INFO_HEADER_LEN;
+
+const CDI_LEN: usize = 32;
+
+/// The TVM CDI ID length
+/// The TVM CDI ID is derived from the TSM CDI.
+pub const CDI_ID_LEN: usize = 20;
 
 macro_rules! is_static_measurement {
     ($idx:ident) => {{
@@ -127,14 +136,28 @@ impl<D: Digest> MeasurementRegister<D> {
 
 /// The attestation manager.
 #[derive(Debug)]
-pub struct AttestationManager<D: Digest> {
+pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
     // Measurement registers
     measurements: RwLock<ArrayVec<MeasurementRegister<D>, MSMT_REGISTERS>>,
+
+    // Compound Device Identifier (CDI) for the managed TVM
+    cdi_attest: [u8; CDI_LEN],
+    // CDI ID, a 20 bytes identifier derived from the CDI itself
+    cdi_id: [u8; CDI_ID_LEN],
+
+    _pd: PhantomData<H>,
 }
 
-impl<'a, D: Digest> AttestationManager<D> {
+impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// Create a new attestation manager.
-    pub fn new(hash_algorithm: ObjectIdentifier) -> Self {
+    pub fn new(cdi: &'a [u8], vm_id: u64, hash_algorithm: ObjectIdentifier) -> Result<Self> {
+        // Check that we're using a valid hash function for ed25519.
+        // We need the hash length to be at least as long as an ed25519
+        // secret key (32 bytes).
+        if <D as OutputSizeUser>::output_size() < SECRET_KEY_LENGTH {
+            return Err(Error::DerivedKeyTooShort);
+        }
+
         let mut measurements = ArrayVec::<MeasurementRegister<D>, MSMT_REGISTERS>::new();
 
         for (idx, tcg_pcr) in TCG_PCR_MAPPING.iter().enumerate().take(MSMT_REGISTERS) {
@@ -149,9 +172,33 @@ impl<'a, D: Digest> AttestationManager<D> {
             );
         }
 
-        AttestationManager {
+        // Derive a TVM specific CDI from the TSM CDI.
+        let kdf = Hkdf::<D, H>::new(Some(&vm_id.to_le_bytes()), cdi);
+        let mut cdi_attest = [0u8; CDI_LEN];
+        kdf.expand(b"CDI_Attest", &mut cdi_attest)
+            .map_err(Error::InvalidCdiExpansion)?;
+
+        // Derive a reduced and salted CDI ID from the TVM specific CDI
+        let id_salt: [u8; 64] = [
+            // From the OpenDice implementation.
+            0xDB, 0xDB, 0xAE, 0xBC, 0x80, 0x20, 0xDA, 0x9F, 0xF0, 0xDD, 0x5A, 0x24, 0xC8, 0x3A,
+            0xA5, 0xA5, 0x42, 0x86, 0xDF, 0xC2, 0x63, 0x03, 0x1E, 0x32, 0x9B, 0x4D, 0xA1, 0x48,
+            0x43, 0x06, 0x59, 0xFE, 0x62, 0xCD, 0xB5, 0xB7, 0xE1, 0xE0, 0x0F, 0xC6, 0x80, 0x30,
+            0x67, 0x11, 0xEB, 0x44, 0x4A, 0xF7, 0x72, 0x09, 0x35, 0x94, 0x96, 0xFC, 0xFF, 0x1D,
+            0xB9, 0x52, 0x0B, 0xA5, 0x1C, 0x7B, 0x29, 0xEA,
+        ];
+        let kdf_id = Hkdf::<D, H>::new(Some(&id_salt), &cdi_attest);
+        let mut cdi_id = [0u8; CDI_ID_LEN];
+        kdf_id
+            .expand(b"ID", &mut cdi_id)
+            .map_err(Error::InvalidCdiExpansion)?;
+
+        Ok(AttestationManager {
             measurements: RwLock::new(measurements),
-        }
+            cdi_attest,
+            cdi_id,
+            _pd: PhantomData,
+        })
     }
 
     /// Extend one of the measurement registers.
@@ -204,10 +251,38 @@ impl<'a, D: Digest> AttestationManager<D> {
         extn.encode_to_slice(extn_buf)
             .map_err(Error::InvalidExtensionDer)
     }
-}
 
-impl<D: Digest> Default for AttestationManager<D> {
-    fn default() -> Self {
-        Self::new(ID_SHA_384)
+    /// Generate an asymetric key pair from the attestation CDI.
+    /// This key pair will be used for signing certificates requests coming from TVMs.
+    #[allow(clippy::needless_borrow)]
+    pub fn key_pair(&self) -> Result<Keypair> {
+        // From the OpenDice implementation
+        let asym_salt: [u8; 64] = [
+            0x63, 0xB6, 0xA0, 0x4D, 0x2C, 0x07, 0x7F, 0xC1, 0x0F, 0x63, 0x9F, 0x21, 0xDA, 0x79,
+            0x38, 0x44, 0x35, 0x6C, 0xC2, 0xB0, 0xB4, 0x41, 0xB3, 0xA7, 0x71, 0x24, 0x03, 0x5C,
+            0x03, 0xF8, 0xE1, 0xBE, 0x60, 0x35, 0xD3, 0x1F, 0x28, 0x28, 0x21, 0xA7, 0x45, 0x0A,
+            0x02, 0x22, 0x2A, 0xB1, 0xB3, 0xCF, 0xF1, 0x67, 0x9B, 0x05, 0xAB, 0x1C, 0xA5, 0xD1,
+            0xAF, 0xFB, 0x78, 0x9C, 0xCD, 0x2B, 0x0B, 0x3B,
+        ];
+
+        // First we extract a Pseudo Random Key (PRK) for our private key.
+        let key_pair_bytes = Hkdf::<D, H>::extract(Some(&asym_salt), &self.cdi_attest).0;
+        // We checked that the PRK is long enough when creating the attestation
+        // manager instance.
+        let sk = SecretKey::from_bytes(&key_pair_bytes.as_slice()[..SECRET_KEY_LENGTH])
+            .map_err(Error::InvalidKey)?;
+
+        // The public key is then derived from the secret one.
+        let pk = (&sk).into();
+
+        Ok(Keypair {
+            public: pk,
+            secret: sk,
+        })
+    }
+
+    /// Encode the CDI ID into a UTF-8 slice.
+    pub fn encode_cdi_id(&self, output: &mut [u8]) -> Result<()> {
+        hex::encode_to_slice(self.cdi_id, output).map_err(Error::InvalidCdiId)
     }
 }

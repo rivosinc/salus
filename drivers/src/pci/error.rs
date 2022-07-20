@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::address::{Address, Bus};
-use super::header::HeaderType;
+use super::device::HeaderType;
 
 /// Errors resulting from interacting with PCI devices.
 #[derive(Clone, Copy, Debug)]

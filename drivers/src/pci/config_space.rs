@@ -3,12 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::ops::Range;
+use core::ptr::NonNull;
 
-use data_model::Le32;
 use riscv_pages::SupervisorPageAddr;
 
 use super::address::*;
-use super::header::{Header, HeaderWord};
+use super::device::PciDeviceInfo;
+use super::registers::CommonRegisters;
 
 // See PCI Express Base Specification
 const PCIE_ECAM_FN_SHIFT: u64 = 12;
@@ -56,25 +57,22 @@ impl PciConfigSpace {
         })
     }
 
-    /// Returns the configuration space for the function at the given address if the address is
-    /// valid for this ECAM space.
-    pub fn config_space_for(&self, address: Address) -> Option<PciFuncConfigSpace> {
+    /// Returns a pointer to the configuration space registers for the function at the given address if
+    /// the address is valid for this ECAM space.
+    pub fn registers_for(&self, address: Address) -> Option<NonNull<CommonRegisters>> {
         let offset = self.config_space_offset(address)?;
         if offset.checked_add(PCIE_FUNCTION_CONFIG_SIZE as u64)? > self.config_size {
             return None;
         }
-        // Safety: config_base is guaranteed to be uniquely owned PCI memory by construction and the
-        // range of memory used below is within the owned range as checked.
-        let func_config = unsafe {
-            PciFuncConfigSpace::new(address, (self.config_base.bits() + offset) as *mut Le32)
-        };
-        Some(func_config)
+        NonNull::new((self.config_base.bits() + offset) as *mut CommonRegisters)
     }
 
-    /// Gets a Header object at the given address if it exists.
-    pub fn header_for(&self, address: Address) -> Option<Header> {
-        let func_config = self.config_space_for(address)?;
-        Header::new(&func_config)
+    /// Gets a `PciDeviceInfo` object for the device at `address`, if present.
+    pub fn info_for(&self, address: Address) -> Option<PciDeviceInfo> {
+        // Safety: Each register block in this ECAM space points to a valid (hardware-)initialized
+        // common config space header.
+        let registers = unsafe { self.registers_for(address)?.as_ref() };
+        PciDeviceInfo::read_from(address, registers)
     }
 
     // Returns the range of headers to check based on if this is a multi-function device.
@@ -86,8 +84,8 @@ impl PciConfigSpace {
         if header_addr.function() != Function::default() {
             return 0..0;
         }
-        self.header_for(header_addr)
-            .map(|header| if header.multi_function() { 0..8 } else { 0..1 })
+        self.info_for(header_addr)
+            .map(|info| if info.multi_function() { 0..8 } else { 0..1 })
             .unwrap_or(0..0)
     }
 
@@ -96,52 +94,6 @@ impl PciConfigSpace {
         (address.bits() as u64)
             .checked_sub(Address::bus_address(self.bus_range.start).bits() as u64)
             .map(|a| a << PCIE_ECAM_FN_SHIFT)
-    }
-}
-
-/// The configuration space for a single PCI function. Used to access the registers within the
-/// configuration space of the function.
-pub struct PciFuncConfigSpace {
-    address: Address,
-    base_ptr: *mut Le32,
-}
-
-impl PciFuncConfigSpace {
-    /// Creates a new function config space for the function at `address` with a config space located
-    /// at `base_ptr`.
-    ///
-    /// # Safety
-    ///
-    /// Caller must guarantee that `base_ptr` points to a valid PCIe function config space of length
-    /// `PCIE_FUNCTION_CONFIG_SIZE` and that `PciFunctionConfigSpace` can read and write to that area
-    /// safely.
-    pub unsafe fn new(address: Address, base_ptr: *mut Le32) -> Self {
-        Self { address, base_ptr }
-    }
-
-    /// Returns the PCI bus address of this function.
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    /// Reads a 32-bit value from this function's config space.
-    pub fn read_dword(&self, dword: HeaderWord) -> u32 {
-        unsafe {
-            // Safety: A HeaderWord is guaranteed to be within the bounds of the config region at
-            // self.base_ptr.
-            let dword_ptr = self.base_ptr.add(dword as usize);
-            core::ptr::read_volatile(dword_ptr).to_native()
-        }
-    }
-
-    /// Writes a 32-bit value to this function's config sapce.
-    pub fn write_dword(&mut self, dword: HeaderWord, val: u32) {
-        unsafe {
-            // Safety: A HeaderWord is guaranteed to be within the bounds of the config region at
-            // self.base_ptr.
-            let dword_ptr = self.base_ptr.add(dword as usize);
-            core::ptr::write_volatile(dword_ptr, Le32::from(val))
-        };
     }
 }
 
@@ -208,7 +160,7 @@ pub struct FnIter<'a> {
 }
 
 impl<'a> Iterator for FnIter<'a> {
-    type Item = Header;
+    type Item = PciDeviceInfo;
 
     fn next(&mut self) -> Option<Self::Item> {
         let fn_idx = self.range.next()?;
@@ -220,7 +172,7 @@ impl<'a> Iterator for FnIter<'a> {
             self.dev_addr.device(),
             this_fn,
         );
-        self.config_space.header_for(function_addr)
+        self.config_space.info_for(function_addr)
     }
 }
 
@@ -248,8 +200,8 @@ mod tests {
         );
 
         let first_addr = Address::default();
-        assert!(config_space.header_for(first_addr).is_some());
+        assert!(config_space.info_for(first_addr).is_some());
         let second_address = first_addr.next_function().unwrap();
-        assert!(config_space.header_for(second_address).is_none());
+        assert!(config_space.info_for(second_address).is_none());
     }
 }

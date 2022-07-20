@@ -328,8 +328,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     PcieRoot::get().for_each_device(|dev: &dyn PciDevice| {
         println!(
             "found func {} type: {}",
-            dev.header(),
-            dev.header().header_type()
+            dev.info(),
+            dev.info().header_type()
         );
     });
 

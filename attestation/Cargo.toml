@@ -13,7 +13,9 @@ ed25519 = { version = "1.5.2", default-features = false, features = ["pkcs8"] }
 ed25519-dalek = { version = "1.0.1", default-features = false, features = ["u64_backend"] }
 flagset = "0.4.3"
 generic-array = "0.14.5"
+hex = { version = "0.4.3", default-features = false }
 hkdf = "0.12.3"
+hmac = "0.12.1"
 lazy_static = { version = "1.4.0", default-features = false, features = ["spin_no_std"] }
 spin = { version = "*", default-features = false, features = ["rwlock"] }
 spki = "0.6.0"

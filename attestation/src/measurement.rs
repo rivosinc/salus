@@ -3,10 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
-use const_oid::{db::rfc5912::ID_SHA_384, ObjectIdentifier};
+use const_oid::ObjectIdentifier;
+use core::marker::PhantomData;
 use der::Encode;
 use digest::{Digest, OutputSizeUser};
+use ed25519_dalek::{Keypair, SecretKey, SECRET_KEY_LENGTH};
 use generic_array::GenericArray;
+use hkdf::HmacImpl;
 use spin::RwLock;
 
 use crate::{
@@ -14,6 +17,7 @@ use crate::{
         dice::tcbinfo::{DiceTcbInfo, MAX_FWID_LEN, MAX_TCB_INFO_HEADER_LEN, TCG_DICE_TCB_INFO},
         Extension,
     },
+    kdf::{derive_attestation_cdi, derive_secret_key, extract_cdi},
     Error, Result,
 };
 
@@ -27,6 +31,12 @@ const MSMT_REGISTERS: usize = STATIC_MSMT_REGISTERS + DYNAMIC_MSMT_REGISTERS;
 
 /// Largest possible DiceTcbInfo extension length
 pub const MAX_TCB_INFO_EXTN_LEN: usize = (MSMT_REGISTERS * MAX_FWID_LEN) + MAX_TCB_INFO_HEADER_LEN;
+
+const CDI_LEN: usize = 32;
+
+/// The TVM CDI ID length
+/// The TVM CDI ID is derived from the TSM CDI.
+pub const CDI_ID_LEN: usize = 20;
 
 macro_rules! is_static_measurement {
     ($idx:ident) => {{
@@ -47,6 +57,13 @@ pub enum MeasurementIndex {
     /// Dynamic TVM pages use the first DRTM register (PCR17)
     TvmPageExtension = 4,
 }
+
+#[derive(Clone, Debug)]
+enum AttestationCdi {}
+#[derive(Clone, Debug)]
+enum CsrCdi {}
+#[derive(Clone, Debug)]
+enum SealingCdi {}
 
 const TCG_PCR_MAPPING: [u8; MSMT_REGISTERS] = [
     0,  // TCG PCR 0  - SRTM
@@ -125,16 +142,126 @@ impl<D: Digest> MeasurementRegister<D> {
     }
 }
 
-/// The attestation manager.
-#[derive(Debug)]
-pub struct AttestationManager<D: Digest> {
-    // Measurement registers
-    measurements: RwLock<ArrayVec<MeasurementRegister<D>, MSMT_REGISTERS>>,
+// A CDI builder
+trait CdiBuilder<'a> {
+    // Build the next layer CDI from the current one.
+    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
+        &mut self,
+        tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
+        tci_info: &[u8],
+    ) -> Result<()>;
 }
 
-impl<'a, D: Digest> AttestationManager<D> {
+#[derive(Debug)]
+struct Cdi<T> {
+    // Current layer Compound Device Identifier (CDI)
+    current_cdi: [u8; CDI_LEN],
+
+    // Next layer Compound Device Identifier (CDI)
+    next_cdi: Option<[u8; CDI_LEN]>,
+
+    _pd_t: PhantomData<T>,
+}
+
+impl<'a, T> Cdi<T> {
+    fn new<D: Digest, H: HmacImpl<D>>(cdi: &'a [u8]) -> Result<Self> {
+        // Extract the current CDI from the passed CDI slice.
+        let mut current_cdi = [0u8; CDI_LEN];
+        extract_cdi::<D, H>(cdi, &mut current_cdi)?;
+        Ok(Cdi {
+            current_cdi,
+            next_cdi: None,
+            _pd_t: PhantomData,
+        })
+    }
+
+    fn next_cdi(&'a self) -> Result<&'a [u8]> {
+        if let Some(next_cdi) = &self.next_cdi {
+            return Ok(next_cdi);
+        }
+
+        Err(Error::MissingCdi)
+    }
+}
+
+impl<'a> CdiBuilder<'a> for Cdi<AttestationCdi> {
+    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
+        &mut self,
+        tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
+        tci_info: &[u8],
+    ) -> Result<()> {
+        // We must not build the CDI multiple times.
+        if self.next_cdi.is_some() {
+            return Err(Error::NextCDIAlreadyExists);
+        }
+
+        let mut cdi_attest = [0u8; CDI_LEN];
+        derive_attestation_cdi::<D, H>(
+            &self.current_cdi,
+            Some(tci_info),
+            Some(tci_digest.as_slice()),
+            &mut cdi_attest,
+        )?;
+        self.next_cdi = Some(cdi_attest);
+
+        Ok(())
+    }
+}
+
+impl<'a> CdiBuilder<'a> for Cdi<CsrCdi> {
+    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
+        &mut self,
+        _tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
+        tci_info: &[u8],
+    ) -> Result<()> {
+        // We must not build the CDI multiple times.
+        if self.next_cdi.is_some() {
+            return Err(Error::NextCDIAlreadyExists);
+        }
+
+        let mut cdi_csr = [0u8; CDI_LEN];
+        derive_attestation_cdi::<D, H>(
+            &self.current_cdi,
+            Some(tci_info),
+            None,
+            &mut cdi_csr,
+        )?;
+        self.next_cdi = Some(cdi_csr);
+
+        Ok(())
+    }
+}
+
+/// The attestation manager.
+#[derive(Debug)]
+pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
+    // Measurement registers
+    measurements: RwLock<ArrayVec<MeasurementRegister<D>, MSMT_REGISTERS>>,
+
+    // Attestation Compound Device Identifier (CDI)
+    attestation_cdi: RwLock<Cdi<AttestationCdi>>,
+
+    // Compound Device Identifier (CDI) used for servicing the certificate
+    // signing requests (CSR).
+    // This is a CDI derived from the current CDI and the VM identifier.
+    csr_cdi: RwLock<Cdi<CsrCdi>>,
+
+    // TVM identifier
+    vm_id: u64,
+
+    _pd: PhantomData<H>,
+}
+
+impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// Create a new attestation manager.
-    pub fn new(hash_algorithm: ObjectIdentifier) -> Self {
+    pub fn new(cdi: &'a [u8], vm_id: u64, hash_algorithm: ObjectIdentifier) -> Result<Self> {
+        // Check that we're using a valid hash function for ed25519.
+        // We need the hash length to be at least as long as an ed25519
+        // secret key (32 bytes).
+        if <D as OutputSizeUser>::output_size() < SECRET_KEY_LENGTH {
+            return Err(Error::DerivedKeyTooShort);
+        }
+
         let mut measurements = ArrayVec::<MeasurementRegister<D>, MSMT_REGISTERS>::new();
 
         for (idx, tcg_pcr) in TCG_PCR_MAPPING.iter().enumerate().take(MSMT_REGISTERS) {
@@ -149,9 +276,13 @@ impl<'a, D: Digest> AttestationManager<D> {
             );
         }
 
-        AttestationManager {
+        Ok(AttestationManager {
             measurements: RwLock::new(measurements),
-        }
+            attestation_cdi: RwLock::new(Cdi::new::<D, H>(cdi)?),
+            csr_cdi: RwLock::new(Cdi::new::<D, H>(cdi)?),
+            vm_id,
+            _pd: PhantomData,
+        })
     }
 
     /// Extend one of the measurement registers.
@@ -172,13 +303,35 @@ impl<'a, D: Digest> AttestationManager<D> {
         self.measurements.write()[idx].extend(bytes, address)
     }
 
+    fn attestation_tci(&self) -> GenericArray<u8, <D as OutputSizeUser>::OutputSize> {
+        let mut hasher = D::new();
+        self.measurements
+            .read()
+            .iter()
+            .filter(|m| m.static_measurement)
+            .for_each(|m| hasher.update(m.digest.clone()));
+
+        hasher.finalize()
+    }
+
     /// Finalize locks all measurement registers that must no longer be
     /// extended. This should be called after the platform boot process is
     /// finished in order to only allow for dynamic measurements.
-    pub fn finalize(&self) {
+    pub fn finalize(&self) -> Result<()> {
         for m in self.measurements.write().iter_mut() {
             m.finalize()
         }
+
+        // Build the attestation CDI.
+        self.attestation_cdi
+            .write()
+            .build_next_cdi::<D, H>(self.attestation_tci(), &self.vm_id.to_le_bytes())?;
+
+        // Build the CSR CDI.
+        // The TCI is empty, we only rely on the TSM one.
+        self.csr_cdi
+            .write()
+            .build_next_cdi::<D, H>(D::new().finalize(), &self.vm_id.to_le_bytes())
     }
 
     /// Encode the measured TCB into a DiceTcbInfo extension blob.
@@ -204,10 +357,19 @@ impl<'a, D: Digest> AttestationManager<D> {
         extn.encode_to_slice(extn_buf)
             .map_err(Error::InvalidExtensionDer)
     }
-}
 
-impl<D: Digest> Default for AttestationManager<D> {
-    fn default() -> Self {
-        Self::new(ID_SHA_384)
+    /// Generate an asymetric key pair from the CSR CDI.
+    /// This key pair will be used for signing certificates requests coming from TVMs.
+    #[allow(clippy::needless_borrow)]
+    pub fn csr_key_pair(&self) -> Result<Keypair> {
+        let mut secret_bytes = [0u8; SECRET_KEY_LENGTH];
+        derive_secret_key::<D, H>(&self.attestation_cdi.read().next_cdi()?, &mut secret_bytes)?;
+        let secret = SecretKey::from_bytes(&secret_bytes).map_err(Error::InvalidKey)?;
+
+        // The public key is then derived from the secret one.
+        Ok(Keypair {
+            public: (&secret).into(),
+            secret,
+        })
     }
 }

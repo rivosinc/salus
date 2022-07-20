@@ -10,7 +10,7 @@ use const_oid::{AssociatedOid, ObjectIdentifier};
 use der::asn1::{OctetStringRef, UIntRef};
 use der::Sequence;
 
-pub(crate) const AUTH_KEY_ID_EXTENSION_LEN: usize = 32;
+pub(crate) const AUTH_KEY_ID_EXTENSION_LEN: usize = 64;
 
 /// AuthorityKeyIdentifier as defined in [RFC 5280 Section 4.2.1.1].
 ///

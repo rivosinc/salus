@@ -31,15 +31,19 @@ impl PciBus {
             .ok_or(Error::OutOfBoundsBusNumber(bus_num))?;
         let mut devices = Vec::new();
         for dev in bus_config.devices() {
-            for header in dev.functions() {
+            for info in dev.functions() {
                 // Unwrap ok, if we have a header the config space for the corresponding function
                 // must exist.
-                let func_config = config_space.config_space_for(header.address()).unwrap();
-                let pci_dev = PciDeviceType::new(func_config, header.clone())?;
+                let registers_ptr = config_space.registers_for(info.address()).unwrap();
+                // Safety: We trust that PciConfigSpace returned a valid config space pointer for the
+                // same device as the one referred to by info.address(). We guarantee that the created
+                // device has unique ownership of the register space via the bus enumeration process
+                // by creating at most one device per PCI address.
+                let pci_dev = unsafe { PciDeviceType::new(registers_ptr, info.clone()) }?;
                 let id = device_arena
                     .try_insert(pci_dev)
                     .map_err(|_| Error::AllocError)?;
-                let entry = BusDevice(header.address(), id);
+                let entry = BusDevice(info.address(), id);
                 devices.try_reserve(1).map_err(|_| Error::AllocError)?;
                 devices.push(entry);
             }

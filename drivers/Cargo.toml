@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
+assertions = { path = "../assertions" }
 data_model = { path = "../data-model" }
 device_tree = { path = "../device-tree" }
 hyp_alloc = { path = "../hyp-alloc" }
@@ -14,3 +15,4 @@ page_tracking = { path = "../page-tracking" }
 riscv_pages = { path = "../riscv-pages" }
 riscv_regs = { path = "../riscv-regs" }
 spin = { version = "*", default-features = false, features = ["once"] }
+tock-registers = { version = "0.7" }

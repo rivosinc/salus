@@ -7,10 +7,10 @@ mod bus;
 mod config_space;
 mod device;
 mod error;
-mod header;
+mod registers;
 mod root;
 
-pub use device::PciDevice;
+pub use device::{PciDevice, PciDeviceInfo};
 pub use error::Error as PciError;
 pub use error::Result as PciResult;
 pub use root::{PciBarSpace, PciBarType, PcieRoot};

@@ -5,7 +5,7 @@
 use arrayvec::ArrayString;
 use core::{fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
-use drivers::{CpuId, CpuInfo, Imsic, ImsicGuestId};
+use drivers::{pci::PcieRoot, CpuId, CpuInfo, Imsic, ImsicGuestId};
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList};
 use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::*;
@@ -86,14 +86,15 @@ impl HostDtBuilder {
         // First add a 'soc' subnode of the root.
         let soc_node_id = self.tree.add_node("soc", self.tree.root())?;
         let soc_node = self.tree.get_mut_node(soc_node_id).unwrap();
+        soc_node
+            .add_prop("compatible")?
+            .set_value_str("simple-bus")?;
         soc_node.add_prop("#address-cells")?.set_value_u32(&[2])?;
         soc_node.add_prop("#size-cells")?.set_value_u32(&[2])?;
         soc_node.add_prop("ranges")?;
 
-        // All we have is the IMSIC for now.
         Imsic::get().add_host_imsic_node(&mut self.tree, imsic_addr)?;
-
-        // TODO: Add PCIe nodes.
+        PcieRoot::get().add_host_pcie_node(&mut self.tree)?;
 
         Ok(self)
     }
@@ -284,6 +285,28 @@ impl<T: GuestStagePageTable> HostVmLoader<T> {
                 imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
             }
         }
+
+        // Identity-map the PCIe BAR resources.
+        let pci = PcieRoot::get();
+        for (res_type, range) in pci.bar_spaces() {
+            let gpa =
+                PageAddr::new(RawAddr::guest(range.base().bits(), PageOwnerId::host())).unwrap();
+            // TODO: PCI resources should have their own region type.
+            self.vm
+                .add_confidential_memory_region(gpa, range.length_bytes());
+            let pages = pci.take_bar_space(res_type).unwrap();
+            self.vm.add_pages(gpa, pages);
+        }
+
+        // Set up MMIO emulation for the PCIe config space.
+        let config_mem = pci.config_space();
+        let config_gpa = PageAddr::new(RawAddr::guest(
+            config_mem.base().bits(),
+            PageOwnerId::host(),
+        ))
+        .unwrap();
+        self.vm
+            .add_mmio_region(config_gpa, config_mem.length_bytes());
 
         // Host guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned block,
         // and because we built the HwMemMap with a minimum region alignment of T::TOP_LEVEL_ALIGN

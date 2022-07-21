@@ -378,6 +378,6 @@ impl<T: GuestStagePageTable> HostVmLoader<T> {
                 .unwrap(),
             self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
         );
-        self.vm.finalize()
+        self.vm.finalize().unwrap()
     }
 }

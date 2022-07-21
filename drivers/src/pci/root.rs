@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::alloc::Global;
-use arrayvec::ArrayVec;
+use arrayvec::{ArrayString, ArrayVec};
 use core::marker::PhantomData;
-use device_tree::DeviceTree;
+use device_tree::{DeviceTree, DeviceTreeResult};
 use hyp_alloc::{Arena, ArenaId};
 use page_tracking::HwMemMap;
 use riscv_pages::*;
@@ -43,6 +43,16 @@ pub enum PciBarType {
 
 const MAX_BAR_SPACES: usize = PciBarType::PrefetchableMem64 as usize + 1;
 
+// The number of "PCI address" cells, as specified in the standard PCI binding.
+const PCI_ADDR_CELLS: usize = 3;
+// Number of u32 cells per 'ranges' property in the device tree.
+const CELLS_PER_RANGE: usize = PCI_ADDR_CELLS + 4;
+
+// Format of the first PCI address cell which specifies the type of the resource.
+const PCI_ADDR_PREFETCH_BIT: u32 = 1 << 30;
+const PCI_ADDR_SPACE_CODE_SHIFT: u32 = 24;
+const PCI_ADDR_SPACE_CODE_MASK: u32 = 0x3;
+
 impl PciBarType {
     fn from_index(index: usize) -> Option<Self> {
         use PciBarType::*;
@@ -55,6 +65,46 @@ impl PciBarType {
             _ => None,
         }
     }
+
+    // Reads a PCI BAR resource type from the first cell in a PCI address range.
+    fn from_dt_cell(cell: u32) -> Option<Self> {
+        let prefetchable = (cell & PCI_ADDR_PREFETCH_BIT) != 0;
+        use PciBarType::*;
+        match (cell >> PCI_ADDR_SPACE_CODE_SHIFT) & PCI_ADDR_SPACE_CODE_MASK {
+            0x0 => {
+                // Config space. Ignore it since we already got it from 'reg'.
+                None
+            }
+            0x1 => Some(IoPort),
+            0x2 => {
+                if prefetchable {
+                    Some(PrefetchableMem32)
+                } else {
+                    Some(Mem32)
+                }
+            }
+            0x3 => {
+                if prefetchable {
+                    Some(PrefetchableMem64)
+                } else {
+                    Some(Mem64)
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Returns the PCI address cell used to encode this resource type.
+    fn to_dt_cell(self) -> u32 {
+        use PciBarType::*;
+        match self {
+            IoPort => 0x1 << PCI_ADDR_SPACE_CODE_SHIFT,
+            Mem32 => 0x2 << PCI_ADDR_SPACE_CODE_SHIFT,
+            PrefetchableMem32 => (0x2 << PCI_ADDR_SPACE_CODE_SHIFT) | PCI_ADDR_PREFETCH_BIT,
+            Mem64 => 0x3 << PCI_ADDR_SPACE_CODE_SHIFT,
+            PrefetchableMem64 => (0x3 << PCI_ADDR_SPACE_CODE_SHIFT) | PCI_ADDR_PREFETCH_BIT,
+        }
+    }
 }
 
 /// Describes a PCI BAR space of a particular type.
@@ -63,7 +113,7 @@ struct PciBarSpace {
     addr: SupervisorPageAddr,
     size: u64,
     taken: bool,
-    _pci_addr: u64,
+    pci_addr: u64,
 }
 
 struct PcieRootInner {
@@ -71,7 +121,7 @@ struct PcieRootInner {
     bar_spaces: ArrayVec<Option<PciBarSpace>, MAX_BAR_SPACES>,
     root_bus: PciBus,
     device_arena: PciDeviceArena,
-    _msi_parent_phandle: u32,
+    msi_parent_phandle: u32,
 }
 
 impl PcieRootInner {
@@ -210,38 +260,15 @@ impl PcieRoot {
         for _ in 0..bar_spaces.capacity() {
             bar_spaces.push(None);
         }
-        const PCI_ADDR_CELLS: usize = 3;
-        const CELLS_PER_RANGE: usize = PCI_ADDR_CELLS + 4;
         while ranges.len() >= CELLS_PER_RANGE {
-            // We've already guaranteed there are enough cells for this range.
-            let phys_hi = ranges.next().unwrap();
-
-            // Determine the resource type.
-            const PREFETCH_BIT: u32 = 1 << 30;
-            let prefetchable = (phys_hi & PREFETCH_BIT) != 0;
-            const SPACE_CODE_SHIFT: u32 = 24;
-            const SPACE_CODE_MASK: u32 = 0x3;
-            let resource_type = match (phys_hi >> SPACE_CODE_SHIFT) & SPACE_CODE_MASK {
-                0x0 => {
-                    // Config space. Ignore it since we already got it from 'reg'.
+            // Get the resource type from the first cell. We've already guaranteed there are enough
+            // cells for this range.
+            let resource_type = match PciBarType::from_dt_cell(ranges.next().unwrap()) {
+                Some(r) => r,
+                None => {
+                    ranges.advance_by(CELLS_PER_RANGE - 1).unwrap();
                     continue;
                 }
-                0x1 => PciBarType::IoPort,
-                0x2 => {
-                    if prefetchable {
-                        PciBarType::PrefetchableMem32
-                    } else {
-                        PciBarType::Mem32
-                    }
-                }
-                0x3 => {
-                    if prefetchable {
-                        PciBarType::PrefetchableMem64
-                    } else {
-                        PciBarType::Mem64
-                    }
-                }
-                _ => unreachable!(),
             };
 
             // Next is the PCI address, followed by the CPU address and region size.
@@ -258,7 +285,7 @@ impl PcieRoot {
                 addr,
                 size,
                 taken: false,
-                _pci_addr: pci_addr,
+                pci_addr,
             };
             if bar_spaces[resource_type as usize].is_some() {
                 return Err(Error::DuplicateBarSpace(resource_type));
@@ -283,7 +310,7 @@ impl PcieRoot {
             bar_spaces,
             root_bus,
             device_arena,
-            _msi_parent_phandle: msi_parent_phandle,
+            msi_parent_phandle,
         };
         PCIE_ROOT.call_once(|| Self {
             inner: Mutex::new(inner),
@@ -326,6 +353,70 @@ impl PcieRoot {
         // Safety: We have unique ownership of the memory since we've just taken it from this PcieRoot.
         let iter = unsafe { PciBarPageIter::new(mem_range) };
         Some(iter)
+    }
+
+    /// Adds a node for this PCIe root complex to the host's device tree in `dt`. It's assumed that
+    /// the config space and BAR resources will be identity-mapped into the host VM's guest physical
+    /// address space (i.e. GPA == SPA for the various PCI memory regions). It is up to the caller to
+    /// set up those mappings, however.
+    pub fn add_host_pcie_node(&self, dt: &mut DeviceTree) -> DeviceTreeResult<()> {
+        let inner = self.inner.lock();
+
+        let soc_node_id = dt.iter().find(|n| n.name() == "soc").unwrap().id();
+        let mut pci_name = ArrayString::<32>::new();
+        let config_mem = inner.config_space.mem_range();
+        core::fmt::write(
+            &mut pci_name,
+            format_args!("pci@{:x}", config_mem.base().bits()),
+        )
+        .unwrap();
+        let pci_id = dt.add_node(pci_name.as_str(), Some(soc_node_id))?;
+        let pci_node = dt.get_mut_node(pci_id).unwrap();
+
+        // We forward all properties as-is, or use the values we've assumed while parsing the device
+        // tree (e.g. '#address-cells`). This means that the config space and BAR resources are assumed
+        // to be identity mapped in the host, though it's up to the caller to actually set up the
+        // emulation region and install the mapping. Note that we do not forward 'interrupt-map' and
+        // related properties since we aren't doing legacy INTx emulation.
+        pci_node
+            .add_prop("compatible")?
+            .set_value_str("pci-host-ecam-generic")?;
+        pci_node
+            .add_prop("reg")?
+            .set_value_u64(&[config_mem.base().bits(), config_mem.length_bytes()])?;
+        let mut ranges = ArrayVec::<u32, { CELLS_PER_RANGE * MAX_BAR_SPACES }>::new();
+        for (i, space) in inner
+            .bar_spaces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, space)| space.as_ref().map(|s| (i, s)))
+        {
+            let resource_type = PciBarType::from_index(i).unwrap();
+            ranges.push(resource_type.to_dt_cell());
+            ranges.push((space.pci_addr >> 32) as u32);
+            ranges.push(space.pci_addr as u32);
+            ranges.push((space.addr.bits() >> 32) as u32);
+            ranges.push(space.addr.bits() as u32);
+            ranges.push((space.size >> 32) as u32);
+            ranges.push(space.size as u32);
+        }
+        pci_node.add_prop("ranges")?.set_value_u32(&ranges)?;
+        pci_node.add_prop("device_type")?.set_value_str("pci")?;
+        pci_node.add_prop("dma-coherent")?;
+        pci_node
+            .add_prop("linux,pci-domain")?
+            .set_value_u32(&[inner.config_space.segment().bits()])?;
+        let bus_range = inner.config_space.bus_range();
+        pci_node
+            .add_prop("bus-range")?
+            .set_value_u32(&[bus_range.start.bits(), bus_range.end.bits()])?;
+        pci_node
+            .add_prop("msi-parent")?
+            .set_value_u32(&[inner.msi_parent_phandle])?;
+        pci_node.add_prop("#size-cells")?.set_value_u32(&[2])?;
+        pci_node.add_prop("#address-cells")?.set_value_u32(&[3])?;
+
+        Ok(())
     }
 }
 

@@ -165,6 +165,7 @@ name = "drivers"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "assertions",
  "data_model",
  "device_tree",
  "hyp_alloc",
@@ -172,6 +173,7 @@ dependencies = [
  "riscv_pages",
  "riscv_regs",
  "spin 0.9.3",
+ "tock-registers",
 ]
 
 [[package]]

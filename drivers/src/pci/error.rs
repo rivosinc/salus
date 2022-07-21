@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::address::{Address, Bus};
-use super::header::HeaderType;
+use super::device::HeaderType;
+use super::root::PciBarType;
 
 /// Errors resulting from interacting with PCI devices.
 #[derive(Clone, Copy, Debug)]
@@ -32,8 +33,14 @@ pub enum Error {
     NoRangesProperty,
     /// Too many PCI resource ranges were specified in the device tree's `ranges` property.
     TooManyBarSpaces,
+    /// Multiple PCI resources of the given type were specified in the device tree.
+    DuplicateBarSpace(PciBarType),
     /// The device tree provided an invalid bus number in the `bus-range` property.
     InvalidBusNumber(u32),
+    /// No 'msi-parent' device tree property was specified in the device tree.
+    MissingMsiParent,
+    /// The 'msi-parent' property did not refer to an IMSIC.
+    InvalidMsiParent,
     /// Invalid value in a PCI header at `address`.
     UnsupportedHeaderType(Address, HeaderType),
     /// Bus is not within the bounds of a config space.

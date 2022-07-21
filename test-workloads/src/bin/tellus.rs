@@ -421,9 +421,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             counter_index_mask: 0xffff_ffff,
             stop_flags: PmuCounterStopFlags::default(),
         });
+        // Safety: PmuFunction does not touch memory.
         let result = unsafe { ecall_send(&msg) };
         if result.is_err() {
             println!("StopCounters failed");
+        }
+
+        if read_csr::<0xC02>() != 0 {
+            println!("CSR <0xC02> was non-zero before starting counter");
         }
 
         let start_flags = PmuCounterStartFlags::default().set_start_set_init_value();
@@ -431,15 +436,41 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             counter_index_base,
             counter_index_mask: 0xffff_ffff,
             start_flags,
-            initial_value: 0,
+            initial_value: 0x55aa_55aa,
         });
 
+        // Safety: PmuFunction does not touch memory.
         let result = unsafe { ecall_send(&msg) };
         if result.is_err() {
             println!("StartCounters failed");
         }
-
-        let _ = read_csr::<0xC02>();
+        if read_csr::<0xC02>() == 0 {
+            println!("CSR <0xC02> was zero after starting counter");
+        }
+        let msg = SbiMessage::Pmu(PmuFunction::StopCounters {
+            counter_index_base,
+            counter_index_mask: 0xffff_ffff,
+            stop_flags: PmuCounterStopFlags::default(),
+        });
+        // Safety: PmuFunction does not touch memory.
+        let result = unsafe { ecall_send(&msg) };
+        if result.is_err() {
+            println!("StopCounters failed");
+        }
+        if read_csr::<0xC02>() != read_csr::<0xC02>() {
+            println!("CSR read returned different values after counter was stopped");
+        }
+        let msg = SbiMessage::Pmu(PmuFunction::StartCounters {
+            counter_index_base,
+            counter_index_mask: 0xffff_ffff,
+            start_flags: PmuCounterStartFlags::default(),
+            initial_value: 0,
+        });
+        // Safety: PmuFunction does not touch memory.
+        let result = unsafe { ecall_send(&msg) };
+        if result.is_err() {
+            println!("StartCounters failed");
+        }
     } else {
         println!("Configured counter failed");
     }

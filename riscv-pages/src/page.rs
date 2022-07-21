@@ -278,6 +278,82 @@ impl<AS: AddressSpace> Iterator for PageAddrIter<AS> {
     }
 }
 
+/// A range of Page addresses in an address space.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PageAddrRange<AS: AddressSpace> {
+    base: PageAddr<AS>,
+    page_size: PageSize,
+    num_pages: u64,
+}
+
+impl<AS: AddressSpace> PageAddrRange<AS> {
+    /// Creates a `PageAddrRange` of `num_pages` 4kB pages starting at `base`.
+    pub fn new(base: PageAddr<AS>, num_pages: u64) -> Self {
+        Self {
+            base,
+            page_size: PageSize::Size4k,
+            num_pages,
+        }
+    }
+
+    /// Same as `new()`, but with `page_size`-sized pages.
+    pub fn with_size(base: PageAddr<AS>, num_pages: u64, page_size: PageSize) -> Option<Self> {
+        if !base.is_aligned(page_size) {
+            return None;
+        }
+
+        Some(Self {
+            base,
+            num_pages,
+            page_size,
+        })
+    }
+
+    /// Returns the base address of this range.
+    pub fn base(&self) -> PageAddr<AS> {
+        self.base
+    }
+
+    /// Returns the number of pages in this range.
+    pub fn num_pages(&self) -> u64 {
+        self.num_pages
+    }
+
+    /// Returns the length of the range in bytes.
+    pub fn length_bytes(&self) -> u64 {
+        self.num_pages * self.page_size as u64
+    }
+
+    /// Returns the page size of this range.
+    pub fn page_size(&self) -> PageSize {
+        self.page_size
+    }
+}
+
+impl<AS: AddressSpace> Iterator for PageAddrRange<AS> {
+    type Item = PageAddr<AS>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.num_pages == 0 {
+            return None;
+        }
+        let addr = self.base;
+        self.base = addr.checked_add_pages_with_size(1, self.page_size)?;
+        self.num_pages -= 1;
+        Some(addr)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let num_pages = self.num_pages as usize;
+        (num_pages, Some(num_pages))
+    }
+}
+
+impl<AS: AddressSpace> ExactSizeIterator for PageAddrRange<AS> {}
+
+/// A range of page addresses in the supervisor physical address space.
+pub type SupervisorPageRange = PageAddrRange<SupervisorPhys>;
+
 /// The page number of a page.
 #[derive(Copy, Clone)]
 pub struct Pfn<AS: AddressSpace>(u64, AS);

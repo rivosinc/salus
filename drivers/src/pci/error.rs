@@ -4,6 +4,7 @@
 
 use super::address::{Address, Bus};
 use super::device::HeaderType;
+use super::root::PciBarType;
 
 /// Errors resulting from interacting with PCI devices.
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +33,8 @@ pub enum Error {
     NoRangesProperty,
     /// Too many PCI resource ranges were specified in the device tree's `ranges` property.
     TooManyBarSpaces,
+    /// Multiple PCI resources of the given type were specified in the device tree.
+    DuplicateBarSpace(PciBarType),
     /// The device tree provided an invalid bus number in the `bus-range` property.
     InvalidBusNumber(u32),
     /// Invalid value in a PCI header at `address`.

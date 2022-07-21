@@ -38,6 +38,7 @@ mod tests {
     const NUM_CPUS: u32 = 4;
     const HART_ID_BASE: u32 = 4;
     const PHANDLE_BASE: u32 = 10;
+    const IMSIC_PHANDLE: u32 = 99;
 
     const GUEST_BITS: u32 = 3;
     const GROUP_SHIFT: u32 = 24;
@@ -140,6 +141,11 @@ mod tests {
             .unwrap()
             .set_value_str("riscv,imsics")
             .unwrap();
+        imsic_node
+            .add_prop("phandle")
+            .unwrap()
+            .set_value_u32(&[IMSIC_PHANDLE])
+            .unwrap();
         imsic_node.add_prop("msi-controller").unwrap();
         imsic_node.add_prop("interrupt-controller").unwrap();
         imsic_node
@@ -237,6 +243,7 @@ mod tests {
 
         let imsic = Imsic::get();
         assert_eq!(imsic.guests_per_hart(), (1 << GUEST_BITS as usize) - 1);
+        assert_eq!(imsic.phandle(), IMSIC_PHANDLE);
 
         // Make sure the interrupt file addresses are correct.
         let group0_addr = imsic.base_addr();

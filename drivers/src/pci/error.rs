@@ -37,6 +37,10 @@ pub enum Error {
     DuplicateBarSpace(PciBarType),
     /// The device tree provided an invalid bus number in the `bus-range` property.
     InvalidBusNumber(u32),
+    /// No 'msi-parent' device tree property was specified in the device tree.
+    MissingMsiParent,
+    /// The 'msi-parent' property did not refer to an IMSIC.
+    InvalidMsiParent,
     /// Invalid value in a PCI header at `address`.
     UnsupportedHeaderType(Address, HeaderType),
     /// Bus is not within the bounds of a config space.

@@ -55,7 +55,7 @@ pub enum Error {
     InvalidTcbInfoExtensionDer(der::Error),
 
     /// Invalid Key bytes
-    InvalidKey,
+    InvalidKey(ed25519_dalek::SignatureError),
 
     /// Unsupported signing algorithm
     UnsupportedAlgorithm(const_oid::ObjectIdentifier),
@@ -68,6 +68,15 @@ pub enum Error {
 
     /// Invalid data digest
     InvalidDigest(der::Error),
+
+    /// Failed to expand the CDI
+    InvalidCdiExpansion(hkdf::InvalidLength),
+
+    /// Invalid CDI ID
+    InvalidCdiId(hex::FromHexError),
+
+    /// Derived Key is too short
+    DerivedKeyTooShort,
 }
 
 /// Custom attestation result.

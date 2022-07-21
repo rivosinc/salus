@@ -28,6 +28,13 @@ use crate::vm_pages::{
 };
 use crate::{print, println};
 
+#[derive(Debug)]
+pub enum Error {
+    AttestationManagerCreationFailed(attestation::Error),
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
 // What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
@@ -225,13 +232,21 @@ impl<T: GuestStagePageTable, S> Vm<T, S> {
 
 impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     /// Create a new guest using the given initial page table and vCPU tracking table.
-    pub fn new(vm_pages: VmPages<T, VmStateInitializing>, vcpus: VmCpus) -> Self {
-        Self {
+    pub fn new(vm_pages: VmPages<T, VmStateInitializing>, vcpus: VmCpus) -> Result<Self> {
+        let vm_id = vm_pages.page_owner_id().raw();
+        Ok(Self {
             vcpus,
             vm_pages,
             guests: None,
-            attestation_mgr: AttestationSha384::default(),
-        }
+            attestation_mgr: AttestationSha384::new(
+                // Fake compound device identifier (DICE CDI)
+                // TODO Get the CDI from e.g. the TSM driver.
+                b"THISISARANDOMCDI",
+                vm_id,
+                const_oid::db::rfc5912::ID_SHA_384,
+            )
+            .map_err(Error::AttestationManagerCreationFailed)?,
+        })
     }
 
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
@@ -1112,22 +1127,6 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
         cert_len: usize,
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
-        // Random ed25519 key pair.
-        // TODO: Derive the Salus attestation key pair from the previous layer (e.g. the TSM driver)
-        // public key and measurements
-        // (KeyPair(Salus) = ASYM_KDF(Key(TSM driver), Hash(measurements)))
-        let key_pair: [u8; 64] = [
-            239, 85, 17, 235, 167, 103, 34, 62, 7, 10, 32, 146, 113, 39, 96, 174, 3, 219, 232, 166,
-            240, 121, 167, 13, 98, 238, 122, 116, 193, 114, 215, 213, 175, 181, 75, 166, 224, 164,
-            140, 146, 53, 120, 10, 37, 104, 94, 136, 225, 249, 102, 171, 160, 97, 132, 15, 71, 35,
-            56, 0, 74, 130, 168, 225, 71,
-        ];
-
-        // Fake device identifier (DICE CDI)
-        // TODO: Derive the Salus CDI from the public part of its key pair.
-        // CDI(Salus) = KDF(N, PubKey(Salus), SALT, "ID")
-        let cdi: &[u8] = b"THISISARANDOMCDI";
-
         if csr_len > MAX_CSR_LEN {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
@@ -1151,14 +1150,8 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 
         let cert_gpa = RawAddr::guest(cert_addr, self.vm_pages.page_owner_id());
         let mut cert_bytes_buffer = [0u8; MAX_CERT_LEN];
-        let cert_bytes = Certificate::from_csr(
-            &csr,
-            cdi,
-            &key_pair,
-            &self.attestation_mgr,
-            &mut cert_bytes_buffer,
-        )
-        .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        let cert_bytes = Certificate::from_csr(&csr, &self.attestation_mgr, &mut cert_bytes_buffer)
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let cert_bytes_len = cert_bytes.len();
 
         // Check that the guest gave us enough space
@@ -1283,7 +1276,8 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let mut vm = Vm::new(
             vm_pages,
             VmCpus::new(PageOwnerId::host(), vcpus_pages, page_tracker).unwrap(),
-        );
+        )
+        .unwrap();
         vm.add_guest_tracking_pages(guest_tracking_pages);
 
         let cpu_info = CpuInfo::get();

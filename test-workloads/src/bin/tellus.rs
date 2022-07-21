@@ -15,7 +15,7 @@ use device_tree::Fdt;
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
-use sbi::api::tsm;
+use sbi::api::{reset, tsm};
 use sbi::SbiMessage;
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -41,11 +41,8 @@ pub fn alloc_error(_layout: Layout) -> ! {
 
 /// Powers off this machine.
 pub fn poweroff() -> ! {
-    let msg = SbiMessage::Reset(sbi::ResetFunction::shutdown());
-    // Safety: This ecall doesn't touch memory and will never return.
-    unsafe {
-        ecall_send(&msg).unwrap();
-    }
+    // `shutdown` should not return, so unrapping the result is appropriate.
+    reset::shutdown().unwrap();
 
     abort()
 }

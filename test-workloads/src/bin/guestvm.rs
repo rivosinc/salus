@@ -22,6 +22,7 @@ use attestation::{
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
+use sbi::api::reset;
 use sbi::SbiMessage;
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -179,14 +180,8 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     println!("Exiting guest");
     println!("*****************************************");
 
-    let msg = SbiMessage::Reset(sbi::ResetFunction::Reset {
-        reset_type: sbi::ResetType::Shutdown,
-        reason: sbi::ResetReason::NoReason,
-    });
-    // Safety: Reset terminates this VM.
-    unsafe {
-        ecall_send(&msg).expect("Guest shutdown failed");
-    }
+    reset::reset(sbi::ResetType::Shutdown, sbi::ResetReason::NoReason)
+        .expect("Guest shutdown failed");
     unreachable!();
 }
 

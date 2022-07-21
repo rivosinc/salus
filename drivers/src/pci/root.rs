@@ -418,6 +418,18 @@ impl PcieRoot {
 
         Ok(())
     }
+
+    /// Emulates a read of `len` bytes at `offset` in the config space.
+    pub fn emulate_config_read(&self, _offset: u64, _len: usize) -> u64 {
+        // TODO: Find the device that corresponds to offset and emulate the read. For now, return all
+        // 1's to make it look like no devices are present.
+        !0x0
+    }
+
+    /// Emulates a write of `len` bytes at `offset` in the config space.
+    pub fn emulate_config_write(&self, _offset: u64, _value: u64, _len: usize) {
+        // TODO: Find the device that corresponds to offset and emulate the write.
+    }
 }
 
 /// An iterator over the types of BAR resources for a PCI root complex.

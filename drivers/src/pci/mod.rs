@@ -13,4 +13,4 @@ mod root;
 pub use device::{PciDevice, PciDeviceInfo};
 pub use error::Error as PciError;
 pub use error::Result as PciResult;
-pub use root::{PciBarSpace, PciBarType, PcieRoot};
+pub use root::{PciBarPage, PciBarPageIter, PciBarSpaceIter, PciBarType, PcieRoot};

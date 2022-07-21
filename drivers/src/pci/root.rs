@@ -4,20 +4,18 @@
 
 use alloc::alloc::Global;
 use arrayvec::ArrayVec;
+use core::marker::PhantomData;
 use device_tree::DeviceTree;
 use hyp_alloc::{Arena, ArenaId};
 use page_tracking::HwMemMap;
-use riscv_pages::{DeviceMemType, PageAddr, PageSize, RawAddr, SupervisorPageAddr};
-use spin::Once;
+use riscv_pages::*;
+use spin::{Mutex, Once};
 
 use super::address::*;
 use super::bus::PciBus;
 use super::config_space::PciConfigSpace;
 use super::device::*;
 use super::error::*;
-
-// The maximum number of BAR resources we support at the root complex.
-const MAX_BAR_SPACES: usize = 4;
 
 /// An arena of PCI devices.
 pub type PciDeviceArena = Arena<PciDeviceType, Global>;
@@ -28,56 +26,74 @@ pub type PciDeviceId = ArenaId<PciDeviceType>;
 /// PCI BAR resource types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PciBarType {
-    /// IO space.
-    Io,
+    /// IO port space.
+    IoPort = 0,
     /// 32-bit non-prefetchable memory space.
-    Mem32,
+    Mem32 = 1,
     /// 32-bit prefetchable memory space.
-    PrefetchableMem32,
+    PrefetchableMem32 = 2,
     /// 64-bit non-prefetchable memory space. 64-bit memory spaces are supposed to be prefetchable,
     /// but many device trees (including from QEMU) don't set the prefetch bit.
-    Mem64,
+    Mem64 = 3,
     /// 64-bit prefetchable memory space.
-    PrefetchableMem64,
+    PrefetchableMem64 = 4,
+}
+
+const MAX_BAR_SPACES: usize = PciBarType::PrefetchableMem64 as usize + 1;
+
+impl PciBarType {
+    fn from_index(index: usize) -> Option<Self> {
+        use PciBarType::*;
+        match index {
+            0 => Some(IoPort),
+            1 => Some(Mem32),
+            2 => Some(PrefetchableMem32),
+            3 => Some(Mem64),
+            4 => Some(PrefetchableMem64),
+            _ => None,
+        }
+    }
 }
 
 /// Describes a PCI BAR space of a particular type.
 #[derive(Debug)]
-pub struct PciBarSpace {
-    resource_type: PciBarType,
+struct PciBarSpace {
     addr: SupervisorPageAddr,
     size: u64,
-    pci_addr: u64,
+    taken: bool,
+    _pci_addr: u64,
 }
 
-impl PciBarSpace {
-    /// Returns the type of resource this BAR space maps.
-    pub fn resource_type(&self) -> PciBarType {
-        self.resource_type
-    }
+struct PcieRootInner {
+    config_space: PciConfigSpace,
+    bar_spaces: ArrayVec<Option<PciBarSpace>, MAX_BAR_SPACES>,
+    root_bus: PciBus,
+    device_arena: PciDeviceArena,
+}
 
-    /// Returns the CPU physical address of this BAR space.
-    pub fn addr(&self) -> SupervisorPageAddr {
-        self.addr
-    }
-
-    /// Returns the size of this BAR space.
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    /// Returns the PCI bus address of this BAR space.
-    pub fn pci_addr(&self) -> u64 {
-        self.pci_addr
+impl PcieRootInner {
+    /// Calls `f` for each device on `bus`.
+    fn for_each_device_on<F: FnMut(&dyn PciDevice)>(&self, bus: &PciBus, f: &mut F) {
+        for id in bus.devices() {
+            // If the ID appears on a bus, it must be in the arena.
+            let dev = self.device_arena.get(id).unwrap();
+            match dev {
+                PciDeviceType::Endpoint(ep) => f(ep),
+                PciDeviceType::Bridge(bridge) => {
+                    f(bridge);
+                    // Recrusively walk the buses behind the bridge.
+                    bridge
+                        .child_bus()
+                        .inspect(|b| self.for_each_device_on(b, f));
+                }
+            };
+        }
     }
 }
 
 /// Represents a PCI-Express root complex.
 pub struct PcieRoot {
-    _config_space: PciConfigSpace,
-    bar_spaces: ArrayVec<PciBarSpace, MAX_BAR_SPACES>,
-    root_bus: PciBus,
-    device_arena: PciDeviceArena,
+    inner: Mutex<PcieRootInner>,
 }
 
 static PCIE_ROOT: Once<PcieRoot> = Once::new();
@@ -172,6 +188,9 @@ impl PcieRoot {
             .ok_or(Error::NoRangesProperty)?;
         let mut ranges = ranges_prop.value_u32();
         let mut bar_spaces = ArrayVec::new();
+        for _ in 0..bar_spaces.capacity() {
+            bar_spaces.push(None);
+        }
         const PCI_ADDR_CELLS: usize = 3;
         const CELLS_PER_RANGE: usize = PCI_ADDR_CELLS + 4;
         while ranges.len() >= CELLS_PER_RANGE {
@@ -188,7 +207,7 @@ impl PcieRoot {
                     // Config space. Ignore it since we already got it from 'reg'.
                     continue;
                 }
-                0x1 => PciBarType::Io,
+                0x1 => PciBarType::IoPort,
                 0x2 => {
                     if prefetchable {
                         PciBarType::PrefetchableMem32
@@ -217,14 +236,15 @@ impl PcieRoot {
             }
 
             let bar_space = PciBarSpace {
-                resource_type,
                 addr,
                 size,
-                pci_addr,
+                taken: false,
+                _pci_addr: pci_addr,
             };
-            bar_spaces
-                .try_push(bar_space)
-                .map_err(|_| Error::TooManyBarSpaces)?;
+            if bar_spaces[resource_type as usize].is_some() {
+                return Err(Error::DuplicateBarSpace(resource_type));
+            }
+            bar_spaces[resource_type as usize] = Some(bar_space);
 
             unsafe {
                 // Safety: Have to trust that the device tree points to valid PCI space.
@@ -239,11 +259,14 @@ impl PcieRoot {
         let mut device_arena = PciDeviceArena::new(Global);
         let root_bus = PciBus::enumerate(&config_space, bus_range.start, &mut device_arena)?;
 
-        PCIE_ROOT.call_once(|| Self {
-            _config_space: config_space,
+        let inner = PcieRootInner {
+            config_space,
             bar_spaces,
             root_bus,
             device_arena,
+        };
+        PCIE_ROOT.call_once(|| Self {
+            inner: Mutex::new(inner),
         });
         Ok(())
     }
@@ -256,29 +279,147 @@ impl PcieRoot {
 
     /// Walks the PCIe hierarchy, calling `f` on each device function.
     pub fn for_each_device<F: FnMut(&dyn PciDevice)>(&self, mut f: F) {
-        self.for_each_device_on(&self.root_bus, &mut f)
+        let inner = self.inner.lock();
+        inner.for_each_device_on(&inner.root_bus, &mut f)
     }
 
-    /// Calls `f` for each device on `bus`.
-    fn for_each_device_on<F: FnMut(&dyn PciDevice)>(&self, bus: &PciBus, f: &mut F) {
-        for id in bus.devices() {
-            // If the ID appears on a bus, it must be in the arena.
-            let dev = self.device_arena.get(id).unwrap();
-            match dev {
-                PciDeviceType::Endpoint(ep) => f(ep),
-                PciDeviceType::Bridge(bridge) => {
-                    f(bridge);
-                    // Recrusively walk the buses behind the bridge.
-                    bridge
-                        .child_bus()
-                        .inspect(|b| self.for_each_device_on(b, f));
-                }
-            };
-        }
+    /// Returns the memory range occupied by this root complex's config space.
+    pub fn config_space(&self) -> SupervisorPageRange {
+        self.inner.lock().config_space.mem_range()
     }
 
     /// Returns an iterator over the root's PCI BAR spaces.
-    pub fn bar_spaces(&self) -> core::slice::Iter<PciBarSpace> {
-        self.bar_spaces.iter()
+    pub fn bar_spaces(&self) -> PciBarSpaceIter {
+        PciBarSpaceIter::new(self)
+    }
+
+    /// Takes ownership of the PCI BAR space identified by `resource_type`, returning an iterator over
+    /// the pages occupied by that resource.
+    pub fn take_bar_space(&self, resource_type: PciBarType) -> Option<PciBarPageIter> {
+        let mut inner = self.inner.lock();
+        let space = inner.bar_spaces[resource_type as usize].as_mut()?;
+        if space.taken {
+            return None;
+        }
+        space.taken = true;
+        let mem_range = SupervisorPageRange::new(space.addr, PageSize::num_4k_pages(space.size));
+        // Safety: We have unique ownership of the memory since we've just taken it from this PcieRoot.
+        let iter = unsafe { PciBarPageIter::new(mem_range) };
+        Some(iter)
     }
 }
+
+/// An iterator over the types of BAR resources for a PCI root complex.
+pub struct PciBarSpaceIter<'a> {
+    root: &'a PcieRoot,
+    index: usize,
+}
+
+impl<'a> PciBarSpaceIter<'a> {
+    /// Creates a new iterator over `root`'s BAR resources.
+    fn new(root: &'a PcieRoot) -> Self {
+        Self { root, index: 0 }
+    }
+}
+
+impl<'a> Iterator for PciBarSpaceIter<'a> {
+    type Item = (PciBarType, SupervisorPageRange);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let inner = self.root.inner.lock();
+        while let Some(mem_type) = PciBarType::from_index(self.index) {
+            let i = self.index;
+            self.index += 1;
+            if let Some(ref space) = inner.bar_spaces[i] {
+                let mem_range =
+                    SupervisorPageRange::new(space.addr, PageSize::num_4k_pages(space.size));
+                return Some((mem_type, mem_range));
+            }
+        }
+        None
+    }
+}
+
+/// A `PhysPage` implementation representing a page of a PCI BAR resource.
+pub struct PciBarPage<S: State> {
+    addr: SupervisorPageAddr,
+    state: PhantomData<S>,
+}
+
+impl<S: State> PhysPage for PciBarPage<S> {
+    /// Creates a new `PciBarPage` at the given page-aligned address. Pages are always 4kB.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `addr` refers to a uniquely-owned page of a PCI BAR resource.
+    unsafe fn new_with_size(addr: SupervisorPageAddr, size: PageSize) -> Self {
+        assert_eq!(size, PageSize::Size4k);
+        Self {
+            addr,
+            state: PhantomData,
+        }
+    }
+
+    fn addr(&self) -> SupervisorPageAddr {
+        self.addr
+    }
+
+    fn size(&self) -> PageSize {
+        PageSize::Size4k
+    }
+
+    fn mem_type() -> MemType {
+        MemType::Mmio(DeviceMemType::PciBar)
+    }
+}
+
+// We assume PCI BAR pages are always clean, though in reality they may maintain state depending on
+// the device they map. How that state is wiped is device-dependent however, and we'll need something
+// like the proposed TDISP extension in order to support authenticating and measuring the state of a
+// device. For now, devices are only directly assigned to the host VM.
+impl MappablePhysPage<MeasureOptional> for PciBarPage<MappableClean> {}
+impl AssignablePhysPage<MeasureOptional> for PciBarPage<ConvertedClean> {
+    type MappablePage = PciBarPage<MappableClean>;
+}
+impl ConvertedPhysPage for PciBarPage<ConvertedClean> {
+    type DirtyPage = PciBarPage<ConvertedClean>;
+}
+impl InvalidatedPhysPage for PciBarPage<Invalidated> {}
+impl ReclaimablePhysPage for PciBarPage<ConvertedClean> {
+    type MappablePage = PciBarPage<MappableClean>;
+}
+
+/// An iterator yielding owning references to PCI BAR resources as `PciBarPage`s.
+pub struct PciBarPageIter {
+    mem_range: SupervisorPageRange,
+}
+
+impl PciBarPageIter {
+    /// Creates a new `PciBarPageIter` over `mem_range`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `mem_range` is occupied by a valid PCI BAR resource and that
+    /// the memory in that range is uniquely owned.
+    unsafe fn new(mem_range: SupervisorPageRange) -> Self {
+        Self { mem_range }
+    }
+}
+
+impl Iterator for PciBarPageIter {
+    type Item = PciBarPage<ConvertedClean>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let addr = self.mem_range.next()?;
+        // Safety: The address is guaranteed to be valid and the page it refers to is guaranteed to
+        // be uniquely owned at construction of the PciBarPageIter.
+        let page = unsafe { PciBarPage::new(addr) };
+        Some(page)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.mem_range.size_hint()
+    }
+}
+
+impl ExactSizeIterator for PciBarPageIter {}

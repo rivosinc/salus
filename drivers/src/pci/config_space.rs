@@ -5,7 +5,7 @@
 use core::ops::Range;
 use core::ptr::NonNull;
 
-use riscv_pages::SupervisorPageAddr;
+use riscv_pages::{PageSize, SupervisorPageAddr, SupervisorPageRange};
 
 use super::address::*;
 use super::device::PciDeviceInfo;
@@ -73,6 +73,11 @@ impl PciConfigSpace {
         // common config space header.
         let registers = unsafe { self.registers_for(address)?.as_ref() };
         PciDeviceInfo::read_from(address, registers)
+    }
+
+    /// Returns the memory range occupied by this config space.
+    pub fn mem_range(&self) -> SupervisorPageRange {
+        SupervisorPageRange::new(self.config_base, PageSize::num_4k_pages(self.config_size))
     }
 
     // Returns the range of headers to check based on if this is a multi-function device.

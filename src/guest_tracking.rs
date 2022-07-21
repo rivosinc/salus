@@ -13,12 +13,13 @@ use spin::{Mutex, RwLock, RwLockReadGuard};
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
 
 /// Guest tracking-related errors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Error {
     InsufficientGuestStorage,
     InvalidGuestId,
     GuestInUse,
     GuestNotInitializing,
+    VmFinalizeFailed(crate::vm::Error),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -67,7 +68,7 @@ impl<T: GuestStagePageTable> GuestStateInner<T> {
         let mut temp = Self::Temp;
         core::mem::swap(self, &mut temp);
         let mut running = match temp {
-            Self::Init(v) => Self::Running(v.finalize()),
+            Self::Init(v) => Self::Running(v.finalize().map_err(Error::VmFinalizeFailed)?),
             _ => unreachable!(),
         };
         core::mem::swap(self, &mut running);

@@ -28,6 +28,14 @@ use crate::vm_pages::{
 };
 use crate::{print, println};
 
+#[derive(Debug)]
+pub enum Error {
+    AttestationManagerCreationFailed(attestation::Error),
+    AttestationManagerFinalizeFailed(attestation::Error),
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
 // What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
@@ -225,9 +233,9 @@ impl<T: GuestStagePageTable, S> Vm<T, S> {
 
 impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     /// Create a new guest using the given initial page table and vCPU tracking table.
-    pub fn new(vm_pages: VmPages<T, VmStateInitializing>, vcpus: VmCpus) -> Self {
+    pub fn new(vm_pages: VmPages<T, VmStateInitializing>, vcpus: VmCpus) -> Result<Self> {
         let vm_id = vm_pages.page_owner_id().raw();
-        Self {
+        Ok(Self {
             vcpus,
             vm_pages,
             guests: None,
@@ -238,8 +246,8 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
                 vm_id,
                 const_oid::db::rfc5912::ID_SHA_384,
             )
-            .expect("Failed to create attestation manager"),
-        }
+            .map_err(Error::AttestationManagerCreationFailed)?,
+        })
     }
 
     /// `guests`: A vec for storing guest info if "nested" guests will be created. Must have
@@ -293,14 +301,16 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     }
 
     /// Completes intialization of the `Vm`, returning it in a finalized state.
-    pub fn finalize(self) -> Vm<T, VmStateFinalized> {
-        self.attestation_mgr.finalize();
-        Vm {
+    pub fn finalize(self) -> Result<Vm<T, VmStateFinalized>> {
+        self.attestation_mgr
+            .finalize()
+            .map_err(Error::AttestationManagerFinalizeFailed)?;
+        Ok(Vm {
             vcpus: self.vcpus,
             vm_pages: self.vm_pages.finalize(),
             guests: self.guests,
             attestation_mgr: self.attestation_mgr,
-        }
+        })
     }
 
     /// Destroys this `Vm`.
@@ -1269,7 +1279,8 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
         let mut vm = Vm::new(
             vm_pages,
             VmCpus::new(PageOwnerId::host(), vcpus_pages, page_tracker).unwrap(),
-        );
+        )
+        .unwrap();
         vm.add_guest_tracking_pages(guest_tracking_pages);
 
         let cpu_info = CpuInfo::get();
@@ -1364,10 +1375,10 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     }
 
     /// Completes intialization of the host, returning it in a finalized state.
-    pub fn finalize(self) -> HostVm<T, VmStateFinalized> {
-        HostVm {
-            inner: self.inner.finalize(),
-        }
+    pub fn finalize(self) -> Result<HostVm<T, VmStateFinalized>> {
+        Ok(HostVm {
+            inner: self.inner.finalize()?,
+        })
     }
 }
 

@@ -275,6 +275,7 @@ struct ImsicState {
     guest_index_bits: u32,
     guests_per_hart: usize,
     interrupt_ids: u32,
+    phandle: u32,
 }
 
 impl ImsicState {
@@ -355,6 +356,15 @@ impl Imsic {
             .expect("No 'interrupts-extended' property in IMSIC node");
         // Assumes CPU's #interrupt-cells is 1.
         assert_eq!(interrupts_prop.value_u32().count(), num_cpus * 2);
+
+        // Find the IMSIC's phandle. The PCIe controller will refer to it via 'msi-parent'.
+        let phandle = imsic_node
+            .props()
+            .find(|p| p.name() == "phandle")
+            .expect("No 'phandle' property in IMSIC node")
+            .value_u32()
+            .next()
+            .unwrap();
 
         let interrupt_ids = imsic_node
             .props()
@@ -490,6 +500,7 @@ impl Imsic {
             guest_index_bits,
             guests_per_hart,
             interrupt_ids,
+            phandle,
         };
         IMSIC.call_once(|| Self {
             inner: Mutex::new(imsic),
@@ -551,6 +562,11 @@ impl Imsic {
         Ok(pcpu.base_addr())
     }
 
+    /// Returns the phandle of this IMSIC's node in the device-tree.
+    pub fn phandle(&self) -> u32 {
+        self.inner.lock().phandle
+    }
+
     /// Sends an IPI to the specified CPU.
     pub fn send_ipi(&self, cpu: CpuId) -> Result<()> {
         let addr = self.supervisor_file_addr(cpu)?;
@@ -597,6 +613,9 @@ impl Imsic {
         imsic_node
             .add_prop("compatible")?
             .set_value_str("riscv,imsics")?;
+        imsic_node
+            .add_prop("phandle")?
+            .set_value_u32(&[imsic.phandle])?;
         imsic_node.add_prop("msi-controller")?;
         imsic_node.add_prop("interrupt-controller")?;
         imsic_node

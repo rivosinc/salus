@@ -8,7 +8,7 @@ use attestation::{
 };
 use core::{mem, slice};
 use der::Decode;
-use drivers::{CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
+use drivers::{pci::PcieRoot, CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::*;
@@ -1312,6 +1312,11 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
             .unwrap();
     }
 
+    /// Adds an emulated MMIO region to the host VM.
+    pub fn add_mmio_region(&mut self, addr: GuestPageAddr, len: u64) {
+        self.inner.vm_pages.add_mmio_region(addr, len).unwrap();
+    }
+
     /// Adds data pages that are measured and mapped to the page tables for the host. Requires
     /// that the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
     pub fn add_measured_pages<I, S, M>(&mut self, to_addr: GuestPageAddr, pages: I)
@@ -1380,6 +1385,14 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
     }
 }
 
+/// Errors encountered during MMIO emulation.
+#[derive(Clone, Copy, Debug)]
+enum MmioEmulationError {
+    AccessingVCpuReg,
+    InvalidOpCode(u64),
+    InvalidAddress(u64),
+}
+
 impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
     /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.
     pub fn run(&self, vcpu_id: u64) {
@@ -1414,6 +1427,12 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
                     HartStop => {
                         break;
                     }
+                    MmioPageFault => {
+                        if let Err(e) = self.emulate_mmio(vcpu_id) {
+                            println!("Unhandled MMIO page fault: {:?}", e);
+                            poweroff();
+                        }
+                    }
                     _ => {
                         println!("Unhandled host VM exit; shutting down");
                         poweroff();
@@ -1429,5 +1448,50 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
             self.inner.vcpus.get_vcpu_status(vcpu_id),
             Ok(VmCpuStatus::Runnable)
         )
+    }
+
+    /// Handle an MMIO emulation fault for `vcpu_id`.
+    fn emulate_mmio(&self, vcpu_id: u64) -> core::result::Result<(), MmioEmulationError> {
+        let addr = self
+            .inner
+            .get_vcpu_reg(vcpu_id, TvmCpuRegister::ExitCause0)
+            .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
+        let raw_op = self
+            .inner
+            .get_vcpu_reg(vcpu_id, TvmCpuRegister::ExitCause1)
+            .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
+        let op = TvmMmioOpCode::from_reg(raw_op)
+            .map_err(|_| MmioEmulationError::InvalidOpCode(raw_op))?;
+
+        // For now, the only thing we're emulating is PCI config space.
+        let pci = PcieRoot::get();
+        let offset = addr - pci.config_space().base().bits();
+        if offset > pci.config_space().length_bytes() {
+            return Err(MmioEmulationError::InvalidAddress(addr));
+        }
+        use TvmMmioOpCode::*;
+        let width = match op {
+            Load8 | Load8U | Store8 => 1,
+            Load16 | Load16U | Store16 => 2,
+            Load32 | Load32U | Store32 => 4,
+            Load64 | Store64 => 8,
+        };
+        match op {
+            Load8 | Load8U | Load16 | Load16U | Load32 | Load32U | Load64 => {
+                let val = pci.emulate_config_read(offset, width);
+                self.inner
+                    .set_vcpu_reg(vcpu_id, TvmCpuRegister::MmioLoadValue, val)
+                    .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
+            }
+            Store8 | Store16 | Store32 | Store64 => {
+                let val = self
+                    .inner
+                    .get_vcpu_reg(vcpu_id, TvmCpuRegister::MmioStoreValue)
+                    .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
+                pci.emulate_config_write(offset, val, width);
+            }
+        }
+
+        Ok(())
     }
 }

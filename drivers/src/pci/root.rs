@@ -11,6 +11,8 @@ use page_tracking::HwMemMap;
 use riscv_pages::*;
 use spin::{Mutex, Once};
 
+use crate::Imsic;
+
 use super::address::*;
 use super::bus::PciBus;
 use super::config_space::PciConfigSpace;
@@ -69,6 +71,7 @@ struct PcieRootInner {
     bar_spaces: ArrayVec<Option<PciBarSpace>, MAX_BAR_SPACES>,
     root_bus: PciBus,
     device_arena: PciDeviceArena,
+    _msi_parent_phandle: u32,
 }
 
 impl PcieRootInner {
@@ -141,6 +144,16 @@ impl PcieRoot {
                     config_size,
                 )
                 .map_err(Error::InvalidMmioRegion)?;
+        }
+
+        // Make sure the IMSIC is our MSI controller.
+        let msi_parent_phandle = pci_node
+            .props()
+            .find(|p| p.name() == "msi-parent")
+            .and_then(|p| p.value_u32().next())
+            .ok_or(Error::MissingMsiParent)?;
+        if msi_parent_phandle != Imsic::get().phandle() {
+            return Err(Error::InvalidMsiParent);
         }
 
         // Find the bus range this root complex covers.
@@ -264,6 +277,7 @@ impl PcieRoot {
             bar_spaces,
             root_bus,
             device_arena,
+            _msi_parent_phandle: msi_parent_phandle,
         };
         PCIE_ROOT.call_once(|| Self {
             inner: Mutex::new(inner),

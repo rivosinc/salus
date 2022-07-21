@@ -180,9 +180,15 @@ impl PcieRoot {
                 },
             }
         };
-        // TODO: Segment assignment in the case of multiple PCIe domains.
-        let config_space =
-            PciConfigSpace::new(config_base, config_size, Segment::default(), bus_range);
+
+        // Find the segment number specified in the device tree, if any.
+        let segment = pci_node
+            .props()
+            .find(|p| p.name() == "linux,pci-domain")
+            .and_then(|p| p.value_u32().next())
+            .and_then(|v| Segment::try_from(v).ok())
+            .unwrap_or_default();
+        let config_space = PciConfigSpace::new(config_base, config_size, segment, bus_range);
 
         // Parse the 'ranges' property for the various BAR resources. Assuming '#address-cells' is 3
         // and '#size-cells' is 2, each range is 7x u32 cells:

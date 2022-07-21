@@ -41,6 +41,7 @@ pub enum Error {
     InvalidMapRegion,
     SharedPageNotMapped,
     Measurement(attestation::Error),
+    VmCreationFailed(crate::vm::Error),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -803,7 +804,8 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
             Vm::new(
                 VmPages::new(guest_root, region_vec, self.nesting + 1),
                 VmCpus::new(id, vcpu_pages, self.page_tracker.clone()).unwrap(),
-            ),
+            )
+            .map_err(Error::VmCreationFailed)?,
             box_page,
         ))
     }

@@ -80,6 +80,16 @@ impl PciConfigSpace {
         SupervisorPageRange::new(self.config_base, PageSize::num_4k_pages(self.config_size))
     }
 
+    /// Returns the PCI segment (domain) for this config space.
+    pub fn segment(&self) -> Segment {
+        self.segment
+    }
+
+    /// Returns the PCI bus numbers covered by this config space.
+    pub fn bus_range(&self) -> BusRange {
+        self.bus_range
+    }
+
     // Returns the range of headers to check based on if this is a multi-function device.
     // If no header present: 0..0 don't scan anything.
     // If the header is present and multi-function: 0..8 - Check all the possible headers.

@@ -171,6 +171,8 @@ dependencies = [
  "page_tracking",
  "riscv_pages",
  "riscv_regs",
+ "s_mode_utils",
+ "sbi",
  "spin 0.9.3",
 ]
 

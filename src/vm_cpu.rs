@@ -2,9 +2,13 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::smp::PerCpu;
+use crate::vm::MmioOperation;
+use crate::vm_id::VmId;
+use crate::vm_pages::{ActiveVmPages, VmPages};
 use core::arch::global_asm;
-use core::{mem::size_of, ops::Deref, ops::DerefMut};
-use drivers::{CpuId, CpuInfo, ImsicGuestId};
+use core::{arch::asm, mem::size_of, ops::Deref, ops::DerefMut};
+use drivers::{pmu::PmuInfo, CpuId, CpuInfo, ImsicGuestId};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};
@@ -12,18 +16,17 @@ use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::{
     GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages,
 };
-use riscv_regs::{hstatus, scounteren, sstatus};
+use riscv_regs::{hcounteren, hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
-    PrivilegeLevel, Readable, Trap, Writeable, CSR,
+    PrivilegeLevel, Readable, Trap, Writeable, CSR, CSR_CYCLE, CSR_HPMCOUNTER31,
 };
-use sbi::{SbiMessage, SbiReturnType, TvmMmioOpCode};
+use s_mode_utils::ecall::ecall_send;
+use sbi::{
+    PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuFunction, SbiMessage,
+    SbiReturnType, TvmMmioOpCode,
+};
 use spin::{Mutex, RwLock, RwLockReadGuard};
-
-use crate::smp::PerCpu;
-use crate::vm::MmioOperation;
-use crate::vm_id::VmId;
-use crate::vm_pages::{ActiveVmPages, VmPages};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {
@@ -50,6 +53,7 @@ struct HostCpuState {
     gprs: GeneralPurposeRegisters,
     sstatus: u64,
     hstatus: u64,
+    hcounteren: u64,
     scounteren: u64,
     stvec: u64,
     sscratch: u64,
@@ -64,6 +68,7 @@ struct GuestCpuState {
     fcsr: u64,
     sstatus: u64,
     hstatus: u64,
+    hcounteren: u64,
     scounteren: u64,
     sepc: u64,
 }
@@ -95,6 +100,192 @@ pub struct VmCpuTrapState {
     pub htval: u64,
     pub htinst: u64,
 }
+#[derive(Default)]
+#[repr(C)]
+struct VmPmuState {
+    // Stores values of PMU CSRs
+    pmu_csrs: [u64; 32],
+    // Stores an index into PmuCounterInfo for configured counters (max index is 31)
+    configured_counters: u64,
+    started_counters: u64,
+}
+
+impl VmPmuState {
+    #[inline]
+    fn read_csr<const V: u16>() -> u64 {
+        let r: u64;
+        unsafe {
+            asm!("csrr {rd}, {csr}", rd = out(reg) r, csr = const V);
+        }
+        r
+    }
+
+    fn read_pmu_csr(csr: u64) -> u64 {
+        // These represent the range from CSR_CYCLE - CSR_HPMCOUNTER31
+        match csr {
+            0xC00 => Self::read_csr::<0xC00>(),
+            0xC01 => Self::read_csr::<0xC01>(),
+            0xC02 => Self::read_csr::<0xC02>(),
+            0xC03 => Self::read_csr::<0xC03>(),
+            0xC04 => Self::read_csr::<0xC04>(),
+            0xC05 => Self::read_csr::<0xC05>(),
+            0xC06 => Self::read_csr::<0xC06>(),
+            0xC07 => Self::read_csr::<0xC07>(),
+            0xC08 => Self::read_csr::<0xC08>(),
+            0xC09 => Self::read_csr::<0xC09>(),
+            0xC0A => Self::read_csr::<0xC0A>(),
+            0xC0B => Self::read_csr::<0xC0B>(),
+            0xC0C => Self::read_csr::<0xC0C>(),
+            0xC0D => Self::read_csr::<0xC0D>(),
+            0xC0E => Self::read_csr::<0xC0E>(),
+            0xC0F => Self::read_csr::<0xC0F>(),
+            0xC10 => Self::read_csr::<0xC10>(),
+            0xC11 => Self::read_csr::<0xC11>(),
+            0xC12 => Self::read_csr::<0xC12>(),
+            0xC13 => Self::read_csr::<0xC13>(),
+            0xC14 => Self::read_csr::<0xC14>(),
+            0xC15 => Self::read_csr::<0xC15>(),
+            0xC16 => Self::read_csr::<0xC16>(),
+            0xC17 => Self::read_csr::<0xC17>(),
+            0xC18 => Self::read_csr::<0xC18>(),
+            0xC19 => Self::read_csr::<0xC19>(),
+            0xC1A => Self::read_csr::<0xC1A>(),
+            0xC1B => Self::read_csr::<0xC1B>(),
+            0xC1C => Self::read_csr::<0xC1C>(),
+            0xC1D => Self::read_csr::<0xC1D>(),
+            0xC1E => Self::read_csr::<0xC1E>(),
+            0xC1F => Self::read_csr::<0xC1F>(),
+            _ => 0,
+        }
+    }
+
+    fn gen_counter_mask(high: u64, low: u64) -> u64 {
+        (u64::MAX << low) & (u64::MAX >> (63 - high))
+    }
+
+    fn is_pmu_csr(csr: u64) -> bool {
+        csr >= CSR_CYCLE.into() && csr <= CSR_HPMCOUNTER31.into()
+    }
+
+    // Caches the current value of a PMU CSR
+    fn snapshot_pmu_csr(&mut self, counter_index: u64) {
+        let pmu_info = PmuInfo::get();
+        if let Some(info) = pmu_info.counters_info.get(counter_index as usize) {
+            let counter_info = info.0;
+            let csr = counter_info.get_csr();
+            if Self::is_pmu_csr(csr) {
+                self.pmu_csrs[(csr - Into::<u64>::into(CSR_CYCLE)) as usize] =
+                    Self::read_pmu_csr(csr);
+            }
+        }
+    }
+
+    /// Returns the current or cached value of a PMU CSR.
+    /// The actual CSR value is returned if the counter has been started.
+    pub fn get_pmu_csr_value(&self, csr: u64) -> Option<u64> {
+        let pmu_info = PmuInfo::get();
+        if Self::is_pmu_csr(csr) && let Some(counter_index) = pmu_info.get_csr_index(csr)
+        && counter_index <= 31 {
+            if self.started_counters & (1 << counter_index) != 0 {
+                Some(Self::read_pmu_csr(csr))
+            } else {
+                Some(self.pmu_csrs[(csr - Into::<u64>::into(CSR_CYCLE)) as usize])
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Updates the state for configured PMU counters.
+    /// This is intended to be called after a successful SBI invocation for configuring PMU counters.
+    pub fn update_configured_pmu_counters(
+        &mut self,
+        counter_index: u64,
+        config_flags: PmuCounterConfigFlags,
+    ) {
+        let pmu_info = PmuInfo::get();
+        if counter_index <= 31 &&
+        let Some(info) = pmu_info.counters_info.get(counter_index as usize) &&
+        info.0.is_hardware_counter() {
+            self.configured_counters |= 1 << counter_index;
+            if config_flags.is_auto_start_set() {
+                self.started_counters |= 1 << counter_index;
+            }
+        }
+    }
+
+    /// Updates the state for started PMU counters.
+    /// This is intended to be called after a successful SBI invocation for starting PMU counters.
+    pub fn update_started_pmu_counters(&mut self, counter_index: u64, counter_mask: u64) {
+        if counter_index <= 31 && self.configured_counters != 0 {
+            for i in counter_index..=31 {
+                if self.configured_counters & (1 << i) != 0 && (i & counter_mask) != 0 {
+                    self.started_counters |= 1 << i;
+                }
+            }
+        }
+    }
+
+    /// Updates the bitmap for started PMU counters
+    /// This is intended to be called after a successful SBI invocation for stopping PMU counters.
+    pub fn update_stopped_pmu_counters(&mut self, counter_index: u64, counter_mask: u64) {
+        if counter_index <= 31 && self.started_counters != 0 {
+            for i in counter_index.max(self.started_counters.trailing_zeros().into())..=31 {
+                if self.started_counters & (1 << i) != 0 && (i & counter_mask) != 0 {
+                    self.started_counters &= !(1 << i);
+                    self.snapshot_pmu_csr(i);
+                }
+            }
+        }
+    }
+
+    /// Starts previously started counters using the last captured value as the initial value.
+    /// This is intended to be called in of anticipation of an in-bound context switch.
+    pub fn restore_started_counters(&mut self) {
+        if self.started_counters != 0 {
+            let pmu_info = PmuInfo::get();
+            for counter_index in self.started_counters.trailing_zeros()..=31 {
+                if self.started_counters & (1 << counter_index) != 0
+                && let Some(info) = pmu_info.counters_info.get(counter_index as usize) {
+                    let counter_info = info.0;
+                    let csr = counter_info.get_csr();
+                    if Self::is_pmu_csr(csr) {
+                        let msg = SbiMessage::Pmu(PmuFunction::StartCounters {
+                            counter_index_base : counter_index.into(),
+                            counter_index_mask: Self::gen_counter_mask(counter_index.into(), 0),
+                            start_flags : PmuCounterStartFlags::default().set_start_set_init_value(),
+                            initial_value : self.pmu_csrs[(csr - Into::<u64>::into(CSR_CYCLE)) as usize],
+                        });
+                        // Safety: PmuFunction does not touch memory.
+                        // Ignore errors since we can't do anything about them.
+                        let _ = unsafe { ecall_send(&msg) };
+                    }
+                }
+            }
+        }
+    }
+
+    /// Captures the current CSR value of started counters, after stopping them.
+    /// This is intended to be called in anticipation of out-bound context switch.
+    pub fn save_started_counters(&mut self) {
+        if self.started_counters != 0 {
+            // Stop all counters
+            let msg = SbiMessage::Pmu(PmuFunction::StopCounters {
+                counter_index_base: 0,
+                counter_index_mask: 0xffff_ffff,
+                stop_flags: PmuCounterStopFlags::default(),
+            });
+            // Safety: PmuFunction does not touch memory.
+            // Ignore errors since we can't do anything about them.
+            let _ = unsafe { ecall_send(&msg) };
+            for counter_index in self.started_counters.trailing_zeros()..=31 {
+                if self.started_counters & (1 << counter_index) != 0 {
+                    self.snapshot_pmu_csr(counter_index.into());
+                }
+            }
+        }
+    }
+}
 
 /// (v)CPU register state that must be saved or restored when entering/exiting a VM or switching
 /// between VMs.
@@ -105,6 +296,7 @@ struct VmCpuState {
     guest_regs: GuestCpuState,
     guest_vcpu_csrs: GuestVCpuState,
     trap_csrs: VmCpuTrapState,
+    pmu_state: VmPmuState,
 }
 
 // The vCPU context switch, defined in guest.S
@@ -169,6 +361,7 @@ global_asm!(
     host_sp = const host_gpr_offset(GprIndex::SP),
     host_sstatus = const host_csr_offset!(sstatus),
     host_hstatus = const host_csr_offset!(hstatus),
+    host_hcounteren = const host_csr_offset!(hcounteren),
     host_scounteren = const host_csr_offset!(scounteren),
     host_stvec = const host_csr_offset!(stvec),
     host_sscratch = const host_csr_offset!(sscratch),
@@ -240,6 +433,7 @@ global_asm!(
     sstatus_fs_clean = const sstatus::fs::Clean.value,
     guest_sstatus = const guest_csr_offset!(sstatus),
     guest_hstatus = const guest_csr_offset!(hstatus),
+    guest_hcounteren = const guest_csr_offset!(hcounteren),
     guest_scounteren = const guest_csr_offset!(scounteren),
     guest_sepc = const guest_csr_offset!(sepc),
 );
@@ -292,6 +486,8 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
             CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
         }
 
+        self.state.pmu_state.restore_started_counters();
+
         // TODO, HGEIE programinng:
         //  - Track which guests the host wants interrupts from (by trapping HGEIE accesses from
         //    VS level) and update HGEIE[2:] appropriately.
@@ -327,6 +523,8 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
         if CpuInfo::get().has_sstc() {
             self.state.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
         }
+
+        self.state.pmu_state.save_started_counters();
 
         // Determine the exit cause from the trap CSRs.
         use Exception::*;
@@ -495,16 +693,16 @@ impl VmCpu {
             hstatus.modify(hstatus::vtw.val(1));
         }
         state.guest_regs.hstatus = hstatus.get();
-
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
         sstatus.modify(sstatus::spp::Supervisor);
         sstatus.modify(sstatus::fs::Initial);
         state.guest_regs.sstatus = sstatus.get();
 
-        let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);
-        scounteren.modify(scounteren::cycle.val(1));
-        scounteren.modify(scounteren::time.val(1));
-        scounteren.modify(scounteren::instret.val(1));
+        // Trap on guest acccess to all counters
+        let hcounteren = LocalRegisterCopy::<u64, hcounteren::Register>::new(0);
+        state.guest_regs.hcounteren = hcounteren.get();
+
+        let scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);
         state.guest_regs.scounteren = scounteren.get();
 
         Self {
@@ -686,6 +884,40 @@ impl VmCpu {
             vcpu: self,
             active_pages,
         })
+    }
+
+    /// Updates the state for configured PMU counters.
+    /// This is intended to be called after a successful SBI invocation for configuring PMU counters.
+    pub fn update_configured_pmu_counters(
+        &mut self,
+        counter_index: u64,
+        config_flags: PmuCounterConfigFlags,
+    ) {
+        self.state
+            .pmu_state
+            .update_configured_pmu_counters(counter_index, config_flags);
+    }
+
+    /// Updates the internal state for started PMU counters.
+    /// This is intended to be called after a successful SBI invocation for configuring PMU counters.
+    pub fn update_started_pmu_counters(&mut self, counter_index: u64, counter_mask: u64) {
+        self.state
+            .pmu_state
+            .update_started_pmu_counters(counter_index, counter_mask);
+    }
+
+    /// Updates the internal state for stopped PMU counters.
+    /// This is intended to be called after a successful SBI invocation for stopping PMU counters.
+    pub fn update_stopped_pmu_counters(&mut self, counter_index: u64, counter_mask: u64) {
+        self.state
+            .pmu_state
+            .update_stopped_pmu_counters(counter_index, counter_mask);
+    }
+
+    /// Returns the current or cached value of a PMU CSR.
+    /// The actual CSR value is returned if the counter has been started.
+    pub fn read_pmu_csr(&self, csr: u64) -> Option<u64> {
+        self.state.pmu_state.get_pmu_csr_value(csr)
     }
 }
 

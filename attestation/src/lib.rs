@@ -68,6 +68,9 @@ pub enum Error {
 
     /// Invalid data digest
     InvalidDigest(der::Error),
+
+    /// Failed to expand the CDI
+    InvalidCdiExpansion(hkdf::InvalidLength),
 }
 
 /// Custom attestation result.
@@ -150,6 +153,8 @@ mod attr;
 pub mod certificate;
 /// x.509 certificate extensions
 pub mod extensions;
+/// Key Derivation Function module
+mod kdf;
 /// TCB layer measurement module
 pub mod measurement;
 mod name;

@@ -29,6 +29,10 @@ pub use state::*;
 mod tsm;
 pub use tsm::*;
 
+// The PMU SBI extension
+mod pmu;
+pub use pmu::*;
+
 /// Interfaces for invoking SBI functionality.
 pub mod api;
 
@@ -106,6 +110,8 @@ pub enum SbiMessage {
     Tee(TeeFunction),
     /// The extension for getting attestation evidences and extending measurements.
     Attestation(AttestationFunction),
+    /// The extension for getting performance counter state.
+    Pmu(PmuFunction),
 }
 
 impl SbiMessage {
@@ -120,6 +126,7 @@ impl SbiMessage {
             EXT_RESET => ResetFunction::from_regs(args).map(SbiMessage::Reset),
             EXT_TEE => TeeFunction::from_regs(args).map(SbiMessage::Tee),
             EXT_ATTESTATION => AttestationFunction::from_regs(args).map(SbiMessage::Attestation),
+            EXT_PMU => PmuFunction::from_regs(args).map(SbiMessage::Pmu),
             _ => Err(Error::NotSupported),
         }
     }
@@ -133,6 +140,7 @@ impl SbiMessage {
             SbiMessage::Reset(_) => EXT_RESET,
             SbiMessage::Tee(_) => EXT_TEE,
             SbiMessage::Attestation(_) => EXT_ATTESTATION,
+            SbiMessage::Pmu(_) => EXT_PMU,
         }
     }
 
@@ -145,6 +153,7 @@ impl SbiMessage {
             SbiMessage::Reset(_) => 0,
             SbiMessage::Tee(f) => f.a6(),
             SbiMessage::Attestation(f) => f.a6(),
+            SbiMessage::Pmu(f) => f.a6(),
         }
     }
 
@@ -152,6 +161,7 @@ impl SbiMessage {
     pub fn a5(&self) -> u64 {
         match self {
             SbiMessage::Tee(f) => f.a5(),
+            SbiMessage::Pmu(f) => f.a5(),
             _ => 0,
         }
     }
@@ -160,6 +170,7 @@ impl SbiMessage {
     pub fn a4(&self) -> u64 {
         match self {
             SbiMessage::Tee(f) => f.a4(),
+            SbiMessage::Pmu(f) => f.a4(),
             _ => 0,
         }
     }
@@ -169,6 +180,7 @@ impl SbiMessage {
         match self {
             SbiMessage::Tee(f) => f.a3(),
             SbiMessage::Attestation(f) => f.a3(),
+            SbiMessage::Pmu(f) => f.a3(),
             _ => 0,
         }
     }
@@ -179,6 +191,7 @@ impl SbiMessage {
             SbiMessage::HartState(f) => f.a2(),
             SbiMessage::Tee(f) => f.a2(),
             SbiMessage::Attestation(f) => f.a2(),
+            SbiMessage::Pmu(f) => f.a2(),
             _ => 0,
         }
     }
@@ -190,6 +203,7 @@ impl SbiMessage {
             SbiMessage::HartState(f) => f.a1(),
             SbiMessage::Tee(f) => f.a1(),
             SbiMessage::Attestation(f) => f.a1(),
+            SbiMessage::Pmu(f) => f.a1(),
             _ => 0,
         }
     }
@@ -202,6 +216,7 @@ impl SbiMessage {
             SbiMessage::HartState(f) => f.a0(),
             SbiMessage::Tee(f) => f.a0(),
             SbiMessage::Attestation(f) => f.a0(),
+            SbiMessage::Pmu(f) => f.a0(),
             _ => 0,
         }
     }

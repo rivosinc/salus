@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use super::address::*;
 use super::config_space::PciConfigSpace;
-use super::device::PciDeviceType;
+use super::device::PciDevice;
 use super::error::*;
 use super::root::{PciDeviceArena, PciDeviceId};
 
@@ -39,7 +39,7 @@ impl PciBus {
                 // same device as the one referred to by info.address(). We guarantee that the created
                 // device has unique ownership of the register space via the bus enumeration process
                 // by creating at most one device per PCI address.
-                let pci_dev = unsafe { PciDeviceType::new(registers_ptr, info.clone()) }?;
+                let pci_dev = unsafe { PciDevice::new(registers_ptr, info.clone()) }?;
                 let id = device_arena
                     .try_insert(pci_dev)
                     .map_err(|_| Error::AllocError)?;
@@ -55,7 +55,7 @@ impl PciBus {
             let bridge_id = bd.1;
             let sec_bus = cur_bus.next().ok_or(Error::OutOfBuses)?;
             match device_arena.get_mut(bridge_id) {
-                Some(PciDeviceType::Bridge(bridge)) => {
+                Some(PciDevice::Bridge(bridge)) => {
                     // Set the bridge to cover everything beyond sec_bus until we've enumerated
                     // the buses behind the bridge.
                     bridge.assign_bus_range(BusRange {
@@ -72,7 +72,7 @@ impl PciBus {
             // Avoid double mutable borrow of device_arena by re-acquiring the reference to the bridge
             // device here. PciBus::enumerate() may have added devices and re-allocated the arena.
             match device_arena.get_mut(bridge_id) {
-                Some(PciDeviceType::Bridge(bridge)) => {
+                Some(PciDevice::Bridge(bridge)) => {
                     // Now constrain the bus assignment to only the buses we enumerated.
                     bridge.assign_bus_range(BusRange {
                         start: sec_bus,

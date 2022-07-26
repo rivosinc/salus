@@ -146,17 +146,6 @@ impl core::fmt::Display for PciDeviceInfo {
     }
 }
 
-/// Common functionality implemented by PCI devices, regardless of type.
-pub trait PciDevice {
-    /// Returns the `PciDeviceInfo` structure read from the config space of this device.
-    fn info(&self) -> &PciDeviceInfo;
-
-    /// Returns the PCI bus address of this device.
-    fn address(&self) -> Address {
-        self.info().address()
-    }
-}
-
 /// Represents a PCI endpoint.
 pub struct PciEndpoint {
     _registers: &'static mut EndpointRegisters,
@@ -170,12 +159,6 @@ impl PciEndpoint {
             _registers: registers,
             info,
         })
-    }
-}
-
-impl PciDevice for PciEndpoint {
-    fn info(&self) -> &PciDeviceInfo {
-        &self.info
     }
 }
 
@@ -208,9 +191,8 @@ impl PciBridge {
     pub fn assign_bus_range(&mut self, range: BusRange) {
         self.registers.sub_bus.set(range.end.bits() as u8);
         self.registers.sec_bus.set(range.start.bits() as u8);
-        self.registers
-            .pri_bus
-            .set(self.address().bus().bits() as u8);
+        let pri_bus = self.info.address().bus();
+        self.registers.pri_bus.set(pri_bus.bits() as u8);
         self.bus_range = range;
     }
 
@@ -225,22 +207,16 @@ impl PciBridge {
     }
 }
 
-impl PciDevice for PciBridge {
-    fn info(&self) -> &PciDeviceInfo {
-        &self.info
-    }
-}
-
-/// The top-level PCI device types.
-pub enum PciDeviceType {
+/// Represents a single PCI device.
+pub enum PciDevice {
     /// A function endpoint (type 0) device.
     Endpoint(PciEndpoint),
     /// A bridge (type 1) device.
     Bridge(PciBridge),
 }
 
-impl PciDeviceType {
-    /// Creates a `PciDeviceType` from a function config space.
+impl PciDevice {
+    /// Creates a `PciDevice` from a function config space.
     ///
     /// # Safety
     ///
@@ -254,22 +230,30 @@ impl PciDeviceType {
             HeaderType::Endpoint => {
                 let registers = registers_ptr.cast().as_mut();
                 let ep = PciEndpoint::new(registers, info)?;
-                Ok(PciDeviceType::Endpoint(ep))
+                Ok(PciDevice::Endpoint(ep))
             }
             HeaderType::PciBridge => {
                 let registers = registers_ptr.cast().as_mut();
                 let bridge = PciBridge::new(registers, info)?;
-                Ok(PciDeviceType::Bridge(bridge))
+                Ok(PciDevice::Bridge(bridge))
             }
             h => Err(Error::UnsupportedHeaderType(info.address(), h)),
+        }
+    }
+
+    /// Returns the `PciDeviceInfo` for this device.
+    pub fn info(&self) -> &PciDeviceInfo {
+        match self {
+            PciDevice::Endpoint(ep) => &ep.info,
+            PciDevice::Bridge(bridge) => &bridge.info,
         }
     }
 }
 
 // PciEndpoint and PciBridge hold raw pointers to their config spaces. Access to that config space is
 // done through their respective interfaces which allow them to be shared and sent between threads.
-unsafe impl Send for PciDeviceType {}
-unsafe impl Sync for PciDeviceType {}
+unsafe impl Send for PciDevice {}
+unsafe impl Sync for PciDevice {}
 
 #[cfg(test)]
 mod tests {

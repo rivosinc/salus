@@ -20,10 +20,10 @@ use super::device::*;
 use super::error::*;
 
 /// An arena of PCI devices.
-pub type PciDeviceArena = Arena<PciDeviceType, Global>;
+pub type PciDeviceArena = Arena<PciDevice, Global>;
 
 /// Identifiers in the PCI device arena.
-pub type PciDeviceId = ArenaId<PciDeviceType>;
+pub type PciDeviceId = ArenaId<PciDevice>;
 
 /// PCI BAR resource types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,19 +126,16 @@ struct PcieRootInner {
 
 impl PcieRootInner {
     /// Calls `f` for each device on `bus`.
-    fn for_each_device_on<F: FnMut(&dyn PciDevice)>(&self, bus: &PciBus, f: &mut F) {
+    fn for_each_device_on<F: FnMut(&PciDevice)>(&self, bus: &PciBus, f: &mut F) {
         for id in bus.devices() {
             // If the ID appears on a bus, it must be in the arena.
             let dev = self.device_arena.get(id).unwrap();
-            match dev {
-                PciDeviceType::Endpoint(ep) => f(ep),
-                PciDeviceType::Bridge(bridge) => {
-                    f(bridge);
-                    // Recrusively walk the buses behind the bridge.
-                    bridge
-                        .child_bus()
-                        .inspect(|b| self.for_each_device_on(b, f));
-                }
+            f(dev);
+            if let PciDevice::Bridge(bridge) = dev {
+                // Recrusively walk the buses behind the bridge.
+                bridge
+                    .child_bus()
+                    .inspect(|b| self.for_each_device_on(b, f));
             };
         }
     }
@@ -325,7 +322,7 @@ impl PcieRoot {
     }
 
     /// Walks the PCIe hierarchy, calling `f` on each device function.
-    pub fn for_each_device<F: FnMut(&dyn PciDevice)>(&self, mut f: F) {
+    pub fn for_each_device<F: FnMut(&PciDevice)>(&self, mut f: F) {
         let inner = self.inner.lock();
         inner.for_each_device_on(&inner.root_bus, &mut f)
     }

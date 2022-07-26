@@ -34,7 +34,7 @@ mod vm_id;
 mod vm_pages;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{pci::PciDevice, pci::PcieRoot, CpuInfo, Imsic};
+use drivers::{pci::PcieRoot, CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;
@@ -325,7 +325,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Probe for a PCI bus.
     PcieRoot::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up PCIe");
-    PcieRoot::get().for_each_device(|dev: &dyn PciDevice| {
+    PcieRoot::get().for_each_device(|dev| {
         println!(
             "found func {} type: {}",
             dev.info(),

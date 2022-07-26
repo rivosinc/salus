@@ -82,7 +82,7 @@ pub enum Error {
     MissingCdi,
 
     /// Next layer CDI is already built
-    NextCDIAlreadyExists
+    NextCDIAlreadyExists,
 }
 
 /// Custom attestation result.

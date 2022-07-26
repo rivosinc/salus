@@ -240,9 +240,10 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
             vm_pages,
             guests: None,
             attestation_mgr: AttestationSha384::new(
-                // Fake compound device identifier (DICE CDI)
+                // Fake compound device identifiers (DICE CDI)
                 // TODO Get the CDI from e.g. the TSM driver.
-                b"THISISARANDOMCDI",
+                b"RANDOMATTESTATIONCDI",
+                b"RANDOMSEALINGCDI",
                 vm_id,
                 const_oid::db::rfc5912::ID_SHA_384,
             )

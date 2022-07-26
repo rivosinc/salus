@@ -17,7 +17,7 @@ use crate::{
         dice::tcbinfo::{DiceTcbInfo, MAX_FWID_LEN, MAX_TCB_INFO_HEADER_LEN, TCG_DICE_TCB_INFO},
         Extension,
     },
-    kdf::{derive_attestation_cdi, derive_secret_key, extract_cdi},
+    kdf::{derive_attestation_cdi, derive_sealing_cdi, derive_secret_key, extract_cdi},
     Error, Result,
 };
 
@@ -48,9 +48,22 @@ macro_rules! is_static_measurement {
     }};
 }
 
+macro_rules! is_stable_measurement {
+    ($pcr:ident) => {{
+        if *$pcr == MeasurementIndex::PlatformConfig as u8 {
+            false
+        } else {
+            true
+        }
+    }};
+}
+
 /// Measurement register indexes aliases.
 #[repr(u8)]
 pub enum MeasurementIndex {
+    /// Platform configuration measurement (PCR 1)
+    PlatformConfig = 1,
+
     /// TVM pages extend the first OS measurement register (PCR 8)
     TvmPage = 2,
 
@@ -97,6 +110,12 @@ struct MeasurementRegister<D: Digest> {
     // to `extend` fail.
     static_measurement: bool,
 
+    // For a given workload, a stable measurement register must not change
+    // between boots. If it does change, this means the workload TCB actually
+    // changed. For example, a platform config measurement is not stable, while
+    // an OS one is.
+    stable: bool,
+
     // The measured data hash algorithm.
     hash_algorithm: ObjectIdentifier,
 
@@ -109,6 +128,7 @@ impl<D: Digest> MeasurementRegister<D> {
         fwid_index: u8,
         pcr_index: u8,
         static_measurement: bool,
+        stable: bool,
         hash_algorithm: ObjectIdentifier,
     ) -> Self {
         MeasurementRegister {
@@ -117,6 +137,7 @@ impl<D: Digest> MeasurementRegister<D> {
             pcr_index,
             extensible: true,
             static_measurement,
+            stable,
             hash_algorithm,
             digest: GenericArray::default(),
         }
@@ -220,13 +241,29 @@ impl<'a> CdiBuilder<'a> for Cdi<CsrCdi> {
         }
 
         let mut cdi_csr = [0u8; CDI_LEN];
-        derive_attestation_cdi::<D, H>(
+        derive_attestation_cdi::<D, H>(&self.current_cdi, Some(tci_info), None, &mut cdi_csr)?;
+        self.next_cdi = Some(cdi_csr);
+
+        Ok(())
+    }
+}
+
+impl<'a> CdiBuilder<'a> for Cdi<SealingCdi> {
+    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
+        &mut self,
+        tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
+        tci_info: &[u8],
+    ) -> Result<()> {
+        // The sealing CDI can be generated even after the next layer
+        // is finalized.
+        let mut cdi_sealing = [0u8; CDI_LEN];
+        derive_sealing_cdi::<D, H>(
             &self.current_cdi,
             Some(tci_info),
-            None,
-            &mut cdi_csr,
+            Some(tci_digest.as_slice()),
+            &mut cdi_sealing,
         )?;
-        self.next_cdi = Some(cdi_csr);
+        self.next_cdi = Some(cdi_sealing);
 
         Ok(())
     }
@@ -246,6 +283,9 @@ pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
     // This is a CDI derived from the current CDI and the VM identifier.
     csr_cdi: RwLock<Cdi<CsrCdi>>,
 
+    // Sealing Compound Device Identifier (CDI)
+    sealing_cdi: RwLock<Cdi<SealingCdi>>,
+
     // TVM identifier
     vm_id: u64,
 
@@ -254,7 +294,12 @@ pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
 
 impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// Create a new attestation manager.
-    pub fn new(cdi: &'a [u8], vm_id: u64, hash_algorithm: ObjectIdentifier) -> Result<Self> {
+    pub fn new(
+        attestation_cdi: &'a [u8],
+        sealing_cdi: &'a [u8],
+        vm_id: u64,
+        hash_algorithm: ObjectIdentifier,
+    ) -> Result<Self> {
         // Check that we're using a valid hash function for ed25519.
         // We need the hash length to be at least as long as an ed25519
         // secret key (32 bytes).
@@ -271,6 +316,7 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
                     idx as u8,
                     *tcg_pcr,
                     is_static_measurement!(idx),
+                    is_stable_measurement!(tcg_pcr),
                     hash_algorithm,
                 ),
             );
@@ -278,8 +324,9 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
 
         Ok(AttestationManager {
             measurements: RwLock::new(measurements),
-            attestation_cdi: RwLock::new(Cdi::new::<D, H>(cdi)?),
-            csr_cdi: RwLock::new(Cdi::new::<D, H>(cdi)?),
+            attestation_cdi: RwLock::new(Cdi::new::<D, H>(attestation_cdi)?),
+            csr_cdi: RwLock::new(Cdi::new::<D, H>(attestation_cdi)?),
+            sealing_cdi: RwLock::new(Cdi::new::<D, H>(sealing_cdi)?),
             vm_id,
             _pd: PhantomData,
         })
@@ -314,6 +361,18 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
         hasher.finalize()
     }
 
+    fn sealing_tci(&self) -> GenericArray<u8, <D as OutputSizeUser>::OutputSize> {
+        // The sealing TCI includes *all* measurements.
+        let mut hasher = D::new();
+        self.measurements
+            .read()
+            .iter()
+            .filter(|m| m.stable)
+            .for_each(|m| hasher.update(m.digest.clone()));
+
+        hasher.finalize()
+    }
+
     /// Finalize locks all measurement registers that must no longer be
     /// extended. This should be called after the platform boot process is
     /// finished in order to only allow for dynamic measurements.
@@ -331,7 +390,12 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
         // The TCI is empty, we only rely on the TSM one.
         self.csr_cdi
             .write()
-            .build_next_cdi::<D, H>(D::new().finalize(), &self.vm_id.to_le_bytes())
+            .build_next_cdi::<D, H>(D::new().finalize(), &self.vm_id.to_le_bytes())?;
+
+        // Build the sealing CDI.
+        self.sealing_cdi
+            .write()
+            .build_next_cdi::<D, H>(self.sealing_tci(), &self.vm_id.to_le_bytes())
     }
 
     /// Encode the measured TCB into a DiceTcbInfo extension blob.

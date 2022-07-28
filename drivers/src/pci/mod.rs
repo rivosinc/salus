@@ -7,6 +7,7 @@ mod bus;
 mod config_space;
 mod device;
 mod error;
+mod mmio_builder;
 mod registers;
 mod root;
 

@@ -403,3 +403,10 @@ register_bitfields![u64,
         delta OFFSET(0) NUMBITS(64) [],
     ]
 ];
+
+// Performance counter registers.
+register_bitfields![u64,
+    pub hpmcounter [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];

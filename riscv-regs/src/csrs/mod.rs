@@ -66,6 +66,8 @@ pub struct CSR {
     pub vstopei: ReadWriteRiscvCsr<stopei::Register, 0x25c>,
     pub vsatp: ReadWriteRiscvCsr<satp::Register, CSR_VSATP>,
     pub vstopi: ReadWriteRiscvCsr<stopi::Register, 0xeb0>,
+
+    pub hpmcounter: [&'static dyn RiscvCsrInterface<R = hpmcounter::Register>; 32],
 }
 
 // Define the "addresses" of each CSR register.
@@ -115,4 +117,40 @@ pub const CSR: &CSR = &CSR {
     vstopei: ReadWriteRiscvCsr::new(),
     vsatp: ReadWriteRiscvCsr::new(),
     vstopi: ReadWriteRiscvCsr::new(),
+
+    // TODO: Use a procedural macro to generate these.
+    hpmcounter: [
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc00>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc01>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc02>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc03>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc04>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc05>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc06>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc07>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc08>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc09>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc0a>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc0b>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc0c>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc0d>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc0e>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc0f>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc10>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc11>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc12>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc13>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc14>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc15>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc16>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc17>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc18>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc19>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc1a>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc1b>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc1c>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc1d>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc1e>::new(),
+        &ReadWriteRiscvCsr::<hpmcounter::Register, 0xc1f>::new(),
+    ],
 };

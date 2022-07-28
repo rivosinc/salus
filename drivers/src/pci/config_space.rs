@@ -13,6 +13,8 @@ use super::registers::CommonRegisters;
 
 // See PCI Express Base Specification
 const PCIE_ECAM_FN_SHIFT: u64 = 12;
+const PCIE_ECAM_DEV_SHIFT: u64 = 15;
+const PCIE_ECAM_BUS_SHIFT: u64 = 20;
 const PCIE_FUNCTION_CONFIG_SIZE: usize = 4096;
 
 /// A PCIe ECAM configuration space for a root complex covering `self.bus_range`.
@@ -73,6 +75,21 @@ impl PciConfigSpace {
         // common config space header.
         let registers = unsafe { self.registers_for(address)?.as_ref() };
         PciDeviceInfo::read_from(address, registers)
+    }
+
+    /// Maps an offset within this config space to the PCI address of the device whose config space
+    /// is mapped at that location, along with the offset within that device's config space.
+    pub fn offset_to_address(&self, offset: usize) -> Option<(Address, usize)> {
+        if offset as u64 >= self.config_size {
+            return None;
+        }
+        let bus =
+            (((offset >> PCIE_ECAM_BUS_SHIFT) as u32) & Bus::MAX_VAL) + self.bus_range.start.bits();
+        let dev = ((offset >> PCIE_ECAM_DEV_SHIFT) as u32) & Device::MAX_VAL;
+        let func = ((offset >> PCIE_ECAM_FN_SHIFT) as u32) & Function::MAX_VAL;
+        let address = Address::try_from_components(self.segment.bits(), bus, dev, func)?;
+        let dev_offset = offset & (PCIE_FUNCTION_CONFIG_SIZE - 1);
+        Some((address, dev_offset))
     }
 
     /// Returns the memory range occupied by this config space.

@@ -49,6 +49,12 @@ pub enum Error {
     AllocError,
     /// Ran out of bus numbers while assigning buses.
     OutOfBuses,
+    /// Unsupported size or alignment in emulated config space access.
+    UnsupportedConfigAccess,
+    /// Offset in emulated config space is invalid.
+    InvalidConfigOffset,
+    /// The device targetted by the emulated config space access does not exist.
+    DeviceNotFound(Address),
 }
 
 /// Holds results for PCI operations.

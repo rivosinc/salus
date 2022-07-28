@@ -3,8 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use assertions::const_assert;
-use tock_registers::register_bitfields;
+use const_field_offset::FieldOffsets;
+use tock_registers::interfaces::Readable;
 use tock_registers::registers::{ReadOnly, ReadWrite};
+use tock_registers::{register_bitfields, LocalRegisterCopy, RegisterLongName, UIntLike};
 
 // PCI register definitions. See the PCI Express Base Specification for more details.
 //
@@ -84,6 +86,7 @@ register_bitfields![u32,
 
 /// Common portion of the PCI configuration header.
 #[repr(C)]
+#[derive(FieldOffsets)]
 pub struct CommonRegisters {
     pub vendor_id: ReadOnly<u16>,
     pub dev_id: ReadOnly<u16>,
@@ -99,8 +102,12 @@ pub struct CommonRegisters {
     pub bist: ReadWrite<u8, Bist::Register>,
 }
 
+/// End byte offset of the common part of a PCI header.
+pub const PCI_COMMON_HEADER_END: usize = 0xf;
+
 /// Endpoint (type 0) PCI configuration registers.
 #[repr(C)]
+#[derive(FieldOffsets)]
 pub struct EndpointRegisters {
     pub common: CommonRegisters,
     pub bar: [ReadWrite<u32, BaseAddress::Register>; 6],
@@ -118,6 +125,7 @@ pub struct EndpointRegisters {
 
 /// Bridge (type 1) PCI configuration registers.
 #[repr(C)]
+#[derive(FieldOffsets)]
 pub struct BridgeRegisters {
     pub common: CommonRegisters,
     pub bar: [ReadWrite<u32, BaseAddress::Register>; 2],
@@ -143,6 +151,162 @@ pub struct BridgeRegisters {
     pub int_pin: ReadWrite<u8>,
     pub bridge_control: ReadWrite<u16, BridgeControl::Register>,
 }
+
+/// Start byte offset of the type-specific part of a PCI header.
+pub const PCI_TYPE_HEADER_START: usize = 0x10;
+/// End byte offset of the type-specific part of a PCI header.
+pub const PCI_TYPE_HEADER_END: usize = 0x3f;
+
+/// Trait for specifying various mask values for a register.
+///
+/// TODO: Make the `*_mask()` functions const values.
+pub trait RegisterMasks: RegisterLongName {
+    type RegType: UIntLike;
+
+    /// Returns a bit mask of the bits that are writeable by a VM for this register.
+    fn writeable_mask() -> Self::RegType;
+
+    /// Returns a bit mask of the bits that are readable by a VM for this register.
+    fn readable_mask() -> Self::RegType;
+
+    /// Returns a bit mask of the clearable (RW1C) bits for this register.
+    fn clearable_mask() -> Self::RegType;
+}
+
+/// Helpers for masking off virtualized bits in emulated config register accesses.
+pub trait RegisterHelpers {
+    type RegType: UIntLike;
+
+    /// Returns the value in `self` with the bits that should not be writeable by a VM masked off.
+    fn writeable_bits(&self) -> Self::RegType;
+
+    /// Returns the value in `self` with the bits that should not be readable by a VM masked off.
+    fn readable_bits(&self) -> Self::RegType;
+
+    /// Returns the value in `self` with the clearable (RW1C) bits masked off.
+    fn non_clearable_bits(&self) -> Self::RegType;
+}
+
+// PCI config register readable/writeable masks.
+//
+// In general, we pass-through any non-legacy control and status bits for reads and writes. Anything
+// related to INTx is hidden since we don't support virtualizing it. A few other bits are virtualized
+// and are not passed through, as noted below.
+
+impl RegisterMasks for Command::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, Command::Register>::new(0);
+        mask.modify(Command::IoEnable.val(1));
+        mask.modify(Command::MemoryEnable.val(1));
+        mask.modify(Command::BusMasterEnable.val(1));
+        mask.modify(Command::ParityErrorResponse.val(1));
+        mask.modify(Command::SerrEnable.val(1));
+        mask.get()
+    }
+
+    fn readable_mask() -> u16 {
+        Self::writeable_mask()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+// STATUS.CAP_LIST is virtualized.
+impl RegisterMasks for Status::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, Status::Register>::new(0);
+        mask.modify(Status::MasterDataParityError.val(1));
+        mask.modify(Status::SignaledTargetAbort.val(1));
+        mask.modify(Status::ReceivedTargetAbort.val(1));
+        mask.modify(Status::ReceivedMasterAbort.val(1));
+        mask.modify(Status::SignaledSystemError.val(1));
+        mask.modify(Status::DetectedParityError.val(1));
+        mask.get()
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, Status::Register>::new(Self::writeable_mask());
+        mask.modify(Status::ImmediateReadiness.val(1));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        Self::writeable_mask()
+    }
+}
+
+impl RegisterMasks for SecondaryStatus::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, SecondaryStatus::Register>::new(0);
+        mask.modify(SecondaryStatus::MasterDataParityError.val(1));
+        mask.modify(SecondaryStatus::SignaledTargetAbort.val(1));
+        mask.modify(SecondaryStatus::ReceivedTargetAbort.val(1));
+        mask.modify(SecondaryStatus::ReceivedMasterAbort.val(1));
+        mask.modify(SecondaryStatus::ReceivedSystemError.val(1));
+        mask.modify(SecondaryStatus::DetectedParityError.val(1));
+        mask.get()
+    }
+
+    fn readable_mask() -> u16 {
+        Self::writeable_mask()
+    }
+
+    fn clearable_mask() -> u16 {
+        Self::writeable_mask()
+    }
+}
+
+// BRIDGE_CTL.BUS_RESET is virtualized.
+impl RegisterMasks for BridgeControl::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, BridgeControl::Register>::new(0);
+        mask.modify(BridgeControl::ParityErrorResponse.val(1));
+        mask.modify(BridgeControl::SerrEnable.val(1));
+        mask.get()
+    }
+
+    fn readable_mask() -> u16 {
+        Self::writeable_mask()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+// Macro to implement RegisterHelpers for the given type.
+macro_rules! reg_helpers_impl {
+    ($reg_type:tt) => {
+        impl<T: UIntLike, R: RegisterMasks<RegType = T>> RegisterHelpers for $reg_type<T, R> {
+            type RegType = T;
+
+            fn writeable_bits(&self) -> Self::RegType {
+                self.get() & R::writeable_mask()
+            }
+
+            fn readable_bits(&self) -> Self::RegType {
+                self.get() & R::readable_mask()
+            }
+
+            fn non_clearable_bits(&self) -> Self::RegType {
+                self.get() & !R::clearable_mask()
+            }
+        }
+    };
+}
+
+reg_helpers_impl!(LocalRegisterCopy);
+reg_helpers_impl!(ReadWrite);
 
 fn _assert_register_layout() {
     const_assert!(core::mem::size_of::<CommonRegisters>() == 0x10);

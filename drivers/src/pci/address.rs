@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// PCI addresses are composed of a segment, bus, device, and function. Each of those components will
-// implement the `AddressComponent` type.
-trait AddressComponent {
+/// PCI addresses are composed of a segment, bus, device, and function. Each of those components will
+/// implement the `AddressComponent` type.
+pub trait AddressComponent {
     const SHIFT: u32;
     const BITS: u32;
     const MAX_VAL: u32 = (1 << Self::BITS) - 1;

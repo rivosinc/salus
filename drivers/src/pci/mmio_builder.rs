@@ -4,8 +4,6 @@
 
 //! Helpers for PCI configuration space emulation.
 
-#![allow(dead_code)]
-
 use core::cmp::min;
 use core::mem::size_of;
 

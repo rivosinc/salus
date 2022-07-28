@@ -125,11 +125,11 @@ struct PcieRootInner {
 }
 
 impl PcieRootInner {
-    /// Calls `f` for each device on `bus`.
+    // Calls `f` for each device on `bus`.
     fn for_each_device_on<F: FnMut(&PciDevice)>(&self, bus: &PciBus, f: &mut F) {
-        for id in bus.devices() {
+        for bd in bus.devices() {
             // If the ID appears on a bus, it must be in the arena.
-            let dev = self.device_arena.get(id).unwrap();
+            let dev = self.device_arena.get(bd.id).unwrap();
             f(dev);
             if let PciDevice::Bridge(bridge) = dev {
                 // Recrusively walk the buses behind the bridge.
@@ -138,6 +138,49 @@ impl PcieRootInner {
                     .inspect(|b| self.for_each_device_on(b, f));
             };
         }
+    }
+
+    // Returns the device ID for the device at the virtualized PCI address `address` on `bus`.
+    fn device_by_virtual_address_on(&self, bus: &PciBus, address: Address) -> Option<PciDeviceId> {
+        if address.bus() == bus.virtual_secondary_bus_num() {
+            // The device is on this bus.
+            return bus
+                .devices()
+                .find(|bd| {
+                    bd.address.device() == address.device()
+                        && bd.address.function() == address.function()
+                })
+                .map(|bd| bd.id);
+        } else {
+            for bd in bus.devices() {
+                let dev = self.device_arena.get(bd.id).unwrap();
+                if let PciDevice::Bridge(bridge) = dev {
+                    // Check if the device is behind the virtualized buses assigned to this bridge.
+                    // Unwrap is ok here since buses must have been assigned at this point.
+                    let child_bus = bridge.child_bus().unwrap();
+                    if child_bus.virtual_secondary_bus_num() <= address.bus()
+                        && child_bus.virtual_subordinate_bus_num() >= address.bus()
+                    {
+                        return self.device_by_virtual_address_on(child_bus, address);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    // Returns the ID of the device whose config space is mapped at `offset` in the virtualized
+    // config space, along with the offset within the device's config space.
+    fn virtual_config_offset_to_device(&self, offset: usize) -> Result<(PciDeviceId, usize)> {
+        let (address, dev_offset) = self
+            .config_space
+            .offset_to_address(offset)
+            .ok_or(Error::InvalidConfigOffset)?;
+        let dev_id = self
+            .device_by_virtual_address_on(&self.root_bus, address)
+            .ok_or(Error::DeviceNotFound(address))?;
+        Ok((dev_id, dev_offset))
     }
 }
 
@@ -155,6 +198,12 @@ impl From<U64Cell> for u64 {
     fn from(u: U64Cell) -> u64 {
         ((u.0 as u64) << 32) | (u.1 as u64)
     }
+}
+
+// Returns if an access of `len` bytes at `offset` is supported in the virtualized config space.
+fn valid_config_mmio_access(offset: u64, len: usize) -> bool {
+    // We only support naturally-aligned byte, word, or dword accesses.
+    matches!(len, 1 | 2 | 4) && (offset & (len as u64 - 1)) == 0
 }
 
 impl PcieRoot {
@@ -417,15 +466,37 @@ impl PcieRoot {
     }
 
     /// Emulates a read of `len` bytes at `offset` in the config space.
-    pub fn emulate_config_read(&self, _offset: u64, _len: usize) -> u64 {
-        // TODO: Find the device that corresponds to offset and emulate the read. For now, return all
-        // 1's to make it look like no devices are present.
-        !0x0
+    pub fn emulate_config_read(&self, offset: u64, len: usize) -> u64 {
+        self.do_emulate_config_read(offset, len).unwrap_or(!0x0)
     }
 
     /// Emulates a write of `len` bytes at `offset` in the config space.
-    pub fn emulate_config_write(&self, _offset: u64, _value: u64, _len: usize) {
-        // TODO: Find the device that corresponds to offset and emulate the write.
+    pub fn emulate_config_write(&self, offset: u64, value: u64, len: usize) {
+        // If the write failed, just discard it.
+        let _ = self.do_emulate_config_write(offset, value, len);
+    }
+
+    fn do_emulate_config_read(&self, offset: u64, len: usize) -> Result<u64> {
+        if !valid_config_mmio_access(offset, len) {
+            return Err(Error::UnsupportedConfigAccess);
+        }
+        let inner = self.inner.lock();
+        let (dev_id, dev_offset) = inner.virtual_config_offset_to_device(offset as usize)?;
+        // If the device ID is present in the hierarchy, then it must be in the arena.
+        let dev = inner.device_arena.get(dev_id).unwrap();
+        Ok(dev.emulate_config_read(dev_offset, len) as u64)
+    }
+
+    fn do_emulate_config_write(&self, offset: u64, value: u64, len: usize) -> Result<()> {
+        if !valid_config_mmio_access(offset, len) {
+            return Err(Error::UnsupportedConfigAccess);
+        }
+        let mut inner = self.inner.lock();
+        let (dev_id, dev_offset) = inner.virtual_config_offset_to_device(offset as usize)?;
+        // If the device ID is present in the hierarchy, then it must be in the arena.
+        let dev = inner.device_arena.get_mut(dev_id).unwrap();
+        dev.emulate_config_write(dev_offset, value as u32, len);
+        Ok(())
     }
 }
 

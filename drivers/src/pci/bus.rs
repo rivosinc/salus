@@ -10,11 +10,18 @@ use super::device::PciDevice;
 use super::error::*;
 use super::root::{PciDeviceArena, PciDeviceId};
 
-struct BusDevice(Address, PciDeviceId);
+/// A entry for a single device on a `PciBus`.
+pub struct BusDevice {
+    /// The PCI bus address of the device.
+    pub address: Address,
+    /// The ID of the device in the `PciDeviceArena`.
+    pub id: PciDeviceId,
+}
 
 /// Represents a PCI bus.
 pub struct PciBus {
     bus_range: BusRange,
+    virtual_bus_range: BusRange,
     devices: Vec<BusDevice>,
 }
 
@@ -43,7 +50,10 @@ impl PciBus {
                 let id = device_arena
                     .try_insert(pci_dev)
                     .map_err(|_| Error::AllocError)?;
-                let entry = BusDevice(info.address(), id);
+                let entry = BusDevice {
+                    address: info.address(),
+                    id,
+                };
                 devices.try_reserve(1).map_err(|_| Error::AllocError)?;
                 devices.push(entry);
             }
@@ -52,7 +62,7 @@ impl PciBus {
         // Recursively enumerate the buses behind any bridges on this bus.
         let mut cur_bus = bus_num;
         for bd in devices.iter() {
-            let bridge_id = bd.1;
+            let bridge_id = bd.id;
             let sec_bus = cur_bus.next().ok_or(Error::OutOfBuses)?;
             match device_arena.get_mut(bridge_id) {
                 Some(PciDevice::Bridge(bridge)) => {
@@ -92,17 +102,38 @@ impl PciBus {
                 start: bus_num,
                 end: cur_bus,
             },
+            virtual_bus_range: BusRange::default(),
             devices,
         })
     }
 
     /// Returns an iterator over the device IDs on this bus.
-    pub fn devices(&self) -> impl ExactSizeIterator<Item = PciDeviceId> + '_ {
-        self.devices.iter().map(|bd| bd.1)
+    pub fn devices(&self) -> core::slice::Iter<BusDevice> {
+        self.devices.iter()
     }
 
     /// Returns the subordinate bus number (the highest-numbered downstream bus) for this bus.
     pub fn subordinate_bus_num(&self) -> Bus {
         self.bus_range.end
+    }
+
+    /// Sets the virtualized secondary bus number for this bus.
+    pub fn set_virtual_secondary_bus_num(&mut self, bus: Bus) {
+        self.virtual_bus_range.start = bus;
+    }
+
+    /// Returns the virtualized secondary bus number for this bus.
+    pub fn virtual_secondary_bus_num(&self) -> Bus {
+        self.virtual_bus_range.start
+    }
+
+    /// Sets the virtualized subordinate bus number for this bus.
+    pub fn set_virtual_subordinate_bus_num(&mut self, bus: Bus) {
+        self.virtual_bus_range.end = bus;
+    }
+
+    /// Returns the virtualized subordinate bus number for this bus.
+    pub fn virtual_subordinate_bus_num(&self) -> Bus {
+        self.virtual_bus_range.end
     }
 }

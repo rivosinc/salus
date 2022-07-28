@@ -9,7 +9,7 @@ use page_tracking::HwMemMap;
 use riscv_pages::*;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use riscv_regs::Readable;
-use riscv_regs::{sie, stopei, Writeable, CSR};
+use riscv_regs::{sie, stopei, RiscvCsrInterface, Writeable, CSR};
 use spin::{Mutex, Once};
 
 use crate::{CpuId, CpuInfo, MAX_CPUS};

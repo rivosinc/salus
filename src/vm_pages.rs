@@ -15,7 +15,7 @@ use riscv_page_tables::{
 use riscv_pages::*;
 use riscv_regs::{
     hgatp, hstatus, DecodedInstruction, Exception, LocalRegisterCopy, PrivilegeLevel, Readable,
-    Writeable, CSR,
+    RiscvCsrInterface, Writeable, CSR,
 };
 use spin::Mutex;
 

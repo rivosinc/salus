@@ -8,6 +8,7 @@ pub mod csr_access;
 pub mod defs;
 pub mod traps;
 
+pub use csr_access::RiscvCsrInterface;
 pub use tock_registers::interfaces::ReadWriteable;
 pub use tock_registers::interfaces::Readable;
 pub use tock_registers::interfaces::Writeable;

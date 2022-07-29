@@ -55,6 +55,8 @@ pub enum Error {
     InvalidConfigOffset,
     /// The device targetted by the emulated config space access does not exist.
     DeviceNotFound(Address),
+    /// Too many capabilities were found for a PCI device.
+    TooManyCapabilities,
 }
 
 /// Holds results for PCI operations.

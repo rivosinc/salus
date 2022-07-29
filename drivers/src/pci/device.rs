@@ -150,49 +150,9 @@ impl core::fmt::Display for PciDeviceInfo {
     }
 }
 
-// Macro that itself defines a `span!()` macro for the given struct field which evaluates to a
-// const range pattern which can be used in `match` expressions. Note that the type of the field
-// must also be specified, though its cross-checked against the actual field span in a unit test.
-//
-// This is as hairy as it is because of the limitations of match arm range patterns and constant
-// expressions in Rust. Ideally we would be able to reuse `memoffset::span_of()!` to implmenet this,
-// however it's currently not possible to use `span_of!()`/`offset_of!()` in const expressions, see
-// https://github.com/Gilnaa/memoffset/issues/4#issuecomment-1069658383.
-//
-// TODO: Replace this with `span_of!()` when it's possible to use it in const expressions.
-macro_rules! define_field_span {
-    ($st:ident, $field:tt, $field_type:ty) => {
-        pub mod $field {
-            use super::$st;
-
-            pub const START_OFFSET: usize = $st::FIELD_OFFSETS.$field.get_byte_offset();
-            pub const END_OFFSET: usize = START_OFFSET + core::mem::size_of::<$field_type>() - 1;
-
-            macro_rules! span {
-                () => {
-                    $field::START_OFFSET..=$field::END_OFFSET
-                };
-            }
-
-            #[cfg(test)]
-            mod tests {
-                use memoffset::span_of;
-
-                #[test]
-                fn check_field_span() {
-                    let actual_span = span_of!(super::$st, $field);
-                    assert_eq!(super::START_OFFSET, actual_span.start);
-                    assert_eq!(super::END_OFFSET, actual_span.end - 1);
-                }
-            }
-
-            pub(crate) use span;
-        }
-    };
-}
-
 mod common_offsets {
     use super::CommonRegisters;
+    use crate::define_field_span;
 
     define_field_span!(CommonRegisters, vendor_id, u16);
     define_field_span!(CommonRegisters, dev_id, u16);
@@ -207,6 +167,7 @@ mod common_offsets {
 
 mod endpoint_offsets {
     use super::EndpointRegisters;
+    use crate::define_field_span;
 
     define_field_span!(EndpointRegisters, bar, [u32; 6]);
     define_field_span!(EndpointRegisters, subsys_vendor_id, u16);
@@ -216,6 +177,7 @@ mod endpoint_offsets {
 
 mod bridge_offsets {
     use super::BridgeRegisters;
+    use crate::define_field_span;
 
     define_field_span!(BridgeRegisters, bar, [u32; 2]);
     define_field_span!(BridgeRegisters, pri_bus, u8);
@@ -247,7 +209,7 @@ impl PciEndpoint {
     /// Creates a new `PciEndpoint` using the config space at `registers`.
     fn new(registers: &'static mut EndpointRegisters, info: PciDeviceInfo) -> Result<Self> {
         let capabilities =
-            PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize);
+            PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
         Ok(Self {
             registers,
             info,
@@ -270,8 +232,7 @@ impl PciEndpoint {
                 op.push_word(self.registers.subsys_id.get());
             }
             cap_ptr::span!() => {
-                // TODO: Point to virtualized capabilites.
-                op.push_byte(0);
+                op.push_byte(self.capabilities.start_offset() as u8);
             }
             _ => {
                 // No INTx, cardbus, etc.
@@ -316,7 +277,7 @@ impl PciBridge {
         registers.sec_bus.set(0);
         registers.pri_bus.set(0);
         let capabilities =
-            PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize);
+            PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
         Ok(Self {
             registers,
             info,
@@ -405,8 +366,7 @@ impl PciBridge {
                 op.push_word(self.registers.io_limit_upper.get());
             }
             cap_ptr::span!() => {
-                // TODO: Point to virtualized capabilites.
-                op.push_byte(0);
+                op.push_byte(self.capabilities.start_offset() as u8);
             }
             bridge_control::span!() => {
                 let mut reg = LocalRegisterCopy::<u16, BridgeControl::Register>::new(
@@ -593,7 +553,12 @@ impl PciDevice {
                     op.push_word(regs.command.readable_bits());
                 }
                 status::span!() => {
-                    op.push_word(regs.status.readable_bits());
+                    let mut reg = LocalRegisterCopy::<u16, Status::Register>::new(
+                        regs.status.readable_bits(),
+                    );
+                    // We always virtualize a capability list, so make sure CAP_LIST is set.
+                    reg.modify(Status::CapabilitiesList.val(1));
+                    op.push_word(reg.get());
                 }
                 rev_id::span!() => {
                     op.push_byte(regs.rev_id.get());
@@ -613,15 +578,19 @@ impl PciDevice {
                 PCI_TYPE_HEADER_START..=PCI_TYPE_HEADER_END => {
                     self.emulate_type_specific_read(&mut op);
                 }
+                PCI_CAPS_START..=PCI_CONFIG_SPACE_END => {
+                    self.capabilities().emulate_read(&mut op);
+                }
                 offset => {
                     if offset <= PCI_COMMON_HEADER_END {
                         // Everything else in the common part of the header is unimplemented and we can
                         // safely return 0.
                         op.push_byte(0);
                     } else {
-                        // Make everything beyond the standard header appear unimplemented.
+                        // Make everything beyond the standard PCI configuration space appear
+                        // unimplemented.
                         //
-                        // TODO: Capabilities.
+                        // TODO: Extended config space emulation?
                         op.push_dword(!0x0);
                     }
                 }
@@ -655,11 +624,14 @@ impl PciDevice {
                 PCI_TYPE_HEADER_START..=PCI_TYPE_HEADER_END => {
                     self.emulate_type_specific_write(&mut op);
                 }
+                PCI_CAPS_START..=PCI_CONFIG_SPACE_END => {
+                    self.capabilities_mut().emulate_write(&mut op);
+                }
                 _ => {
                     // We don't allow writes to other bits of the common header and everything beyond
-                    // it is unimplemented for now.
+                    // the standard config space is unimplemented.
                     //
-                    // TODO: Capabilities.
+                    // TODO: Extended config space emulation?
                     op.pop_byte();
                 }
             }
@@ -703,6 +675,14 @@ impl PciDevice {
         match self {
             PciDevice::Endpoint(ep) => &ep.capabilities,
             PciDevice::Bridge(bridge) => &bridge.capabilities,
+        }
+    }
+
+    // Returns a mutable reference to the `PciCapabilities` for this device.
+    fn capabilities_mut(&mut self) -> &mut PciCapabilities {
+        match self {
+            PciDevice::Endpoint(ep) => &mut ep.capabilities,
+            PciDevice::Bridge(bridge) => &mut bridge.capabilities,
         }
     }
 }

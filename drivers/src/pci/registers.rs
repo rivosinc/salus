@@ -157,6 +157,17 @@ pub const PCI_TYPE_HEADER_START: usize = 0x10;
 /// End byte offset of the type-specific part of a PCI header.
 pub const PCI_TYPE_HEADER_END: usize = 0x3f;
 
+/// PCI capability header.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct CapabilityHeader {
+    pub cap_id: ReadOnly<u8>,
+    pub next_cap: ReadOnly<u8>,
+}
+
+/// End byte offset of the standard PCI configuration space.
+pub const PCI_CONFIG_SPACE_END: usize = 0xff;
+
 /// Trait for specifying various mask values for a register.
 ///
 /// TODO: Make the `*_mask()` functions const values.

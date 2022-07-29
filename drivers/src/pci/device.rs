@@ -11,6 +11,7 @@ use tock_registers::LocalRegisterCopy;
 
 use super::address::*;
 use super::bus::PciBus;
+use super::capabilities::*;
 use super::error::*;
 use super::mmio_builder::{MmioReadBuilder, MmioWriteBuilder};
 use super::registers::*;
@@ -239,12 +240,19 @@ mod bridge_offsets {
 pub struct PciEndpoint {
     registers: &'static mut EndpointRegisters,
     info: PciDeviceInfo,
+    capabilities: PciCapabilities,
 }
 
 impl PciEndpoint {
     /// Creates a new `PciEndpoint` using the config space at `registers`.
     fn new(registers: &'static mut EndpointRegisters, info: PciDeviceInfo) -> Result<Self> {
-        Ok(Self { registers, info })
+        let capabilities =
+            PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize);
+        Ok(Self {
+            registers,
+            info,
+            capabilities,
+        })
     }
 
     // Emulate a read from the endpoint-specific registers of this device's config space.
@@ -292,6 +300,7 @@ impl PciEndpoint {
 pub struct PciBridge {
     registers: &'static mut BridgeRegisters,
     info: PciDeviceInfo,
+    capabilities: PciCapabilities,
     bus_range: BusRange,
     child_bus: Option<PciBus>,
     virtual_primary_bus: Bus,
@@ -306,9 +315,12 @@ impl PciBridge {
         registers.sub_bus.set(0);
         registers.sec_bus.set(0);
         registers.pri_bus.set(0);
+        let capabilities =
+            PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize);
         Ok(Self {
             registers,
             info,
+            capabilities,
             bus_range: BusRange::default(),
             child_bus: None,
             virtual_primary_bus: Bus::default(),
@@ -548,6 +560,21 @@ impl PciDevice {
         }
     }
 
+    /// Returns if the device supports MSI.
+    pub fn has_msi(&self) -> bool {
+        self.capabilities().has_msi()
+    }
+
+    /// Returns if the device supports MSI-X.
+    pub fn has_msix(&self) -> bool {
+        self.capabilities().has_msix()
+    }
+
+    /// Returns if the device is a PCI-Express device.
+    pub fn is_pcie(&self) -> bool {
+        self.capabilities().is_pcie()
+    }
+
     /// Emulates a read from the configuration space of this device at `offset`.
     pub fn emulate_config_read(&self, offset: usize, len: usize) -> u32 {
         let mut op = MmioReadBuilder::new(offset, len);
@@ -668,6 +695,14 @@ impl PciDevice {
         match self {
             PciDevice::Endpoint(ep) => ep.emulate_config_write(write_op),
             PciDevice::Bridge(bridge) => bridge.emulate_config_write(write_op),
+        }
+    }
+
+    // Returns a reference to the `PciCapabilities` for this device.
+    fn capabilities(&self) -> &PciCapabilities {
+        match self {
+            PciDevice::Endpoint(ep) => &ep.capabilities,
+            PciDevice::Bridge(bridge) => &bridge.capabilities,
         }
     }
 }

@@ -4,6 +4,7 @@
 
 mod address;
 mod bus;
+mod capabilities;
 mod config_space;
 mod device;
 mod error;

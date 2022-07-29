@@ -165,6 +165,9 @@ pub struct CapabilityHeader {
     pub next_cap: ReadOnly<u8>,
 }
 
+/// Start byte offset of where PCI capability structures may be located in the standard PCI
+/// configuration space.
+pub const PCI_CAPS_START: usize = PCI_TYPE_HEADER_END + 1;
 /// End byte offset of the standard PCI configuration space.
 pub const PCI_CONFIG_SPACE_END: usize = 0xff;
 
@@ -323,4 +326,46 @@ fn _assert_register_layout() {
     const_assert!(core::mem::size_of::<CommonRegisters>() == 0x10);
     const_assert!(core::mem::size_of::<EndpointRegisters>() == 0x40);
     const_assert!(core::mem::size_of::<BridgeRegisters>() == 0x40);
+}
+
+/// Macro that itself defines a `span!()` macro for the given struct field which evaluates to a
+/// const range pattern which can be used in `match` expressions. Note that the type of the field
+/// must also be specified, though its cross-checked against the actual field span in a unit test.
+///
+/// This is as hairy as it is because of the limitations of match arm range patterns and constant
+/// expressions in Rust. Ideally we would be able to reuse `memoffset::span_of()!` to implmenet this,
+/// however it's currently not possible to use `span_of!()`/`offset_of!()` in const expressions, see
+/// https://github.com/Gilnaa/memoffset/issues/4#issuecomment-1069658383.
+///
+/// TODO: Replace this with `span_of!()` when it's possible to use it in const expressions.
+#[macro_export]
+macro_rules! define_field_span {
+    ($st:ident, $field:tt, $field_type:ty) => {
+        pub mod $field {
+            use super::$st;
+
+            pub const START_OFFSET: usize = $st::FIELD_OFFSETS.$field.get_byte_offset();
+            pub const END_OFFSET: usize = START_OFFSET + core::mem::size_of::<$field_type>() - 1;
+
+            macro_rules! span {
+                () => {
+                    $field::START_OFFSET..=$field::END_OFFSET
+                };
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use memoffset::span_of;
+
+                #[test]
+                fn check_field_span() {
+                    let actual_span = span_of!(super::$st, $field);
+                    assert_eq!(super::START_OFFSET, actual_span.start);
+                    assert_eq!(super::END_OFFSET, actual_span.end - 1);
+                }
+            }
+
+            pub(crate) use span;
+        }
+    };
 }

@@ -5,6 +5,8 @@
 use arrayvec::ArrayVec;
 use tock_registers::interfaces::Readable;
 
+use super::error::*;
+use super::mmio_builder::{MmioReadBuilder, MmioWriteBuilder};
 use super::registers::*;
 
 // Standard PCI capability IDs.
@@ -35,11 +37,86 @@ impl CapabilityId {
     }
 }
 
-// Maps a PCI capability ID to its offset in config space.
-#[derive(Clone, Copy, Debug)]
+mod header_offsets {
+    use super::CapabilityHeader;
+    use crate::define_field_span;
+
+    define_field_span!(CapabilityHeader, cap_id, u8);
+    define_field_span!(CapabilityHeader, next_cap, u8);
+}
+
+// Represents a single PCI capability.
 struct PciCapability {
     id: CapabilityId,
     offset: usize,
+    next: usize,
+}
+
+impl PciCapability {
+    // Creates a new capability of type `id` at `header`, which itself is at `offset` within the
+    // configuration space.
+    fn new(_header: &mut CapabilityHeader, id: CapabilityId, offset: usize) -> Result<Self> {
+        Ok(PciCapability {
+            id,
+            offset,
+            next: 0,
+        })
+    }
+
+    // Returns the ID of this capability.
+    fn id(&self) -> CapabilityId {
+        self.id
+    }
+
+    // Returns the offset of this capability within the configuration space of this device.
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    // Sets the offset of the next capability (from the start of the configuration space) in the
+    // linked list.
+    fn set_next(&mut self, next: usize) {
+        self.next = next;
+    }
+
+    // Returns the length of this capability structure.
+    fn length(&self) -> usize {
+        core::mem::size_of::<CapabilityHeader>()
+    }
+
+    // Emulates a read from this capability structure.
+    fn emulate_read(&self, op: &mut MmioReadBuilder) {
+        let cap_offset = op.offset() - self.offset;
+        use header_offsets::*;
+        match cap_offset {
+            cap_id::span!() => {
+                // TODO: Hide the capability until we're ready to pass them through.
+                op.push_byte(0);
+            }
+            next_cap::span!() => {
+                op.push_byte(self.next as u8);
+            }
+            _ => {
+                // TODO: Emulate type-specific registers.
+                op.push_byte(0);
+            }
+        }
+    }
+
+    // Emulates a write to this capability structure.
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder) {
+        let cap_offset = op.offset() - self.offset;
+        use header_offsets::*;
+        match cap_offset {
+            cap_id::span!() | next_cap::span!() => {
+                op.pop_byte();
+            }
+            _ => {
+                // TODO: Emulate type-specific registers.
+                op.pop_byte();
+            }
+        }
+    }
 }
 
 // The maximum number of capabilities we support for a single device. Enough for the typical PCI
@@ -55,7 +132,7 @@ pub struct PciCapabilities {
 impl PciCapabilities {
     /// Creates a new `PciCapabilities` by parsing the PCI capability linked-list starting at
     /// `start_offset` within the standard PCI configuration space pointed to by `config_regs`.
-    pub fn new(config_regs: &mut CommonRegisters, start_offset: usize) -> Self {
+    pub fn new(config_regs: &mut CommonRegisters, start_offset: usize) -> Result<Self> {
         let mut caps = ArrayVec::new();
         let mut current_offset = start_offset;
         while current_offset > PCI_TYPE_HEADER_END && current_offset < PCI_CONFIG_SPACE_END {
@@ -64,7 +141,7 @@ impl PciCapabilities {
             // Safety: `cap_ptr` is within the valid and uniquely-owned PCI configuration space
             // referred to by `config_regs` and we are trusting that the hardware has initialized the
             // capability offset registers such that they refer to valid PCI capability headers.
-            let header = unsafe { cap_ptr.as_ref().unwrap() };
+            let header = unsafe { cap_ptr.as_mut().unwrap() };
             let offset = current_offset;
             // Per the spec, the bottom two bits of the next capability pointer should always be
             // discarded.
@@ -74,36 +151,75 @@ impl PciCapabilities {
             // that the hardware provides a valid config space.
             current_offset = (header.next_cap.get() as usize) & !0x3;
             if let Some(id) = CapabilityId::from_raw(header.cap_id.get()) {
-                let cap = PciCapability { id, offset };
-                if caps.try_push(cap).is_err() {
-                    break;
-                }
+                let cap = PciCapability::new(header, id, offset)?;
+                caps.try_push(cap).map_err(|_| Error::TooManyCapabilities)?;
             };
         }
-        Self { caps }
+
+        // Now link all the capabilities together to form a linked-list in the virtual config space.
+        for i in 1..caps.len() {
+            let next_ptr = caps[i].offset();
+            caps[i - 1].set_next(next_ptr);
+        }
+
+        Ok(Self { caps })
     }
 
     /// Returns if an MSI capability is present.
     pub fn has_msi(&self) -> bool {
-        self.offset_by_id(CapabilityId::Msi).is_some()
+        self.capability_by_id(CapabilityId::Msi).is_some()
     }
 
     /// Returns if an MSI-X capability is present.
     pub fn has_msix(&self) -> bool {
-        self.offset_by_id(CapabilityId::MsiX).is_some()
+        self.capability_by_id(CapabilityId::MsiX).is_some()
     }
 
     /// Returns if a PCI-Express capability is present.
     pub fn is_pcie(&self) -> bool {
-        self.offset_by_id(CapabilityId::PciExpress).is_some()
+        self.capability_by_id(CapabilityId::PciExpress).is_some()
+    }
+
+    /// Emulates a read from this device's capabilities structures.
+    pub fn emulate_read(&self, op: &mut MmioReadBuilder) {
+        if let Some(cap) = self.capability_by_offset(op.offset()) {
+            cap.emulate_read(op);
+        } else {
+            op.push_byte(0);
+        }
+    }
+
+    /// Emulates a write to this device's capabilities structures.
+    pub fn emulate_write(&mut self, op: &mut MmioWriteBuilder) {
+        if let Some(cap) = self.capability_by_offset_mut(op.offset()) {
+            cap.emulate_write(op);
+        } else {
+            op.pop_byte();
+        }
+    }
+
+    /// Returns the offset (in the PCI configuration space) of the first emulated capability.
+    pub fn start_offset(&self) -> usize {
+        self.caps.get(0).map(|cap| cap.offset()).unwrap_or(0)
+    }
+
+    // Returns a reference to the capability at `offset`.
+    fn capability_by_offset(&self, offset: usize) -> Option<&PciCapability> {
+        self.caps
+            .iter()
+            .find(|cap| cap.offset() <= offset && offset < (cap.offset() + cap.length()))
+    }
+
+    // Returns a mutable reference to the capability at `offset`.
+    fn capability_by_offset_mut(&mut self, offset: usize) -> Option<&mut PciCapability> {
+        self.caps
+            .iter_mut()
+            .find(|cap| cap.offset() <= offset && offset < (cap.offset() + cap.length()))
     }
 
     // Gets the offset of the capability with the given ID.
-    fn offset_by_id(&self, id: CapabilityId) -> Option<usize> {
-        self.caps
-            .iter()
-            .find(|cap| cap.id == id)
-            .map(|cap| cap.offset)
+    fn capability_by_id(&self, id: CapabilityId) -> Option<&PciCapability> {
+        self.caps.iter().find(|cap| cap.id() == id)
     }
 }
 
@@ -131,11 +247,21 @@ mod tests {
             .collect();
         // Not safe, just a test.
         let regs = unsafe { (header_mem.as_mut_ptr() as *mut CommonRegisters).as_mut() }.unwrap();
-        let caps = PciCapabilities::new(regs, 0x40);
+        let caps = PciCapabilities::new(regs, 0x40).unwrap();
         assert!(caps.has_msix());
         assert!(!caps.is_pcie());
         assert!(!caps.has_msi());
-        assert_eq!(caps.offset_by_id(CapabilityId::PowerManagement), Some(0x40));
-        assert_eq!(caps.offset_by_id(CapabilityId::Vendor), Some(0x5c));
+        assert_eq!(
+            caps.capability_by_id(CapabilityId::PowerManagement)
+                .unwrap()
+                .offset(),
+            0x40
+        );
+        assert_eq!(
+            caps.capability_by_id(CapabilityId::Vendor)
+                .unwrap()
+                .offset(),
+            0x5c
+        );
     }
 }

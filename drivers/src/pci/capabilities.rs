@@ -94,6 +94,17 @@ mod bridge_subsys_offsets {
     define_field_span!(BridgeSubsystemRegisters, ssid, u16);
 }
 
+mod express_offsets {
+    use super::ExpressRegisters;
+    use crate::define_field_span;
+
+    define_field_span!(ExpressRegisters, exp_caps, u16);
+    define_field_span!(ExpressRegisters, dev_caps, u32);
+    define_field_span!(ExpressRegisters, dev_control, u16);
+    define_field_span!(ExpressRegisters, link_caps, u32);
+    define_field_span!(ExpressRegisters, link_status, u16);
+}
+
 // Type-specific capability structures.
 #[enum_dispatch]
 enum CapabilityType {
@@ -102,6 +113,7 @@ enum CapabilityType {
     MsiX,
     Vendor,
     BridgeSubsystem,
+    PciExpress,
 }
 
 // Common functionality required by all capabilities.
@@ -425,13 +437,156 @@ impl Capability for BridgeSubsystem {
     }
 }
 
+// The possible PCI express device types as reported in the FLAGS register of the PCI express
+// capabilities register.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PciExpressDeviceType {
+    Endpoint = 0,
+    LegacyEndpoint = 1,
+    RootPort = 4,
+    UpstreamSwitchPort = 5,
+    DownstreamSwitchPort = 6,
+    PciExpressToPciBridge = 7,
+    PciToPciExpressBridge = 8,
+    RootComplexIntegratedEndpoint = 9,
+    RootComplexEventCollector = 10,
+}
+
+impl PciExpressDeviceType {
+    // Returns the device type corresponding to the raw code.
+    fn from_raw(raw: u8) -> Option<Self> {
+        use PciExpressDeviceType::*;
+        match raw {
+            0 => Some(Endpoint),
+            1 => Some(LegacyEndpoint),
+            4 => Some(RootPort),
+            5 => Some(UpstreamSwitchPort),
+            6 => Some(DownstreamSwitchPort),
+            7 => Some(PciExpressToPciBridge),
+            8 => Some(PciToPciExpressBridge),
+            9 => Some(RootComplexIntegratedEndpoint),
+            10 => Some(RootComplexEventCollector),
+            _ => None,
+        }
+    }
+
+    // Returns if this device type implements the root control and status registers.
+    fn has_root_control(&self) -> bool {
+        use PciExpressDeviceType::*;
+        matches!(
+            self,
+            RootComplexIntegratedEndpoint | RootComplexEventCollector
+        )
+    }
+
+    // Returns if this device type implements the link control and status registers.
+    fn has_link_control(&self) -> bool {
+        use PciExpressDeviceType::*;
+        matches!(
+            self,
+            Endpoint
+                | LegacyEndpoint
+                | RootPort
+                | UpstreamSwitchPort
+                | DownstreamSwitchPort
+                | PciExpressToPciBridge
+                | PciToPciExpressBridge
+        )
+    }
+}
+
+struct PciExpress {
+    registers: &'static mut ExpressRegisters,
+    version: u8,
+    device_type: PciExpressDeviceType,
+}
+
+impl PciExpress {
+    fn new(header: &mut CapabilityHeader) -> Result<Self> {
+        // Safety: `header` points to a valid and unqiuely-owned capability structure and we are
+        // trusting that the hardware reported the type of the capability correctly.
+        let registers = unsafe {
+            (header as *mut CapabilityHeader as *mut ExpressRegisters)
+                .as_mut()
+                .unwrap()
+        };
+        let version = registers.exp_caps.read(ExpressCapabilities::Version) as u8;
+        if version != 1 && version != 2 {
+            return Err(Error::UnsupportedExpressCapabilityVersion(version));
+        }
+        let raw_type = registers.exp_caps.read(ExpressCapabilities::DeviceType) as u8;
+        let device_type = PciExpressDeviceType::from_raw(raw_type)
+            .ok_or(Error::UnsupportedExpressDevice(raw_type))?;
+        Ok(Self {
+            registers,
+            version,
+            device_type,
+        })
+    }
+}
+
+impl Capability for PciExpress {
+    fn length(&self) -> usize {
+        if self.version == 2 {
+            size_of::<ExpressRegisters>()
+        } else if self.device_type.has_root_control() {
+            offset_of!(ExpressRegisters, dev_caps2)
+        } else if self.device_type.has_link_control() {
+            offset_of!(ExpressRegisters, slot_caps)
+        } else {
+            offset_of!(ExpressRegisters, link_caps)
+        }
+    }
+
+    fn emulate_read(&self, op: &mut MmioReadBuilder, cap_offset: usize) {
+        use express_offsets::*;
+        match cap_offset {
+            exp_caps::span!() => {
+                op.push_word(self.registers.exp_caps.readable_bits());
+            }
+            dev_caps::span!() => {
+                op.push_dword(self.registers.dev_caps.readable_bits());
+            }
+            dev_control::span!() => {
+                op.push_word(self.registers.dev_control.readable_bits());
+            }
+            link_caps::span!() if self.device_type.has_link_control() => {
+                op.push_dword(self.registers.link_caps.readable_bits());
+            }
+            link_status::span!() if self.device_type.has_link_control() => {
+                op.push_word(self.registers.link_status.readable_bits());
+            }
+            _ => {
+                // Make all other capability and status bits appear unimplemented.
+                op.push_byte(0);
+            }
+        }
+    }
+
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, cap_offset: usize) {
+        use express_offsets::*;
+        match cap_offset {
+            dev_control::span!() => {
+                let reg = LocalRegisterCopy::<u16, DeviceControl::Register>::new(
+                    op.pop_word(self.registers.dev_control.get()),
+                );
+                self.registers.dev_control.set(reg.writeable_bits());
+            }
+            _ => {
+                // We don't support writes to any of the othe control registers for now.
+                op.pop_byte();
+            }
+        }
+    }
+}
+
 // Represents a single PCI capability.
 struct PciCapability {
     id: CapabilityId,
     offset: usize,
     next: usize,
-    // `None` if the capability is unimplemented.
-    cap_type: Option<CapabilityType>,
+    cap_type: CapabilityType,
 }
 
 impl PciCapability {
@@ -439,13 +594,12 @@ impl PciCapability {
     // configuration space.
     fn new(header: &mut CapabilityHeader, id: CapabilityId, offset: usize) -> Result<Self> {
         let cap_type = match id {
-            CapabilityId::PowerManagement => Some(PowerManagement::new(header).into()),
-            CapabilityId::Msi => Some(Msi::new(header)?.into()),
-            CapabilityId::MsiX => Some(MsiX::new(header).into()),
-            CapabilityId::Vendor => Some(Vendor::new(header)?.into()),
-            CapabilityId::BridgeSubsystem => Some(BridgeSubsystem::new(header).into()),
-            // TODO: Implement the other capability types we need to support.
-            _ => None,
+            CapabilityId::PowerManagement => PowerManagement::new(header).into(),
+            CapabilityId::Msi => Msi::new(header)?.into(),
+            CapabilityId::MsiX => MsiX::new(header).into(),
+            CapabilityId::Vendor => Vendor::new(header)?.into(),
+            CapabilityId::BridgeSubsystem => BridgeSubsystem::new(header).into(),
+            CapabilityId::PciExpress => PciExpress::new(header)?.into(),
         };
         Ok(PciCapability {
             id,
@@ -473,10 +627,7 @@ impl PciCapability {
 
     // Returns the length of this capability structure.
     fn length(&self) -> usize {
-        self.cap_type
-            .as_ref()
-            .map(|c| c.length())
-            .unwrap_or(size_of::<CapabilityHeader>())
+        self.cap_type.length()
     }
 
     // Emulates a read from this capability structure.
@@ -485,22 +636,13 @@ impl PciCapability {
         use header_offsets::*;
         match cap_offset {
             cap_id::span!() => {
-                if self.cap_type.is_some() {
-                    op.push_byte(self.id as u8);
-                } else {
-                    // Hide the ID of unimplemented capabilities.
-                    op.push_byte(0);
-                }
+                op.push_byte(self.id as u8);
             }
             next_cap::span!() => {
                 op.push_byte(self.next as u8);
             }
             _ => {
-                if let Some(ref c) = self.cap_type {
-                    c.emulate_read(op, cap_offset);
-                } else {
-                    op.push_byte(0);
-                }
+                self.cap_type.emulate_read(op, cap_offset);
             }
         }
     }
@@ -514,11 +656,7 @@ impl PciCapability {
                 op.pop_byte();
             }
             _ => {
-                if let Some(ref mut c) = self.cap_type {
-                    c.emulate_write(op, cap_offset);
-                } else {
-                    op.pop_byte();
-                }
+                self.cap_type.emulate_write(op, cap_offset);
             }
         }
     }

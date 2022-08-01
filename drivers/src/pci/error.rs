@@ -61,6 +61,10 @@ pub enum Error {
     MsiNot64BitCapable,
     /// The device has a vendor capability structure with an invalid length field.
     InvalidVendorCapabilityLength(usize),
+    /// The device has an unsupported PCI Express capability version.
+    UnsupportedExpressCapabilityVersion(u8),
+    /// The PCI Express device has an unsupported/unknwon device type.
+    UnsupportedExpressDevice(u8),
 }
 
 /// Holds results for PCI operations.

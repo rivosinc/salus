@@ -11,6 +11,7 @@ assertions = { path = "../assertions" }
 const-field-offset = { version = "0.1.2" }
 data_model = { path = "../data-model" }
 device_tree = { path = "../device-tree" }
+enum_dispatch = { version = "0.3.8" }
 hyp_alloc = { path = "../hyp-alloc" }
 memoffset = { version = ">=0.6.5", features = ["unstable_const"] }
 page_tracking = { path = "../page-tracking" }

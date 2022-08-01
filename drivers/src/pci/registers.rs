@@ -51,6 +51,25 @@ register_bitfields![u16,
         Vga16Bit OFFSET(4) NUMBITS(1),
         SecondaryBusReset OFFSET(6) NUMBITS(1),
     ],
+
+    pub PmCapabilities [
+        Version OFFSET(0) NUMBITS(3),
+        ImmediateReadinessD0 OFFSET(4) NUMBITS(1),
+        DeviceSpecificInitialization OFFSET(5) NUMBITS(1),
+        AuxCurrent OFFSET(6) NUMBITS(3),
+        D1Support OFFSET(9) NUMBITS(1),
+        D2Support OFFSET(10) NUMBITS(1),
+        PmeSupport OFFSET(11) NUMBITS(5),
+    ],
+
+    pub PmControlStatus [
+        PowerState OFFSET(0) NUMBITS(2),
+        NoSoftReset OFFSET(3) NUMBITS(1),
+        PmeEn OFFSET(8) NUMBITS(1),
+        DataSelect OFFSET(9) NUMBITS(4),
+        DataScale OFFSET(13) NUMBITS(2),
+        PmeStatus OFFSET(15) NUMBITS(1),
+    ],
 ];
 
 register_bitfields![u8,
@@ -170,6 +189,17 @@ pub struct CapabilityHeader {
 pub const PCI_CAPS_START: usize = PCI_TYPE_HEADER_END + 1;
 /// End byte offset of the standard PCI configuration space.
 pub const PCI_CONFIG_SPACE_END: usize = 0xff;
+
+/// PCI power management capability.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct PowerManagementRegisters {
+    pub header: CapabilityHeader,
+    pub pmc: ReadOnly<u16, PmCapabilities::Register>,
+    pub pmcsr: ReadWrite<u16, PmControlStatus::Register>,
+    _reserved: u8,
+    pub data: ReadWrite<u8>,
+}
 
 /// Trait for specifying various mask values for a register.
 ///
@@ -298,6 +328,49 @@ impl RegisterMasks for BridgeControl::Register {
     }
 }
 
+// Hide D1/D2 and PME support for now.
+//
+// TODO: Support power management control by VMs.
+impl RegisterMasks for PmCapabilities::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        0
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, PmCapabilities::Register>::new(0);
+        mask.modify(PmCapabilities::Version.val(PmCapabilities::Version.mask));
+        mask.modify(PmCapabilities::ImmediateReadinessD0.val(1));
+        mask.modify(PmCapabilities::DeviceSpecificInitialization.val(1));
+        mask.modify(PmCapabilities::AuxCurrent.val(PmCapabilities::AuxCurrent.mask));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+// Don't expose the ability to make power state transitions.
+impl RegisterMasks for PmControlStatus::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        0
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, PmControlStatus::Register>::new(0);
+        mask.modify(PmControlStatus::NoSoftReset.val(1));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
 // Macro to implement RegisterHelpers for the given type.
 macro_rules! reg_helpers_impl {
     ($reg_type:tt) => {
@@ -320,6 +393,7 @@ macro_rules! reg_helpers_impl {
 }
 
 reg_helpers_impl!(LocalRegisterCopy);
+reg_helpers_impl!(ReadOnly);
 reg_helpers_impl!(ReadWrite);
 
 fn _assert_register_layout() {

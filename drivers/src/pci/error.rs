@@ -59,6 +59,8 @@ pub enum Error {
     TooManyCapabilities,
     /// The device has MSI support, but is not 64-bit capable.
     MsiNot64BitCapable,
+    /// The device has a vendor capability structure with an invalid length field.
+    InvalidVendorCapabilityLength(usize),
 }
 
 /// Holds results for PCI operations.

@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
+use core::mem::size_of;
+use enum_dispatch::enum_dispatch;
 use tock_registers::interfaces::Readable;
 
 use super::error::*;
@@ -45,21 +47,99 @@ mod header_offsets {
     define_field_span!(CapabilityHeader, next_cap, u8);
 }
 
+mod pmc_offsets {
+    use super::PowerManagementRegisters;
+    use crate::define_field_span;
+
+    define_field_span!(PowerManagementRegisters, pmc, u16);
+    define_field_span!(PowerManagementRegisters, pmcsr, u16);
+}
+
+// Type-specific capability structures.
+#[enum_dispatch]
+enum CapabilityType {
+    PowerManagement,
+}
+
+// Common functionality required by all capabilities.
+#[enum_dispatch(CapabilityType)]
+trait Capability {
+    // Returns the length of the capability, including the common header.
+    fn length(&self) -> usize;
+
+    // Emulates a read from the type-specific registers of this capability.
+    fn emulate_read(&self, op: &mut MmioReadBuilder, cap_offset: usize);
+
+    // Emulates a write to the type-specific registers of this capability.
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, cap_offset: usize);
+}
+
+struct PowerManagement {
+    registers: &'static mut PowerManagementRegisters,
+}
+
+impl PowerManagement {
+    fn new(header: &mut CapabilityHeader) -> Self {
+        // Safety: `header` points to a valid and unqiuely-owned capability structure and we are
+        // trusting that the hardware reported the type of the capability correctly.
+        let registers = unsafe {
+            (header as *mut CapabilityHeader as *mut PowerManagementRegisters)
+                .as_mut()
+                .unwrap()
+        };
+        Self { registers }
+    }
+}
+
+impl Capability for PowerManagement {
+    fn length(&self) -> usize {
+        size_of::<PowerManagementRegisters>()
+    }
+
+    fn emulate_read(&self, op: &mut MmioReadBuilder, cap_offset: usize) {
+        use pmc_offsets::*;
+        match cap_offset {
+            pmc::span!() => {
+                op.push_word(self.registers.pmc.readable_bits());
+            }
+            pmcsr::span!() => {
+                op.push_word(self.registers.pmcsr.readable_bits());
+            }
+            _ => {
+                op.push_byte(0);
+            }
+        }
+    }
+
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, _cap_offset: usize) {
+        // TODO: Support PME and D-state transitions if necessary.
+        op.pop_byte();
+    }
+}
+
 // Represents a single PCI capability.
 struct PciCapability {
     id: CapabilityId,
     offset: usize,
     next: usize,
+    // `None` if the capability is unimplemented.
+    cap_type: Option<CapabilityType>,
 }
 
 impl PciCapability {
     // Creates a new capability of type `id` at `header`, which itself is at `offset` within the
     // configuration space.
-    fn new(_header: &mut CapabilityHeader, id: CapabilityId, offset: usize) -> Result<Self> {
+    fn new(header: &mut CapabilityHeader, id: CapabilityId, offset: usize) -> Result<Self> {
+        let cap_type = match id {
+            CapabilityId::PowerManagement => Some(PowerManagement::new(header).into()),
+            // TODO: Implement the other capability types we need to support.
+            _ => None,
+        };
         Ok(PciCapability {
             id,
             offset,
             next: 0,
+            cap_type,
         })
     }
 
@@ -81,7 +161,10 @@ impl PciCapability {
 
     // Returns the length of this capability structure.
     fn length(&self) -> usize {
-        core::mem::size_of::<CapabilityHeader>()
+        self.cap_type
+            .as_ref()
+            .map(|c| c.length())
+            .unwrap_or(size_of::<CapabilityHeader>())
     }
 
     // Emulates a read from this capability structure.
@@ -90,15 +173,22 @@ impl PciCapability {
         use header_offsets::*;
         match cap_offset {
             cap_id::span!() => {
-                // TODO: Hide the capability until we're ready to pass them through.
-                op.push_byte(0);
+                if self.cap_type.is_some() {
+                    op.push_byte(self.id as u8);
+                } else {
+                    // Hide the ID of unimplemented capabilities.
+                    op.push_byte(0);
+                }
             }
             next_cap::span!() => {
                 op.push_byte(self.next as u8);
             }
             _ => {
-                // TODO: Emulate type-specific registers.
-                op.push_byte(0);
+                if let Some(ref c) = self.cap_type {
+                    c.emulate_read(op, cap_offset);
+                } else {
+                    op.push_byte(0);
+                }
             }
         }
     }
@@ -112,8 +202,11 @@ impl PciCapability {
                 op.pop_byte();
             }
             _ => {
-                // TODO: Emulate type-specific registers.
-                op.pop_byte();
+                if let Some(ref mut c) = self.cap_type {
+                    c.emulate_write(op, cap_offset);
+                } else {
+                    op.pop_byte();
+                }
             }
         }
     }

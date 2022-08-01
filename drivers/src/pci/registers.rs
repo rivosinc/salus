@@ -86,6 +86,27 @@ register_bitfields![u16,
         FunctionMask OFFSET(14) NUMBITS(1),
         MsiXEnable OFFSET(15) NUMBITS(1),
     ],
+
+    pub ExpressCapabilities [
+        Version OFFSET(0) NUMBITS(4),
+        DeviceType OFFSET(4) NUMBITS(4),
+        SlotImplemented OFFSET(8) NUMBITS(1),
+        InterruptMessageNumber OFFSET(9) NUMBITS(5),
+        FlitModeSupported OFFSET(15) NUMBITS(1),
+    ],
+
+    pub DeviceControl [
+        EnableRelaxedOrdering OFFSET(4) NUMBITS(1),
+        MaxPayloadSize OFFSET(5) NUMBITS(3),
+        NoSnoop OFFSET(11) NUMBITS(1),
+        MaxReadRequestSize OFFSET(12) NUMBITS(3),
+        FunctionLevelReset OFFSET(15) NUMBITS(1),
+    ],
+
+    pub LinkStatus [
+        LinkSpeed OFFSET(0) NUMBITS(4),
+        LinkWidth OFFSET(4) NUMBITS(6),
+    ],
 ];
 
 register_bitfields![u8,
@@ -116,6 +137,17 @@ register_bitfields![u32,
         ],
         Prefetchable OFFSET(3) NUMBITS(1) [],
         Address OFFSET(4) NUMBITS(28) [],
+    ],
+
+    pub DeviceCapabilities [
+        MaxPayloadSize OFFSET(0) NUMBITS(3),
+        FunctionLevelReset OFFSET(28) NUMBITS(1),
+    ],
+
+    pub LinkCapabilities [
+        MaxLinkSpeed OFFSET(0) NUMBITS(4),
+        MaxLinkWidth OFFSET(4) NUMBITS(6),
+        PortNumber OFFSET(24) NUMBITS(8),
     ],
 ];
 
@@ -260,6 +292,44 @@ pub struct BridgeSubsystemRegisters {
     _reserved: u16,
     pub ssvid: ReadOnly<u16>,
     pub ssid: ReadOnly<u16>,
+}
+
+/// PCI Express capability registers.
+///
+/// Which registers are actually implemented depends on the version of the capability and the type
+/// of the device.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct ExpressRegisters {
+    // Implemented by all devices.
+    pub header: CapabilityHeader,
+    pub exp_caps: ReadOnly<u16, ExpressCapabilities::Register>,
+    pub dev_caps: ReadOnly<u32, DeviceCapabilities::Register>,
+    pub dev_control: ReadWrite<u16, DeviceControl::Register>,
+    pub dev_status: ReadWrite<u16>,
+    // All devices with links. We only expose the link speed and width.
+    pub link_caps: ReadOnly<u32, LinkCapabilities::Register>,
+    pub link_control: ReadWrite<u16>,
+    pub link_status: ReadWrite<u16, LinkStatus::Register>,
+    // All devices with slots. We hide the FLAGS_SLOT bit, so these registers will appear as
+    // unimplemented to a VM.
+    pub slot_caps: ReadOnly<u32>,
+    pub slot_control: ReadWrite<u16>,
+    pub slot_status: ReadWrite<u16>,
+    // All root ports or root complex event collectors. We don't expose any of the capabilities here.
+    pub root_control: ReadWrite<u16>,
+    pub root_caps: ReadOnly<u16>,
+    pub root_status: ReadWrite<u32>,
+    // Express capability V2 registers. We don't expose any of the bits here for now.
+    pub dev_caps2: ReadOnly<u32>,
+    pub dev_control2: ReadWrite<u16>,
+    pub dev_status2: ReadOnly<u16>,
+    pub link_caps2: ReadOnly<u32>,
+    pub link_control2: ReadWrite<u16>,
+    pub link_status2: ReadWrite<u16>,
+    pub slot_caps2: ReadOnly<u32>,
+    pub slot_control2: ReadOnly<u16>,
+    pub slot_status2: ReadOnly<u16>,
 }
 
 /// Trait for specifying various mask values for a register.
@@ -478,6 +548,121 @@ impl RegisterMasks for MsiXMessageControl::Register {
         let mut mask =
             LocalRegisterCopy::<u16, MsiXMessageControl::Register>::new(Self::writeable_mask());
         mask.modify(MsiXMessageControl::TableSize.val(MsiXMessageControl::TableSize.mask));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+// Hide FLAGS_SLOT so that we can leave the slot registers unimplemented.
+impl RegisterMasks for ExpressCapabilities::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        0
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, ExpressCapabilities::Register>::new(0);
+        mask.modify(ExpressCapabilities::Version.val(ExpressCapabilities::Version.mask));
+        mask.modify(ExpressCapabilities::DeviceType.val(ExpressCapabilities::DeviceType.mask));
+        mask.modify(
+            ExpressCapabilities::InterruptMessageNumber
+                .val(ExpressCapabilities::InterruptMessageNumber.mask),
+        );
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+// Hide everything but MPS for now. Phantom functions, extended tags, etc could affect requester IDs
+// and confuse the IOMMU.
+//
+// TODO: Expose function-level reset capability.
+impl RegisterMasks for DeviceCapabilities::Register {
+    type RegType = u32;
+
+    fn writeable_mask() -> u32 {
+        0
+    }
+
+    fn readable_mask() -> u32 {
+        let mut mask = LocalRegisterCopy::<u32, DeviceCapabilities::Register>::new(0);
+        mask.modify(
+            DeviceCapabilities::MaxPayloadSize.val(DeviceCapabilities::MaxPayloadSize.mask),
+        );
+        mask.get()
+    }
+
+    fn clearable_mask() -> u32 {
+        0
+    }
+}
+
+// Allow reads from (but not writes to) payload size fields since they can have system-wide effects
+//
+// TODO: Allow function-level resets.
+impl RegisterMasks for DeviceControl::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, DeviceControl::Register>::new(0);
+        mask.modify(DeviceControl::EnableRelaxedOrdering.val(1));
+        mask.modify(DeviceControl::NoSnoop.val(1));
+        mask.get()
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask =
+            LocalRegisterCopy::<u16, DeviceControl::Register>::new(Self::writeable_mask());
+        mask.modify(DeviceControl::MaxPayloadSize.val(DeviceControl::MaxPayloadSize.mask));
+        mask.modify(DeviceControl::MaxReadRequestSize.val(DeviceControl::MaxReadRequestSize.mask));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+// Hide everything but link speed/width and port number.
+impl RegisterMasks for LinkCapabilities::Register {
+    type RegType = u32;
+
+    fn writeable_mask() -> u32 {
+        0
+    }
+
+    fn readable_mask() -> u32 {
+        let mut mask = LocalRegisterCopy::<u32, LinkCapabilities::Register>::new(0);
+        mask.modify(LinkCapabilities::MaxLinkSpeed.val(LinkCapabilities::MaxLinkSpeed.mask));
+        mask.modify(LinkCapabilities::MaxLinkWidth.val(LinkCapabilities::MaxLinkWidth.mask));
+        mask.modify(LinkCapabilities::PortNumber.val(LinkCapabilities::PortNumber.mask));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u32 {
+        0
+    }
+}
+
+// Like LNKCAP, hide everything except link speed/width.
+impl RegisterMasks for LinkStatus::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        0
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, LinkStatus::Register>::new(0);
+        mask.modify(LinkStatus::LinkSpeed.val(LinkStatus::LinkSpeed.mask));
+        mask.modify(LinkStatus::LinkWidth.val(LinkStatus::LinkWidth.mask));
         mask.get()
     }
 

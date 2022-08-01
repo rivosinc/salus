@@ -80,6 +80,12 @@ register_bitfields![u16,
         ExtendedMessageCapable OFFSET(9) NUMBITS(1),
         ExtendedMessageEnable OFFSET(10) NUMBITS(1),
     ],
+
+    pub MsiXMessageControl [
+        TableSize OFFSET(0) NUMBITS(10),
+        FunctionMask OFFSET(14) NUMBITS(1),
+        MsiXEnable OFFSET(15) NUMBITS(1),
+    ],
 ];
 
 register_bitfields![u8,
@@ -223,6 +229,16 @@ pub struct MsiRegisters {
     pub extended_msg_data: ReadWrite<u16>,
     pub mask_bits: ReadWrite<u32>,
     pub pending_bits: ReadOnly<u32>,
+}
+
+/// MSI-X capability.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct MsiXRegisters {
+    pub header: CapabilityHeader,
+    pub msg_control: ReadWrite<u16, MsiXMessageControl::Register>,
+    pub table_offset: ReadOnly<u32>,
+    pub pba_offset: ReadOnly<u32>,
 }
 
 /// Trait for specifying various mask values for a register.
@@ -419,6 +435,28 @@ impl RegisterMasks for MsiMessageControl::Register {
         mask.modify(MsiMessageControl::Address64BitCapable.val(1));
         mask.modify(MsiMessageControl::VectorMaskingCapable.val(1));
         mask.modify(MsiMessageControl::ExtendedMessageCapable.val(1));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+impl RegisterMasks for MsiXMessageControl::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, MsiXMessageControl::Register>::new(0);
+        mask.modify(MsiXMessageControl::FunctionMask.val(1));
+        mask.modify(MsiXMessageControl::MsiXEnable.val(1));
+        mask.get()
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask =
+            LocalRegisterCopy::<u16, MsiXMessageControl::Register>::new(Self::writeable_mask());
+        mask.modify(MsiXMessageControl::TableSize.val(MsiXMessageControl::TableSize.mask));
         mask.get()
     }
 

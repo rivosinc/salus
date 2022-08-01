@@ -79,12 +79,20 @@ mod msix_offsets {
     define_field_span!(MsiXRegisters, pba_offset, u32);
 }
 
+mod vendor_offsets {
+    use super::VendorCapabilityHeader;
+    use crate::define_field_span;
+
+    define_field_span!(VendorCapabilityHeader, cap_length, u8);
+}
+
 // Type-specific capability structures.
 #[enum_dispatch]
 enum CapabilityType {
     PowerManagement,
     Msi,
     MsiX,
+    Vendor,
 }
 
 // Common functionality required by all capabilities.
@@ -308,6 +316,64 @@ impl Capability for MsiX {
     }
 }
 
+struct Vendor {
+    header: &'static mut VendorCapabilityHeader,
+    length: usize,
+}
+
+impl Vendor {
+    fn new(header: &mut CapabilityHeader) -> Result<Self> {
+        // Safety: `header` points to a valid and unqiuely-owned capability structure and we are
+        // trusting that the hardware reported the type of the capability correctly.
+        let vendor_header = unsafe {
+            (header as *mut CapabilityHeader as *mut VendorCapabilityHeader)
+                .as_mut()
+                .unwrap()
+        };
+        let length = vendor_header.cap_length.get() as usize;
+        // Sanity check the reported length.
+        if length < size_of::<VendorCapabilityHeader>() || length > PCI_MAX_CAP_LENGTH {
+            return Err(Error::InvalidVendorCapabilityLength(length));
+        }
+        Ok(Self {
+            header: vendor_header,
+            length,
+        })
+    }
+}
+
+impl Capability for Vendor {
+    fn length(&self) -> usize {
+        self.length
+    }
+
+    fn emulate_read(&self, op: &mut MmioReadBuilder, cap_offset: usize) {
+        use vendor_offsets::*;
+        match cap_offset {
+            cap_length::span!() => {
+                op.push_byte(self.length as u8);
+            }
+            x if cap_length::END_OFFSET < x && x < self.length => {
+                // Safety: We've verified that the read offset is within the bounds of the capability
+                // structure. Further, byte-sized reads are always valid in PCI configuration space.
+                let reg = unsafe {
+                    let ptr = (self.header as *const VendorCapabilityHeader as *const u8).add(x);
+                    core::ptr::read_volatile(ptr)
+                };
+                op.push_byte(reg);
+            }
+            _ => {
+                op.push_byte(0);
+            }
+        }
+    }
+
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, _cap_offset: usize) {
+        // The vendor capability structure is opaque, so treat all the registers as read-only.
+        op.pop_byte();
+    }
+}
+
 // Represents a single PCI capability.
 struct PciCapability {
     id: CapabilityId,
@@ -325,6 +391,7 @@ impl PciCapability {
             CapabilityId::PowerManagement => Some(PowerManagement::new(header).into()),
             CapabilityId::Msi => Some(Msi::new(header)?.into()),
             CapabilityId::MsiX => Some(MsiX::new(header).into()),
+            CapabilityId::Vendor => Some(Vendor::new(header)?.into()),
             // TODO: Implement the other capability types we need to support.
             _ => None,
         };

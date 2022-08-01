@@ -205,6 +205,8 @@ pub struct CapabilityHeader {
 pub const PCI_CAPS_START: usize = PCI_TYPE_HEADER_END + 1;
 /// End byte offset of the standard PCI configuration space.
 pub const PCI_CONFIG_SPACE_END: usize = 0xff;
+/// The maximum number of bytes that can be occupied by PCI capability structures.
+pub const PCI_MAX_CAP_LENGTH: usize = PCI_CONFIG_SPACE_END - PCI_CAPS_START + 1;
 
 /// PCI power management capability.
 #[repr(C)]
@@ -239,6 +241,15 @@ pub struct MsiXRegisters {
     pub msg_control: ReadWrite<u16, MsiXMessageControl::Register>,
     pub table_offset: ReadOnly<u32>,
     pub pba_offset: ReadOnly<u32>,
+}
+
+/// Vendor-specific capability. These capabilities are dynamically-sized.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct VendorCapabilityHeader {
+    pub header: CapabilityHeader,
+    pub cap_length: ReadOnly<u8>,
+    _vendor_specific: u8,
 }
 
 /// Trait for specifying various mask values for a register.

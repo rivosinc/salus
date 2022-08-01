@@ -252,6 +252,16 @@ pub struct VendorCapabilityHeader {
     _vendor_specific: u8,
 }
 
+/// Bridge subsystem vendor ID capability.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct BridgeSubsystemRegisters {
+    pub header: CapabilityHeader,
+    _reserved: u16,
+    pub ssvid: ReadOnly<u16>,
+    pub ssid: ReadOnly<u16>,
+}
+
 /// Trait for specifying various mask values for a register.
 ///
 /// TODO: Make the `*_mask()` functions const values.

@@ -86,6 +86,14 @@ mod vendor_offsets {
     define_field_span!(VendorCapabilityHeader, cap_length, u8);
 }
 
+mod bridge_subsys_offsets {
+    use super::BridgeSubsystemRegisters;
+    use crate::define_field_span;
+
+    define_field_span!(BridgeSubsystemRegisters, ssvid, u16);
+    define_field_span!(BridgeSubsystemRegisters, ssid, u16);
+}
+
 // Type-specific capability structures.
 #[enum_dispatch]
 enum CapabilityType {
@@ -93,6 +101,7 @@ enum CapabilityType {
     Msi,
     MsiX,
     Vendor,
+    BridgeSubsystem,
 }
 
 // Common functionality required by all capabilities.
@@ -374,6 +383,48 @@ impl Capability for Vendor {
     }
 }
 
+struct BridgeSubsystem {
+    registers: &'static mut BridgeSubsystemRegisters,
+}
+
+impl BridgeSubsystem {
+    fn new(header: &mut CapabilityHeader) -> Self {
+        // Safety: `header` points to a valid and unqiuely-owned capability structure and we are
+        // trusting that the hardware reported the type of the capability correctly.
+        let registers = unsafe {
+            (header as *mut CapabilityHeader as *mut BridgeSubsystemRegisters)
+                .as_mut()
+                .unwrap()
+        };
+        Self { registers }
+    }
+}
+
+impl Capability for BridgeSubsystem {
+    fn length(&self) -> usize {
+        size_of::<BridgeSubsystemRegisters>()
+    }
+
+    fn emulate_read(&self, op: &mut MmioReadBuilder, cap_offset: usize) {
+        use bridge_subsys_offsets::*;
+        match cap_offset {
+            ssvid::span!() => {
+                op.push_word(self.registers.ssvid.get());
+            }
+            ssid::span!() => {
+                op.push_word(self.registers.ssid.get());
+            }
+            _ => {
+                op.push_byte(0);
+            }
+        }
+    }
+
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, _cap_offset: usize) {
+        op.pop_byte();
+    }
+}
+
 // Represents a single PCI capability.
 struct PciCapability {
     id: CapabilityId,
@@ -392,6 +443,7 @@ impl PciCapability {
             CapabilityId::Msi => Some(Msi::new(header)?.into()),
             CapabilityId::MsiX => Some(MsiX::new(header).into()),
             CapabilityId::Vendor => Some(Vendor::new(header)?.into()),
+            CapabilityId::BridgeSubsystem => Some(BridgeSubsystem::new(header).into()),
             // TODO: Implement the other capability types we need to support.
             _ => None,
         };

@@ -70,11 +70,21 @@ mod msi_offsets {
     define_field_span!(MsiRegisters, pending_bits, u32);
 }
 
+mod msix_offsets {
+    use super::MsiXRegisters;
+    use crate::define_field_span;
+
+    define_field_span!(MsiXRegisters, msg_control, u16);
+    define_field_span!(MsiXRegisters, table_offset, u32);
+    define_field_span!(MsiXRegisters, pba_offset, u32);
+}
+
 // Type-specific capability structures.
 #[enum_dispatch]
 enum CapabilityType {
     PowerManagement,
     Msi,
+    MsiX,
 }
 
 // Common functionality required by all capabilities.
@@ -242,6 +252,62 @@ impl Capability for Msi {
     }
 }
 
+struct MsiX {
+    registers: &'static mut MsiXRegisters,
+}
+
+impl MsiX {
+    fn new(header: &mut CapabilityHeader) -> Self {
+        // Safety: `header` points to a valid and unqiuely-owned capability structure and we are
+        // trusting that the hardware reported the type of the capability correctly.
+        let registers = unsafe {
+            (header as *mut CapabilityHeader as *mut MsiXRegisters)
+                .as_mut()
+                .unwrap()
+        };
+        Self { registers }
+    }
+}
+
+impl Capability for MsiX {
+    fn length(&self) -> usize {
+        size_of::<MsiXRegisters>()
+    }
+
+    fn emulate_read(&self, op: &mut MmioReadBuilder, cap_offset: usize) {
+        use msix_offsets::*;
+        match cap_offset {
+            msg_control::span!() => {
+                op.push_word(self.registers.msg_control.readable_bits());
+            }
+            table_offset::span!() => {
+                op.push_dword(self.registers.table_offset.get());
+            }
+            pba_offset::span!() => {
+                op.push_dword(self.registers.pba_offset.get());
+            }
+            _ => {
+                op.push_byte(0);
+            }
+        }
+    }
+
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, cap_offset: usize) {
+        use msix_offsets::*;
+        match cap_offset {
+            msg_control::span!() => {
+                let reg = LocalRegisterCopy::<u16, MsiXMessageControl::Register>::new(
+                    op.pop_word(self.registers.msg_control.get()),
+                );
+                self.registers.msg_control.set(reg.writeable_bits());
+            }
+            _ => {
+                op.pop_byte();
+            }
+        }
+    }
+}
+
 // Represents a single PCI capability.
 struct PciCapability {
     id: CapabilityId,
@@ -258,6 +324,7 @@ impl PciCapability {
         let cap_type = match id {
             CapabilityId::PowerManagement => Some(PowerManagement::new(header).into()),
             CapabilityId::Msi => Some(Msi::new(header)?.into()),
+            CapabilityId::MsiX => Some(MsiX::new(header).into()),
             // TODO: Implement the other capability types we need to support.
             _ => None,
         };

@@ -57,6 +57,8 @@ pub enum Error {
     DeviceNotFound(Address),
     /// Too many capabilities were found for a PCI device.
     TooManyCapabilities,
+    /// The device has MSI support, but is not 64-bit capable.
+    MsiNot64BitCapable,
 }
 
 /// Holds results for PCI operations.

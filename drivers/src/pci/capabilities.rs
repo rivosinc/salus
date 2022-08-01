@@ -5,7 +5,9 @@
 use arrayvec::ArrayVec;
 use core::mem::size_of;
 use enum_dispatch::enum_dispatch;
-use tock_registers::interfaces::Readable;
+use memoffset::offset_of;
+use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::LocalRegisterCopy;
 
 use super::error::*;
 use super::mmio_builder::{MmioReadBuilder, MmioWriteBuilder};
@@ -55,10 +57,24 @@ mod pmc_offsets {
     define_field_span!(PowerManagementRegisters, pmcsr, u16);
 }
 
+mod msi_offsets {
+    use super::MsiRegisters;
+    use crate::define_field_span;
+
+    define_field_span!(MsiRegisters, msg_control, u16);
+    define_field_span!(MsiRegisters, msg_addr, u32);
+    define_field_span!(MsiRegisters, msg_upper_addr, u32);
+    define_field_span!(MsiRegisters, msg_data, u16);
+    define_field_span!(MsiRegisters, extended_msg_data, u16);
+    define_field_span!(MsiRegisters, mask_bits, u32);
+    define_field_span!(MsiRegisters, pending_bits, u32);
+}
+
 // Type-specific capability structures.
 #[enum_dispatch]
 enum CapabilityType {
     PowerManagement,
+    Msi,
 }
 
 // Common functionality required by all capabilities.
@@ -117,6 +133,115 @@ impl Capability for PowerManagement {
     }
 }
 
+struct Msi {
+    registers: &'static mut MsiRegisters,
+    per_vector_masks: bool,
+}
+
+impl Msi {
+    fn new(header: &mut CapabilityHeader) -> Result<Self> {
+        // Safety: `header` points to a valid and unqiuely-owned capability structure and we are
+        // trusting that the hardware reported the type of the capability correctly.
+        let registers = unsafe {
+            (header as *mut CapabilityHeader as *mut MsiRegisters)
+                .as_mut()
+                .unwrap()
+        };
+        // Keep things simple by only supporting 64-bit MSI. Basically all devices emulated by QEMU
+        // use 64-bit MSI anyway.
+        if registers
+            .msg_control
+            .read(MsiMessageControl::Address64BitCapable)
+            == 0
+        {
+            return Err(Error::MsiNot64BitCapable);
+        }
+        let per_vector_masks = registers
+            .msg_control
+            .read(MsiMessageControl::VectorMaskingCapable)
+            != 0;
+        Ok(Self {
+            registers,
+            per_vector_masks,
+        })
+    }
+}
+
+impl Capability for Msi {
+    fn length(&self) -> usize {
+        if self.per_vector_masks {
+            size_of::<MsiRegisters>()
+        } else {
+            offset_of!(MsiRegisters, mask_bits)
+        }
+    }
+
+    fn emulate_read(&self, op: &mut MmioReadBuilder, cap_offset: usize) {
+        use msi_offsets::*;
+        match cap_offset {
+            msg_control::span!() => {
+                op.push_word(self.registers.msg_control.readable_bits());
+            }
+            msg_addr::span!() => {
+                op.push_dword(self.registers.msg_addr.get());
+            }
+            msg_upper_addr::span!() => {
+                op.push_dword(self.registers.msg_upper_addr.get());
+            }
+            msg_data::span!() => {
+                op.push_word(self.registers.msg_data.get());
+            }
+            extended_msg_data::span!() => {
+                op.push_word(self.registers.extended_msg_data.get());
+            }
+            mask_bits::span!() if self.per_vector_masks => {
+                op.push_dword(self.registers.mask_bits.get());
+            }
+            pending_bits::span!() if self.per_vector_masks => {
+                op.push_dword(self.registers.pending_bits.get());
+            }
+            _ => {
+                op.push_byte(0);
+            }
+        }
+    }
+
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, cap_offset: usize) {
+        use msi_offsets::*;
+        match cap_offset {
+            msg_control::span!() => {
+                let reg = LocalRegisterCopy::<u16, MsiMessageControl::Register>::new(
+                    op.pop_word(self.registers.msg_control.get()),
+                );
+                self.registers.msg_control.set(reg.writeable_bits());
+            }
+            msg_addr::span!() => {
+                let reg = op.pop_dword(self.registers.msg_addr.get());
+                self.registers.msg_addr.set(reg);
+            }
+            msg_upper_addr::span!() => {
+                let reg = op.pop_dword(self.registers.msg_upper_addr.get());
+                self.registers.msg_upper_addr.set(reg);
+            }
+            msg_data::span!() => {
+                let reg = op.pop_word(self.registers.msg_data.get());
+                self.registers.msg_data.set(reg);
+            }
+            extended_msg_data::span!() => {
+                let reg = op.pop_word(self.registers.extended_msg_data.get());
+                self.registers.extended_msg_data.set(reg);
+            }
+            mask_bits::span!() if self.per_vector_masks => {
+                let reg = op.pop_dword(self.registers.mask_bits.get());
+                self.registers.mask_bits.set(reg);
+            }
+            _ => {
+                op.pop_byte();
+            }
+        }
+    }
+}
+
 // Represents a single PCI capability.
 struct PciCapability {
     id: CapabilityId,
@@ -132,6 +257,7 @@ impl PciCapability {
     fn new(header: &mut CapabilityHeader, id: CapabilityId, offset: usize) -> Result<Self> {
         let cap_type = match id {
             CapabilityId::PowerManagement => Some(PowerManagement::new(header).into()),
+            CapabilityId::Msi => Some(Msi::new(header)?.into()),
             // TODO: Implement the other capability types we need to support.
             _ => None,
         };

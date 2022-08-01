@@ -70,6 +70,16 @@ register_bitfields![u16,
         DataScale OFFSET(13) NUMBITS(2),
         PmeStatus OFFSET(15) NUMBITS(1),
     ],
+
+    pub MsiMessageControl [
+        MsiEnable OFFSET(0) NUMBITS(1),
+        MultipleMessageCapable OFFSET(1) NUMBITS(3),
+        MultipleMessageEnable OFFSET(4) NUMBITS(3),
+        Address64BitCapable OFFSET(7) NUMBITS(1),
+        VectorMaskingCapable OFFSET(8) NUMBITS(1),
+        ExtendedMessageCapable OFFSET(9) NUMBITS(1),
+        ExtendedMessageEnable OFFSET(10) NUMBITS(1),
+    ],
 ];
 
 register_bitfields![u8,
@@ -199,6 +209,20 @@ pub struct PowerManagementRegisters {
     pub pmcsr: ReadWrite<u16, PmControlStatus::Register>,
     _reserved: u8,
     pub data: ReadWrite<u8>,
+}
+
+/// 64-bit MSI capability.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct MsiRegisters {
+    pub header: CapabilityHeader,
+    pub msg_control: ReadWrite<u16, MsiMessageControl::Register>,
+    pub msg_addr: ReadWrite<u32>,
+    pub msg_upper_addr: ReadWrite<u32>,
+    pub msg_data: ReadWrite<u16>,
+    pub extended_msg_data: ReadWrite<u16>,
+    pub mask_bits: ReadWrite<u32>,
+    pub pending_bits: ReadOnly<u32>,
 }
 
 /// Trait for specifying various mask values for a register.
@@ -363,6 +387,38 @@ impl RegisterMasks for PmControlStatus::Register {
     fn readable_mask() -> u16 {
         let mut mask = LocalRegisterCopy::<u16, PmControlStatus::Register>::new(0);
         mask.modify(PmControlStatus::NoSoftReset.val(1));
+        mask.get()
+    }
+
+    fn clearable_mask() -> u16 {
+        0
+    }
+}
+
+impl RegisterMasks for MsiMessageControl::Register {
+    type RegType = u16;
+
+    fn writeable_mask() -> u16 {
+        let mut mask = LocalRegisterCopy::<u16, MsiMessageControl::Register>::new(0);
+        mask.modify(MsiMessageControl::MsiEnable.val(1));
+        mask.modify(
+            MsiMessageControl::MultipleMessageEnable
+                .val(MsiMessageControl::MultipleMessageEnable.mask),
+        );
+        mask.modify(MsiMessageControl::ExtendedMessageEnable.val(1));
+        mask.get()
+    }
+
+    fn readable_mask() -> u16 {
+        let mut mask =
+            LocalRegisterCopy::<u16, MsiMessageControl::Register>::new(Self::writeable_mask());
+        mask.modify(
+            MsiMessageControl::MultipleMessageCapable
+                .val(MsiMessageControl::MultipleMessageCapable.mask),
+        );
+        mask.modify(MsiMessageControl::Address64BitCapable.val(1));
+        mask.modify(MsiMessageControl::VectorMaskingCapable.val(1));
+        mask.modify(MsiMessageControl::ExtendedMessageCapable.val(1));
         mask.get()
     }
 

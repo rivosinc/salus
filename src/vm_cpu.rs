@@ -101,9 +101,16 @@ pub struct VmCpuTrapState {
 #[derive(Default)]
 #[repr(C)]
 struct VmCpuState {
+    // CPU state that's shared between our's and the guest's execution environment. Saved/restored
+    // when entering/exiting a VM.
     host_regs: HostCpuState,
     guest_regs: GuestCpuState,
+
+    // CPU state that only applies when V=1, e.g. the VS-level CSRs. Saved/restored on activation of
+    // the vCPU.
     guest_vcpu_csrs: GuestVCpuState,
+
+    // Read on VM exit.
     trap_csrs: VmCpuTrapState,
 }
 
@@ -267,30 +274,59 @@ pub enum VmCpuExit {
     // TODO: Add other exit causes as needed.
 }
 
-/// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
-pub struct ActiveVmCpu<'vcpu, 'pages, T: GuestStagePageTable> {
-    vcpu: &'vcpu mut VmCpu,
-    active_pages: ActiveVmPages<'pages, T>,
+// Interface for vCPU state save/restore on context switch.
+trait VmCpuSaveState {
+    // Saves this `ActiveVmCpu`'s state, effectively de-activating it until a corresponding call to
+    // `restore()`.
+    fn save(&mut self);
+
+    // Re-activates this `ActiveVmCpu` by restoring the state that was saved with `save()`.
+    fn restore(&mut self);
 }
 
-impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
+/// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
+pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePageTable> {
+    vcpu: &'vcpu mut VmCpu,
+    vm_pages: &'pages VmPages<T>,
+    // `None` if this vCPU is itself running a child vCPU. Restored when the child vCPU exits.
+    active_pages: Option<ActiveVmPages<'pages, T>>,
+    // The parent vCPU which activated us.
+    parent_vcpu: Option<&'prev mut dyn VmCpuSaveState>,
+}
+
+impl<'vcpu, 'pages, 'prev, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, 'prev, T> {
+    // Restores and activates the vCPU state from `vcpu`, with the VM address space represented by
+    // `vm_pages`.
+    fn restore_from(
+        vcpu: &'vcpu mut VmCpu,
+        vm_pages: &'pages VmPages<T>,
+        parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
+    ) -> Self {
+        let this_cpu = PerCpu::this_cpu();
+        if let Some(ref c) = vcpu.current_cpu && c.cpu != this_cpu.cpu_id() {
+            // If we've changed CPUs, then any per-CPU state is invalid.
+            //
+            // TODO: Migration between physical CPUs needs to be done explicitly via TEECALL.
+            vcpu.current_cpu = None;
+        }
+
+        // We store the parent vCPU as a trait object as a means of type-erasure for ActiveVmCpu's
+        // inner lifetimes.
+        let parent_vcpu = parent_vcpu.map(|p| p as &mut dyn VmCpuSaveState);
+
+        let mut active_vcpu = Self {
+            vcpu,
+            vm_pages,
+            active_pages: None,
+            parent_vcpu,
+        };
+        active_vcpu.restore();
+        active_vcpu
+    }
+
     /// Runs this vCPU until it exits.
     pub fn run_to_exit(&mut self) -> VmCpuExit {
         self.complete_pending_mmio_op();
-
-        // Load the vCPU CSRs. Safe as these don't take effect until V=1.
-        CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
-        CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
-        CSR.vsie.set(self.state.guest_vcpu_csrs.vsie);
-        CSR.vstvec.set(self.state.guest_vcpu_csrs.vstvec);
-        CSR.vsscratch.set(self.state.guest_vcpu_csrs.vsscratch);
-        CSR.vsepc.set(self.state.guest_vcpu_csrs.vsepc);
-        CSR.vscause.set(self.state.guest_vcpu_csrs.vscause);
-        CSR.vstval.set(self.state.guest_vcpu_csrs.vstval);
-        CSR.vsatp.set(self.state.guest_vcpu_csrs.vsatp);
-        if CpuInfo::get().has_sstc() {
-            CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
-        }
 
         // TODO, HGEIE programinng:
         //  - Track which guests the host wants interrupts from (by trapping HGEIE accesses from
@@ -313,20 +349,6 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
         self.state.trap_csrs.stval = CSR.stval.get();
         self.state.trap_csrs.htval = CSR.htval.get();
         self.state.trap_csrs.htinst = CSR.htinst.get();
-
-        // Save the vCPU state.
-        self.state.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
-        self.state.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
-        self.state.guest_vcpu_csrs.vsie = CSR.vsie.get();
-        self.state.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
-        self.state.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
-        self.state.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
-        self.state.guest_vcpu_csrs.vscause = CSR.vscause.get();
-        self.state.guest_vcpu_csrs.vstval = CSR.vstval.get();
-        self.state.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
-        if CpuInfo::get().has_sstc() {
-            self.state.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
-        }
 
         // Determine the exit cause from the trap CSRs.
         use Exception::*;
@@ -380,9 +402,82 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
         }
     }
 
+    /// Sets up access to the virtual MMIO registers for `mmio_op`.
+    ///
+    /// If `mmio_op` is a load instruction, writes to `MmioLoadValue` will be forwarded to the actual
+    /// destination register the next time this `VmCpu` is run. If `mmio_op` is a store instruction,
+    /// reads from `MmioStoreValue` will return the value from the source register of the store
+    /// instruction until the next time this `VmCpu` is run.
+    pub fn set_pending_mmio_op(&mut self, mmio_op: MmioOperation) {
+        self.pending_mmio_op = Some(mmio_op);
+
+        // Populate MmioStoreValue with whatever the VM was trying to store.
+        use TvmMmioOpCode::*;
+        let val = match mmio_op.opcode() {
+            Store8 => self.get_gpr(mmio_op.register()) as u8 as u64,
+            Store16 => self.get_gpr(mmio_op.register()) as u16 as u64,
+            Store32 => self.get_gpr(mmio_op.register()) as u32 as u64,
+            Store64 => self.get_gpr(mmio_op.register()),
+            _ => 0,
+        };
+        self.set_virt_reg(VirtualRegister::MmioStore, val);
+    }
+
+    /// Delivers the given exception to the vCPU, setting up its register state to handle the trap
+    /// the next time it is run.
+    pub fn inject_exception(&mut self, exception: Exception, stval: u64) {
+        // Update previous privelege level and interrupt state in VSSTATUS.
+        let mut vsstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(CSR.vsstatus.get());
+        if vsstatus.is_set(sstatus::sie) {
+            vsstatus.modify(sstatus::spie.val(1));
+        }
+        vsstatus.modify(sstatus::sie.val(0));
+        let sstatus =
+            LocalRegisterCopy::<u64, sstatus::Register>::new(self.state.guest_regs.sstatus);
+        vsstatus.modify(sstatus::spp.val(sstatus.read(sstatus::spp)));
+        CSR.vsstatus.set(vsstatus.get());
+
+        CSR.vscause.set(Trap::Exception(exception).to_scause());
+        CSR.vstval.set(stval);
+        CSR.vsepc.set(self.state.guest_regs.sepc);
+
+        // Redirect the vCPU to its STVEC on entry.
+        self.state.guest_regs.sepc = CSR.vstvec.get();
+    }
+
+    /// Increments the current `sepc` CSR value by `value`.
+    pub fn inc_sepc(&mut self, value: u64) {
+        self.state.guest_regs.sepc += value;
+    }
+
+    /// Increments SEPC and Updates A0/A1 with the result of an SBI call.
+    pub fn set_ecall_result(&mut self, result: SbiReturnType) {
+        self.inc_sepc(4); // ECALL is always a 4-byte instruction.
+        match result {
+            SbiReturnType::Legacy(a0) => {
+                self.set_gpr(GprIndex::A0, a0);
+            }
+            SbiReturnType::Standard(ret) => {
+                self.set_gpr(GprIndex::A0, ret.error_code as u64);
+                self.set_gpr(GprIndex::A1, ret.return_value as u64);
+            }
+        }
+    }
+
     /// Returns this active vCPU's `ActiveVmPages`.
     pub fn active_pages(&self) -> &ActiveVmPages<'pages, T> {
-        &self.active_pages
+        // Unwrap ok since it's not possible to externally hold a reference to an `ActiveVmCpu` with
+        // `self.active_pages` set to `None`. The only instance where `self.active_pages` is `None` is
+        // when we're swapped out to run a child vCPU, in which case that child `ActiveVmCpu` holds
+        // the exclusive reference to the parent `ActiveVmCpu`.
+        self.active_pages.as_ref().unwrap()
+    }
+
+    /// Performs any pending TLB maintenance for this VM's address space.
+    pub fn sync_tlb(&mut self) {
+        // Exit and re-enter so that we pick up the new TLB version.
+        self.active_pages = None;
+        self.restore_vm_pages();
     }
 
     /// Completes any pending MMIO operation for this CPU.
@@ -424,9 +519,86 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, T> {
             self.inc_sepc(mmio_op.len() as u64);
         }
     }
+
+    // Saves the VS-level CSRs.
+    fn save_vcpu_csrs(&mut self) {
+        self.state.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
+        self.state.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
+        self.state.guest_vcpu_csrs.vsie = CSR.vsie.get();
+        self.state.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
+        self.state.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
+        self.state.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
+        self.state.guest_vcpu_csrs.vscause = CSR.vscause.get();
+        self.state.guest_vcpu_csrs.vstval = CSR.vstval.get();
+        self.state.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
+        if CpuInfo::get().has_sstc() {
+            self.state.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
+        }
+    }
+
+    // Restores the VS-level CSRs.
+    fn restore_vcpu_csrs(&mut self) {
+        // Safe as these don't take effect until V=1.
+        CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
+        CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
+        CSR.vsie.set(self.state.guest_vcpu_csrs.vsie);
+        CSR.vstvec.set(self.state.guest_vcpu_csrs.vstvec);
+        CSR.vsscratch.set(self.state.guest_vcpu_csrs.vsscratch);
+        CSR.vsepc.set(self.state.guest_vcpu_csrs.vsepc);
+        CSR.vscause.set(self.state.guest_vcpu_csrs.vscause);
+        CSR.vstval.set(self.state.guest_vcpu_csrs.vstval);
+        CSR.vsatp.set(self.state.guest_vcpu_csrs.vsatp);
+        if CpuInfo::get().has_sstc() {
+            CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
+        }
+    }
+
+    // Restores the VM's address space.
+    fn restore_vm_pages(&mut self) {
+        // Get the VMID to use for this VM's address space on this physical CPU.
+        let this_cpu = PerCpu::this_cpu();
+        let mut vmid_tracker = this_cpu.vmid_tracker_mut();
+        // If VMIDs rolled over next_vmid() will do the necessary flush and the previous TLB version
+        // doesn't matter.
+        let (vmid, prev_tlb_version) = match self.current_cpu {
+            Some(ref c) if c.vmid.version() == vmid_tracker.current_version() => {
+                (c.vmid, Some(c.tlb_version))
+            }
+            _ => (vmid_tracker.next_vmid(), None),
+        };
+
+        // enter_with_vmid() will fence if prev_tlb_version is stale.
+        let active_pages = self.vm_pages.enter_with_vmid(vmid, prev_tlb_version);
+
+        // Update our per-CPU state in case VMID or TLB version changed.
+        if let Some(ref mut c) = self.current_cpu {
+            c.vmid = vmid;
+            c.tlb_version = active_pages.tlb_version();
+        } else {
+            self.current_cpu = Some(CurrentCpu {
+                cpu: this_cpu.cpu_id(),
+                vmid,
+                tlb_version: active_pages.tlb_version(),
+            });
+        }
+
+        self.active_pages = Some(active_pages);
+    }
 }
 
-impl<'vcpu, 'pages, T: GuestStagePageTable> Deref for ActiveVmCpu<'vcpu, 'pages, T> {
+impl<T: GuestStagePageTable> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
+    fn save(&mut self) {
+        self.active_pages = None;
+        self.save_vcpu_csrs();
+    }
+
+    fn restore(&mut self) {
+        self.restore_vcpu_csrs();
+        self.restore_vm_pages();
+    }
+}
+
+impl<T: GuestStagePageTable> Deref for ActiveVmCpu<'_, '_, '_, T> {
     type Target = VmCpu;
 
     fn deref(&self) -> &VmCpu {
@@ -434,9 +606,18 @@ impl<'vcpu, 'pages, T: GuestStagePageTable> Deref for ActiveVmCpu<'vcpu, 'pages,
     }
 }
 
-impl<'vcpu, 'pages, T: GuestStagePageTable> DerefMut for ActiveVmCpu<'vcpu, 'pages, T> {
+impl<T: GuestStagePageTable> DerefMut for ActiveVmCpu<'_, '_, '_, T> {
     fn deref_mut(&mut self) -> &mut VmCpu {
         self.vcpu
+    }
+}
+
+impl<T: GuestStagePageTable> Drop for ActiveVmCpu<'_, '_, '_, T> {
+    fn drop(&mut self) {
+        self.save();
+        if let Some(ref mut p) = self.parent_vcpu {
+            p.restore();
+        }
     }
 }
 
@@ -527,11 +708,6 @@ impl VmCpu {
         self.state.guest_regs.sepc
     }
 
-    /// Increments the current `sepc` CSR value by `value`.
-    pub fn inc_sepc(&mut self, value: u64) {
-        self.state.guest_regs.sepc += value;
-    }
-
     /// Sets one of the vCPU's general-purpose registers.
     pub fn set_gpr(&mut self, gpr: GprIndex, value: u64) {
         self.state.guest_regs.gprs.set_reg(gpr, value);
@@ -572,20 +748,6 @@ impl VmCpu {
         }
     }
 
-    /// Increments SEPC and Updates A0/A1 with the result of an SBI call.
-    pub fn set_ecall_result(&mut self, result: SbiReturnType) {
-        self.inc_sepc(4); // ECALL is always a 4-byte instruction.
-        match result {
-            SbiReturnType::Legacy(a0) => {
-                self.set_gpr(GprIndex::A0, a0);
-            }
-            SbiReturnType::Standard(ret) => {
-                self.set_gpr(GprIndex::A0, ret.error_code as u64);
-                self.set_gpr(GprIndex::A1, ret.return_value as u64);
-            }
-        }
-    }
-
     /// Sets the interrupt file for this vCPU.
     pub fn set_interrupt_file(&mut self, interrupt_file: ImsicGuestId) {
         self.interrupt_file = Some(interrupt_file);
@@ -597,95 +759,23 @@ impl VmCpu {
         self.state.guest_regs.hstatus = hstatus.get();
     }
 
-    /// Sets up access to the virtual MMIO registers for `mmio_op`.
-    ///
-    /// If `mmio_op` is a load instruction, writes to `MmioLoadValue` will be forwarded to the actual
-    /// destination register the next time this `VmCpu` is run. If `mmio_op` is a store instruction,
-    /// reads from `MmioStoreValue` will return the value from the source register of the store
-    /// instruction until the next time this `VmCpu` is run.
-    pub fn set_pending_mmio_op(&mut self, mmio_op: MmioOperation) {
-        self.pending_mmio_op = Some(mmio_op);
-
-        // Populate MmioStoreValue with whatever the VM was trying to store.
-        use TvmMmioOpCode::*;
-        let val = match mmio_op.opcode() {
-            Store8 => self.get_gpr(mmio_op.register()) as u8 as u64,
-            Store16 => self.get_gpr(mmio_op.register()) as u16 as u64,
-            Store32 => self.get_gpr(mmio_op.register()) as u32 as u64,
-            Store64 => self.get_gpr(mmio_op.register()),
-            _ => 0,
-        };
-        self.set_virt_reg(VirtualRegister::MmioStore, val);
-    }
-
-    /// Delivers the given exception to the vCPU, setting up its register state to handle the trap
-    /// the next time it is run.
-    pub fn inject_exception(&mut self, exception: Exception, stval: u64) {
-        // Update previous privelege level and interrupt state in VSSTATUS.
-        let mut vsstatus =
-            LocalRegisterCopy::<u64, sstatus::Register>::new(self.state.guest_vcpu_csrs.vsstatus);
-        if vsstatus.is_set(sstatus::sie) {
-            vsstatus.modify(sstatus::spie.val(1));
-        }
-        vsstatus.modify(sstatus::sie.val(0));
-        let sstatus =
-            LocalRegisterCopy::<u64, sstatus::Register>::new(self.state.guest_regs.sstatus);
-        vsstatus.modify(sstatus::spp.val(sstatus.read(sstatus::spp)));
-        self.state.guest_vcpu_csrs.vsstatus = vsstatus.get();
-
-        self.state.guest_vcpu_csrs.vscause = Trap::Exception(exception).to_scause();
-        self.state.guest_vcpu_csrs.vstval = stval;
-        self.state.guest_vcpu_csrs.vsepc = self.state.guest_regs.sepc;
-
-        // Redirect the vCPU to its STVEC on entry.
-        self.state.guest_regs.sepc = self.state.guest_vcpu_csrs.vstvec;
-    }
-
-    /// Activates the VM address space in `vm_pages`, returning a reference to it as an
-    /// `ActiveVmPages`.
-    pub fn activate<'vcpu, 'pages, T: GuestStagePageTable>(
+    /// Activates `vcpu` with the VM address space in `vm_pages`, returning a reference to it as an
+    /// `ActiveVmCpu`. If `parent_vcpu` is not `None`, its state is saved before this vCPU is
+    /// activated and is restored when the returned `ActiveVmCpu` is dropped.
+    pub fn activate<'vcpu, 'pages, 'prev: 'vcpu + 'pages, T: GuestStagePageTable>(
         &'vcpu mut self,
         vm_pages: &'pages VmPages<T>,
-    ) -> Result<ActiveVmCpu<'vcpu, 'pages, T>> {
+        mut parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
+    ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'prev, T>> {
         if self.guest_id != vm_pages.page_owner_id() {
             return Err(Error::WrongAddressSpace);
         }
-        // Get the VMID to use for this VM's address space on this physical CPU.
-        let this_cpu = PerCpu::this_cpu();
-        if let Some(ref c) = self.current_cpu && c.cpu != this_cpu.cpu_id() {
-            // If we've changed CPUs, then any per-CPU state is invalid.
-            //
-            // TODO: Migration between physical CPUs needs to be done explicitly via TEECALL.
-            self.current_cpu = None;
-        }
-        let mut vmid_tracker = this_cpu.vmid_tracker_mut();
-        // If VMIDs rolled over next_vmid() will do the necessary flush.
-        let vmid = self
-            .current_cpu
-            .as_ref()
-            .filter(|c| c.vmid.version() == vmid_tracker.current_version())
-            .map_or_else(|| vmid_tracker.next_vmid(), |c| c.vmid);
-        let prev_tlb_version = self.current_cpu.as_ref().map(|c| c.tlb_version);
 
-        // enter_with_vmid() will fence if prev_tlb_version is stale.
-        let active_pages = vm_pages.enter_with_vmid(vmid, prev_tlb_version);
-
-        // Update our per-CPU state in case VMID or TLB version changed.
-        if let Some(ref mut c) = self.current_cpu {
-            c.vmid = vmid;
-            c.tlb_version = active_pages.tlb_version();
-        } else {
-            self.current_cpu = Some(CurrentCpu {
-                cpu: this_cpu.cpu_id(),
-                vmid,
-                tlb_version: active_pages.tlb_version(),
-            });
+        if let Some(ref mut p) = parent_vcpu {
+            p.save();
         }
 
-        Ok(ActiveVmCpu {
-            vcpu: self,
-            active_pages,
-        })
+        Ok(ActiveVmCpu::restore_from(self, vm_pages, parent_vcpu))
     }
 }
 

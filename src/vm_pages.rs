@@ -363,18 +363,15 @@ pub enum PageFaultType {
     Unmapped(Exception),
 }
 
-/// Represents a reference to the current VM address space. The previous address space is restored
-/// when dropped. Used to directly access a guest's memory.
+/// Represents the active VM address space. Holds a reference to the TLB version of the address space
+/// at the time the address space was activated. Used to directly access a guest's memory.
 pub struct ActiveVmPages<'a, T: GuestStagePageTable> {
-    prev_hgatp: u64,
     tlb_version: TlbVersion,
     vm_pages: &'a VmPages<T>,
 }
 
 impl<'a, T: GuestStagePageTable> Drop for ActiveVmPages<'a, T> {
     fn drop(&mut self) {
-        CSR.hgatp.set(self.prev_hgatp);
-
         // Unwrap ok since tlb_tracker won't increment the version while there are outstanding
         // references.
         self.vm_pages
@@ -398,7 +395,7 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         hgatp.modify(hgatp::vmid.val(vmid.vmid()));
         hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
         hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
-        let prev_hgatp = CSR.hgatp.atomic_replace(hgatp.get());
+        CSR.hgatp.set(hgatp.get());
 
         let tlb_version = vm_pages.tlb_tracker.get_version();
         // Fence if this VMID was previously running on this CPU with an old TLB version.
@@ -415,7 +412,6 @@ impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
         }
 
         Self {
-            prev_hgatp,
             tlb_version,
             vm_pages,
         }
@@ -854,9 +850,9 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         Ok(count)
     }
 
-    /// Activates the address space represented by this `VmPages`. The address space is exited (and
-    /// the previous one restored) when the returned `ActiveVmPages` is dropped. Flushes TLB entries
-    /// for the given VMID if it was previously active with a stale TLB version on this CPU.
+    /// Activates the address space represented by this `VmPages`. The reference to the address space
+    /// is dropped when the returned `ActiveVmPages` is dropped. Flushes TLB entries for the given
+    /// VMID if it was previously active with a stale TLB version on this CPU.
     ///
     /// The caller must ensure that VMID has been allocated to reference this address space on this
     /// CPU and that there are no stale translations tagged with VMID referencing other VM address

@@ -20,7 +20,7 @@ use sbi::*;
 use crate::guest_tracking::{GuestState, Guests};
 use crate::print_util::*;
 use crate::smp;
-use crate::vm_cpu::{VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
+use crate::vm_cpu::{ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
     ActiveVmPages, InstructionFetchError, PageFaultType, VmPages, VmRegionList,
@@ -405,26 +405,30 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Run this guest until an unhandled exit is encountered.
-    fn run_vcpu(&self, vcpu_id: u64) -> EcallResult<TvmCpuExitCode> {
+    fn run_vcpu(
+        &self,
+        vcpu_id: u64,
+        parent_vcpu: Option<&mut ActiveVmCpu<T>>,
+    ) -> EcallResult<TvmCpuExitCode> {
         // Take the vCPU out of self.vcpus, giving us exclusive ownership.
         let mut vcpu = self
             .vcpus
             .take_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let exit_code = {
-            let mut vcpu = vcpu.lock();
+            let mut locked_vcpu = vcpu.lock();
+            // Activate this vCPU, saving the state of our parent vCPU.
+            let mut active_vcpu = locked_vcpu
+                .activate(&self.vm_pages, parent_vcpu)
+                .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
 
             // Run until there's an exit we can't handle.
             let cause = loop {
-                // Activate this vCPU and its address space. We re-activate after every exit (even
-                // if it was handled) so that any pending TLB maintenance can be completed.
-                let mut active_vcpu = vcpu.activate(&self.vm_pages).unwrap();
-
                 let exit = active_vcpu.run_to_exit();
                 use SbiReturnType::*;
                 match exit {
                     VmCpuExit::Ecall(Some(sbi_msg)) => {
-                        match self.handle_ecall(sbi_msg, active_vcpu.active_pages()) {
+                        match self.handle_ecall(sbi_msg, &mut active_vcpu) {
                             EcallAction::LegacyOk => {
                                 active_vcpu.set_ecall_result(Legacy(0));
                             }
@@ -569,10 +573,10 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             // Populate the virtual trap cause registers so that the host can retrieve the detailed
             // exit cause.
             if let Some(cause0) = cause.cause0() {
-                vcpu.set_virt_reg(VirtualRegister::Cause0, cause0);
+                active_vcpu.set_virt_reg(VirtualRegister::Cause0, cause0);
             }
             if let Some(cause1) = cause.cause1() {
-                vcpu.set_virt_reg(VirtualRegister::Cause1, cause1);
+                active_vcpu.set_virt_reg(VirtualRegister::Cause1, cause1);
             }
             cause.code()
         };
@@ -587,7 +591,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Handles ecalls from the guest.
-    fn handle_ecall(&self, msg: SbiMessage, active_pages: &ActiveVmPages<T>) -> EcallAction {
+    fn handle_ecall(&self, msg: SbiMessage, active_vcpu: &mut ActiveVmCpu<T>) -> EcallAction {
         match msg {
             SbiMessage::PutChar(c) => {
                 // put char - legacy command
@@ -600,9 +604,9 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             ),
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
-            SbiMessage::Tee(tee_func) => self.handle_tee_msg(tee_func, active_pages),
+            SbiMessage::Tee(tee_func) => self.handle_tee_msg(tee_func, active_vcpu),
             SbiMessage::Attestation(attestation_func) => {
-                self.handle_attestation_msg(attestation_func, active_pages)
+                self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
         }
     }
@@ -649,12 +653,16 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     fn handle_tee_msg(
         &self,
         tee_func: TeeFunction,
-        active_pages: &ActiveVmPages<T>,
+        active_vcpu: &mut ActiveVmCpu<T>,
     ) -> EcallAction {
         use TeeFunction::*;
         match tee_func {
-            TsmGetInfo { dest_addr, len } => self.get_tsm_info(dest_addr, len, active_pages).into(),
-            TvmCreate { params_addr, len } => self.add_guest(params_addr, len, active_pages).into(),
+            TsmGetInfo { dest_addr, len } => self
+                .get_tsm_info(dest_addr, len, active_vcpu.active_pages())
+                .into(),
+            TvmCreate { params_addr, len } => self
+                .add_guest(params_addr, len, active_vcpu.active_pages())
+                .into(),
             TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
             TsmConvertPages {
                 page_addr,
@@ -666,17 +674,8 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                 page_type,
                 num_pages,
             } => self.reclaim_pages(page_addr, page_type, num_pages).into(),
-            TsmInitiateFence => self
-                .vm_pages
-                .initiate_fence()
-                .map_err(EcallError::from)
-                .map(|_| 0)
-                .into(),
-            TsmLocalFence => {
-                // Nothing to do here as the fence itself will occur once we re-enter `VmPages` the
-                // next time we're run.
-                EcallAction::Continue(SbiReturn::success(0))
-            }
+            TsmInitiateFence => self.initiate_fence(active_vcpu).into(),
+            TsmLocalFence => self.local_fence(active_vcpu).into(),
             AddPageTablePages {
                 guest_id,
                 page_addr,
@@ -720,11 +719,13 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
                     page_type,
                     num_pages,
                     guest_addr,
-                    active_pages,
+                    active_vcpu.active_pages(),
                 )
                 .into(),
             Finalize { guest_id } => self.guest_finalize(guest_id).into(),
-            TvmCpuRun { guest_id, vcpu_id } => self.guest_run_vcpu(guest_id, vcpu_id).into(),
+            TvmCpuRun { guest_id, vcpu_id } => {
+                self.guest_run_vcpu(guest_id, vcpu_id, active_vcpu).into()
+            }
             TvmCpuCreate { guest_id, vcpu_id } => self.guest_add_vcpu(guest_id, vcpu_id).into(),
             TvmCpuSetRegister {
                 guest_id,
@@ -851,6 +852,18 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
             .reclaim_pages(page_addr, num_pages)
             .map_err(EcallError::from)?;
         Ok(num_pages)
+    }
+
+    fn initiate_fence(&self, active_vcpu: &mut ActiveVmCpu<T>) -> EcallResult<u64> {
+        self.vm_pages.initiate_fence().map_err(EcallError::from)?;
+        active_vcpu.sync_tlb();
+        Ok(0)
+    }
+
+    fn local_fence(&self, active_vcpu: &mut ActiveVmCpu<T>) -> EcallResult<u64> {
+        // Nothing to do here other than to check if there's TLB maintenance to be done.
+        active_vcpu.sync_tlb();
+        Ok(0)
     }
 
     fn add_guest(
@@ -987,12 +1000,17 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     }
 
     /// Runs a guest VM's vCPU.
-    fn guest_run_vcpu(&self, guest_id: u64, vcpu_id: u64) -> EcallResult<u64> {
+    fn guest_run_vcpu(
+        &self,
+        guest_id: u64,
+        vcpu_id: u64,
+        active_vcpu: &mut ActiveVmCpu<T>,
+    ) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let exit_code = guest_vm.run_vcpu(vcpu_id)?;
+        let exit_code = guest_vm.run_vcpu(vcpu_id, Some(active_vcpu))?;
         Ok(exit_code as u64)
     }
 
@@ -1410,7 +1428,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
             // Run until we shut down, or this vCPU stops.
             loop {
                 use TvmCpuExitCode::*;
-                match self.inner.run_vcpu(vcpu_id).unwrap() {
+                match self.inner.run_vcpu(vcpu_id, None).unwrap() {
                     SystemReset => {
                         println!("Host VM requested shutdown");
                         poweroff();

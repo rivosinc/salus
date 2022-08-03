@@ -4,8 +4,10 @@
 
 use arrayvec::ArrayVec;
 use riscv_pages::SupervisorPageAddr;
+use tock_registers::LocalRegisterCopy;
 
 use super::error::*;
+use super::registers::*;
 
 /// PCI BAR resource types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +85,38 @@ impl PciResourceType {
             Mem64 => 0x3 << PCI_ADDR_SPACE_CODE_SHIFT,
             PrefetchableMem64 => (0x3 << PCI_ADDR_SPACE_CODE_SHIFT) | PCI_ADDR_PREFETCH_BIT,
         }
+    }
+
+    /// Decodes the resource type from a BAR register.
+    pub fn from_bar_register(reg: LocalRegisterCopy<u32, BaseAddress::Register>) -> Self {
+        let is_mem = matches!(
+            reg.read_as_enum(BaseAddress::SpaceType),
+            Some(BaseAddress::SpaceType::Value::Memory)
+        );
+        let is_64bit = is_mem
+            && matches!(
+                reg.read_as_enum(BaseAddress::MemoryType),
+                Some(BaseAddress::MemoryType::Value::Bits64)
+            );
+        let prefetch = is_mem && reg.is_set(BaseAddress::Prefetchable);
+        if is_mem {
+            match (is_64bit, prefetch) {
+                (true, true) => PciResourceType::PrefetchableMem64,
+                (true, false) => PciResourceType::Mem64,
+                (false, true) => PciResourceType::PrefetchableMem32,
+                (false, false) => PciResourceType::Mem32,
+            }
+        } else {
+            PciResourceType::IoPort
+        }
+    }
+
+    /// Returns if this resource uses 64-bit addresses.
+    pub fn is_64bit(&self) -> bool {
+        matches!(
+            self,
+            PciResourceType::Mem64 | PciResourceType::PrefetchableMem64
+        )
     }
 }
 

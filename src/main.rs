@@ -334,6 +334,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             dev.has_msix(),
             dev.is_pcie(),
         );
+
+        for bar in dev.bar_info().bars() {
+            println!(
+                "BAR{:}: type {:?}, size 0x{:x}",
+                bar.index(),
+                bar.bar_type(),
+                bar.size()
+            );
+        }
     });
 
     // Set up per-CPU memory and boot the secondary CPUs.

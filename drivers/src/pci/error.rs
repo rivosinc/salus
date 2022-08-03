@@ -65,6 +65,10 @@ pub enum Error {
     UnsupportedExpressCapabilityVersion(u8),
     /// The PCI Express device has an unsupported/unknwon device type.
     UnsupportedExpressDevice(u8),
+    /// The device has a 64-bit BAR at an odd-numbered index.
+    Invalid64BitBarIndex,
+    /// The device has a non-power-of-2 sized BAR.
+    InvalidBarSize(u64),
 }
 
 /// Holds results for PCI operations.

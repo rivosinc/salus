@@ -2,11 +2,12 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use arrayvec::ArrayVec;
 use core::fmt;
 use core::mem::size_of;
 use core::ptr::NonNull;
-
 use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::registers::ReadWrite;
 use tock_registers::LocalRegisterCopy;
 
 use super::address::*;
@@ -15,6 +16,7 @@ use super::capabilities::*;
 use super::error::*;
 use super::mmio_builder::{MmioReadBuilder, MmioWriteBuilder};
 use super::registers::*;
+use super::resource::*;
 
 /// The Vendor Id from the PCI header.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
@@ -198,11 +200,96 @@ mod bridge_offsets {
     define_field_span!(BridgeRegisters, bridge_control, u16);
 }
 
+/// Describes a single PCI BAR.
+#[derive(Clone, Debug)]
+pub struct PciBarInfo {
+    index: usize,
+    bar_type: PciResourceType,
+    size: u64,
+}
+
+impl PciBarInfo {
+    /// Returns the index of this BAR.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Returns the type of resource this BAR maps.
+    pub fn bar_type(&self) -> PciResourceType {
+        self.bar_type
+    }
+
+    /// Returns the size of this BAR.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// Describes the BARs of a PCI device.
+pub struct PciDeviceBarInfo {
+    bars: ArrayVec<PciBarInfo, PCI_ENDPOINT_BARS>,
+}
+
+impl PciDeviceBarInfo {
+    // Probes the size and type of each BAR from `registers`.
+    fn new(registers: &mut [ReadWrite<u32, BaseAddress::Register>]) -> Result<Self> {
+        let mut bars = ArrayVec::new();
+        let mut index = 0;
+        while index < registers.len() {
+            let bar_index = index;
+            let bar_type = PciResourceType::from_bar_register(registers[index].extract());
+
+            // Write all 1s to detect the number of bits that are implemented.
+            registers[index].set(!0);
+            let val = registers[index].get();
+            registers[index].set(0);
+            index += 1;
+            if val == 0 {
+                // If we read back all 0s, the BAR is unimplemented.
+                continue;
+            }
+            let bits_lo = val & !((1u32 << BaseAddress::Address.shift) - 1);
+            let bits_hi = if bar_type.is_64bit() {
+                // For 64-bit BARs the upper bits are in the adjacent register.
+                if bar_index % 2 != 0 {
+                    return Err(Error::Invalid64BitBarIndex);
+                }
+                registers[index].set(!0);
+                let val = registers[index].get();
+                registers[index].set(0);
+                index += 1;
+                val
+            } else {
+                !0
+            };
+            let size = !((bits_lo as u64) | ((bits_hi as u64) << 32)) + 1;
+            if !size.is_power_of_two() {
+                return Err(Error::InvalidBarSize(size));
+            }
+
+            let bar = PciBarInfo {
+                index: bar_index,
+                bar_type,
+                size,
+            };
+            bars.push(bar);
+        }
+
+        Ok(Self { bars })
+    }
+
+    /// Returns an iterator over this device's BARs.
+    pub fn bars(&self) -> impl ExactSizeIterator<Item = &PciBarInfo> {
+        self.bars.iter()
+    }
+}
+
 /// Represents a PCI endpoint.
 pub struct PciEndpoint {
     registers: &'static mut EndpointRegisters,
     info: PciDeviceInfo,
     capabilities: PciCapabilities,
+    bar_info: PciDeviceBarInfo,
 }
 
 impl PciEndpoint {
@@ -210,10 +297,13 @@ impl PciEndpoint {
     fn new(registers: &'static mut EndpointRegisters, info: PciDeviceInfo) -> Result<Self> {
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
+        let bar_info = PciDeviceBarInfo::new(&mut registers.bar)?;
+
         Ok(Self {
             registers,
             info,
             capabilities,
+            bar_info,
         })
     }
 
@@ -262,6 +352,7 @@ pub struct PciBridge {
     registers: &'static mut BridgeRegisters,
     info: PciDeviceInfo,
     capabilities: PciCapabilities,
+    bar_info: PciDeviceBarInfo,
     bus_range: BusRange,
     child_bus: Option<PciBus>,
     virtual_primary_bus: Bus,
@@ -278,10 +369,12 @@ impl PciBridge {
         registers.pri_bus.set(0);
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
+        let bar_info = PciDeviceBarInfo::new(&mut registers.bar)?;
         Ok(Self {
             registers,
             info,
             capabilities,
+            bar_info,
             bus_range: BusRange::default(),
             child_bus: None,
             virtual_primary_bus: Bus::default(),
@@ -517,6 +610,14 @@ impl PciDevice {
         match self {
             PciDevice::Endpoint(ep) => &ep.info,
             PciDevice::Bridge(bridge) => &bridge.info,
+        }
+    }
+
+    /// Returns the `PciDeviceBarInfo` for this device.
+    pub fn bar_info(&self) -> &PciDeviceBarInfo {
+        match self {
+            PciDevice::Endpoint(ep) => &ep.bar_info,
+            PciDevice::Bridge(bridge) => &bridge.bar_info,
         }
     }
 

@@ -172,12 +172,15 @@ pub struct CommonRegisters {
 /// End byte offset of the common part of a PCI header.
 pub const PCI_COMMON_HEADER_END: usize = 0xf;
 
+/// Number of BAR registers in a PCI endpoint header.
+pub const PCI_ENDPOINT_BARS: usize = 6;
+
 /// Endpoint (type 0) PCI configuration registers.
 #[repr(C)]
 #[derive(FieldOffsets)]
 pub struct EndpointRegisters {
     pub common: CommonRegisters,
-    pub bar: [ReadWrite<u32, BaseAddress::Register>; 6],
+    pub bar: [ReadWrite<u32, BaseAddress::Register>; PCI_ENDPOINT_BARS],
     pub cardbus: ReadOnly<u32>,
     pub subsys_vendor_id: ReadOnly<u16>,
     pub subsys_id: ReadOnly<u16>,
@@ -190,12 +193,15 @@ pub struct EndpointRegisters {
     pub max_lat: ReadOnly<u8>,
 }
 
+/// Number of BAR registers in a PCI bridge header.
+pub const PCI_BRIDGE_BARS: usize = 2;
+
 /// Bridge (type 1) PCI configuration registers.
 #[repr(C)]
 #[derive(FieldOffsets)]
 pub struct BridgeRegisters {
     pub common: CommonRegisters,
-    pub bar: [ReadWrite<u32, BaseAddress::Register>; 2],
+    pub bar: [ReadWrite<u32, BaseAddress::Register>; PCI_BRIDGE_BARS],
     pub pri_bus: ReadWrite<u8>,
     pub sec_bus: ReadWrite<u8>,
     pub sub_bus: ReadWrite<u8>,

@@ -31,15 +31,13 @@ const PCI_ADDR_CELLS: usize = 3;
 // Number of u32 cells per 'ranges' property in the device tree.
 const CELLS_PER_RANGE: usize = PCI_ADDR_CELLS + 4;
 
-struct PcieRootInner {
+struct PcieRootDevices {
     config_space: PciConfigSpace,
-    resources: PciRootResources,
     root_bus: PciBus,
     device_arena: PciDeviceArena,
-    msi_parent_phandle: u32,
 }
 
-impl PcieRootInner {
+impl PcieRootDevices {
     // Calls `f` for each device on `bus`.
     fn for_each_device_on<F: FnMut(&PciDevice)>(&self, bus: &PciBus, f: &mut F) {
         for bd in bus.devices() {
@@ -101,7 +99,9 @@ impl PcieRootInner {
 
 /// Represents a PCI-Express root complex.
 pub struct PcieRoot {
-    inner: Mutex<PcieRootInner>,
+    devices: Mutex<PcieRootDevices>,
+    resources: Mutex<PciRootResources>,
+    msi_parent_phandle: u32,
 }
 
 static PCIE_ROOT: Once<PcieRoot> = Once::new();
@@ -255,15 +255,15 @@ impl PcieRoot {
         let mut device_arena = PciDeviceArena::new(Global);
         let root_bus = PciBus::enumerate(&config_space, bus_range.start, &mut device_arena)?;
 
-        let inner = PcieRootInner {
+        let devices = PcieRootDevices {
             config_space,
-            resources,
             root_bus,
             device_arena,
-            msi_parent_phandle,
         };
         PCIE_ROOT.call_once(|| Self {
-            inner: Mutex::new(inner),
+            devices: Mutex::new(devices),
+            resources: Mutex::new(resources),
+            msi_parent_phandle,
         });
         Ok(())
     }
@@ -276,13 +276,13 @@ impl PcieRoot {
 
     /// Walks the PCIe hierarchy, calling `f` on each device function.
     pub fn for_each_device<F: FnMut(&PciDevice)>(&self, mut f: F) {
-        let inner = self.inner.lock();
-        inner.for_each_device_on(&inner.root_bus, &mut f)
+        let devices = self.devices.lock();
+        devices.for_each_device_on(&devices.root_bus, &mut f)
     }
 
     /// Returns the memory range occupied by this root complex's config space.
     pub fn config_space(&self) -> SupervisorPageRange {
-        self.inner.lock().config_space.mem_range()
+        self.devices.lock().config_space.mem_range()
     }
 
     /// Returns an iterator over the root's PCI resources.
@@ -293,8 +293,8 @@ impl PcieRoot {
     /// Takes ownership of the PCI BAR space identified by `resource_type`, returning an iterator over
     /// the pages occupied by that resource.
     pub fn take_resource(&self, resource_type: PciResourceType) -> Option<PciBarPageIter> {
-        let mut inner = self.inner.lock();
-        let res = inner.resources.get_mut(resource_type)?;
+        let mut resources = self.resources.lock();
+        let res = resources.get_mut(resource_type)?;
         res.take().ok()?;
         let mem_range = SupervisorPageRange::new(res.addr(), PageSize::num_4k_pages(res.size()));
         // Safety: We have unique ownership of the memory since we've just taken it from this PcieRoot.
@@ -307,11 +307,11 @@ impl PcieRoot {
     /// address space (i.e. GPA == SPA for the various PCI memory regions). It is up to the caller to
     /// set up those mappings, however.
     pub fn add_host_pcie_node(&self, dt: &mut DeviceTree) -> DeviceTreeResult<()> {
-        let inner = self.inner.lock();
+        let devices = self.devices.lock();
 
         let soc_node_id = dt.iter().find(|n| n.name() == "soc").unwrap().id();
         let mut pci_name = ArrayString::<32>::new();
-        let config_mem = inner.config_space.mem_range();
+        let config_mem = devices.config_space.mem_range();
         core::fmt::write(
             &mut pci_name,
             format_args!("pci@{:x}", config_mem.base().bits()),
@@ -332,9 +332,10 @@ impl PcieRoot {
             .add_prop("reg")?
             .set_value_u64(&[config_mem.base().bits(), config_mem.length_bytes()])?;
         let mut ranges = ArrayVec::<u32, { CELLS_PER_RANGE * MAX_RESOURCE_TYPES }>::new();
+        let resources = self.resources.lock();
         for i in 0..MAX_RESOURCE_TYPES {
             let res_type = PciResourceType::from_index(i).unwrap();
-            if let Some(res) = inner.resources.get(res_type) {
+            if let Some(res) = resources.get(res_type) {
                 ranges.push(res_type.to_dt_cell());
                 ranges.push((res.pci_addr() >> 32) as u32);
                 ranges.push(res.pci_addr() as u32);
@@ -349,14 +350,14 @@ impl PcieRoot {
         pci_node.add_prop("dma-coherent")?;
         pci_node
             .add_prop("linux,pci-domain")?
-            .set_value_u32(&[inner.config_space.segment().bits()])?;
-        let bus_range = inner.config_space.bus_range();
+            .set_value_u32(&[devices.config_space.segment().bits()])?;
+        let bus_range = devices.config_space.bus_range();
         pci_node
             .add_prop("bus-range")?
             .set_value_u32(&[bus_range.start.bits(), bus_range.end.bits()])?;
         pci_node
             .add_prop("msi-parent")?
-            .set_value_u32(&[inner.msi_parent_phandle])?;
+            .set_value_u32(&[self.msi_parent_phandle])?;
         pci_node.add_prop("#size-cells")?.set_value_u32(&[2])?;
         pci_node.add_prop("#address-cells")?.set_value_u32(&[3])?;
 
@@ -378,10 +379,10 @@ impl PcieRoot {
         if !valid_config_mmio_access(offset, len) {
             return Err(Error::UnsupportedConfigAccess);
         }
-        let inner = self.inner.lock();
-        let (dev_id, dev_offset) = inner.virtual_config_offset_to_device(offset as usize)?;
+        let devices = self.devices.lock();
+        let (dev_id, dev_offset) = devices.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
-        let dev = inner.device_arena.get(dev_id).unwrap();
+        let dev = devices.device_arena.get(dev_id).unwrap();
         Ok(dev.emulate_config_read(dev_offset, len) as u64)
     }
 
@@ -389,10 +390,10 @@ impl PcieRoot {
         if !valid_config_mmio_access(offset, len) {
             return Err(Error::UnsupportedConfigAccess);
         }
-        let mut inner = self.inner.lock();
-        let (dev_id, dev_offset) = inner.virtual_config_offset_to_device(offset as usize)?;
+        let mut devices = self.devices.lock();
+        let (dev_id, dev_offset) = devices.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
-        let dev = inner.device_arena.get_mut(dev_id).unwrap();
+        let dev = devices.device_arena.get_mut(dev_id).unwrap();
         dev.emulate_config_write(dev_offset, value as u32, len);
         Ok(())
     }
@@ -415,10 +416,10 @@ impl<'a> Iterator for PciResourceIter<'a> {
     type Item = (PciResourceType, SupervisorPageRange);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let inner = self.root.inner.lock();
+        let resources = self.root.resources.lock();
         while let Some(mem_type) = PciResourceType::from_index(self.index) {
             self.index += 1;
-            if let Some(res) = inner.resources.get(mem_type) {
+            if let Some(res) = resources.get(mem_type) {
                 let mem_range =
                     SupervisorPageRange::new(res.addr(), PageSize::num_4k_pages(res.size()));
                 return Some((mem_type, mem_range));

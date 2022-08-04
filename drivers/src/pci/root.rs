@@ -18,6 +18,7 @@ use super::bus::PciBus;
 use super::config_space::PciConfigSpace;
 use super::device::*;
 use super::error::*;
+use super::resource::*;
 
 /// An arena of PCI devices.
 pub type PciDeviceArena = Arena<PciDevice, Global>;
@@ -25,100 +26,14 @@ pub type PciDeviceArena = Arena<PciDevice, Global>;
 /// Identifiers in the PCI device arena.
 pub type PciDeviceId = ArenaId<PciDevice>;
 
-/// PCI BAR resource types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PciBarType {
-    /// IO port space.
-    IoPort = 0,
-    /// 32-bit non-prefetchable memory space.
-    Mem32 = 1,
-    /// 32-bit prefetchable memory space.
-    PrefetchableMem32 = 2,
-    /// 64-bit non-prefetchable memory space. 64-bit memory spaces are supposed to be prefetchable,
-    /// but many device trees (including from QEMU) don't set the prefetch bit.
-    Mem64 = 3,
-    /// 64-bit prefetchable memory space.
-    PrefetchableMem64 = 4,
-}
-
-const MAX_BAR_SPACES: usize = PciBarType::PrefetchableMem64 as usize + 1;
-
 // The number of "PCI address" cells, as specified in the standard PCI binding.
 const PCI_ADDR_CELLS: usize = 3;
 // Number of u32 cells per 'ranges' property in the device tree.
 const CELLS_PER_RANGE: usize = PCI_ADDR_CELLS + 4;
 
-// Format of the first PCI address cell which specifies the type of the resource.
-const PCI_ADDR_PREFETCH_BIT: u32 = 1 << 30;
-const PCI_ADDR_SPACE_CODE_SHIFT: u32 = 24;
-const PCI_ADDR_SPACE_CODE_MASK: u32 = 0x3;
-
-impl PciBarType {
-    fn from_index(index: usize) -> Option<Self> {
-        use PciBarType::*;
-        match index {
-            0 => Some(IoPort),
-            1 => Some(Mem32),
-            2 => Some(PrefetchableMem32),
-            3 => Some(Mem64),
-            4 => Some(PrefetchableMem64),
-            _ => None,
-        }
-    }
-
-    // Reads a PCI BAR resource type from the first cell in a PCI address range.
-    fn from_dt_cell(cell: u32) -> Option<Self> {
-        let prefetchable = (cell & PCI_ADDR_PREFETCH_BIT) != 0;
-        use PciBarType::*;
-        match (cell >> PCI_ADDR_SPACE_CODE_SHIFT) & PCI_ADDR_SPACE_CODE_MASK {
-            0x0 => {
-                // Config space. Ignore it since we already got it from 'reg'.
-                None
-            }
-            0x1 => Some(IoPort),
-            0x2 => {
-                if prefetchable {
-                    Some(PrefetchableMem32)
-                } else {
-                    Some(Mem32)
-                }
-            }
-            0x3 => {
-                if prefetchable {
-                    Some(PrefetchableMem64)
-                } else {
-                    Some(Mem64)
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    // Returns the PCI address cell used to encode this resource type.
-    fn to_dt_cell(self) -> u32 {
-        use PciBarType::*;
-        match self {
-            IoPort => 0x1 << PCI_ADDR_SPACE_CODE_SHIFT,
-            Mem32 => 0x2 << PCI_ADDR_SPACE_CODE_SHIFT,
-            PrefetchableMem32 => (0x2 << PCI_ADDR_SPACE_CODE_SHIFT) | PCI_ADDR_PREFETCH_BIT,
-            Mem64 => 0x3 << PCI_ADDR_SPACE_CODE_SHIFT,
-            PrefetchableMem64 => (0x3 << PCI_ADDR_SPACE_CODE_SHIFT) | PCI_ADDR_PREFETCH_BIT,
-        }
-    }
-}
-
-/// Describes a PCI BAR space of a particular type.
-#[derive(Debug)]
-struct PciBarSpace {
-    addr: SupervisorPageAddr,
-    size: u64,
-    taken: bool,
-    pci_addr: u64,
-}
-
 struct PcieRootInner {
     config_space: PciConfigSpace,
-    bar_spaces: ArrayVec<Option<PciBarSpace>, MAX_BAR_SPACES>,
+    resources: PciRootResources,
     root_bus: PciBus,
     device_arena: PciDeviceArena,
     msi_parent_phandle: u32,
@@ -302,14 +217,11 @@ impl PcieRoot {
             .find(|p| p.name() == "ranges")
             .ok_or(Error::NoRangesProperty)?;
         let mut ranges = ranges_prop.value_u32();
-        let mut bar_spaces = ArrayVec::new();
-        for _ in 0..bar_spaces.capacity() {
-            bar_spaces.push(None);
-        }
+        let mut resources = PciRootResources::new();
         while ranges.len() >= CELLS_PER_RANGE {
             // Get the resource type from the first cell. We've already guaranteed there are enough
             // cells for this range.
-            let resource_type = match PciBarType::from_dt_cell(ranges.next().unwrap()) {
+            let resource_type = match PciResourceType::from_dt_cell(ranges.next().unwrap()) {
                 Some(r) => r,
                 None => {
                     ranges.advance_by(CELLS_PER_RANGE - 1).unwrap();
@@ -321,22 +233,14 @@ impl PcieRoot {
             let pci_addr = U64Cell(ranges.next().unwrap(), ranges.next().unwrap()).into();
             let cpu_addr = U64Cell(ranges.next().unwrap(), ranges.next().unwrap()).into();
             let addr = PageAddr::new(RawAddr::supervisor(cpu_addr))
-                .ok_or(Error::BarSpaceMisaligned(cpu_addr))?;
+                .ok_or(Error::ResourceMisaligned(cpu_addr))?;
             let size = U64Cell(ranges.next().unwrap(), ranges.next().unwrap()).into();
             if size % (PageSize::Size4k as u64) != 0 {
-                return Err(Error::BarSpaceNotPageMultiple(size));
+                return Err(Error::ResourceNotPageMultiple(size));
             }
 
-            let bar_space = PciBarSpace {
-                addr,
-                size,
-                taken: false,
-                pci_addr,
-            };
-            if bar_spaces[resource_type as usize].is_some() {
-                return Err(Error::DuplicateBarSpace(resource_type));
-            }
-            bar_spaces[resource_type as usize] = Some(bar_space);
+            let resource = PciRootResource::new(addr, size, pci_addr);
+            resources.insert(resource_type, resource)?;
 
             unsafe {
                 // Safety: Have to trust that the device tree points to valid PCI space.
@@ -353,7 +257,7 @@ impl PcieRoot {
 
         let inner = PcieRootInner {
             config_space,
-            bar_spaces,
+            resources,
             root_bus,
             device_arena,
             msi_parent_phandle,
@@ -381,21 +285,18 @@ impl PcieRoot {
         self.inner.lock().config_space.mem_range()
     }
 
-    /// Returns an iterator over the root's PCI BAR spaces.
-    pub fn bar_spaces(&self) -> PciBarSpaceIter {
-        PciBarSpaceIter::new(self)
+    /// Returns an iterator over the root's PCI resources.
+    pub fn resources(&self) -> PciResourceIter {
+        PciResourceIter::new(self)
     }
 
     /// Takes ownership of the PCI BAR space identified by `resource_type`, returning an iterator over
     /// the pages occupied by that resource.
-    pub fn take_bar_space(&self, resource_type: PciBarType) -> Option<PciBarPageIter> {
+    pub fn take_resource(&self, resource_type: PciResourceType) -> Option<PciBarPageIter> {
         let mut inner = self.inner.lock();
-        let space = inner.bar_spaces[resource_type as usize].as_mut()?;
-        if space.taken {
-            return None;
-        }
-        space.taken = true;
-        let mem_range = SupervisorPageRange::new(space.addr, PageSize::num_4k_pages(space.size));
+        let res = inner.resources.get_mut(resource_type)?;
+        res.take().ok()?;
+        let mem_range = SupervisorPageRange::new(res.addr(), PageSize::num_4k_pages(res.size()));
         // Safety: We have unique ownership of the memory since we've just taken it from this PcieRoot.
         let iter = unsafe { PciBarPageIter::new(mem_range) };
         Some(iter)
@@ -430,21 +331,18 @@ impl PcieRoot {
         pci_node
             .add_prop("reg")?
             .set_value_u64(&[config_mem.base().bits(), config_mem.length_bytes()])?;
-        let mut ranges = ArrayVec::<u32, { CELLS_PER_RANGE * MAX_BAR_SPACES }>::new();
-        for (i, space) in inner
-            .bar_spaces
-            .iter()
-            .enumerate()
-            .filter_map(|(i, space)| space.as_ref().map(|s| (i, s)))
-        {
-            let resource_type = PciBarType::from_index(i).unwrap();
-            ranges.push(resource_type.to_dt_cell());
-            ranges.push((space.pci_addr >> 32) as u32);
-            ranges.push(space.pci_addr as u32);
-            ranges.push((space.addr.bits() >> 32) as u32);
-            ranges.push(space.addr.bits() as u32);
-            ranges.push((space.size >> 32) as u32);
-            ranges.push(space.size as u32);
+        let mut ranges = ArrayVec::<u32, { CELLS_PER_RANGE * MAX_RESOURCE_TYPES }>::new();
+        for i in 0..MAX_RESOURCE_TYPES {
+            let res_type = PciResourceType::from_index(i).unwrap();
+            if let Some(res) = inner.resources.get(res_type) {
+                ranges.push(res_type.to_dt_cell());
+                ranges.push((res.pci_addr() >> 32) as u32);
+                ranges.push(res.pci_addr() as u32);
+                ranges.push((res.addr().bits() >> 32) as u32);
+                ranges.push(res.addr().bits() as u32);
+                ranges.push((res.size() >> 32) as u32);
+                ranges.push(res.size() as u32);
+            }
         }
         pci_node.add_prop("ranges")?.set_value_u32(&ranges)?;
         pci_node.add_prop("device_type")?.set_value_str("pci")?;
@@ -501,29 +399,28 @@ impl PcieRoot {
 }
 
 /// An iterator over the types of BAR resources for a PCI root complex.
-pub struct PciBarSpaceIter<'a> {
+pub struct PciResourceIter<'a> {
     root: &'a PcieRoot,
     index: usize,
 }
 
-impl<'a> PciBarSpaceIter<'a> {
+impl<'a> PciResourceIter<'a> {
     /// Creates a new iterator over `root`'s BAR resources.
     fn new(root: &'a PcieRoot) -> Self {
         Self { root, index: 0 }
     }
 }
 
-impl<'a> Iterator for PciBarSpaceIter<'a> {
-    type Item = (PciBarType, SupervisorPageRange);
+impl<'a> Iterator for PciResourceIter<'a> {
+    type Item = (PciResourceType, SupervisorPageRange);
 
     fn next(&mut self) -> Option<Self::Item> {
         let inner = self.root.inner.lock();
-        while let Some(mem_type) = PciBarType::from_index(self.index) {
-            let i = self.index;
+        while let Some(mem_type) = PciResourceType::from_index(self.index) {
             self.index += 1;
-            if let Some(ref space) = inner.bar_spaces[i] {
+            if let Some(res) = inner.resources.get(mem_type) {
                 let mem_range =
-                    SupervisorPageRange::new(space.addr, PageSize::num_4k_pages(space.size));
+                    SupervisorPageRange::new(res.addr(), PageSize::num_4k_pages(res.size()));
                 return Some((mem_type, mem_range));
             }
         }

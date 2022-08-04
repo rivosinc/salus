@@ -288,13 +288,13 @@ impl<T: GuestStagePageTable> HostVmLoader<T> {
 
         // Identity-map the PCIe BAR resources.
         let pci = PcieRoot::get();
-        for (res_type, range) in pci.bar_spaces() {
+        for (res_type, range) in pci.resources() {
             let gpa =
                 PageAddr::new(RawAddr::guest(range.base().bits(), PageOwnerId::host())).unwrap();
             // TODO: PCI resources should have their own region type.
             self.vm
                 .add_confidential_memory_region(gpa, range.length_bytes());
-            let pages = pci.take_bar_space(res_type).unwrap();
+            let pages = pci.take_resource(res_type).unwrap();
             self.vm.add_pages(gpa, pages);
         }
 

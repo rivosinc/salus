@@ -6,6 +6,10 @@
 
 use core::cmp::min;
 use core::mem::size_of;
+use page_tracking::PageTracker;
+use riscv_pages::PageOwnerId;
+
+use super::resource::PciRootResources;
 
 // Returns a bit mask covering the specified number of bytes.
 fn byte_mask(bytes: usize) -> u32 {
@@ -21,6 +25,16 @@ fn select_bytes(val: u32, offset: usize, len: usize) -> u32 {
 fn update_bytes(dest: u32, offset: usize, len: usize, src: u32) -> u32 {
     let mask = byte_mask(len) << (offset * 8);
     dest & !mask | ((src << (offset * 8)) & mask)
+}
+
+/// Context for an emulated MMIO operation.
+pub struct MmioEmulationContext<'root> {
+    /// Global page-tracking table.
+    pub page_tracker: PageTracker,
+    /// ID of the VM making the access.
+    pub guest_id: PageOwnerId,
+    /// The PCI root complex resources.
+    pub resources: &'root PciRootResources,
 }
 
 /// A builder for emulated MMIO config space read operations.

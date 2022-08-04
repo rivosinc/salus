@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use riscv_pages::SupervisorPageAddr;
+
 use super::address::{Address, Bus};
 use super::device::HeaderType;
 use super::resource::PciResourceType;
@@ -69,6 +71,10 @@ pub enum Error {
     Invalid64BitBarIndex,
     /// The device has a non-power-of-2 sized BAR.
     InvalidBarSize(u64),
+    /// A BAR or bridge window is programmed with an invalid address.
+    InvalidBarAddress(u64),
+    /// A VM has programmed a BAR or bridge window to cover a page it does not own.
+    UnownedBarPage(SupervisorPageAddr),
 }
 
 /// Holds results for PCI operations.

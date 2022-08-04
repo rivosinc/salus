@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
-use riscv_pages::SupervisorPageAddr;
+use riscv_pages::{SupervisorPageAddr, SupervisorPhysAddr};
 use tock_registers::LocalRegisterCopy;
 
 use super::error::*;
@@ -204,6 +204,23 @@ impl PciRootResources {
     /// Returns a mutable reference to the resource with the given type.
     pub fn get_mut(&mut self, resource_type: PciResourceType) -> Option<&mut PciRootResource> {
         self.resources[resource_type as usize].as_mut()
+    }
+
+    /// Translates the given PCI bus address to a CPU physical address.
+    pub fn pci_to_physical_addr(
+        &self,
+        resource_type: PciResourceType,
+        pci_addr: u64,
+    ) -> Option<SupervisorPhysAddr> {
+        use PciResourceType::*;
+        let res = match resource_type {
+            IoPort | Mem32 | Mem64 => self.get(resource_type),
+            // Fall back to the non-prefetchable equivalent if the prefetchable resource doesn't exist.
+            PrefetchableMem32 => self.get(resource_type).or_else(|| self.get(Mem32)),
+            PrefetchableMem64 => self.get(resource_type).or_else(|| self.get(Mem64)),
+        }?;
+        SupervisorPhysAddr::from(res.addr())
+            .checked_increment(pci_addr.checked_sub(res.pci_addr())?)
     }
 }
 

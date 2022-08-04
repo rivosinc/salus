@@ -6,6 +6,8 @@ use arrayvec::ArrayVec;
 use core::fmt;
 use core::mem::size_of;
 use core::ptr::NonNull;
+use page_tracking::PageTracker;
+use riscv_pages::*;
 use tock_registers::interfaces::{Readable, Writeable};
 use tock_registers::registers::ReadWrite;
 use tock_registers::LocalRegisterCopy;
@@ -14,7 +16,7 @@ use super::address::*;
 use super::bus::PciBus;
 use super::capabilities::*;
 use super::error::*;
-use super::mmio_builder::{MmioReadBuilder, MmioWriteBuilder};
+use super::mmio_builder::*;
 use super::registers::*;
 use super::resource::*;
 
@@ -357,6 +359,8 @@ pub struct PciBridge {
     child_bus: Option<PciBus>,
     virtual_primary_bus: Bus,
     virtual_bus_reset: u16,
+    has_io_window: bool,
+    has_pref_window: bool,
 }
 
 impl PciBridge {
@@ -367,6 +371,20 @@ impl PciBridge {
         registers.sub_bus.set(0);
         registers.sec_bus.set(0);
         registers.pri_bus.set(0);
+        // Check if the IO and prefetchable memory windows are implemented. We need to do this by
+        // checking if the registers are writeable since 0 is a valid base and limit.
+        let has_io_window = {
+            registers.io_limit.set(!0);
+            let val = registers.io_limit.get();
+            registers.io_limit.set(0);
+            val != 0
+        };
+        let has_pref_window = {
+            registers.pref_limit.set(!0);
+            let val = registers.pref_limit.get();
+            registers.pref_limit.set(0);
+            val != 0
+        };
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
         let bar_info = PciDeviceBarInfo::new(&mut registers.bar)?;
@@ -379,6 +397,8 @@ impl PciBridge {
             child_bus: None,
             virtual_primary_bus: Bus::default(),
             virtual_bus_reset: 0,
+            has_io_window,
+            has_pref_window,
         })
     }
 
@@ -569,6 +589,68 @@ impl PciBridge {
             }
         }
     }
+
+    // Returns the base and limit of the bridge's IO window if it's implemented and enabled.
+    fn get_io_window(&self) -> Option<(u64, u64)> {
+        const SHIFT: usize = 12;
+        if self.has_io_window {
+            let base = {
+                let lo = self.registers.io_base.read(IoWindow::Address) as u64;
+                let hi = self.registers.io_base_upper.get() as u64;
+                (hi << 16) | (lo << SHIFT)
+            };
+            let limit = {
+                let lo = self.registers.io_limit.read(IoWindow::Address) as u64;
+                let hi = self.registers.io_limit_upper.get() as u64;
+                (hi << 16) | (lo << SHIFT) | ((1u64 << SHIFT) - 1)
+            };
+            if limit < base {
+                None
+            } else {
+                Some((base, limit))
+            }
+        } else {
+            None
+        }
+    }
+
+    // Returns the base and limit of the bridge's 32-bit memory window if it's enabled.
+    fn get_mem_window(&self) -> Option<(u64, u64)> {
+        const SHIFT: usize = 20;
+        let base = (self.registers.mem_base.read(MemWindow::Address) as u64) << SHIFT;
+        let limit = ((self.registers.mem_limit.read(MemWindow::Address) as u64) << SHIFT)
+            | ((1u64 << SHIFT) - 1);
+        if limit < base {
+            None
+        } else {
+            Some((base, limit))
+        }
+    }
+
+    // Returns the base and limit of the bridge's prefetchable memory window if it's implemented and
+    // enabled.
+    fn get_pref_window(&self) -> Option<(u64, u64)> {
+        const SHIFT: usize = 20;
+        if self.has_pref_window {
+            let base = {
+                let lo = self.registers.pref_base.read(MemWindow::Address) as u64;
+                let hi = self.registers.pref_base_upper.get() as u64;
+                (hi << 32) | (lo << SHIFT)
+            };
+            let limit = {
+                let lo = self.registers.pref_limit.read(MemWindow::Address) as u64;
+                let hi = self.registers.pref_limit_upper.get() as u64;
+                (hi << 32) | (lo << SHIFT) | ((1u64 << SHIFT) - 1)
+            };
+            if limit < base {
+                None
+            } else {
+                Some((base, limit))
+            }
+        } else {
+            None
+        }
+    }
 }
 
 /// Represents a single PCI device.
@@ -577,6 +659,38 @@ pub enum PciDevice {
     Endpoint(PciEndpoint),
     /// A bridge (type 1) device.
     Bridge(PciBridge),
+}
+
+// Returns `Ok` if `range` is PCI BAR memory owned by `guest_id`.
+fn bar_range_is_owned(
+    range: SupervisorPageRange,
+    page_tracker: &PageTracker,
+    guest_id: PageOwnerId,
+) -> Result<()> {
+    for p in range {
+        if !page_tracker.is_mapped_page(p, guest_id, MemType::Mmio(DeviceMemType::PciBar)) {
+            return Err(Error::UnownedBarPage(p));
+        }
+    }
+    Ok(())
+}
+
+// Returns `Ok` if the specified bridge window is assigned a valid address for the VM in `context`.
+fn bridge_window_is_valid(
+    window_type: PciResourceType,
+    base: u64,
+    limit: u64,
+    context: &MmioEmulationContext,
+) -> Result<()> {
+    let phys_addr = context
+        .resources
+        .pci_to_physical_addr(window_type, base)
+        .ok_or(Error::InvalidBarAddress(base))?;
+    let page_range = SupervisorPageRange::new(
+        PageAddr::with_round_down(phys_addr, PageSize::Size4k),
+        PageSize::num_4k_pages(limit - base),
+    );
+    bar_range_is_owned(page_range, &context.page_tracker, context.guest_id)
 }
 
 impl PciDevice {
@@ -637,7 +751,12 @@ impl PciDevice {
     }
 
     /// Emulates a read from the configuration space of this device at `offset`.
-    pub fn emulate_config_read(&self, offset: usize, len: usize) -> u32 {
+    pub fn emulate_config_read(
+        &self,
+        offset: usize,
+        len: usize,
+        _context: MmioEmulationContext,
+    ) -> u32 {
         let mut op = MmioReadBuilder::new(offset, len);
         while !op.done() {
             let regs = self.common_registers();
@@ -701,26 +820,46 @@ impl PciDevice {
     }
 
     /// Emulates a write to the configuration space of this device at `offset`.
-    pub fn emulate_config_write(&mut self, offset: usize, value: u32, len: usize) {
+    pub fn emulate_config_write(
+        &mut self,
+        offset: usize,
+        value: u32,
+        len: usize,
+        context: MmioEmulationContext,
+    ) {
         let mut op = MmioWriteBuilder::new(offset, value, len);
         while !op.done() {
-            let regs = self.common_registers_mut();
             use common_offsets::*;
             match op.offset() {
                 command::span!() => {
                     let mut reg = LocalRegisterCopy::<u16, Command::Register>::new(
-                        op.pop_word(regs.command.get()),
+                        op.pop_word(self.common_registers().command.get()),
                     );
+
+                    // Check that the VM has assigned valid BARs / bridge windows for this device
+                    // before allowing it to enable IO or memory space access.
+                    if reg.is_set(Command::IoEnable) && self.can_enable_io_space(&context).is_err()
+                    {
+                        reg.modify(Command::IoEnable.val(0));
+                    }
+                    if reg.is_set(Command::MemoryEnable)
+                        && self.can_enable_mem_space(&context).is_err()
+                    {
+                        reg.modify(Command::MemoryEnable.val(0));
+                    }
+
                     // TODO: No DMA until the IOMMU is enabled.
                     reg.modify(Command::BusMasterEnable.val(0));
-                    regs.command.set(reg.writeable_bits());
+                    self.common_registers_mut()
+                        .command
+                        .set(reg.writeable_bits());
                 }
                 status::span!() => {
                     // Make sure we only write the RW1C bits if the write operation covers that byte.
                     let reg = LocalRegisterCopy::<u16, Status::Register>::new(
-                        op.pop_word(regs.status.non_clearable_bits()),
+                        op.pop_word(self.common_registers().status.non_clearable_bits()),
                     );
-                    regs.status.set(reg.writeable_bits());
+                    self.common_registers_mut().status.set(reg.writeable_bits());
                 }
                 PCI_TYPE_HEADER_START..=PCI_TYPE_HEADER_END => {
                     self.emulate_type_specific_write(&mut op);
@@ -739,6 +878,72 @@ impl PciDevice {
         }
     }
 
+    // Returns the PCI bus address programmed in the BAR at `bar_index`.
+    fn get_bar_addr(&self, index: usize, bar_type: PciResourceType) -> Option<u64> {
+        let regs = self.bar_registers();
+        let addr_lo = regs.get(index)?.get() & !((1u32 << BaseAddress::Address.shift) - 1);
+        let addr_hi = if bar_type.is_64bit() {
+            regs.get(index + 1)?.get()
+        } else {
+            0
+        };
+        Some((addr_lo as u64) | ((addr_hi as u64) << 32))
+    }
+
+    // Returns `Ok` if the specified BAR is assigned a valid address for the VM in `context`.
+    fn bar_assignment_is_valid(
+        &self,
+        bar: &PciBarInfo,
+        context: &MmioEmulationContext,
+    ) -> Result<()> {
+        // Unwrap ok: BAR index is guaranteed to be valid since it's in `self.bar_info`.
+        let pci_addr = self.get_bar_addr(bar.index(), bar.bar_type()).unwrap();
+        let phys_addr = context
+            .resources
+            .pci_to_physical_addr(bar.bar_type(), pci_addr)
+            .ok_or(Error::InvalidBarAddress(pci_addr))?;
+        let page_range = SupervisorPageRange::new(
+            PageAddr::with_round_down(phys_addr, PageSize::Size4k),
+            PageSize::num_4k_pages(bar.size()),
+        );
+        bar_range_is_owned(page_range, &context.page_tracker, context.guest_id)
+    }
+
+    // Returns `Ok` if IO space access can safely be enabled for this device.
+    fn can_enable_io_space(&self, context: &MmioEmulationContext) -> Result<()> {
+        self.bar_info()
+            .bars()
+            .filter(|b| b.bar_type() == PciResourceType::IoPort)
+            .try_for_each(|b| self.bar_assignment_is_valid(b, context))?;
+
+        if let PciDevice::Bridge(bridge) = self {
+            if let Some((base, limit)) = bridge.get_io_window() {
+                bridge_window_is_valid(PciResourceType::IoPort, base, limit, context)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    // Returns `Ok` if memory space access can safely be enabled for this device.
+    fn can_enable_mem_space(&self, context: &MmioEmulationContext) -> Result<()> {
+        self.bar_info()
+            .bars()
+            .filter(|b| b.bar_type() != PciResourceType::IoPort)
+            .try_for_each(|b| self.bar_assignment_is_valid(b, context))?;
+
+        if let PciDevice::Bridge(bridge) = self {
+            if let Some((base, limit)) = bridge.get_mem_window() {
+                bridge_window_is_valid(PciResourceType::Mem32, base, limit, context)?;
+            }
+            if let Some((base, limit)) = bridge.get_pref_window() {
+                bridge_window_is_valid(PciResourceType::PrefetchableMem64, base, limit, context)?;
+            }
+        }
+
+        Ok(())
+    }
+
     // Returns a reference to the common portion of this device's PCI header.
     fn common_registers(&self) -> &CommonRegisters {
         match self {
@@ -752,6 +957,14 @@ impl PciDevice {
         match self {
             PciDevice::Endpoint(ep) => &mut ep.registers.common,
             PciDevice::Bridge(bridge) => &mut bridge.registers.common,
+        }
+    }
+
+    // Returns a reference to this device's BAR registers.
+    fn bar_registers(&self) -> &[ReadWrite<u32, BaseAddress::Register>] {
+        match self {
+            PciDevice::Endpoint(ep) => &ep.registers.bar,
+            PciDevice::Bridge(bridge) => &bridge.registers.bar,
         }
     }
 

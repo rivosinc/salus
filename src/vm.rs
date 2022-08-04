@@ -1492,9 +1492,11 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
             Load32 | Load32U | Store32 => 4,
             Load64 | Store64 => 8,
         };
+        let page_tracker = self.inner.page_tracker();
+        let guest_id = self.inner.page_owner_id();
         match op {
             Load8 | Load8U | Load16 | Load16U | Load32 | Load32U | Load64 => {
-                let val = pci.emulate_config_read(offset, width);
+                let val = pci.emulate_config_read(offset, width, page_tracker, guest_id);
                 self.inner
                     .set_vcpu_reg(vcpu_id, TvmCpuRegister::MmioLoadValue, val)
                     .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
@@ -1504,7 +1506,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
                     .inner
                     .get_vcpu_reg(vcpu_id, TvmCpuRegister::MmioStoreValue)
                     .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
-                pci.emulate_config_write(offset, val, width);
+                pci.emulate_config_write(offset, val, width, page_tracker, guest_id);
             }
         }
 

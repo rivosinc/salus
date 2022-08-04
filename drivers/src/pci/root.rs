@@ -7,7 +7,7 @@ use arrayvec::{ArrayString, ArrayVec};
 use core::marker::PhantomData;
 use device_tree::{DeviceTree, DeviceTreeResult};
 use hyp_alloc::{Arena, ArenaId};
-use page_tracking::HwMemMap;
+use page_tracking::{HwMemMap, PageTracker};
 use riscv_pages::*;
 use spin::{Mutex, Once};
 
@@ -18,6 +18,7 @@ use super::bus::PciBus;
 use super::config_space::PciConfigSpace;
 use super::device::*;
 use super::error::*;
+use super::mmio_builder::MmioEmulationContext;
 use super::resource::*;
 
 /// An arena of PCI devices.
@@ -364,18 +365,38 @@ impl PcieRoot {
         Ok(())
     }
 
-    /// Emulates a read of `len` bytes at `offset` in the config space.
-    pub fn emulate_config_read(&self, offset: u64, len: usize) -> u64 {
-        self.do_emulate_config_read(offset, len).unwrap_or(!0x0)
+    /// Emulates a read of `len` bytes at `offset` in the config space by the VM with `guest_id`.
+    pub fn emulate_config_read(
+        &self,
+        offset: u64,
+        len: usize,
+        page_tracker: PageTracker,
+        guest_id: PageOwnerId,
+    ) -> u64 {
+        self.do_emulate_config_read(offset, len, page_tracker, guest_id)
+            .unwrap_or(!0x0)
     }
 
-    /// Emulates a write of `len` bytes at `offset` in the config space.
-    pub fn emulate_config_write(&self, offset: u64, value: u64, len: usize) {
+    /// Emulates a write of `len` bytes at `offset` in the config space by the VM with `guest_id`.
+    pub fn emulate_config_write(
+        &self,
+        offset: u64,
+        value: u64,
+        len: usize,
+        page_tracker: PageTracker,
+        guest_id: PageOwnerId,
+    ) {
         // If the write failed, just discard it.
-        let _ = self.do_emulate_config_write(offset, value, len);
+        let _ = self.do_emulate_config_write(offset, value, len, page_tracker, guest_id);
     }
 
-    fn do_emulate_config_read(&self, offset: u64, len: usize) -> Result<u64> {
+    fn do_emulate_config_read(
+        &self,
+        offset: u64,
+        len: usize,
+        page_tracker: PageTracker,
+        guest_id: PageOwnerId,
+    ) -> Result<u64> {
         if !valid_config_mmio_access(offset, len) {
             return Err(Error::UnsupportedConfigAccess);
         }
@@ -383,10 +404,23 @@ impl PcieRoot {
         let (dev_id, dev_offset) = devices.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
         let dev = devices.device_arena.get(dev_id).unwrap();
-        Ok(dev.emulate_config_read(dev_offset, len) as u64)
+        let resources = self.resources.lock();
+        let context = MmioEmulationContext {
+            page_tracker,
+            guest_id,
+            resources: &resources,
+        };
+        Ok(dev.emulate_config_read(dev_offset, len, context) as u64)
     }
 
-    fn do_emulate_config_write(&self, offset: u64, value: u64, len: usize) -> Result<()> {
+    fn do_emulate_config_write(
+        &self,
+        offset: u64,
+        value: u64,
+        len: usize,
+        page_tracker: PageTracker,
+        guest_id: PageOwnerId,
+    ) -> Result<()> {
         if !valid_config_mmio_access(offset, len) {
             return Err(Error::UnsupportedConfigAccess);
         }
@@ -394,7 +428,13 @@ impl PcieRoot {
         let (dev_id, dev_offset) = devices.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
         let dev = devices.device_arena.get_mut(dev_id).unwrap();
-        dev.emulate_config_write(dev_offset, value as u32, len);
+        let resources = self.resources.lock();
+        let context = MmioEmulationContext {
+            page_tracker,
+            guest_id,
+            resources: &resources,
+        };
+        dev.emulate_config_write(dev_offset, value as u32, len, context);
         Ok(())
     }
 }

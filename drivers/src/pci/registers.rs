@@ -107,6 +107,10 @@ register_bitfields![u16,
         LinkSpeed OFFSET(0) NUMBITS(4),
         LinkWidth OFFSET(4) NUMBITS(6),
     ],
+
+    pub MemWindow [
+        Address OFFSET(4) NUMBITS(12) [],
+    ],
 ];
 
 register_bitfields![u8,
@@ -122,6 +126,10 @@ register_bitfields![u8,
         CompletionCode OFFSET(0) NUMBITS(3) [],
         Start OFFSET(6) NUMBITS(1) [],
         Capable OFFSET(7) NUMBITS(1) [],
+    ],
+
+    pub IoWindow [
+        Address OFFSET(4) NUMBITS(4) [],
     ],
 ];
 
@@ -206,13 +214,13 @@ pub struct BridgeRegisters {
     pub sec_bus: ReadWrite<u8>,
     pub sub_bus: ReadWrite<u8>,
     pub sec_lat: ReadWrite<u8>,
-    pub io_base: ReadWrite<u8>,
-    pub io_limit: ReadWrite<u8>,
+    pub io_base: ReadWrite<u8, IoWindow::Register>,
+    pub io_limit: ReadWrite<u8, IoWindow::Register>,
     pub sec_status: ReadWrite<u16, SecondaryStatus::Register>,
-    pub mem_base: ReadWrite<u16>,
-    pub mem_limit: ReadWrite<u16>,
-    pub pref_base: ReadWrite<u16>,
-    pub pref_limit: ReadWrite<u16>,
+    pub mem_base: ReadWrite<u16, MemWindow::Register>,
+    pub mem_limit: ReadWrite<u16, MemWindow::Register>,
+    pub pref_base: ReadWrite<u16, MemWindow::Register>,
+    pub pref_limit: ReadWrite<u16, MemWindow::Register>,
     pub pref_base_upper: ReadWrite<u32>,
     pub pref_limit_upper: ReadWrite<u32>,
     pub io_base_upper: ReadWrite<u16>,

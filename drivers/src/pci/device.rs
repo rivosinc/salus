@@ -284,6 +284,15 @@ impl PciDeviceBarInfo {
     pub fn bars(&self) -> impl ExactSizeIterator<Item = &PciBarInfo> {
         self.bars.iter()
     }
+
+    // Returns the type of the BAR at `index`.
+    fn index_to_type(&self, index: usize) -> Option<PciResourceType> {
+        // If `index` is the upper half of a 64-bit BAR, return the type of the lower half.
+        self.bars
+            .iter()
+            .find(|b| b.index() == index || (b.index() + 1 == index && b.bar_type().is_64bit()))
+            .map(|b| b.bar_type())
+    }
 }
 
 /// Represents a PCI endpoint.
@@ -340,6 +349,15 @@ impl PciEndpoint {
             bar::span!() => {
                 let index = (op.offset() - bar::START_OFFSET) / size_of::<u32>();
                 let reg = op.pop_dword(self.registers.bar[index].get());
+                // Discard BAR writes if the BAR is enabled.
+                let io_enabled = self.registers.common.command.is_set(Command::IoEnable);
+                let mem_enabled = self.registers.common.command.is_set(Command::MemoryEnable);
+                if let Some(bar_type) = self.bar_info.index_to_type(index) &&
+                    ((bar_type == PciResourceType::IoPort && io_enabled) ||
+                     (bar_type != PciResourceType::IoPort && mem_enabled))
+                {
+                    return;
+                }
                 self.registers.bar[index].set(reg);
             }
             _ => {
@@ -497,11 +515,20 @@ impl PciBridge {
 
     // Emulate a write to the bridge-specific registers of this device's config space.
     fn emulate_config_write(&mut self, op: &mut MmioWriteBuilder) {
+        let io_enabled = self.registers.common.command.is_set(Command::IoEnable);
+        let mem_enabled = self.registers.common.command.is_set(Command::MemoryEnable);
         use bridge_offsets::*;
         match op.offset() {
             bar::span!() => {
                 let index = (op.offset() - bar::START_OFFSET) / size_of::<u32>();
                 let reg = op.pop_dword(self.registers.bar[index].get());
+                // Discard BAR writes if the BAR is enabled.
+                if let Some(bar_type) = self.bar_info.index_to_type(index) &&
+                    ((bar_type == PciResourceType::IoPort && io_enabled) ||
+                     (bar_type != PciResourceType::IoPort && mem_enabled))
+                {
+                    return;
+                }
                 self.registers.bar[index].set(reg);
             }
             pri_bus::span!() => {
@@ -524,10 +551,16 @@ impl PciBridge {
                     .set_virtual_subordinate_bus_num(bus_num);
             }
             io_base::span!() => {
-                self.registers.io_base.set(op.pop_byte());
+                let reg = op.pop_byte();
+                if !io_enabled {
+                    self.registers.io_base.set(reg);
+                }
             }
             io_limit::span!() => {
-                self.registers.io_limit.set(op.pop_byte());
+                let reg = op.pop_byte();
+                if !io_enabled {
+                    self.registers.io_limit.set(reg);
+                }
             }
             sec_status::span!() => {
                 let reg = LocalRegisterCopy::<u16, SecondaryStatus::Register>::new(
@@ -536,44 +569,52 @@ impl PciBridge {
                 self.registers.sec_status.set(reg.writeable_bits());
             }
             mem_base::span!() => {
-                self.registers
-                    .mem_base
-                    .set(op.pop_word(self.registers.mem_base.get()));
+                let reg = op.pop_word(self.registers.mem_base.get());
+                if !mem_enabled {
+                    self.registers.mem_base.set(reg);
+                }
             }
             mem_limit::span!() => {
-                self.registers
-                    .mem_limit
-                    .set(op.pop_word(self.registers.mem_limit.get()));
+                let reg = op.pop_word(self.registers.mem_limit.get());
+                if !mem_enabled {
+                    self.registers.mem_limit.set(reg);
+                }
             }
             pref_base::span!() => {
-                self.registers
-                    .pref_base
-                    .set(op.pop_word(self.registers.pref_base.get()));
+                let reg = op.pop_word(self.registers.pref_base.get());
+                if !mem_enabled {
+                    self.registers.pref_base.set(reg);
+                }
             }
             pref_limit::span!() => {
-                self.registers
-                    .pref_limit
-                    .set(op.pop_word(self.registers.pref_limit.get()));
+                let reg = op.pop_word(self.registers.pref_limit.get());
+                if !mem_enabled {
+                    self.registers.pref_limit.set(reg);
+                }
             }
             pref_base_upper::span!() => {
-                self.registers
-                    .pref_base_upper
-                    .set(op.pop_dword(self.registers.pref_base_upper.get()));
+                let reg = op.pop_dword(self.registers.pref_base_upper.get());
+                if !mem_enabled {
+                    self.registers.pref_base_upper.set(reg);
+                }
             }
             pref_limit_upper::span!() => {
-                self.registers
-                    .pref_limit_upper
-                    .set(op.pop_dword(self.registers.pref_limit_upper.get()));
+                let reg = op.pop_dword(self.registers.pref_limit_upper.get());
+                if !mem_enabled {
+                    self.registers.pref_limit_upper.set(reg);
+                }
             }
             io_base_upper::span!() => {
-                self.registers
-                    .io_base_upper
-                    .set(op.pop_word(self.registers.io_base_upper.get()));
+                let reg = op.pop_word(self.registers.io_base_upper.get());
+                if !io_enabled {
+                    self.registers.io_base_upper.set(reg);
+                }
             }
             io_limit_upper::span!() => {
-                self.registers
-                    .io_limit_upper
-                    .set(op.pop_word(self.registers.io_limit_upper.get()));
+                let reg = op.pop_word(self.registers.io_limit_upper.get());
+                if !io_enabled {
+                    self.registers.io_limit_upper.set(reg);
+                }
             }
             bridge_control::span!() => {
                 let reg = LocalRegisterCopy::<u16, BridgeControl::Register>::new(

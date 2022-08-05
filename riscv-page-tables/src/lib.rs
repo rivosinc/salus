@@ -106,12 +106,25 @@ mod tests {
     }
 
     #[test]
+    fn ownership_root_pages() {
+        let state = stub_sys_memory();
+
+        let page_tracker = state.page_tracker;
+        let id = page_tracker.add_active_guest().unwrap();
+
+        // Should fail as root_pages owner is not set.
+        assert!(
+            PlatformPageTable::<Sv48x4>::new(state.root_pages, id, page_tracker.clone()).is_err()
+        );
+    }
+
+    #[test]
     fn map_and_unmap_sv48x4() {
         let state = stub_sys_memory();
 
         let page_tracker = state.page_tracker;
         let mut host_pages = state.host_pages;
-        let id = page_tracker.add_active_guest().unwrap();
+        let id = PageOwnerId::host();
         let guest_page_table: PlatformPageTable<Sv48x4> =
             PlatformPageTable::new(state.root_pages, id, page_tracker.clone())
                 .expect("creating sv48x4");
@@ -161,7 +174,7 @@ mod tests {
 
         let page_tracker = state.page_tracker;
         let mut host_pages = state.host_pages;
-        let id = page_tracker.add_active_guest().unwrap();
+        let id = PageOwnerId::host();
         let guest_page_table: PlatformPageTable<Sv48> =
             PlatformPageTable::new(state.root_pages, id, page_tracker.clone())
                 .expect("creating sv48");

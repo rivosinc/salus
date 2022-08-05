@@ -309,6 +309,16 @@ impl PageTracker {
         info.unlock()
     }
 
+    /// Returns true if and only if `addr` is a page owned by `owner`.
+    pub fn is_owned(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> bool {
+        let mut page_tracker = self.inner.lock();
+        if let Ok(info) = page_tracker.get(addr) {
+            info.owner() == Some(owner)
+        } else {
+            false
+        }
+    }
+
     /// Returns true if and only if `addr` is a "Mapped" page owned by `owner` with type `mem_type`.
     pub fn is_mapped_page(
         &self,

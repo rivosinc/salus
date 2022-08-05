@@ -35,6 +35,8 @@ pub enum Error {
     PteLocked,
     /// Attempt to unlock a PTE that is not locked.
     PteNotLocked,
+    /// At least one of the pages for building a table root were not owned by the table's owner.
+    RootPageNotOwned,
     /// The page was not in the range that the `PageTableMapper` covers.
     OutOfMapRange,
     /// The page cannot be shared
@@ -490,7 +492,6 @@ impl<T: PagingMode> PageTableInner<T> {
         owner: PageOwnerId,
         page_tracker: PageTracker,
     ) -> Result<Self> {
-        // TODO: Verify ownership of root PT pages.
         if root.page_size().is_huge() {
             return Err(Error::PageSizeNotSupported(root.page_size()));
         }
@@ -676,6 +677,14 @@ impl<T: PagingMode> PlatformPageTable<T> {
         owner: PageOwnerId,
         page_tracker: PageTracker,
     ) -> Result<Self> {
+        // Check that all pages in `root` are owned by `owner`.
+        if !root
+            .page_addrs()
+            .all(|paddr| page_tracker.is_owned(paddr, owner))
+        {
+            return Err(Error::RootPageNotOwned);
+        }
+
         let inner = PageTableInner::new(root, owner, page_tracker)?;
         Ok(Self {
             inner: Mutex::new(inner),

@@ -8,17 +8,6 @@ use core::marker::PhantomData;
 use crate::page::{CleanablePhysPage, Page, PageSize, PhysPage, SupervisorPageAddr};
 use crate::state::*;
 
-/// `SequentialPages` holds a range of consecutive pages of the same size and state. Each page's
-/// address is one page after the previous. This forms a contiguous area of memory suitable for
-/// holding an array or other linear data.
-#[derive(Debug)]
-pub struct SequentialPages<S: State> {
-    addr: SupervisorPageAddr,
-    page_size: PageSize,
-    count: u64,
-    state: PhantomData<S>,
-}
-
 /// An error resulting from trying to convert an iterator of pages to `SequentialPages`.
 pub enum Error<S: State, I: Iterator<Item = Page<S>>> {
     /// There were zero pages in the list of pages given to create `Self`.
@@ -35,6 +24,17 @@ pub enum Error<S: State, I: Iterator<Item = Page<S>>> {
 /// aligned to the requested size.
 #[derive(Clone, Copy, Debug)]
 pub struct UnalignedPages;
+
+/// `SequentialPages` holds a range of consecutive pages of the same size and state. Each page's
+/// address is one page after the previous. This forms a contiguous area of memory suitable for
+/// holding an array or other linear data.
+#[derive(Debug)]
+pub struct SequentialPages<S: State> {
+    addr: SupervisorPageAddr,
+    page_size: PageSize,
+    count: u64,
+    state: PhantomData<S>,
+}
 
 impl<S: State> SequentialPages<S> {
     /// Creates a `SequentialPages` form the passed iterator.

@@ -481,17 +481,12 @@ pub trait GuestStagePageTable: PagingMode<MappedAddressSpace = GuestPhys> {
 struct PageTableInner<T: PagingMode> {
     root: SequentialPages<InternalClean>,
     owner: PageOwnerId,
-    page_tracker: PageTracker,
     table_type: PhantomData<T>,
 }
 
 impl<T: PagingMode> PageTableInner<T> {
     /// Creates a new `PageTableInner` from the pages in `root`.
-    fn new(
-        root: SequentialPages<InternalClean>,
-        owner: PageOwnerId,
-        page_tracker: PageTracker,
-    ) -> Result<Self> {
+    fn new(root: SequentialPages<InternalClean>, owner: PageOwnerId) -> Result<Self> {
         if root.page_size().is_huge() {
             return Err(Error::PageSizeNotSupported(root.page_size()));
         }
@@ -505,7 +500,6 @@ impl<T: PagingMode> PageTableInner<T> {
         Ok(Self {
             root,
             owner,
-            page_tracker,
             table_type: PhantomData,
         })
     }
@@ -590,24 +584,14 @@ impl<T: PagingMode> PageTableInner<T> {
         }
     }
 
-    /// Returns the valid 4kB leaf PTE mapping `vaddr` if the mapped page matches the specified
-    /// `mem_type`.
-    fn get_mapped_4k_leaf(
-        &mut self,
-        vaddr: PageAddr<T::MappedAddressSpace>,
-        mem_type: MemType,
-    ) -> Result<LeafPte<T>> {
-        let page_tracker = self.page_tracker.clone();
-        let owner = self.owner;
+    /// Returns the valid 4kB leaf PTE mapping `vaddr` if it exists.
+    fn get_mapped_4k_leaf(&mut self, vaddr: PageAddr<T::MappedAddressSpace>) -> Result<LeafPte<T>> {
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
         match entry {
             Leaf(l) => {
                 if !l.level().is_leaf() {
                     return Err(Error::PageSizeNotSupported(l.level().leaf_page_size()));
-                }
-                if !page_tracker.is_mapped_page(l.page_addr(), owner, mem_type) {
-                    return Err(Error::PageNotUnmappable);
                 }
                 Ok(l)
             }
@@ -616,15 +600,11 @@ impl<T: PagingMode> PageTableInner<T> {
     }
 
     /// Returns the invalid 4kB leaf PTE mapping `vaddr` if the PFN the PTE references is a
-    /// page that was converted at a TLB version older than `tlb_version`.
-    fn get_converted_4k_leaf(
+    /// page that was invalidated.
+    fn get_invalidated_4k_leaf(
         &mut self,
         vaddr: PageAddr<T::MappedAddressSpace>,
-        mem_type: MemType,
-        tlb_version: TlbVersion,
     ) -> Result<InvalidatedPte<T>> {
-        let page_tracker = self.page_tracker.clone();
-        let owner = self.owner;
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
         match entry {
@@ -632,32 +612,9 @@ impl<T: PagingMode> PageTableInner<T> {
                 if !i.level().is_leaf() {
                     return Err(Error::PageSizeNotSupported(i.level().leaf_page_size()));
                 }
-                if !page_tracker.is_converted_page(i.page_addr(), owner, mem_type, tlb_version) {
-                    return Err(Error::PageNotConverted);
-                }
                 Ok(i)
             }
             _ => Err(Error::PageNotConverted),
-        }
-    }
-}
-
-impl<T: PagingMode> Drop for PageTableInner<T> {
-    fn drop(&mut self) {
-        // Walk the page table starting from the root, freeing any referenced pages.
-        let page_tracker = self.page_tracker.clone();
-        let owner = self.owner;
-        let mut table = PageTable::from_root(self);
-        table.release_pages(page_tracker, owner);
-
-        // Safe since we uniquely own the pages in self.root.
-        let root_pages: SequentialPages<InternalDirty> = unsafe {
-            SequentialPages::from_mem_range(self.root.base(), PageSize::Size4k, self.root.len())
-        }
-        .unwrap();
-        for p in root_pages {
-            // Unwrap ok, the page must've been assigned to us to begin with.
-            self.page_tracker.release_page(p).unwrap();
         }
     }
 }
@@ -667,6 +624,7 @@ impl<T: PagingMode> Drop for PageTableInner<T> {
 /// TODO: Support non-4k page sizes.
 pub struct PlatformPageTable<T: PagingMode> {
     inner: Mutex<PageTableInner<T>>,
+    page_tracker: PageTracker,
 }
 
 impl<T: PagingMode> PlatformPageTable<T> {
@@ -685,15 +643,16 @@ impl<T: PagingMode> PlatformPageTable<T> {
             return Err(Error::RootPageNotOwned);
         }
 
-        let inner = PageTableInner::new(root, owner, page_tracker)?;
+        let inner = PageTableInner::new(root, owner)?;
         Ok(Self {
             inner: Mutex::new(inner),
+            page_tracker,
         })
     }
 
     /// Returns a reference to the systems physical pages map.
     pub fn page_tracker(&self) -> PageTracker {
-        self.inner.lock().page_tracker.clone()
+        self.page_tracker.clone()
     }
 
     /// Returns the owner Id for this page table.
@@ -751,18 +710,23 @@ impl<T: PagingMode> PlatformPageTable<T> {
 
         let mut inner = self.inner.lock();
         // First make sure the entire range can be unmapped before we start invalidating things.
-        if !addr
-            .iter_from()
-            .take(num_pages as usize)
-            .all(|a| inner.get_mapped_4k_leaf(a, P::mem_type()).is_ok())
-        {
+        if !addr.iter_from().take(num_pages as usize).all(|a| {
+            Self::get_mapped_owned_4k_leaf(&mut inner, a, self.page_tracker.clone(), P::mem_type())
+                .is_ok()
+        }) {
             return Err(Error::PageNotUnmappable);
         }
 
-        let mut pages = PageList::new(inner.page_tracker.clone());
+        let mut pages = PageList::new(self.page_tracker.clone());
         for a in addr.iter_from().take(num_pages as usize) {
             // We verified above that we can safely unwrap here.
-            let entry = inner.get_mapped_4k_leaf(a, P::mem_type()).unwrap();
+            let entry = Self::get_mapped_owned_4k_leaf(
+                &mut inner,
+                a,
+                self.page_tracker.clone(),
+                P::mem_type(),
+            )
+            .unwrap();
             let invalidated = entry.invalidate();
             let page = unsafe {
                 // Safe since we've verified the typing of the page.
@@ -790,12 +754,17 @@ impl<T: PagingMode> PlatformPageTable<T> {
         }
 
         let mut inner = self.inner.lock();
-        let page_tracker = inner.page_tracker.clone();
-        let mut pages = LockedPageList::new(inner.page_tracker.clone());
+        let page_tracker = self.page_tracker.clone();
+        let mut pages = LockedPageList::new(self.page_tracker.clone());
         for a in addr.iter_from().take(num_pages as usize) {
-            let paddr = inner
-                .get_converted_4k_leaf(a, P::mem_type(), tlb_version)?
-                .page_addr();
+            let paddr = Self::get_converted_4k_leaf(
+                &mut inner,
+                a,
+                self.page_tracker.clone(),
+                P::mem_type(),
+                tlb_version,
+            )?
+            .page_addr();
             // Unwrap ok since we've already verified that this page is owned and converted.
             let page = page_tracker
                 .get_converted_page::<P>(paddr, inner.owner, tlb_version)
@@ -821,12 +790,17 @@ impl<T: PagingMode> PlatformPageTable<T> {
         }
 
         let mut inner = self.inner.lock();
-        let mut pages = LockedPageList::new(inner.page_tracker.clone());
+        let mut pages = LockedPageList::new(self.page_tracker.clone());
         for a in addr.iter_from().take(num_pages as usize) {
-            let entry = inner.get_mapped_4k_leaf(a, P::mem_type())?;
+            let entry = Self::get_mapped_owned_4k_leaf(
+                &mut inner,
+                a,
+                self.page_tracker.clone(),
+                P::mem_type(),
+            )?;
             // Unwrap ok, PFN must have been properly aligned in order to have been mapped.
             let paddr = entry.page_addr();
-            let page = inner
+            let page = self
                 .page_tracker
                 .get_shareable_page::<P>(paddr, inner.owner)
                 .map_err(|_| Error::PageNotShareable)?;
@@ -836,6 +810,62 @@ impl<T: PagingMode> PlatformPageTable<T> {
         }
 
         Ok(pages)
+    }
+
+    fn get_mapped_owned_4k_leaf(
+        inner: &mut PageTableInner<T>,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        page_tracker: PageTracker,
+        mem_type: MemType,
+    ) -> Result<LeafPte<T>> {
+        let owner = inner.owner;
+        inner.get_mapped_4k_leaf(vaddr).and_then(|l| {
+            if !page_tracker.is_mapped_page(l.page_addr(), owner, mem_type) {
+                Err(Error::PageNotUnmappable)
+            } else {
+                Ok(l)
+            }
+        })
+    }
+
+    // Returns the invalid 4kB leaf PTE mapping `vaddr` if the PFN the PTE references is a
+    // page that was converted at a TLB version older than `tlb_version`.
+    fn get_converted_4k_leaf(
+        inner: &mut PageTableInner<T>,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        page_tracker: PageTracker,
+        mem_type: MemType,
+        tlb_version: TlbVersion,
+    ) -> Result<InvalidatedPte<T>> {
+        let owner = inner.owner;
+        inner.get_invalidated_4k_leaf(vaddr).and_then(|l| {
+            if !page_tracker.is_converted_page(l.page_addr(), owner, mem_type, tlb_version) {
+                Err(Error::PageNotUnmappable)
+            } else {
+                Ok(l)
+            }
+        })
+    }
+}
+
+impl<T: PagingMode> Drop for PlatformPageTable<T> {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock();
+        // Walk the page table starting from the root, freeing any referenced pages.
+        let page_tracker = self.page_tracker.clone();
+        let owner = inner.owner;
+        let mut table = PageTable::from_root(&mut inner);
+        table.release_pages(page_tracker, owner);
+
+        // Safe since we uniquely own the pages in self.inner.root.
+        let root_pages: SequentialPages<InternalDirty> = unsafe {
+            SequentialPages::from_mem_range(inner.root.base(), PageSize::Size4k, inner.root.len())
+        }
+        .unwrap();
+        for p in root_pages {
+            // Unwrap ok, the page must've been assigned to us to begin with.
+            self.page_tracker.release_page(p).unwrap();
+        }
     }
 }
 

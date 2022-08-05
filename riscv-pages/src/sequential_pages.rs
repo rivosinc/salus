@@ -159,6 +159,11 @@ impl<S: State> SequentialPages<S> {
             state: PhantomData,
         })
     }
+
+    /// Returns an iterator across the addresses of all pages in `self`.
+    pub fn page_addrs(&self) -> impl Iterator<Item = SupervisorPageAddr> {
+        self.addr.iter_from().take(self.count as usize)
+    }
 }
 
 impl<S: Cleanable> SequentialPages<S> {

@@ -295,12 +295,18 @@ impl PciDeviceBarInfo {
     }
 }
 
-/// Represents a PCI endpoint.
-pub struct PciEndpoint {
-    registers: &'static mut EndpointRegisters,
+// Common state between bridges and endpoints.
+struct PciDeviceCommon {
     info: PciDeviceInfo,
     capabilities: PciCapabilities,
     bar_info: PciDeviceBarInfo,
+    owner: Option<PageOwnerId>,
+}
+
+/// Represents a PCI endpoint.
+pub struct PciEndpoint {
+    registers: &'static mut EndpointRegisters,
+    common: PciDeviceCommon,
 }
 
 impl PciEndpoint {
@@ -309,13 +315,13 @@ impl PciEndpoint {
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
         let bar_info = PciDeviceBarInfo::new(&mut registers.bar)?;
-
-        Ok(Self {
-            registers,
+        let common = PciDeviceCommon {
             info,
             capabilities,
             bar_info,
-        })
+            owner: None,
+        };
+        Ok(Self { registers, common })
     }
 
     // Emulate a read from the endpoint-specific registers of this device's config space.
@@ -333,7 +339,7 @@ impl PciEndpoint {
                 op.push_word(self.registers.subsys_id.get());
             }
             cap_ptr::span!() => {
-                op.push_byte(self.capabilities.start_offset() as u8);
+                op.push_byte(self.common.capabilities.start_offset() as u8);
             }
             _ => {
                 // No INTx, cardbus, etc.
@@ -352,7 +358,7 @@ impl PciEndpoint {
                 // Discard BAR writes if the BAR is enabled.
                 let io_enabled = self.registers.common.command.is_set(Command::IoEnable);
                 let mem_enabled = self.registers.common.command.is_set(Command::MemoryEnable);
-                if let Some(bar_type) = self.bar_info.index_to_type(index) &&
+                if let Some(bar_type) = self.common.bar_info.index_to_type(index) &&
                     ((bar_type == PciResourceType::IoPort && io_enabled) ||
                      (bar_type != PciResourceType::IoPort && mem_enabled))
                 {
@@ -370,9 +376,7 @@ impl PciEndpoint {
 /// Represents a PCI bridge.
 pub struct PciBridge {
     registers: &'static mut BridgeRegisters,
-    info: PciDeviceInfo,
-    capabilities: PciCapabilities,
-    bar_info: PciDeviceBarInfo,
+    common: PciDeviceCommon,
     bus_range: BusRange,
     child_bus: Option<PciBus>,
     virtual_primary_bus: Bus,
@@ -406,11 +410,15 @@ impl PciBridge {
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
         let bar_info = PciDeviceBarInfo::new(&mut registers.bar)?;
-        Ok(Self {
-            registers,
+        let common = PciDeviceCommon {
             info,
             capabilities,
             bar_info,
+            owner: None,
+        };
+        Ok(Self {
+            registers,
+            common,
             bus_range: BusRange::default(),
             child_bus: None,
             virtual_primary_bus: Bus::default(),
@@ -425,7 +433,7 @@ impl PciBridge {
     pub fn assign_bus_range(&mut self, range: BusRange) {
         self.registers.sub_bus.set(range.end.bits() as u8);
         self.registers.sec_bus.set(range.start.bits() as u8);
-        let pri_bus = self.info.address().bus();
+        let pri_bus = self.common.info.address().bus();
         self.registers.pri_bus.set(pri_bus.bits() as u8);
         self.bus_range = range;
     }
@@ -497,7 +505,7 @@ impl PciBridge {
                 op.push_word(self.registers.io_limit_upper.get());
             }
             cap_ptr::span!() => {
-                op.push_byte(self.capabilities.start_offset() as u8);
+                op.push_byte(self.common.capabilities.start_offset() as u8);
             }
             bridge_control::span!() => {
                 let mut reg = LocalRegisterCopy::<u16, BridgeControl::Register>::new(
@@ -523,7 +531,7 @@ impl PciBridge {
                 let index = (op.offset() - bar::START_OFFSET) / size_of::<u32>();
                 let reg = op.pop_dword(self.registers.bar[index].get());
                 // Discard BAR writes if the BAR is enabled.
-                if let Some(bar_type) = self.bar_info.index_to_type(index) &&
+                if let Some(bar_type) = self.common.bar_info.index_to_type(index) &&
                     ((bar_type == PciResourceType::IoPort && io_enabled) ||
                      (bar_type != PciResourceType::IoPort && mem_enabled))
                 {
@@ -762,33 +770,41 @@ impl PciDevice {
 
     /// Returns the `PciDeviceInfo` for this device.
     pub fn info(&self) -> &PciDeviceInfo {
-        match self {
-            PciDevice::Endpoint(ep) => &ep.info,
-            PciDevice::Bridge(bridge) => &bridge.info,
-        }
+        &self.common().info
     }
 
     /// Returns the `PciDeviceBarInfo` for this device.
     pub fn bar_info(&self) -> &PciDeviceBarInfo {
-        match self {
-            PciDevice::Endpoint(ep) => &ep.bar_info,
-            PciDevice::Bridge(bridge) => &bridge.bar_info,
-        }
+        &self.common().bar_info
     }
 
     /// Returns if the device supports MSI.
     pub fn has_msi(&self) -> bool {
-        self.capabilities().has_msi()
+        self.common().capabilities.has_msi()
     }
 
     /// Returns if the device supports MSI-X.
     pub fn has_msix(&self) -> bool {
-        self.capabilities().has_msix()
+        self.common().capabilities.has_msix()
     }
 
     /// Returns if the device is a PCI-Express device.
     pub fn is_pcie(&self) -> bool {
-        self.capabilities().is_pcie()
+        self.common().capabilities.is_pcie()
+    }
+
+    /// Returns the device's owner.
+    pub fn owner(&self) -> Option<PageOwnerId> {
+        self.common().owner
+    }
+
+    /// Takes ownership over the device if it is not already owned.
+    pub fn take(&mut self, owner: PageOwnerId) -> Result<()> {
+        if self.owner().is_some() {
+            return Err(Error::DeviceOwned);
+        }
+        self.common_mut().owner = Some(owner);
+        Ok(())
     }
 
     /// Emulates a read from the configuration space of this device at `offset`.
@@ -840,7 +856,7 @@ impl PciDevice {
                     self.emulate_type_specific_read(&mut op);
                 }
                 PCI_CAPS_START..=PCI_CONFIG_SPACE_END => {
-                    self.capabilities().emulate_read(&mut op);
+                    self.common().capabilities.emulate_read(&mut op);
                 }
                 offset => {
                     if offset <= PCI_COMMON_HEADER_END {
@@ -906,7 +922,7 @@ impl PciDevice {
                     self.emulate_type_specific_write(&mut op);
                 }
                 PCI_CAPS_START..=PCI_CONFIG_SPACE_END => {
-                    self.capabilities_mut().emulate_write(&mut op);
+                    self.common_mut().capabilities.emulate_write(&mut op);
                 }
                 _ => {
                     // We don't allow writes to other bits of the common header and everything beyond
@@ -1025,19 +1041,19 @@ impl PciDevice {
         }
     }
 
-    // Returns a reference to the `PciCapabilities` for this device.
-    fn capabilities(&self) -> &PciCapabilities {
+    // Returns a reference to the `PciDeviceCommon` for this device.
+    fn common(&self) -> &PciDeviceCommon {
         match self {
-            PciDevice::Endpoint(ep) => &ep.capabilities,
-            PciDevice::Bridge(bridge) => &bridge.capabilities,
+            PciDevice::Endpoint(ep) => &ep.common,
+            PciDevice::Bridge(bridge) => &bridge.common,
         }
     }
 
-    // Returns a mutable reference to the `PciCapabilities` for this device.
-    fn capabilities_mut(&mut self) -> &mut PciCapabilities {
+    // Returns a mutable reference to the `PciDeviceCommon` for this device.
+    fn common_mut(&mut self) -> &mut PciDeviceCommon {
         match self {
-            PciDevice::Endpoint(ep) => &mut ep.capabilities,
-            PciDevice::Bridge(bridge) => &mut bridge.capabilities,
+            PciDevice::Endpoint(ep) => &mut ep.common,
+            PciDevice::Bridge(bridge) => &mut bridge.common,
         }
     }
 }

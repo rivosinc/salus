@@ -240,6 +240,14 @@ impl PcieRoot {
         Some(iter)
     }
 
+    /// Takes ownership over all unowned devices in the PCI hierarchy on behalf of the host VM.
+    pub fn take_host_devices(&self) {
+        self.for_each_device_on(&self.root_bus, &mut |id| {
+            let dev = self.device_arena.get(id).unwrap();
+            let _ = dev.lock().take(PageOwnerId::host());
+        });
+    }
+
     /// Adds a node for this PCIe root complex to the host's device tree in `dt`. It's assumed that
     /// the config space and BAR resources will be identity-mapped into the host VM's guest physical
     /// address space (i.e. GPA == SPA for the various PCI memory regions). It is up to the caller to
@@ -337,15 +345,17 @@ impl PcieRoot {
         }
         let (dev_id, dev_offset) = self.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
-        let dev = self.device_arena.get(dev_id).unwrap();
+        let dev = self.device_arena.get(dev_id).unwrap().lock();
+        if dev.owner() != Some(guest_id) {
+            return Err(Error::DeviceNotOwned);
+        }
         let resources = self.resources.lock();
         let context = MmioEmulationContext {
             page_tracker,
             guest_id,
             resources: &resources,
         };
-        let result = dev.lock().emulate_config_read(dev_offset, len, context) as u64;
-        Ok(result)
+        Ok(dev.emulate_config_read(dev_offset, len, context) as u64)
     }
 
     fn do_emulate_config_write(
@@ -361,15 +371,17 @@ impl PcieRoot {
         }
         let (dev_id, dev_offset) = self.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
-        let dev = self.device_arena.get(dev_id).unwrap();
+        let mut dev = self.device_arena.get(dev_id).unwrap().lock();
+        if dev.owner() != Some(guest_id) {
+            return Err(Error::DeviceNotOwned);
+        }
         let resources = self.resources.lock();
         let context = MmioEmulationContext {
             page_tracker,
             guest_id,
             resources: &resources,
         };
-        dev.lock()
-            .emulate_config_write(dev_offset, value as u32, len, context);
+        dev.emulate_config_write(dev_offset, value as u32, len, context);
         Ok(())
     }
 

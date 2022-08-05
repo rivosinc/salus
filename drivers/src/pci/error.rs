@@ -75,6 +75,10 @@ pub enum Error {
     InvalidBarAddress(u64),
     /// A VM has programmed a BAR or bridge window to cover a page it does not own.
     UnownedBarPage(SupervisorPageAddr),
+    /// The PCI device is already owned.
+    DeviceOwned,
+    /// The PCI device is not owned, or is owned by another VM.
+    DeviceNotOwned,
 }
 
 /// Holds results for PCI operations.

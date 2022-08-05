@@ -286,8 +286,9 @@ impl<T: GuestStagePageTable> HostVmLoader<T> {
             }
         }
 
-        // Identity-map the PCIe BAR resources.
         let pci = PcieRoot::get();
+        pci.take_host_devices();
+        // Identity-map the PCIe BAR resources.
         for (res_type, range) in pci.resources() {
             let gpa =
                 PageAddr::new(RawAddr::guest(range.base().bits(), PageOwnerId::host())).unwrap();

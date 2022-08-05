@@ -13,3 +13,6 @@ pub mod state;
 /// Host interfaces for confidential computing.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod tsm;
+
+/// Host interfaces for PMU.
+pub mod pmu;

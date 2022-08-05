@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::vec::Vec;
+use spin::Mutex;
 
 use super::address::*;
 use super::config_space::PciConfigSpace;
@@ -48,7 +49,7 @@ impl PciBus {
                 // by creating at most one device per PCI address.
                 let pci_dev = unsafe { PciDevice::new(registers_ptr, info.clone()) }?;
                 let id = device_arena
-                    .try_insert(pci_dev)
+                    .try_insert(Mutex::new(pci_dev))
                     .map_err(|_| Error::AllocError)?;
                 let entry = BusDevice {
                     address: info.address(),
@@ -64,8 +65,9 @@ impl PciBus {
         for bd in devices.iter() {
             let bridge_id = bd.id;
             let sec_bus = cur_bus.next().ok_or(Error::OutOfBuses)?;
-            match device_arena.get_mut(bridge_id) {
-                Some(PciDevice::Bridge(bridge)) => {
+            // ID must be valid, we just added it above.
+            match *device_arena.get(bridge_id).unwrap().lock() {
+                PciDevice::Bridge(ref mut bridge) => {
                     // Set the bridge to cover everything beyond sec_bus until we've enumerated
                     // the buses behind the bridge.
                     bridge.assign_bus_range(BusRange {
@@ -81,8 +83,8 @@ impl PciBus {
 
             // Avoid double mutable borrow of device_arena by re-acquiring the reference to the bridge
             // device here. PciBus::enumerate() may have added devices and re-allocated the arena.
-            match device_arena.get_mut(bridge_id) {
-                Some(PciDevice::Bridge(bridge)) => {
+            match *device_arena.get(bridge_id).unwrap().lock() {
+                PciDevice::Bridge(ref mut bridge) => {
                     // Now constrain the bus assignment to only the buses we enumerated.
                     bridge.assign_bus_range(BusRange {
                         start: sec_bus,

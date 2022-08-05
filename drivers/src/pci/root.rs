@@ -22,85 +22,21 @@ use super::mmio_builder::MmioEmulationContext;
 use super::resource::*;
 
 /// An arena of PCI devices.
-pub type PciDeviceArena = Arena<PciDevice, Global>;
+pub type PciDeviceArena = Arena<Mutex<PciDevice>, Global>;
 
 /// Identifiers in the PCI device arena.
-pub type PciDeviceId = ArenaId<PciDevice>;
+pub type PciDeviceId = ArenaId<Mutex<PciDevice>>;
 
 // The number of "PCI address" cells, as specified in the standard PCI binding.
 const PCI_ADDR_CELLS: usize = 3;
 // Number of u32 cells per 'ranges' property in the device tree.
 const CELLS_PER_RANGE: usize = PCI_ADDR_CELLS + 4;
 
-struct PcieRootDevices {
+/// Represents a PCI-Express root complex.
+pub struct PcieRoot {
     config_space: PciConfigSpace,
     root_bus: PciBus,
     device_arena: PciDeviceArena,
-}
-
-impl PcieRootDevices {
-    // Calls `f` for each device on `bus`.
-    fn for_each_device_on<F: FnMut(&PciDevice)>(&self, bus: &PciBus, f: &mut F) {
-        for bd in bus.devices() {
-            // If the ID appears on a bus, it must be in the arena.
-            let dev = self.device_arena.get(bd.id).unwrap();
-            f(dev);
-            if let PciDevice::Bridge(bridge) = dev {
-                // Recrusively walk the buses behind the bridge.
-                bridge
-                    .child_bus()
-                    .inspect(|b| self.for_each_device_on(b, f));
-            };
-        }
-    }
-
-    // Returns the device ID for the device at the virtualized PCI address `address` on `bus`.
-    fn device_by_virtual_address_on(&self, bus: &PciBus, address: Address) -> Option<PciDeviceId> {
-        if address.bus() == bus.virtual_secondary_bus_num() {
-            // The device is on this bus.
-            return bus
-                .devices()
-                .find(|bd| {
-                    bd.address.device() == address.device()
-                        && bd.address.function() == address.function()
-                })
-                .map(|bd| bd.id);
-        } else {
-            for bd in bus.devices() {
-                let dev = self.device_arena.get(bd.id).unwrap();
-                if let PciDevice::Bridge(bridge) = dev {
-                    // Check if the device is behind the virtualized buses assigned to this bridge.
-                    // Unwrap is ok here since buses must have been assigned at this point.
-                    let child_bus = bridge.child_bus().unwrap();
-                    if child_bus.virtual_secondary_bus_num() <= address.bus()
-                        && child_bus.virtual_subordinate_bus_num() >= address.bus()
-                    {
-                        return self.device_by_virtual_address_on(child_bus, address);
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    // Returns the ID of the device whose config space is mapped at `offset` in the virtualized
-    // config space, along with the offset within the device's config space.
-    fn virtual_config_offset_to_device(&self, offset: usize) -> Result<(PciDeviceId, usize)> {
-        let (address, dev_offset) = self
-            .config_space
-            .offset_to_address(offset)
-            .ok_or(Error::InvalidConfigOffset)?;
-        let dev_id = self
-            .device_by_virtual_address_on(&self.root_bus, address)
-            .ok_or(Error::DeviceNotFound(address))?;
-        Ok((dev_id, dev_offset))
-    }
-}
-
-/// Represents a PCI-Express root complex.
-pub struct PcieRoot {
-    devices: Mutex<PcieRootDevices>,
     resources: Mutex<PciRootResources>,
     msi_parent_phandle: u32,
 }
@@ -256,13 +192,10 @@ impl PcieRoot {
         let mut device_arena = PciDeviceArena::new(Global);
         let root_bus = PciBus::enumerate(&config_space, bus_range.start, &mut device_arena)?;
 
-        let devices = PcieRootDevices {
+        PCIE_ROOT.call_once(|| Self {
             config_space,
             root_bus,
             device_arena,
-        };
-        PCIE_ROOT.call_once(|| Self {
-            devices: Mutex::new(devices),
             resources: Mutex::new(resources),
             msi_parent_phandle,
         });
@@ -277,13 +210,17 @@ impl PcieRoot {
 
     /// Walks the PCIe hierarchy, calling `f` on each device function.
     pub fn for_each_device<F: FnMut(&PciDevice)>(&self, mut f: F) {
-        let devices = self.devices.lock();
-        devices.for_each_device_on(&devices.root_bus, &mut f)
+        // Silence bogus auto-deref lint, see https://github.com/rust-lang/rust-clippy/issues/9101.
+        #[allow(clippy::explicit_auto_deref)]
+        self.for_each_device_on(&self.root_bus, &mut |id| {
+            let dev = self.device_arena.get(id).unwrap();
+            f(&*dev.lock());
+        });
     }
 
     /// Returns the memory range occupied by this root complex's config space.
     pub fn config_space(&self) -> SupervisorPageRange {
-        self.devices.lock().config_space.mem_range()
+        self.config_space.mem_range()
     }
 
     /// Returns an iterator over the root's PCI resources.
@@ -308,11 +245,9 @@ impl PcieRoot {
     /// address space (i.e. GPA == SPA for the various PCI memory regions). It is up to the caller to
     /// set up those mappings, however.
     pub fn add_host_pcie_node(&self, dt: &mut DeviceTree) -> DeviceTreeResult<()> {
-        let devices = self.devices.lock();
-
         let soc_node_id = dt.iter().find(|n| n.name() == "soc").unwrap().id();
         let mut pci_name = ArrayString::<32>::new();
-        let config_mem = devices.config_space.mem_range();
+        let config_mem = self.config_space.mem_range();
         core::fmt::write(
             &mut pci_name,
             format_args!("pci@{:x}", config_mem.base().bits()),
@@ -351,8 +286,8 @@ impl PcieRoot {
         pci_node.add_prop("dma-coherent")?;
         pci_node
             .add_prop("linux,pci-domain")?
-            .set_value_u32(&[devices.config_space.segment().bits()])?;
-        let bus_range = devices.config_space.bus_range();
+            .set_value_u32(&[self.config_space.segment().bits()])?;
+        let bus_range = self.config_space.bus_range();
         pci_node
             .add_prop("bus-range")?
             .set_value_u32(&[bus_range.start.bits(), bus_range.end.bits()])?;
@@ -400,17 +335,17 @@ impl PcieRoot {
         if !valid_config_mmio_access(offset, len) {
             return Err(Error::UnsupportedConfigAccess);
         }
-        let devices = self.devices.lock();
-        let (dev_id, dev_offset) = devices.virtual_config_offset_to_device(offset as usize)?;
+        let (dev_id, dev_offset) = self.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
-        let dev = devices.device_arena.get(dev_id).unwrap();
+        let dev = self.device_arena.get(dev_id).unwrap();
         let resources = self.resources.lock();
         let context = MmioEmulationContext {
             page_tracker,
             guest_id,
             resources: &resources,
         };
-        Ok(dev.emulate_config_read(dev_offset, len, context) as u64)
+        let result = dev.lock().emulate_config_read(dev_offset, len, context) as u64;
+        Ok(result)
     }
 
     fn do_emulate_config_write(
@@ -424,18 +359,76 @@ impl PcieRoot {
         if !valid_config_mmio_access(offset, len) {
             return Err(Error::UnsupportedConfigAccess);
         }
-        let mut devices = self.devices.lock();
-        let (dev_id, dev_offset) = devices.virtual_config_offset_to_device(offset as usize)?;
+        let (dev_id, dev_offset) = self.virtual_config_offset_to_device(offset as usize)?;
         // If the device ID is present in the hierarchy, then it must be in the arena.
-        let dev = devices.device_arena.get_mut(dev_id).unwrap();
+        let dev = self.device_arena.get(dev_id).unwrap();
         let resources = self.resources.lock();
         let context = MmioEmulationContext {
             page_tracker,
             guest_id,
             resources: &resources,
         };
-        dev.emulate_config_write(dev_offset, value as u32, len, context);
+        dev.lock()
+            .emulate_config_write(dev_offset, value as u32, len, context);
         Ok(())
+    }
+
+    // Calls `f` for each device on `bus`.
+    fn for_each_device_on<F: FnMut(PciDeviceId)>(&self, bus: &PciBus, f: &mut F) {
+        for bd in bus.devices() {
+            f(bd.id);
+            // If the ID appears on a bus, it must be in the arena.
+            let dev = self.device_arena.get(bd.id).unwrap();
+            if let PciDevice::Bridge(ref bridge) = *dev.lock() {
+                // Recursively walk the buses behind the bridge.
+                bridge
+                    .child_bus()
+                    .inspect(|b| self.for_each_device_on(b, f));
+            };
+        }
+    }
+
+    // Returns the device ID for the device at the virtualized PCI address `address` on `bus`.
+    fn device_by_virtual_address_on(&self, bus: &PciBus, address: Address) -> Option<PciDeviceId> {
+        if address.bus() == bus.virtual_secondary_bus_num() {
+            // The device is on this bus.
+            return bus
+                .devices()
+                .find(|bd| {
+                    bd.address.device() == address.device()
+                        && bd.address.function() == address.function()
+                })
+                .map(|bd| bd.id);
+        } else {
+            for bd in bus.devices() {
+                let dev = self.device_arena.get(bd.id).unwrap();
+                if let PciDevice::Bridge(ref bridge) = *dev.lock() {
+                    // Check if the device is behind the virtualized buses assigned to this bridge.
+                    // Unwrap is ok here since buses must have been assigned at this point.
+                    let child_bus = bridge.child_bus().unwrap();
+                    if child_bus.virtual_secondary_bus_num() <= address.bus()
+                        && child_bus.virtual_subordinate_bus_num() >= address.bus()
+                    {
+                        return self.device_by_virtual_address_on(child_bus, address);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    // Returns the ID of the device whose config space is mapped at `offset` in the virtualized
+    // config space, along with the offset within the device's config space.
+    fn virtual_config_offset_to_device(&self, offset: usize) -> Result<(PciDeviceId, usize)> {
+        let (address, dev_offset) = self
+            .config_space
+            .offset_to_address(offset)
+            .ok_or(Error::InvalidConfigOffset)?;
+        let dev_id = self
+            .device_by_virtual_address_on(&self.root_bus, address)
+            .ok_or(Error::DeviceNotFound(address))?;
+        Ok((dev_id, dev_offset))
     }
 }
 

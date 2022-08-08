@@ -9,14 +9,14 @@ use super::address::*;
 use super::config_space::PciConfigSpace;
 use super::device::PciDevice;
 use super::error::*;
-use super::root::{PciDeviceArena, PciDeviceId};
+use super::root::{PciArenaId, PciDeviceArena};
 
 /// A entry for a single device on a `PciBus`.
 pub struct BusDevice {
     /// The PCI bus address of the device.
     pub address: Address,
     /// The ID of the device in the `PciDeviceArena`.
-    pub id: PciDeviceId,
+    pub id: PciArenaId,
 }
 
 /// Represents a PCI bus.

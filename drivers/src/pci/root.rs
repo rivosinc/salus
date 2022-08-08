@@ -25,7 +25,7 @@ use super::resource::*;
 pub type PciDeviceArena = Arena<Mutex<PciDevice>, Global>;
 
 /// Identifiers in the PCI device arena.
-pub type PciDeviceId = ArenaId<Mutex<PciDevice>>;
+pub type PciArenaId = ArenaId<Mutex<PciDevice>>;
 
 // The number of "PCI address" cells, as specified in the standard PCI binding.
 const PCI_ADDR_CELLS: usize = 3;
@@ -386,7 +386,7 @@ impl PcieRoot {
     }
 
     // Calls `f` for each device on `bus`.
-    fn for_each_device_on<F: FnMut(PciDeviceId)>(&self, bus: &PciBus, f: &mut F) {
+    fn for_each_device_on<F: FnMut(PciArenaId)>(&self, bus: &PciBus, f: &mut F) {
         for bd in bus.devices() {
             f(bd.id);
             // If the ID appears on a bus, it must be in the arena.
@@ -401,7 +401,7 @@ impl PcieRoot {
     }
 
     // Returns the device ID for the device at the virtualized PCI address `address` on `bus`.
-    fn device_by_virtual_address_on(&self, bus: &PciBus, address: Address) -> Option<PciDeviceId> {
+    fn device_by_virtual_address_on(&self, bus: &PciBus, address: Address) -> Option<PciArenaId> {
         if address.bus() == bus.virtual_secondary_bus_num() {
             // The device is on this bus.
             return bus
@@ -432,7 +432,7 @@ impl PcieRoot {
 
     // Returns the ID of the device whose config space is mapped at `offset` in the virtualized
     // config space, along with the offset within the device's config space.
-    fn virtual_config_offset_to_device(&self, offset: usize) -> Result<(PciDeviceId, usize)> {
+    fn virtual_config_offset_to_device(&self, offset: usize) -> Result<(PciArenaId, usize)> {
         let (address, dev_offset) = self
             .config_space
             .offset_to_address(offset)

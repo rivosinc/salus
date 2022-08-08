@@ -8,7 +8,7 @@ use core::mem::size_of;
 use core::ptr::NonNull;
 use page_tracking::PageTracker;
 use riscv_pages::*;
-use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
 use tock_registers::registers::ReadWrite;
 use tock_registers::LocalRegisterCopy;
 
@@ -251,6 +251,7 @@ impl PciBarInfo {
 }
 
 /// Describes the BARs of a PCI device.
+#[derive(Clone)]
 pub struct PciDeviceBarInfo {
     bars: ArrayVec<PciBarInfo, PCI_ENDPOINT_BARS>,
 }
@@ -970,6 +971,41 @@ impl PciDevice {
             0
         };
         Ok((addr_lo as u64) | ((addr_hi as u64) << 32))
+    }
+
+    /// Programs the BAR at `bar_index` with the given address.
+    pub(super) fn set_bar_addr(&mut self, index: usize, pci_addr: u64) -> Result<()> {
+        let bar = self
+            .bar_info()
+            .get(index)
+            .ok_or(Error::BarNotPresent(index))?;
+        let regs = self.bar_registers();
+        regs[index].set(pci_addr as u32);
+        if bar.bar_type().is_64bit() {
+            regs[index + 1].set((pci_addr >> 32) as u32);
+        }
+        Ok(())
+    }
+
+    /// Enables IO port space access for this device.
+    pub(super) fn enable_io_space(&mut self) {
+        self.common_registers()
+            .command
+            .modify(Command::IoEnable.val(1));
+    }
+
+    /// Enables memory space access for this device.
+    pub(super) fn enable_mem_space(&mut self) {
+        self.common_registers()
+            .command
+            .modify(Command::MemoryEnable.val(1));
+    }
+
+    /// Enables DMA ("bus mastering") for this device.
+    pub(super) fn enable_dma(&mut self) {
+        self.common_registers()
+            .command
+            .modify(Command::BusMasterEnable.val(1));
     }
 
     // Returns `Ok` if the specified BAR is assigned a valid address for the VM in `context`.

@@ -37,6 +37,10 @@ pub enum Error {
     DuplicateResource(PciResourceType),
     /// Attempt to claim a resource that has already been taken.
     ResourceTaken,
+    /// Couldn't find a resource with the specified type.
+    ResourceNotFound(PciResourceType),
+    /// Unable to allocate a PCI resource.
+    OutOfResources,
     /// The device tree provided an invalid bus number in the `bus-range` property.
     InvalidBusNumber(u32),
     /// No 'msi-parent' device tree property was specified in the device tree.
@@ -56,7 +60,7 @@ pub enum Error {
     /// Offset in emulated config space is invalid.
     InvalidConfigOffset,
     /// The device targetted by the emulated config space access does not exist.
-    DeviceNotFound(Address),
+    DeviceNotPresent(Address),
     /// Too many capabilities were found for a PCI device.
     TooManyCapabilities,
     /// The device has MSI support, but is not 64-bit capable.
@@ -81,6 +85,10 @@ pub enum Error {
     DeviceOwned,
     /// The PCI device is not owned, or is owned by another VM.
     DeviceNotOwned,
+    /// The PCI device could not be found.
+    DeviceNotFound,
+    /// The PCI device was expected to be on the root bus, but wasn't.
+    DeviceNotOnRootBus,
 }
 
 /// Holds results for PCI operations.

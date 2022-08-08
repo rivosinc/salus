@@ -17,4 +17,4 @@ pub use device::{DeviceId, PciDevice, PciDeviceInfo, VendorId};
 pub use error::Error as PciError;
 pub use error::Result as PciResult;
 pub use resource::PciResourceType;
-pub use root::{PciBarPage, PciBarPageIter, PciResourceIter, PcieRoot};
+pub use root::{PciArenaId, PciBarPage, PciBarPageIter, PciResourceIter, PcieRoot};

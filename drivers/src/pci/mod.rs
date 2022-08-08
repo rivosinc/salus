@@ -13,7 +13,7 @@ mod registers;
 mod resource;
 mod root;
 
-pub use device::{PciDevice, PciDeviceInfo};
+pub use device::{DeviceId, PciDevice, PciDeviceInfo, VendorId};
 pub use error::Error as PciError;
 pub use error::Result as PciResult;
 pub use resource::PciResourceType;

@@ -308,8 +308,8 @@ impl PciDeviceBarInfo {
         self.bars.iter()
     }
 
-    // Returns the `PciBarInfo` with the given BAR index.
-    fn get(&self, index: usize) -> Option<&PciBarInfo> {
+    /// Returns the `PciBarInfo` with the given BAR index.
+    pub fn get(&self, index: usize) -> Option<&PciBarInfo> {
         self.bars.iter().find(|b| b.index() == index)
     }
 
@@ -458,7 +458,7 @@ impl PciBridge {
 
     /// Configures the secondary and subordinate bus numbers of the bridge such that configuration
     /// cycles from `range.start` to `range.end` (inclusive) will be forwarded downstream.
-    pub fn assign_bus_range(&mut self, range: BusRange) {
+    pub(super) fn assign_bus_range(&mut self, range: BusRange) {
         self.registers.sub_bus.set(range.end.bits() as u8);
         self.registers.sec_bus.set(range.start.bits() as u8);
         let pri_bus = self.common.info.address().bus();
@@ -467,12 +467,12 @@ impl PciBridge {
     }
 
     /// Sets the bus that is directly downstream of this bridge.
-    pub fn set_child_bus(&mut self, bus: PciBus) {
+    pub(super) fn set_child_bus(&mut self, bus: PciBus) {
         self.child_bus = Some(bus)
     }
 
     /// Returns the secondary bus directly downstream of this bridge.
-    pub fn child_bus(&self) -> Option<&PciBus> {
+    pub(super) fn child_bus(&self) -> Option<&PciBus> {
         self.child_bus.as_ref()
     }
 
@@ -772,7 +772,7 @@ impl PciDevice {
     ///
     /// The caller must guarantee that `registers_ptr` points to a valid and uniquely-owned
     /// configuration space, and that it and `info` reference the same device.
-    pub unsafe fn new(
+    pub(super) unsafe fn new(
         registers_ptr: NonNull<CommonRegisters>,
         info: PciDeviceInfo,
     ) -> Result<Self> {
@@ -822,7 +822,7 @@ impl PciDevice {
     }
 
     /// Takes ownership over the device if it is not already owned.
-    pub fn take(&mut self, owner: PageOwnerId) -> Result<()> {
+    pub(super) fn take(&mut self, owner: PageOwnerId) -> Result<()> {
         if self.owner().is_some() {
             return Err(Error::DeviceOwned);
         }
@@ -831,7 +831,7 @@ impl PciDevice {
     }
 
     /// Emulates a read from the configuration space of this device at `offset`.
-    pub fn emulate_config_read(
+    pub(super) fn emulate_config_read(
         &self,
         offset: usize,
         len: usize,
@@ -900,7 +900,7 @@ impl PciDevice {
     }
 
     /// Emulates a write to the configuration space of this device at `offset`.
-    pub fn emulate_config_write(
+    pub(super) fn emulate_config_write(
         &mut self,
         offset: usize,
         value: u32,
@@ -956,8 +956,8 @@ impl PciDevice {
         }
     }
 
-    // Returns the PCI bus address programmed in the BAR at `bar_index`.
-    fn get_bar_addr(&self, index: usize) -> Result<u64> {
+    /// Returns the PCI bus address programmed in the BAR at `bar_index`.
+    pub fn get_bar_addr(&self, index: usize) -> Result<u64> {
         let bar = self
             .bar_info()
             .get(index)

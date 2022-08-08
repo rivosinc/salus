@@ -21,6 +21,7 @@ There is a `Makefile` provided with targets for running various hosts in qemu.
 - qemu-system-riscv64 - build using  qemu
   [instructions](https://wiki.qemu.org/Hosts/Linux) with
   `--target-list=riscv64-softmmu`
+  - Note qemu 7.0.0 has a bug emulating riscv and a newer version from git must be used.
 
 ## Test VM
 

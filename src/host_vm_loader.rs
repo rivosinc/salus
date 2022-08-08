@@ -295,7 +295,7 @@ impl<T: GuestStagePageTable> HostVmLoader<T> {
             // TODO: PCI resources should have their own region type.
             self.vm
                 .add_confidential_memory_region(gpa, range.length_bytes());
-            let pages = pci.take_resource(res_type).unwrap();
+            let pages = pci.take_host_resource(res_type).unwrap();
             self.vm.add_pages(gpa, pages);
         }
 

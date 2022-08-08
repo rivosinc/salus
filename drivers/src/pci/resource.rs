@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
-use riscv_pages::{SupervisorPageAddr, SupervisorPhysAddr};
+use riscv_pages::{PageSize, SupervisorPageAddr, SupervisorPhysAddr};
 use tock_registers::LocalRegisterCopy;
 
 use super::error::*;
@@ -124,7 +124,11 @@ impl PciResourceType {
 #[derive(Debug)]
 pub struct PciRootResource {
     addr: SupervisorPageAddr,
-    size: u64,
+    // Size of the resource being passed through to the host.
+    host_size: u64,
+    // Total size of the resource including space allocated by the hypervisor.
+    total_size: u64,
+    // Whether or not the resource has been claimed by the host.
     taken: bool,
     pci_addr: u64,
 }
@@ -134,7 +138,8 @@ impl PciRootResource {
     pub fn new(addr: SupervisorPageAddr, size: u64, pci_addr: u64) -> Self {
         Self {
             addr,
-            size,
+            host_size: size,
+            total_size: size,
             taken: false,
             pci_addr,
         }
@@ -145,9 +150,14 @@ impl PciRootResource {
         self.addr
     }
 
-    /// Returns the size of the resource.
+    /// Returns the total size of the resource.
     pub fn size(&self) -> u64 {
-        self.size
+        self.total_size
+    }
+
+    /// Returns the size of the resource exposed to the host.
+    pub fn host_size(&self) -> u64 {
+        self.host_size
     }
 
     /// Returns the PCI bus address of the resource.
@@ -155,8 +165,29 @@ impl PciRootResource {
         self.pci_addr
     }
 
-    /// Marks the resource as having been exclusively allocated.
-    pub fn take(&mut self) -> Result<()> {
+    /// Allocates part of the resource for hypervisor use. Hypervisor resources are allocated from
+    /// the end of the resource block so that the alignment of the host-exposed portion of the
+    /// resource remains unaffected.
+    pub fn alloc_for_hypervisor(&mut self, size: u64) -> Result<SupervisorPageAddr> {
+        // Make sure we always allocate at least a page so that the host/hypervisor boundary is
+        // not in the middle of page.
+        let size = core::cmp::max(size, PageSize::Size4k as u64).next_power_of_two();
+        // The start address must be `size`-aligned.
+        self.host_size = self
+            .host_size
+            .checked_sub(size)
+            .ok_or(Error::OutOfResources)?
+            & !(size - 1);
+        // Unwrap ok since `host_size` is less than what it was before and it must've been valid
+        // to begin with.
+        Ok(self
+            .addr
+            .checked_add_pages(PageSize::num_4k_pages(self.host_size))
+            .unwrap())
+    }
+
+    /// Marks the host-exposed portion of the resource as exclusively allocated.
+    pub fn take_for_host(&mut self) -> Result<()> {
         if self.taken {
             return Err(Error::ResourceTaken);
         }
@@ -206,6 +237,24 @@ impl PciRootResources {
         self.resources[resource_type as usize].as_mut()
     }
 
+    /// Returns a present resource compatible with `resource_type`.
+    pub fn find_matching(&self, resource_type: PciResourceType) -> Option<PciResourceType> {
+        use PciResourceType::*;
+        match resource_type {
+            IoPort | Mem32 | Mem64 => self.get(resource_type).map(|_| resource_type),
+            // Fall back to the non-prefetchable equivalent if the prefetchable resource doesn't
+            // exist.
+            PrefetchableMem32 => self
+                .get(resource_type)
+                .map(|_| resource_type)
+                .or_else(|| self.find_matching(Mem32)),
+            PrefetchableMem64 => self
+                .get(resource_type)
+                .map(|_| resource_type)
+                .or_else(|| self.find_matching(Mem64)),
+        }
+    }
+
     /// Translates the given PCI bus address to a CPU physical address.
     pub fn pci_to_physical_addr(&self, pci_addr: u64) -> Option<SupervisorPhysAddr> {
         let res = self
@@ -219,6 +268,23 @@ impl PciRootResources {
             .and_then(|res| res.as_ref())?;
         SupervisorPhysAddr::from(res.addr())
             .checked_increment(pci_addr.checked_sub(res.pci_addr())?)
+    }
+
+    /// Translates the given CPU physical address to a PCI bus address.
+    pub fn physical_to_pci_addr(&self, addr: SupervisorPhysAddr) -> Option<u64> {
+        let res = self
+            .resources
+            .iter()
+            .find(|res| {
+                res.as_ref()
+                    .filter(|r| {
+                        r.addr().bits() <= addr.bits() && addr.bits() <= r.addr().bits() + r.size()
+                    })
+                    .is_some()
+            })
+            .and_then(|res| res.as_ref())?;
+        res.pci_addr()
+            .checked_add(addr.bits().checked_sub(res.addr().bits())?)
     }
 }
 

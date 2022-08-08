@@ -228,16 +228,52 @@ impl PcieRoot {
         PciResourceIter::new(self)
     }
 
-    /// Takes ownership of the PCI BAR space identified by `resource_type`, returning an iterator over
-    /// the pages occupied by that resource.
-    pub fn take_resource(&self, resource_type: PciResourceType) -> Option<PciBarPageIter> {
+    /// Takes ownership of the remaining PCI BAR resources identified by `resource_type`, returning
+    /// an iterator over the pages occupied by that resource.
+    pub fn take_host_resource(&self, resource_type: PciResourceType) -> Result<PciBarPageIter> {
         let mut resources = self.resources.lock();
-        let res = resources.get_mut(resource_type)?;
-        res.take().ok()?;
-        let mem_range = SupervisorPageRange::new(res.addr(), PageSize::num_4k_pages(res.size()));
-        // Safety: We have unique ownership of the memory since we've just taken it from this PcieRoot.
+        let res = resources
+            .get_mut(resource_type)
+            .ok_or(Error::ResourceNotFound(resource_type))?;
+        res.take_for_host()?;
+        let mem_range =
+            SupervisorPageRange::new(res.addr(), PageSize::num_4k_pages(res.host_size()));
+        // Safety: We have unique ownership of the memory since we've just taken it from this
+        // PcieRoot.
         let iter = unsafe { PciBarPageIter::new(mem_range) };
-        Some(iter)
+        Ok(iter)
+    }
+
+    // Allocates a BAR resource of the specified size and type for use with a hypervisor-controlled
+    // device. The allocated resource is not passed through to the host.
+    fn alloc_hypervisor_resource(
+        &self,
+        resource_type: PciResourceType,
+        size: u64,
+    ) -> Result<SupervisorPageRange> {
+        let mut resources = self.resources.lock();
+        let resource_type = resources
+            .find_matching(resource_type)
+            .ok_or(Error::ResourceNotFound(resource_type))?;
+        // Unwrap ok: `resource_type` must be present if it was returned from `find_matching()`.
+        let res = resources.get_mut(resource_type).unwrap();
+        let addr = res.alloc_for_hypervisor(size)?;
+        Ok(SupervisorPageRange::new(addr, PageSize::num_4k_pages(size)))
+    }
+
+    /// Translates the given PCI bus address to a CPU physical address.
+    pub fn pci_to_physical_addr(&self, pci_addr: u64) -> Option<SupervisorPhysAddr> {
+        self.resources.lock().pci_to_physical_addr(pci_addr)
+    }
+
+    /// Translates the given CPU physical address to a PCI bus address.
+    pub fn physical_to_pci_addr(&self, addr: SupervisorPhysAddr) -> Option<u64> {
+        self.resources.lock().physical_to_pci_addr(addr)
+    }
+
+    /// Returns a reference to the device identified by `arena_id`.
+    pub fn get_device(&self, arena_id: PciArenaId) -> Option<&Mutex<PciDevice>> {
+        self.device_arena.get(arena_id)
     }
 
     /// Takes ownership over all unowned devices in the PCI hierarchy on behalf of the host VM.
@@ -246,6 +282,56 @@ impl PcieRoot {
             let dev = self.device_arena.get(id).unwrap();
             let _ = dev.lock().take(PageOwnerId::host());
         });
+    }
+
+    /// Takes ownership over the PCI device with the given `vendor_id` and `device_id`, and enables
+    /// it for use within the hypervisor by assigning it resources. Returns a `PciDeviceId` which
+    /// can be used to retrieve a reference to the device on success.
+    pub fn take_and_enable_hypervisor_device(
+        &self,
+        vendor_id: VendorId,
+        device_id: DeviceId,
+    ) -> Result<PciArenaId> {
+        let mut dev_id: Option<PciArenaId> = None;
+        self.for_each_device_on(&self.root_bus, &mut |id| {
+            let dev = self.device_arena.get(id).unwrap().lock();
+            if dev.info().vendor_id() == vendor_id && dev.info().device_id() == device_id {
+                dev_id = Some(id);
+            }
+        });
+        let dev_id = dev_id.ok_or(Error::DeviceNotFound)?;
+        // Make sure the device is on the root bus. We don't support distributing resources behind
+        // bridges.
+        if !self.root_bus.devices().any(|bd| bd.id == dev_id) {
+            return Err(Error::DeviceNotOnRootBus);
+        }
+
+        let mut dev = self.device_arena.get(dev_id).unwrap().lock();
+        dev.take(PageOwnerId::hypervisor())?;
+        // Now assign BAR resources.
+        let bar_info = dev.bar_info().clone();
+        for bar in bar_info.bars() {
+            let range = self.alloc_hypervisor_resource(bar.bar_type(), bar.size())?;
+            // `range.base()` must be within a PCI root window.
+            let base = self.physical_to_pci_addr(range.base().into()).unwrap();
+            // BAR index must be valid.
+            dev.set_bar_addr(bar.index(), base).unwrap();
+        }
+        if bar_info
+            .bars()
+            .any(|b| b.bar_type() == PciResourceType::IoPort)
+        {
+            dev.enable_io_space();
+        }
+        if bar_info
+            .bars()
+            .any(|b| b.bar_type() != PciResourceType::IoPort)
+        {
+            dev.enable_mem_space();
+        }
+        dev.enable_dma();
+
+        Ok(dev_id)
     }
 
     /// Adds a node for this PCIe root complex to the host's device tree in `dt`. It's assumed that
@@ -285,8 +371,8 @@ impl PcieRoot {
                 ranges.push(res.pci_addr() as u32);
                 ranges.push((res.addr().bits() >> 32) as u32);
                 ranges.push(res.addr().bits() as u32);
-                ranges.push((res.size() >> 32) as u32);
-                ranges.push(res.size() as u32);
+                ranges.push((res.host_size() >> 32) as u32);
+                ranges.push(res.host_size() as u32);
             }
         }
         pci_node.add_prop("ranges")?.set_value_u32(&ranges)?;
@@ -439,7 +525,7 @@ impl PcieRoot {
             .ok_or(Error::InvalidConfigOffset)?;
         let dev_id = self
             .device_by_virtual_address_on(&self.root_bus, address)
-            .ok_or(Error::DeviceNotFound(address))?;
+            .ok_or(Error::DeviceNotPresent(address))?;
         Ok((dev_id, dev_offset))
     }
 }

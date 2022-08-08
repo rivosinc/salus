@@ -25,14 +25,37 @@ use super::resource::*;
 pub struct VendorId(u16);
 
 impl VendorId {
+    /// Creates a new `VendorId` from the raw `id`.
+    pub fn new(id: u16) -> Self {
+        VendorId(id)
+    }
+
+    /// The invalid (not-present) `VendorId`.
     pub const fn invalid() -> Self {
         VendorId(0xffff)
+    }
+
+    /// Returns the raw `VendorId` value.
+    pub fn bits(&self) -> u16 {
+        self.0
     }
 }
 
 /// The Device Id from the PCI header.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct DeviceId(u16);
+
+impl DeviceId {
+    /// Creates a new `DeviceId` from the raw `id`.
+    pub fn new(id: u16) -> Self {
+        DeviceId(id)
+    }
+
+    /// Returns the raw `DeviceId` value.
+    pub fn bits(&self) -> u16 {
+        self.0
+    }
+}
 
 /// The Class of the device from the PCI Header.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]

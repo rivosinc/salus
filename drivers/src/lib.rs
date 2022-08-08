@@ -18,6 +18,8 @@ extern crate std;
 pub mod cpu;
 /// Provides the driver for the IMSIC from the AIA spec.
 pub mod imsic;
+/// Provides the driver for the IOMMU from the proposed RISCV-IOMMU spec.
+pub mod iommu;
 /// Provides PCI bus scanning and device discovery.
 pub mod pci;
 

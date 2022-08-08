@@ -34,7 +34,7 @@ mod vm_id;
 mod vm_pages;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{pci::PcieRoot, CpuInfo, Imsic};
+use drivers::{iommu::Iommu, pci::PcieRoot, CpuInfo, Imsic};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;
@@ -344,6 +344,16 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             );
         }
     });
+
+    // Find the IOMMU device.
+    match Iommu::probe_from(PcieRoot::get()) {
+        Ok(_) => {
+            println!("Found RISC-V IOMMU version 0x{:x}", Iommu::get().version());
+        }
+        Err(e) => {
+            println!("Failed to probe IOMMU: {:?}", e);
+        }
+    };
 
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);

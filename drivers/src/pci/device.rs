@@ -930,16 +930,14 @@ impl PciDevice {
 
                     // TODO: No DMA until the IOMMU is enabled.
                     reg.modify(Command::BusMasterEnable.val(0));
-                    self.common_registers_mut()
-                        .command
-                        .set(reg.writeable_bits());
+                    self.common_registers().command.set(reg.writeable_bits());
                 }
                 status::span!() => {
                     // Make sure we only write the RW1C bits if the write operation covers that byte.
                     let reg = LocalRegisterCopy::<u16, Status::Register>::new(
                         op.pop_word(self.common_registers().status.non_clearable_bits()),
                     );
-                    self.common_registers_mut().status.set(reg.writeable_bits());
+                    self.common_registers().status.set(reg.writeable_bits());
                 }
                 PCI_TYPE_HEADER_START..=PCI_TYPE_HEADER_END => {
                     self.emulate_type_specific_write(&mut op);
@@ -1029,14 +1027,6 @@ impl PciDevice {
         match self {
             PciDevice::Endpoint(ep) => &ep.registers.common,
             PciDevice::Bridge(bridge) => &bridge.registers.common,
-        }
-    }
-
-    // Returns a mutable reference to the common portion of this device's PCI header.
-    fn common_registers_mut(&mut self) -> &mut CommonRegisters {
-        match self {
-            PciDevice::Endpoint(ep) => &mut ep.registers.common,
-            PciDevice::Bridge(bridge) => &mut bridge.registers.common,
         }
     }
 

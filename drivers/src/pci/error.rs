@@ -73,6 +73,8 @@ pub enum Error {
     InvalidBarSize(u64),
     /// A BAR or bridge window is programmed with an invalid address.
     InvalidBarAddress(u64),
+    /// The device does not have a BAR at the specified index.
+    BarNotPresent(usize),
     /// A VM has programmed a BAR or bridge window to cover a page it does not own.
     UnownedBarPage(SupervisorPageAddr),
     /// The PCI device is already owned.

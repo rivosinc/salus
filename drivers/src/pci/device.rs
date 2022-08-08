@@ -308,6 +308,11 @@ impl PciDeviceBarInfo {
         self.bars.iter()
     }
 
+    // Returns the `PciBarInfo` with the given BAR index.
+    fn get(&self, index: usize) -> Option<&PciBarInfo> {
+        self.bars.iter().find(|b| b.index() == index)
+    }
+
     // Returns the type of the BAR at `index`.
     fn index_to_type(&self, index: usize) -> Option<PciResourceType> {
         // If `index` is the upper half of a 64-bit BAR, return the type of the lower half.
@@ -748,15 +753,10 @@ fn bar_range_is_owned(
 }
 
 // Returns `Ok` if the specified bridge window is assigned a valid address for the VM in `context`.
-fn bridge_window_is_valid(
-    window_type: PciResourceType,
-    base: u64,
-    limit: u64,
-    context: &MmioEmulationContext,
-) -> Result<()> {
+fn bridge_window_is_valid(base: u64, limit: u64, context: &MmioEmulationContext) -> Result<()> {
     let phys_addr = context
         .resources
-        .pci_to_physical_addr(window_type, base)
+        .pci_to_physical_addr(base)
         .ok_or(Error::InvalidBarAddress(base))?;
     let page_range = SupervisorPageRange::new(
         PageAddr::with_round_down(phys_addr, PageSize::Size4k),
@@ -957,15 +957,19 @@ impl PciDevice {
     }
 
     // Returns the PCI bus address programmed in the BAR at `bar_index`.
-    fn get_bar_addr(&self, index: usize, bar_type: PciResourceType) -> Option<u64> {
+    fn get_bar_addr(&self, index: usize) -> Result<u64> {
+        let bar = self
+            .bar_info()
+            .get(index)
+            .ok_or(Error::BarNotPresent(index))?;
         let regs = self.bar_registers();
-        let addr_lo = regs.get(index)?.get() & !((1u32 << BaseAddress::Address.shift) - 1);
-        let addr_hi = if bar_type.is_64bit() {
-            regs.get(index + 1)?.get()
+        let addr_lo = regs[index].get() & !((1u32 << BaseAddress::Address.shift) - 1);
+        let addr_hi = if bar.bar_type().is_64bit() {
+            regs[index + 1].get()
         } else {
             0
         };
-        Some((addr_lo as u64) | ((addr_hi as u64) << 32))
+        Ok((addr_lo as u64) | ((addr_hi as u64) << 32))
     }
 
     // Returns `Ok` if the specified BAR is assigned a valid address for the VM in `context`.
@@ -975,10 +979,10 @@ impl PciDevice {
         context: &MmioEmulationContext,
     ) -> Result<()> {
         // Unwrap ok: BAR index is guaranteed to be valid since it's in `self.bar_info`.
-        let pci_addr = self.get_bar_addr(bar.index(), bar.bar_type()).unwrap();
+        let pci_addr = self.get_bar_addr(bar.index()).unwrap();
         let phys_addr = context
             .resources
-            .pci_to_physical_addr(bar.bar_type(), pci_addr)
+            .pci_to_physical_addr(pci_addr)
             .ok_or(Error::InvalidBarAddress(pci_addr))?;
         let page_range = SupervisorPageRange::new(
             PageAddr::with_round_down(phys_addr, PageSize::Size4k),
@@ -996,7 +1000,7 @@ impl PciDevice {
 
         if let PciDevice::Bridge(bridge) = self {
             if let Some((base, limit)) = bridge.get_io_window() {
-                bridge_window_is_valid(PciResourceType::IoPort, base, limit, context)?;
+                bridge_window_is_valid(base, limit, context)?;
             }
         }
 
@@ -1012,10 +1016,10 @@ impl PciDevice {
 
         if let PciDevice::Bridge(bridge) = self {
             if let Some((base, limit)) = bridge.get_mem_window() {
-                bridge_window_is_valid(PciResourceType::Mem32, base, limit, context)?;
+                bridge_window_is_valid(base, limit, context)?;
             }
             if let Some((base, limit)) = bridge.get_pref_window() {
-                bridge_window_is_valid(PciResourceType::PrefetchableMem64, base, limit, context)?;
+                bridge_window_is_valid(base, limit, context)?;
             }
         }
 

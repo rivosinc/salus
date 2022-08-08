@@ -207,18 +207,16 @@ impl PciRootResources {
     }
 
     /// Translates the given PCI bus address to a CPU physical address.
-    pub fn pci_to_physical_addr(
-        &self,
-        resource_type: PciResourceType,
-        pci_addr: u64,
-    ) -> Option<SupervisorPhysAddr> {
-        use PciResourceType::*;
-        let res = match resource_type {
-            IoPort | Mem32 | Mem64 => self.get(resource_type),
-            // Fall back to the non-prefetchable equivalent if the prefetchable resource doesn't exist.
-            PrefetchableMem32 => self.get(resource_type).or_else(|| self.get(Mem32)),
-            PrefetchableMem64 => self.get(resource_type).or_else(|| self.get(Mem64)),
-        }?;
+    pub fn pci_to_physical_addr(&self, pci_addr: u64) -> Option<SupervisorPhysAddr> {
+        let res = self
+            .resources
+            .iter()
+            .find(|res| {
+                res.as_ref()
+                    .filter(|r| r.pci_addr() <= pci_addr && pci_addr <= r.pci_addr() + r.size())
+                    .is_some()
+            })
+            .and_then(|res| res.as_ref())?;
         SupervisorPhysAddr::from(res.addr())
             .checked_increment(pci_addr.checked_sub(res.pci_addr())?)
     }

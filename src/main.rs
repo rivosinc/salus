@@ -11,6 +11,7 @@
     allocator_api,
     alloc_error_handler,
     lang_items,
+    if_let_guard,
     asm_const,
     const_ptr_offset_from,
     ptr_sub_ptr,
@@ -34,7 +35,7 @@ mod vm_id;
 mod vm_pages;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, CpuInfo};
+use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, CpuInfo};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;
@@ -521,6 +522,12 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             println!("Failed to probe IOMMU: {:?}", e);
         }
     };
+
+    // Get platform PMU counter information
+    let result = PmuInfo::init();
+    if result.is_err() {
+        println!("PmuInfo::init() failed with {:?}", result);
+    }
 
     // Now load the host VM.
     let host = HostVmLoader::new(

@@ -22,6 +22,12 @@ register_bitfields![u64,
         MsiFlat OFFSET(22) NUMBITS(1),
         MsiMrif OFFSET(23) NUMBITS(1),
     ],
+
+    pub DirectoryPointer [
+        Ppn OFFSET(0) NUMBITS(44),
+        Busy OFFSET(59) NUMBITS(1),
+        Mode OFFSET(60) NUMBITS(4),
+    ],
 ];
 
 /// The IOMMU register set.
@@ -30,7 +36,7 @@ pub struct IommuRegisters {
     pub capabilities: ReadOnly<u64, Capabilities::Register>,
     pub fctrl: ReadWrite<u32>,
     _reserved0: u32,
-    pub ddtp: ReadWrite<u64>,
+    pub ddtp: ReadWrite<u64, DirectoryPointer::Register>,
     pub cqb: ReadWrite<u64>,
     pub cqh: ReadWrite<u32>,
     pub cqt: ReadOnly<u32>,

@@ -2,17 +2,22 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use riscv_pages::*;
+use riscv_regs::mmio_wmb;
 use spin::Once;
-use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::LocalRegisterCopy;
 
+use super::device_directory::*;
 use super::error::{Error, Result};
 use super::registers::*;
-use crate::pci::{DeviceId, PciArenaId, PcieRoot, VendorId};
+use crate::pci::{self, PciArenaId, PcieRoot};
 
 /// IOMMU device. Responsible for managing address translation for PCI devices.
 pub struct Iommu {
     _arena_id: PciArenaId,
     registers: &'static mut IommuRegisters,
+    _ddt: DeviceDirectory<Ddt3Level>,
 }
 
 // The global IOMMU singleton.
@@ -23,22 +28,28 @@ const IOMMU_VENDOR_ID: u16 = 0x1efd;
 const IOMMU_DEVICE_ID: u16 = 0x8001;
 
 impl Iommu {
-    /// Probes for the IOMMU device on the given PCI root.
-    pub fn probe_from(pci: &PcieRoot) -> Result<()> {
+    /// Probes for and initializes the IOMMU device on the given PCI root. Uses `get_page` to
+    /// allocate pages for IOMMU-internal structures.
+    pub fn probe_from(
+        pci: &PcieRoot,
+        get_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
+    ) -> Result<()> {
         let arena_id = pci
             .take_and_enable_hypervisor_device(
-                VendorId::new(IOMMU_VENDOR_ID),
-                DeviceId::new(IOMMU_DEVICE_ID),
+                pci::VendorId::new(IOMMU_VENDOR_ID),
+                pci::DeviceId::new(IOMMU_DEVICE_ID),
             )
             .map_err(Error::ProbingIommu)?;
-        let dev = pci.get_device(arena_id).unwrap().lock();
-
-        // IOMMU registers are in BAR0.
-        let bar = dev.bar_info().get(0).ok_or(Error::MissingRegisters)?;
-        // Unwrap ok: we've already determined BAR0 is valid.
-        let pci_addr = dev.get_bar_addr(0).unwrap();
-        let regs_base = pci.pci_to_physical_addr(pci_addr).unwrap();
-        let regs_size = bar.size();
+        let (iommu_addr, regs_base, regs_size) = {
+            let dev = pci.get_device(arena_id).unwrap().lock();
+            // IOMMU registers are in BAR0.
+            let bar = dev.bar_info().get(0).ok_or(Error::MissingRegisters)?;
+            // Unwrap ok: we've already determined BAR0 is valid.
+            let pci_addr = dev.get_bar_addr(0).unwrap();
+            let regs_base = pci.pci_to_physical_addr(pci_addr).unwrap();
+            let regs_size = bar.size();
+            (dev.info().address(), regs_base, regs_size)
+        };
         if regs_size < core::mem::size_of::<IommuRegisters>() as u64 {
             return Err(Error::InvalidRegisterSize(regs_size));
         }
@@ -57,9 +68,29 @@ impl Iommu {
             return Err(Error::MissingMsiSupport);
         }
 
+        // Set up an initial device directory table.
+        let ddt = DeviceDirectory::new(get_page().ok_or(Error::OutOfPages)?);
+        let mut result: Result<()> = Ok(());
+        pci.for_each_device(|dev| {
+            let addr = dev.info().address();
+            if addr == iommu_addr {
+                // Skip the IOMMU itself.
+                return;
+            }
+            result = result.and_then(|_| ddt.add_device(addr.try_into()?, get_page));
+        });
+        result?;
+        let mut ddtp = LocalRegisterCopy::<u64, DirectoryPointer::Register>::new(0);
+        ddtp.modify(DirectoryPointer::Ppn.val(ddt.base_address().pfn().bits()));
+        ddtp.modify(DirectoryPointer::Mode.val(Ddt3Level::IOMMU_MODE));
+        // Ensure writes to the DDT have completed before we point the IOMMU at it.
+        mmio_wmb();
+        registers.ddtp.set(ddtp.get());
+
         let iommu = Iommu {
             _arena_id: arena_id,
             registers,
+            _ddt: ddt,
         };
         IOMMU.call_once(|| iommu);
         Ok(())

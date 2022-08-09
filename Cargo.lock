@@ -198,6 +198,7 @@ dependencies = [
  "hyp_alloc",
  "memoffset",
  "page_tracking",
+ "riscv_page_tables",
  "riscv_pages",
  "riscv_regs",
  "spin 0.9.3",

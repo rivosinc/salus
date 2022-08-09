@@ -20,3 +20,6 @@ riscv_pages = { path = "../riscv-pages" }
 riscv_regs = { path = "../riscv-regs" }
 spin = { version = "*", default-features = false, features = ["once"] }
 tock-registers = { version = "0.7" }
+sbi = { path = "../sbi" }
+s_mode_utils = { path = "../s-mode-utils" }
+

@@ -22,6 +22,8 @@ pub mod imsic;
 pub mod iommu;
 /// Provides PCI bus scanning and device discovery.
 pub mod pci;
+/// Caches information about platform hardware and firmware PMU counters.
+pub mod pmu;
 
 pub use cpu::{CpuId, CpuInfo, MAX_CPUS};
 

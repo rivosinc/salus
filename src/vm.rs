@@ -637,7 +637,9 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
-            SbiMessage::Pmu(_) => EcallAction::Continue(SbiReturn::from(Err(SbiError::NotSupported))),
+            SbiMessage::Pmu(_) => {
+                EcallAction::Continue(SbiReturn::from(Err(SbiError::NotSupported)))
+            }
         }
     }
 

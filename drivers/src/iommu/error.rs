@@ -4,8 +4,9 @@
 
 use riscv_pages::SupervisorPageAddr;
 
+use super::device_directory::DeviceId;
 use crate::imsic::ImsicLocation;
-use crate::pci::PciError;
+use crate::pci::{Address, PciError};
 
 /// Errors resulting from interacting with the IOMMU.
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +37,20 @@ pub enum Error {
     MsiAlreadyMapped(ImsicLocation),
     /// The MSI page table entry is not mapped.
     MsiNotMapped(ImsicLocation),
+    /// Failed to allocate a page.
+    OutOfPages,
+    /// Got a leaf entry when a non-leaf entry was expected.
+    NotIntermediateTable,
+    /// Unable to map a PCI BDF address to an IOMMU device ID.
+    PciAddressTooLarge(Address),
+    /// Mismatch between MSI and CPU page table owners.
+    PageTableOwnerMismatch,
+    /// No device context found.
+    DeviceNotFound(DeviceId),
+    /// The device already has an active device context.
+    DeviceAlreadyEnabled(DeviceId),
+    /// The device does not have an active device context.
+    DeviceNotEnabled(DeviceId),
 }
 
 /// Holds results for IOMMU operations.

@@ -345,16 +345,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         }
     });
 
-    // Find the IOMMU device.
-    match Iommu::probe_from(PcieRoot::get()) {
-        Ok(_) => {
-            println!("Found RISC-V IOMMU version 0x{:x}", Iommu::get().version());
-        }
-        Err(e) => {
-            println!("Failed to probe IOMMU: {:?}", e);
-        }
-    };
-
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);
     smp::start_secondary_cpus();
@@ -370,7 +360,19 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.
-    let hyp_mem = HypPageAlloc::new(mem_map);
+    let mut hyp_mem = HypPageAlloc::new(mem_map);
+
+    // Find and initialize the IOMMU.
+    match Iommu::probe_from(PcieRoot::get(), &mut || {
+        hyp_mem.take_pages_for_host_state(1).into_iter().next()
+    }) {
+        Ok(_) => {
+            println!("Found RISC-V IOMMU version 0x{:x}", Iommu::get().version());
+        }
+        Err(e) => {
+            println!("Failed to probe IOMMU: {:?}", e);
+        }
+    };
 
     // Now load the host VM.
     let host = HostVmLoader::new(

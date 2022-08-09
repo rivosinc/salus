@@ -2,21 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use attestation::{
-    certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CERT_LEN,
-    MAX_CSR_LEN,
-};
-use core::{mem, slice};
-use der::Decode;
-use drivers::{imsic::*, iommu::*, pci::PciDevice, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
-use page_tracking::{HypPageAlloc, PageList, PageTracker};
-use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
-use riscv_pages::*;
-use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
-use s_mode_utils::abort::abort;
-use sbi::Error as SbiError;
-use sbi::*;
-
 use crate::guest_tracking::{GuestState, Guests};
 use crate::print_util::*;
 use crate::smp;
@@ -27,6 +12,22 @@ use crate::vm_pages::{
     TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
 };
 use crate::{print, println};
+use attestation::{
+    certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CERT_LEN,
+    MAX_CSR_LEN,
+};
+use core::{mem, slice};
+use der::Decode;
+use drivers::{
+    imsic::*, iommu::*, pci::PciDevice, pci::PcieRoot, pmu::PmuInfo, CpuId, CpuInfo, MAX_CPUS,
+};
+use page_tracking::{HypPageAlloc, PageList, PageTracker};
+use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
+use riscv_pages::*;
+use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
+use s_mode_utils::abort::abort;
+use sbi::*;
+use sbi::{api::pmu, Error as SbiError};
 
 #[derive(Debug)]
 pub enum Error {
@@ -171,6 +172,12 @@ impl From<VmPagesError> for EcallError {
             // each error.
             _ => EcallError::Sbi(SbiError::InvalidAddress),
         }
+    }
+}
+
+impl From<SbiError> for EcallError {
+    fn from(error: SbiError) -> EcallError {
+        EcallError::Sbi(error)
     }
 }
 
@@ -637,10 +644,107 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
-            SbiMessage::Pmu(_) => {
-                EcallAction::Continue(SbiReturn::from(Err(SbiError::NotSupported)))
-            }
+            SbiMessage::Pmu(pmu_func) => self.handle_pmu_msg(pmu_func, active_vcpu),
         }
+    }
+
+    fn handle_pmu_msg(
+        &self,
+        pmu_func: PmuFunction,
+        active_vcpu: &mut ActiveVmCpu<T>,
+    ) -> EcallAction {
+        use PmuFunction::*;
+        fn get_num_counters() -> EcallResult<u64> {
+            let pmu_info = PmuInfo::get()?;
+            Ok(pmu_info.get_num_counters())
+        }
+
+        fn get_counter_info(counter_index: u64) -> EcallResult<u64> {
+            let pmu_info = PmuInfo::get()?;
+            let info = pmu_info.get_counter_info(counter_index)?;
+            Ok(info.raw())
+        }
+
+        fn start_counters<T: GuestStagePagingMode>(
+            counter_index: u64,
+            counter_mask: u64,
+            start_flags: PmuCounterStartFlags,
+            initial_value: u64,
+            _active_vcpu: &mut ActiveVmCpu<T>,
+        ) -> EcallResult<u64> {
+            let _ = PmuInfo::get()?;
+            pmu::start_counters(counter_index, counter_mask, start_flags, initial_value)?;
+            Ok(0)
+        }
+
+        fn stop_counters<T: GuestStagePagingMode>(
+            counter_index: u64,
+            counter_mask: u64,
+            stop_flags: PmuCounterStopFlags,
+            _active_vcpu: &mut ActiveVmCpu<T>,
+        ) -> EcallResult<u64> {
+            let _ = PmuInfo::get()?;
+            pmu::stop_counters(counter_index, counter_mask, stop_flags)?;
+            Ok(0)
+        }
+
+        fn configure_counters<T: GuestStagePagingMode>(
+            counter_index: u64,
+            counter_mask: u64,
+            config_flags: PmuCounterConfigFlags,
+            event_type: PmuEventType,
+            event_data: u64,
+            _active_vcpu: &mut ActiveVmCpu<T>,
+        ) -> EcallResult<u64> {
+            let _ = PmuInfo::get()?;
+            let config_flags = config_flags.set_sinh().set_minh();
+            let result = pmu::configure_matching_counters(
+                counter_index,
+                counter_mask,
+                config_flags,
+                event_type,
+                event_data,
+            )?;
+            Ok(result)
+        }
+
+        let result = match pmu_func {
+            GetNumCounters => get_num_counters(),
+            GetCounterInfo(counter_index) => get_counter_info(counter_index),
+            StartCounters {
+                counter_index,
+                counter_mask,
+                start_flags,
+                initial_value,
+            } => start_counters(
+                counter_index,
+                counter_mask,
+                start_flags,
+                initial_value,
+                active_vcpu,
+            ),
+            StopCounters {
+                counter_index,
+                counter_mask,
+                stop_flags,
+            } => stop_counters(counter_index, counter_mask, stop_flags, active_vcpu),
+            ConfigureMatchingCounters {
+                counter_index,
+                counter_mask,
+                config_flags,
+                event_type,
+                event_data,
+            } => configure_counters(
+                counter_index,
+                counter_mask,
+                config_flags,
+                event_type,
+                event_data,
+                active_vcpu,
+            ),
+            ReadFirmwareCounter(_) => Err(EcallError::Sbi(SbiError::NotSupported)),
+        };
+        result.into()
     }
 
     fn handle_base_msg(&self, base_func: BaseFunction) -> SbiReturn {
@@ -656,6 +760,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
                 | sbi::EXT_RESET
                 | sbi::EXT_TEE
                 | sbi::EXT_MEASUREMENT => 1,
+                sbi::EXT_PMU if PmuInfo::get().is_ok() => 1,
                 _ => 0,
             },
             // TODO: 0 is valid result for the GetMachine* SBI calls but we should probably

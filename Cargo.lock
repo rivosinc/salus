@@ -691,6 +691,7 @@ dependencies = [
  "attestation",
  "der",
  "device_tree",
+ "riscv_regs",
  "s_mode_utils",
  "sbi",
 ]

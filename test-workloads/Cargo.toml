@@ -11,3 +11,4 @@ der = "0.6.0"
 device_tree = { path = "../device-tree" }
 s_mode_utils = { path = "../s-mode-utils" }
 sbi = { path = "../sbi" }
+riscv_regs = { path = "../riscv-regs" }

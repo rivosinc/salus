@@ -4,19 +4,28 @@
 
 #![no_main]
 #![no_std]
-#![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
+#![feature(
+    asm_const,
+    panic_info_message,
+    allocator_api,
+    alloc_error_handler,
+    lang_items
+)]
 
 use core::alloc::{GlobalAlloc, Layout};
-
 extern crate alloc;
 extern crate test_workloads;
 
 use device_tree::Fdt;
+use riscv_regs::{CSR, CSR_CYCLE, CSR_INSTRET};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
-use sbi::api::{reset, tsm};
-use sbi::SbiMessage;
+use sbi::api::{pmu, reset, tsm};
+use sbi::{
+    PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
+    PmuHardware, SbiMessage,
+};
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -33,7 +42,6 @@ unsafe impl GlobalAlloc for GeneralGlobalAlloc {
 
 #[global_allocator]
 static GENERAL_ALLOCATOR: GeneralGlobalAlloc = GeneralGlobalAlloc;
-
 #[alloc_error_handler]
 pub fn alloc_error(_layout: Layout) -> ! {
     abort()
@@ -79,6 +87,46 @@ fn get_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister) -> u64 {
 
 fn set_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister, value: u64) {
     tsm::set_vcpu_reg(vmid, 0, register, value).expect("Tellus - TvmCpuGetRegister failed")
+}
+
+fn exercise_pmu_functionality() {
+    use sbi::api::pmu::{configure_matching_counters, start_counters, stop_counters};
+    let num_counters = pmu::get_num_counters().expect("Tellus - GetNumCounters returned error");
+    for i in 0u64..num_counters {
+        let result = pmu::get_counter_info(i);
+        if result.is_err() {
+            println!("GetCounterInfo for {i} failed with {result:?}");
+        }
+    }
+
+    let event_type = PmuEventType::Hardware(PmuHardware::Instructions);
+    let config_flags = PmuCounterConfigFlags::default();
+    let result =
+        configure_matching_counters(0, (1 << num_counters) - 1, config_flags, event_type, 0);
+    let counter_index = result.expect("configure_matching_counters failed with {result:?}");
+
+    let start_flags = PmuCounterStartFlags::default();
+    let result = start_counters(counter_index, 0x1, start_flags, 0);
+    if result.is_err() && !matches!(result.err().unwrap(), sbi::Error::AlreadyStarted) {
+        result.expect("start_counters failed with result {result:?}");
+    }
+
+    let result = stop_counters(counter_index, 0x1, PmuCounterStopFlags::default());
+    result.expect("stop_counters failed with {result:?}");
+
+    if CSR.hpmcounter[(CSR_INSTRET - CSR_CYCLE) as usize].get_value() == 0 {
+        panic!("Read CSR of CSR_INSTRET returned 0");
+    }
+
+    let event_type = PmuEventType::Firmware(PmuFirmware::AccessLoad);
+    pmu::configure_matching_counters(
+        0,
+        (1 << num_counters) - 1,
+        PmuCounterConfigFlags::default(),
+        event_type,
+        0,
+    )
+    .expect_err("Successfully configured FW counter");
 }
 
 /// The entry point of the Rust part of the kernel.
@@ -370,9 +418,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES,
     );
     reclaim_pages(state_pages_base, tvm_create_pages);
-
+    exercise_pmu_functionality();
     println!("Tellus - All OK");
-
     poweroff();
 }
 

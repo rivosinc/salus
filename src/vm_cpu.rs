@@ -12,10 +12,10 @@ use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{
     GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages,
 };
-use riscv_regs::{hstatus, scounteren, sstatus};
+use riscv_regs::{hstatus, scounteren, sstatus, RiscvCsrInterface};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
-    PrivilegeLevel, Readable, Trap, Writeable, CSR,
+    PrivilegeLevel, Readable, Trap, Writeable, CSR, CSR_CYCLE,
 };
 use sbi::{
     api::pmu::*, Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags,
@@ -175,6 +175,24 @@ impl Iterator for CounterMaskIter {
 }
 
 impl VmPmuState {
+    // Sets the bit to enable access to the CSR for counter_index
+    fn set_hcounteren_bit(counter_index: u64) {
+        // Unwrap ok: Guaranteed to succeed since we have already tested the condition in the call chain
+        let pmu_info = pmu::PmuInfo::get().unwrap();
+        let csr = pmu_info.counter_index_to_csr(counter_index).unwrap();
+        CSR.hcounteren
+            .read_and_set_bits(1 << (csr - CSR_CYCLE as u64));
+    }
+
+    // Clears the bit to enable access to the CSR for counter_index
+    fn clear_hcounteren_bit(counter_index: u64) {
+        // Unwrap ok: Guaranteed to succeed since we have already tested the condition in the call chain
+        let pmu_info = pmu::PmuInfo::get().unwrap();
+        let csr = pmu_info.counter_index_to_csr(counter_index).unwrap();
+        CSR.hcounteren
+            .read_and_clear_bits(1 << (csr - CSR_CYCLE as u64));
+    }
+
     /// Updates internal state for PMU counters.
     /// This should be called following a successful SBI call to configure counters.
     pub fn update_configured_counter(
@@ -201,12 +219,14 @@ impl VmPmuState {
             // If skip_match is set, counter must already be configured
             Configured(c) | Started(c) if config_flags.is_skip_match() => {
                 if config_flags.is_auto_start() {
+                    Self::set_hcounteren_bit(counter_index);
                     *state = Started(*c);
                 }
                 Ok(())
             }
             NotConfigured if !config_flags.is_skip_match() => {
                 *state = if config_flags.is_auto_start() {
+                    Self::set_hcounteren_bit(counter_index);
                     Started(new_state)
                 } else {
                     Configured(new_state)
@@ -225,6 +245,7 @@ impl VmPmuState {
         for i in bitmask_iter {
             if let Configured(c) = self.counter_state[i] {
                 self.counter_state[i] = Started(c);
+                Self::set_hcounteren_bit(i as u64);
             }
         }
     }
@@ -241,13 +262,18 @@ impl VmPmuState {
         let bitmask_iter = CounterMaskIter::new(counter_index, counter_mask);
         for i in bitmask_iter {
             let state = &mut self.counter_state[i];
+            let is_started_counter = matches!(state, Started(_));
             match state {
                 // Deliberately more permissive since the implementation permits
                 // operations even on stopped counters (example: stop_flag_reset).
                 Configured(c) | Started(c) => {
                     if stop_flags.is_reset_flag() {
+                        Self::clear_hcounteren_bit(i as u64);
                         *state = NotConfigured;
                     } else {
+                        if is_started_counter {
+                            c.value = VmPmuState::read_counter_csr(i as u64);
+                        }
                         *state = Configured(*c);
                     }
                 }
@@ -314,6 +340,27 @@ impl VmPmuState {
         }
     }
 
+    fn read_counter_csr(counter_index: u64) -> u64 {
+        // Unwrap ok: Guaranteed to succeed since we have already tested the condition in the call chain
+        let pmu_info = pmu::PmuInfo::get().unwrap();
+        // Unwrap ok: The CSR for a configured counter must be valid
+        let csr = pmu_info.counter_index_to_csr(counter_index).unwrap();
+        CSR.hpmcounter[(csr - CSR_CYCLE as u64) as usize].get_value()
+    }
+
+    /// Returns the cached value for a PMU CSR. We return 0 for counters that couldn't be
+    /// configured or started on the resume path.
+    pub fn get_cached_csr_value(&self, csr: u64) -> SbiResult<u64> {
+        use PmuCounterState::*;
+        let pmu_info = pmu::PmuInfo::get()?;
+        let counter_index = pmu_info.csr_to_counter_index(csr)?;
+        match self.counter_state[counter_index as usize] {
+            Configured(c) => Ok(c.value),
+            Poisoned(c) => Ok(c.value),
+            _ => Err(SbiError::Failed),
+        }
+    }
+
     /// Saves the internal state for PMU counters. Stops started counters, and resets all configured counters.
     /// This should be called in anticipation of an outbound context switch.
     fn save_counters(&mut self) {
@@ -341,9 +388,13 @@ impl VmPmuState {
         if let Ok(pmu_info) = pmu::PmuInfo::get() {
             let num_counters = pmu_info.get_num_counters() as usize;
             let mut counter_mask = 0;
-            for (i, state) in self.counter_state.iter().take(num_counters).enumerate() {
-                if matches!(state, Configured(_) | Started(_)) {
+            for (i, state) in self.counter_state.iter_mut().take(num_counters).enumerate() {
+                let include_counter = matches!(state, Configured(_) | Started(_));
+                if include_counter {
                     counter_mask |= 1 << i;
+                    if let Started(c) = state {
+                        c.value = VmPmuState::read_counter_csr(i as u64);
+                    }
                 }
             }
             let result = reset_all_counters(counter_mask);
@@ -355,13 +406,14 @@ impl VmPmuState {
         }
     }
 
-    /// Restores PMU counters from the saved state, reconfiguring and starting them if necessary.
-    /// This should be called in anticipation of an outbound context switch.
+    /// Restores configured PMU counters, restarts started counters and enables CSR access as necessary.
+    /// This should be called in anticipation of an inbound context switch.
     fn restore_counters(&mut self) {
         use PmuCounterState::*;
         fn resume_counter(counter_index: u64, c: &CounterState) -> SbiResult<()> {
             let start_flags = PmuCounterStartFlags::default().set_init_value();
             start_counters(counter_index, 0x1, start_flags, c.value)
+                .map(|_| VmPmuState::set_hcounteren_bit(counter_index))
         }
 
         fn configure_counter(counter_index: u64, c: &CounterState) -> SbiResult<u64> {
@@ -406,6 +458,7 @@ impl VmPmuState {
         }
     }
 }
+
 /// (v)CPU register state that must be saved or restored when entering/exiting a VM or switching
 /// between VMs.
 #[derive(Default)]

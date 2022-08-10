@@ -16,6 +16,7 @@ use attestation::{
     certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CERT_LEN,
     MAX_CSR_LEN,
 };
+use core::ops::ControlFlow;
 use core::{mem, slice};
 use der::Decode;
 use drivers::{
@@ -440,6 +441,38 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         }
     }
 
+    fn process_decoded_instruction(
+        active_vcpu: &mut ActiveVmCpu<T>,
+        inst: DecodedInstruction,
+    ) -> ControlFlow<VmExitCause> {
+        // We only emulate WFI and Crrss for PMU registers for now.
+        // Everything else gets redirected as an illegal instruction exception.
+        match inst.instruction() {
+            Instruction::Csrrs(csr_type)
+            if let Ok(value) = active_vcpu.pmu().get_cached_csr_value(csr_type.csr().into())  => {
+                // Unwrap ok: rd is 12-bits and instruction is already decoded.
+                let gpr_index = GprIndex::from_raw(csr_type.rd()).unwrap();
+                active_vcpu.set_gpr(gpr_index, value);
+                active_vcpu.inc_sepc(inst.len() as u64);
+                ControlFlow::Continue(())
+            }
+            Instruction::Wfi => {
+                // Just advance SEPC and exit. We place no constraints on when a vCPU
+                // may be resumed from WFI since, per the privileged spec, it's only
+                // a hint and it's perfectly valid for WFI to be a no-op.
+                active_vcpu.inc_sepc(inst.len() as u64);
+                ControlFlow::Break(VmExitCause::Wfi)
+            }
+            _ => {
+                active_vcpu.inject_exception(
+                    Exception::IllegalInstruction,
+                    inst.raw() as u64,
+                );
+                ControlFlow::Continue(())
+            }
+        }
+    }
+
     /// Run this guest until an unhandled exit is encountered.
     fn run_vcpu(
         &self,
@@ -577,24 +610,10 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
                             }
                         };
 
-                        // We only emulate WFI for now. Everything else gets redirected as an illegal
-                        // instruction exception.
-                        match inst.instruction() {
-                            Instruction::Wfi => {
-                                // Just advance SEPC and exit. We place no constraints on when a vCPU
-                                // may be resumed from WFI since, per the privileged spec, it's only
-                                // a hint and it's perfectly valid for WFI to be a no-op.
-                                active_vcpu.inc_sepc(inst.len() as u64);
-                                break VmExitCause::Wfi;
-                            }
-                            _ => {
-                                active_vcpu.inject_exception(
-                                    Exception::IllegalInstruction,
-                                    inst.raw() as u64,
-                                );
-                                continue;
-                            }
-                        }
+                        match Self::process_decoded_instruction(&mut active_vcpu, inst) {
+                            ControlFlow::Continue(_) => continue,
+                            ControlFlow::Break(reason) => break reason,
+                        };
                     }
                     VmCpuExit::DelegatedException { exception, stval } => {
                         active_vcpu.inject_exception(exception, stval);

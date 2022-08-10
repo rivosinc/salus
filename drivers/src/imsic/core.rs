@@ -12,27 +12,12 @@ use riscv_regs::Readable;
 use riscv_regs::{sie, stopei, RiscvCsrInterface, Writeable, CSR};
 use spin::{Mutex, Once};
 
+use super::error::{Error, Result};
 use crate::{CpuId, CpuInfo, MAX_CPUS};
 
 const MAX_GUEST_FILES: usize = 7;
 const MAX_MMIO_REGIONS: usize = 8;
 const MIN_GROUP_SHIFT: u32 = 24; // As mandated by the AIA spec.
-
-/// Errors that can be returned when claiming or releasing guest interrupt files.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
-    /// The requested CPU does not exist.
-    InvalidCpu(CpuId),
-    /// No guest file for the specified guest.
-    InvalidGuestFile,
-    /// Guest file for this guest already taken.
-    GuestFileTaken,
-    /// Attempt to free a guest file that's not taken.
-    GuestFileFree,
-}
-
-/// Holds the result of IMSIC operations.
-pub type Result<T> = core::result::Result<T, Error>;
 
 /// IMSIC indirect CSRs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

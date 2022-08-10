@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::mem::size_of;
-use drivers::{Imsic, ImsicInterruptId};
+use drivers::imsic::{Imsic, ImsicInterruptId};
 use memoffset::offset_of;
 use riscv_regs::{
     sie, GeneralPurposeRegisters, GprIndex, Interrupt, Readable, RiscvCsrInterface, Trap,

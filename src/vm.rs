@@ -8,7 +8,7 @@ use attestation::{
 };
 use core::{mem, slice};
 use der::Decode;
-use drivers::{pci::PcieRoot, CpuId, CpuInfo, ImsicGuestId, MAX_CPUS};
+use drivers::{imsic::ImsicGuestId, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::*;

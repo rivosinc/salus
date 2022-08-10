@@ -34,7 +34,7 @@ mod vm_id;
 mod vm_pages;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{iommu::Iommu, pci::PcieRoot, CpuInfo, Imsic};
+use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, CpuInfo};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;

@@ -5,7 +5,7 @@
 use arrayvec::ArrayString;
 use core::{fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
-use drivers::{pci::PcieRoot, CpuId, CpuInfo, Imsic, ImsicGuestId};
+use drivers::{imsic::Imsic, imsic::ImsicGuestId, pci::PcieRoot, CpuId, CpuInfo};
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList};
 use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::*;

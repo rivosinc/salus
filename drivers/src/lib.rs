@@ -24,13 +24,10 @@ pub mod iommu;
 pub mod pci;
 
 pub use cpu::{CpuId, CpuInfo, MAX_CPUS};
-pub use imsic::{
-    Error as ImsicError, Imsic, ImsicGuestId, ImsicGuestPage, ImsicInterruptId,
-    Result as ImsicResult,
-};
 
 #[cfg(test)]
 mod tests {
+    use super::imsic::Imsic;
     use super::*;
     use alloc::vec::Vec;
     use device_tree::DeviceTree;

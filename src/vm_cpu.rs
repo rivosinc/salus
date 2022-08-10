@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::{mem::size_of, ops::Deref, ops::DerefMut};
-use drivers::{imsic::ImsicGuestId, CpuId, CpuInfo};
+use drivers::{imsic::ImsicFileId, CpuId, CpuInfo};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};
@@ -657,7 +657,7 @@ pub struct VmCpu {
     current_cpu: Option<CurrentCpu>,
     // TODO: interrupt_file should really be part of CurrentCpu, but we have no way to migrate it
     // at present.
-    interrupt_file: Option<ImsicGuestId>,
+    interrupt_file: Option<ImsicFileId>,
     pending_mmio_op: Option<MmioOperation>,
     guest_id: PageOwnerId,
 }
@@ -749,13 +749,13 @@ impl VmCpu {
     }
 
     /// Sets the interrupt file for this vCPU.
-    pub fn set_interrupt_file(&mut self, interrupt_file: ImsicGuestId) {
+    pub fn set_interrupt_file(&mut self, interrupt_file: ImsicFileId) {
         self.interrupt_file = Some(interrupt_file);
 
         // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
         let mut hstatus =
             LocalRegisterCopy::<u64, hstatus::Register>::new(self.state.guest_regs.hstatus);
-        hstatus.modify(hstatus::vgein.val(interrupt_file.to_raw_index() as u64));
+        hstatus.modify(hstatus::vgein.val(interrupt_file.bits() as u64));
         self.state.guest_regs.hstatus = hstatus.get();
     }
 

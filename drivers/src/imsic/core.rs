@@ -113,142 +113,83 @@ impl ReclaimablePhysPage for ImsicGuestPage<ConvertedClean> {
     type MappablePage = ImsicGuestPage<MappableClean>;
 }
 
-/// Represents an IMSIC guest interrupt file ID for use in reading/writing VGEIN, HGEIE, etc.
-/// The host VM always gets interrupt file 1 and the remaining files are for its guests. File 0
-/// is always invalid, as per the AIA spec.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImsicGuestId {
-    /// Interrupt file for the Host VM.
-    HostVm,
-    /// Interrupt file for a guest with the provided index.
-    GuestVm(usize),
+/// An iterator over owning references to IMSIC guest file pages.
+pub struct ImsicGuestPageIter {
+    mem_range: SupervisorPageRange,
 }
 
-impl ImsicGuestId {
-    /// Creates an `ImsicGuestId` from the raw interrupt file number.
-    pub fn from_raw_index(index: usize) -> Option<Self> {
-        match index {
-            0 => None,
-            1 => Some(ImsicGuestId::HostVm),
-            i => Some(ImsicGuestId::GuestVm(i - 2)),
-        }
-    }
-
-    /// Returns the raw interrupt file number for this interrupt file ID.
-    pub fn to_raw_index(&self) -> usize {
-        match self {
-            ImsicGuestId::HostVm => 1,
-            ImsicGuestId::GuestVm(g) => g + 2,
-        }
+impl ImsicGuestPageIter {
+    // Creates a new `ImsicGuestPageIter` from `mem_range`.
+    //
+    // # Safety
+    //
+    // The caller must guarantee that `mem_range` maps a uniquely-owned range of IMSIC guest
+    // interrupt file pages.
+    unsafe fn new(mem_range: SupervisorPageRange) -> Self {
+        Self { mem_range }
     }
 }
 
-/// Indicates whether or not a guest interrupt file is available.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ImsicGuestState {
-    Free,
-    Taken,
+impl Iterator for ImsicGuestPageIter {
+    type Item = ImsicGuestPage<ConvertedClean>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let addr = self.mem_range.next()?;
+        // Safety: The address is guaranteed to be valid and the page it refers to is guaranteed to
+        // be uniquely owned at construction of the `ImsicGuestPageIter`.
+        let page = unsafe { ImsicGuestPage::new(addr) };
+        Some(page)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.mem_range.size_hint()
+    }
 }
 
-/// Holds per-CPU IMSIC state.
+impl ExactSizeIterator for ImsicGuestPageIter {}
+
+// Holds the IMSIC state for a particular CPU.
+struct ImsicPerCpu {
+    group: ImsicGroupId,
+    hart: ImsicHartId,
+    // Index at which this CPU appears in 'interrupts-extended'.
+    dt_index: usize,
+    // True if the host has claimed the guest file pages for this CPU.
+    taken: bool,
+}
+
+// Holds the per-CPU IMSIC state for all CPUs.
 struct ImsicCpuState {
-    // The base address of this hart's IMSIC. Corresponds to the supervisor level interrupt file
-    // for this hart; the guest interrupt files immediately follow it.
-    base_addr: SupervisorPageAddr,
-    guest_files: ArrayVec<ImsicGuestState, MAX_GUEST_FILES>,
+    // Indexed by `CpuId`.
+    cpus: ArrayVec<Option<ImsicPerCpu>, MAX_CPUS>,
 }
 
 impl ImsicCpuState {
-    /// Creates and initializes the IMSIC per-CPU state starting at `base_addr`. All interrupt files
-    /// are initially free.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that `base_addr` is the address of an IMSIC supervisor-level
-    /// interrupt file with `num_guests` VS-level interrupt files. The caller must uniquely own
-    /// this set of pages.
-    unsafe fn new(base_addr: SupervisorPageAddr, num_guests: usize) -> Self {
-        let mut guest_files = ArrayVec::new();
-        for _ in 0..num_guests {
-            guest_files.push(ImsicGuestState::Free)
-        }
-        Self {
-            base_addr,
-            guest_files,
-        }
+    fn get_cpu(&self, cpu: CpuId) -> Option<&ImsicPerCpu> {
+        self.cpus.get(cpu.raw()).and_then(|c| c.as_ref())
     }
 
-    fn base_addr(&self) -> SupervisorPageAddr {
-        self.base_addr
+    fn get_cpu_mut(&mut self, cpu: CpuId) -> Option<&mut ImsicPerCpu> {
+        self.cpus.get_mut(cpu.raw()).and_then(|c| c.as_mut())
     }
 
-    fn take_guest_file(
-        &mut self,
-        guest_id: ImsicGuestId,
-    ) -> Result<ImsicGuestPage<ConvertedClean>> {
-        let index = guest_id.to_raw_index();
-        let state = self
-            .guest_files
-            .get_mut(index - 1)
-            .ok_or(Error::InvalidGuestFile)?;
-        if *state != ImsicGuestState::Free {
-            return Err(Error::GuestFileTaken);
-        }
-        *state = ImsicGuestState::Taken;
-        let addr = self.base_addr.checked_add_pages(index as u64).unwrap();
-        let page = unsafe {
-            // Safe since we've verified that the guest file is free and we know that this is an
-            // IMSIC address.
-            ImsicGuestPage::new(addr)
-        };
-        Ok(page)
-    }
-
-    fn put_guest_file(&mut self, page: ImsicGuestPage<ConvertedClean>) -> Result<()> {
-        let guest_id = page
-            .pfn()
-            .bits()
-            .checked_sub(self.base_addr.pfn().bits())
-            .and_then(|i| ImsicGuestId::from_raw_index(i as usize))
-            .ok_or(Error::InvalidGuestFile)?;
-        let state = self
-            .guest_files
-            .get_mut(guest_id.to_raw_index() - 1)
-            .ok_or(Error::InvalidGuestFile)?;
-        if *state != ImsicGuestState::Taken {
-            return Err(Error::GuestFileFree);
-        }
-        *state = ImsicGuestState::Free;
-        Ok(())
-    }
-}
-
-/// Holds the global state of the IMSICs across the system.
-struct ImsicState {
-    per_cpu_state: ArrayVec<ImsicCpuState, MAX_CPUS>,
-    hart_index_map: ArrayVec<usize, MAX_CPUS>,
-    mmio_regions: ArrayVec<SupervisorPageRange, MAX_MMIO_REGIONS>,
-    geometry: ImsicGeometry<SupervisorPhys>,
-    interrupt_ids: u32,
-    phandle: u32,
-}
-
-impl ImsicState {
-    fn get_cpu(&self, cpu: CpuId) -> Option<&ImsicCpuState> {
-        let &index = self.hart_index_map.get(cpu.raw())?;
-        self.per_cpu_state.get(index)
-    }
-
-    fn get_cpu_mut(&mut self, cpu: CpuId) -> Option<&mut ImsicCpuState> {
-        let &index = self.hart_index_map.get(cpu.raw())?;
-        self.per_cpu_state.get_mut(index)
+    fn dt_index_to_cpu(&self, index: usize) -> Option<CpuId> {
+        let cpu = self
+            .cpus
+            .iter()
+            .position(|c| c.as_ref().filter(|cpu| cpu.dt_index == index).is_some())?;
+        Some(CpuId::new(cpu))
     }
 }
 
 /// System-wide IMSIC state. Used to discover the IMSIC topology from the device-tree and to
 /// manage the allocation of guest interrupt files.
 pub struct Imsic {
-    inner: Mutex<ImsicState>,
+    per_cpu: Mutex<ImsicCpuState>,
+    mmio_regions: ArrayVec<SupervisorPageRange, MAX_MMIO_REGIONS>,
+    geometry: ImsicGeometry<SupervisorPhys>,
+    interrupt_ids: u32,
+    phandle: u32,
 }
 
 static IMSIC: Once<Imsic> = Once::new();
@@ -392,24 +333,26 @@ impl Imsic {
         // Now match up interrupt files to CPUs. The "hart index" for a CPU is the order in which
         // its interrupt appears in 'interrupt-parents'.
         let per_hart_size = (1 << geometry.guest_index_bits()) * PageSize::Size4k as u64;
-        let mut hart_index_map = ArrayVec::new();
-        for _ in 0..num_cpus {
-            hart_index_map.push(0);
-        }
-        let mut hart_index = 0;
+        let mut dt_index = 0;
         let mut interrupts = interrupts_prop.value_u32();
         // We assume that each region listed in the 'reg' property is densely packed with per-hart
         // IMSIC files.
         let mut regs = regs_prop.value_u64();
         let mut mmio_regions = ArrayVec::new();
         let mut per_cpu_state = ArrayVec::new();
+        for _ in 0..num_cpus {
+            per_cpu_state.push(None);
+        }
         while let Some(region_base_addr) = regs.next() {
-            // Make sure the MMIO region matches the expected geometry.
-            if (region_base_addr & !geometry.index_mask()) != geometry.base_addr().bits() {
-                return Err(Error::InvalidMmioRegion(region_base_addr));
-            }
             let region_base_addr = PageAddr::new(RawAddr::supervisor(region_base_addr))
                 .ok_or(Error::MisalignedMmioRegion(region_base_addr))?;
+            // Each MMIO region must map the start of a group.
+            let location = geometry
+                .addr_to_location(region_base_addr)
+                .ok_or_else(|| Error::InvalidMmioRegion(region_base_addr.bits()))?;
+            if location.hart().bits() != 0 || location.file().bits() != 0 {
+                return Err(Error::InvalidMmioRegion(region_base_addr.bits()));
+            }
             // Unwrap ok, we've guaranteed there are an even number of `reg` cells.
             let region_size = regs.next().unwrap();
             if region_size % per_hart_size != 0 {
@@ -433,18 +376,23 @@ impl Imsic {
                 let cpu_base_addr = region_base_addr
                     .checked_add_pages(i * per_hart_size / PageSize::Size4k as u64)
                     .unwrap();
+                // Map the interrupt file location back to group/hart indexes.
+                let location = geometry
+                    .addr_to_location(cpu_base_addr)
+                    .ok_or(Error::InvalidCpuLocation(cpu_id))?;
 
-                // Map hart index -> CPU ID and put this hart's state in the per-CPU array.
-                hart_index_map[cpu_id.raw()] = hart_index;
-                unsafe {
-                    // We trust that the device-tree described the IMSIC topology correctly.
-                    per_cpu_state.push(ImsicCpuState::new(
-                        cpu_base_addr,
-                        geometry.guests_per_hart(),
-                    ))
+                let cpu_state = ImsicPerCpu {
+                    group: location.group(),
+                    hart: location.hart(),
+                    dt_index,
+                    taken: false,
                 };
+                if per_cpu_state[cpu_id.raw()].is_some() {
+                    return Err(Error::DuplicateCpuEntries(cpu_id));
+                }
+                per_cpu_state[cpu_id.raw()] = Some(cpu_state);
 
-                hart_index += 1;
+                dt_index += 1;
             }
 
             mmio_regions.push(PageAddrRange::new(
@@ -452,7 +400,7 @@ impl Imsic {
                 PageSize::num_4k_pages(region_size),
             ));
         }
-        if per_cpu_state.len() != num_cpus {
+        if dt_index != num_cpus {
             return Err(Error::MissingInterruptFiles);
         }
 
@@ -470,17 +418,16 @@ impl Imsic {
             }?;
         }
 
-        let imsic = ImsicState {
-            per_cpu_state,
-            hart_index_map,
+        let imsic = Imsic {
+            per_cpu: Mutex::new(ImsicCpuState {
+                cpus: per_cpu_state,
+            }),
             mmio_regions,
             geometry,
             interrupt_ids,
             phandle,
         };
-        IMSIC.call_once(|| Self {
-            inner: Mutex::new(imsic),
-        });
+        IMSIC.call_once(|| imsic);
         Ok(())
     }
 
@@ -502,51 +449,71 @@ impl Imsic {
         IMSIC.get().unwrap()
     }
 
-    /// Allocates a guest interrupt file on the specified CPU, returning an `ImsicGuestPage`
-    /// representing ownership of that file upon success.
-    pub fn take_guest_file(
-        &self,
-        cpu: CpuId,
-        guest_id: ImsicGuestId,
-    ) -> Result<ImsicGuestPage<ConvertedClean>> {
-        let mut imsic = self.inner.lock();
-        let pcpu = imsic.get_cpu_mut(cpu).ok_or(Error::InvalidCpu(cpu))?;
-        pcpu.take_guest_file(guest_id)
+    /// Returns a descriptor of the physical IMSIC layout.
+    pub fn phys_geometry(&self) -> SupervisorImsicGeometry {
+        self.geometry.clone()
     }
 
-    /// Releases the guest interrupt file represented by `page` on the given CPU.
-    pub fn put_guest_file(&self, cpu: CpuId, page: ImsicGuestPage<ConvertedClean>) -> Result<()> {
-        let mut imsic = self.inner.lock();
-        let pcpu = imsic.get_cpu_mut(cpu).ok_or(Error::InvalidCpu(cpu))?;
-        pcpu.put_guest_file(page)
+    /// Returns a descriptor of the expected virtual IMSIC layout for the host VM. The host VM
+    /// is expected to use guest interrupt file 0 for its supervisor-level interrupt file with
+    /// the remaining guest interrupt files mapped immediately contiguous to it.
+    pub fn host_vm_geometry(&self) -> GuestImsicGeometry {
+        let phys = &self.geometry;
+        // Unwrap ok, we know the index widths / addresses are valid since they come from the
+        // physical geometry.
+        ImsicGeometry::new(
+            PageAddr::new(RawAddr::guest(phys.base_addr().bits(), PageOwnerId::host())).unwrap(),
+            phys.group_index_bits(),
+            phys.group_index_shift(),
+            phys.hart_index_bits(),
+            phys.guest_index_bits(),
+            phys.guests_per_hart() - 1,
+        )
+        .unwrap()
     }
 
-    /// Returns the number of guest interrupt files suppoorted on each CPU.
-    pub fn guests_per_hart(&self) -> usize {
-        self.inner.lock().geometry.guests_per_hart()
+    /// Takes ownership over the guest interrupt file pages for `cpu`, returning an iterator over
+    /// the pages.
+    pub fn take_guest_files(&self, cpu: CpuId) -> Result<ImsicGuestPageIter> {
+        let mut cpus = self.per_cpu.lock();
+        let pcpu = cpus.get_cpu_mut(cpu).ok_or(Error::InvalidCpu(cpu))?;
+        if pcpu.taken {
+            return Err(Error::GuestFilesTaken(cpu));
+        }
+        pcpu.taken = true;
+        let start_loc = ImsicLocation::new(pcpu.group, pcpu.hart, ImsicFileId::guest(0));
+        // If the CPU is valid, then its IMSIC location must be valid.
+        let base_addr = self.geometry.location_to_addr(start_loc).unwrap();
+        let page_range = PageAddrRange::new(base_addr, self.geometry.guests_per_hart() as u64);
+        // Safety: `page_range` is a range of IMSIC guest files that we just took ownership of.
+        let iter = unsafe { ImsicGuestPageIter::new(page_range) };
+        Ok(iter)
     }
 
-    /// Returns the base address of the system's IMSIC hierarchy.
-    pub fn base_addr(&self) -> SupervisorPageAddr {
-        self.inner.lock().mmio_regions[0].base()
-    }
-
-    /// Returns the base address of the supervisor level interrupt file for the given CPU. Can
-    /// be used to direct MSIs to that CPU.
-    pub fn supervisor_file_addr(&self, cpu: CpuId) -> Result<SupervisorPageAddr> {
-        let imisc = self.inner.lock();
-        let pcpu = imisc.get_cpu(cpu).ok_or(Error::InvalidCpu(cpu))?;
-        Ok(pcpu.base_addr())
+    /// Returns the IMSIC location specifier of the supervisor level interrupt file for the given
+    /// CPU.
+    pub fn supervisor_file_location(&self, cpu: CpuId) -> Result<ImsicLocation> {
+        let cpus = self.per_cpu.lock();
+        let pcpu = cpus.get_cpu(cpu).ok_or(Error::InvalidCpu(cpu))?;
+        Ok(ImsicLocation::new(
+            pcpu.group,
+            pcpu.hart,
+            ImsicFileId::supervisor(),
+        ))
     }
 
     /// Returns the phandle of this IMSIC's node in the device-tree.
     pub fn phandle(&self) -> u32 {
-        self.inner.lock().phandle
+        self.phandle
     }
 
     /// Sends an IPI to the specified CPU.
     pub fn send_ipi(&self, cpu: CpuId) -> Result<()> {
-        let addr = self.supervisor_file_addr(cpu)?;
+        // If the CPU is valid, then its IMSIC location must be valid.
+        let addr = self
+            .geometry
+            .location_to_addr(self.supervisor_file_location(cpu)?)
+            .unwrap();
         unsafe {
             // Safe since `addr` maps a valid supervisor-level IMSIC interrupt file.
             core::ptr::write_volatile(addr.bits() as *mut u32, ImsicInterruptId::Ipi as u32)
@@ -561,24 +528,19 @@ impl Imsic {
         ImsicInterruptId::from_raw(raw_id)
     }
 
-    /// Adds an IMSIC node to the host device-tree, with the IMSIC starting at `guest_base_addr`.
-    /// The IMSIC hierarchy is otherwise replicated as-is from the supervisor-level IMSIC. It is
-    /// up to the caller to remap interrupt files appropriately. In particular, the guest interrupt
-    /// files dedicated to the host VM should be mapped to the supervisor interrupt file location in
-    /// the guest physical address space. The caller is also responsible for masking guest interrupt
-    /// files that are inaccessible to the host VM in HGEIE and other CSRs.
-    pub fn add_host_imsic_node(
-        &self,
-        dt: &mut DeviceTree,
-        guest_base_addr: GuestPhysAddr,
-    ) -> DeviceTreeResult<()> {
-        let imsic = self.inner.lock();
-
+    /// Adds an IMSIC node to the host device-tree using the layout specified in
+    /// `self.host_vm_geometry()`. It is up to the caller to remap interrupt files appropriately.
+    /// In particular, the guest interrupt files dedicated to the host VM should be mapped to the
+    /// supervisor interrupt file location in the guest physical address space. The caller is also
+    /// responsible for masking guest interrupt files that are inaccessible to the host VM in HGEIE
+    /// and other CSRs.
+    pub fn add_host_imsic_node(&self, dt: &mut DeviceTree) -> DeviceTreeResult<()> {
+        let geometry = self.host_vm_geometry();
         let soc_node_id = dt.iter().find(|n| n.name() == "soc").unwrap().id();
         let mut imsic_name = ArrayString::<32>::new();
         fmt::write(
             &mut imsic_name,
-            format_args!("imsics@{:x}", guest_base_addr.bits()),
+            format_args!("imsics@{:x}", self.mmio_regions[0].base().bits()),
         )
         .unwrap();
         let imsic_id = dt.add_node(imsic_name.as_str(), Some(soc_node_id))?;
@@ -592,7 +554,7 @@ impl Imsic {
             .set_value_str("riscv,imsics")?;
         imsic_node
             .add_prop("phandle")?
-            .set_value_u32(&[imsic.phandle])?;
+            .set_value_u32(&[self.phandle])?;
         imsic_node.add_prop("msi-controller")?;
         imsic_node.add_prop("interrupt-controller")?;
         imsic_node
@@ -600,39 +562,40 @@ impl Imsic {
             .set_value_u32(&[0])?;
         imsic_node
             .add_prop("riscv,guest-index-bits")?
-            .set_value_u32(&[imsic.geometry.guest_index_bits()])?;
+            .set_value_u32(&[geometry.guest_index_bits()])?;
         imsic_node
             .add_prop("riscv,hart-index-bits")?
-            .set_value_u32(&[imsic.geometry.hart_index_bits()])?;
+            .set_value_u32(&[geometry.hart_index_bits()])?;
         imsic_node.add_prop("riscv,ipi-id")?.set_value_u32(&[1])?;
         imsic_node
             .add_prop("riscv,num-ids")?
-            .set_value_u32(&[imsic.interrupt_ids])?;
-        if imsic.geometry.group_index_bits() > 0 {
+            .set_value_u32(&[self.interrupt_ids])?;
+        if self.geometry.group_index_bits() > 0 {
             // These only matter when we have multiple groups.
             imsic_node
                 .add_prop("riscv,group-index-bits")?
-                .set_value_u32(&[imsic.geometry.group_index_bits()])?;
+                .set_value_u32(&[geometry.group_index_bits()])?;
             imsic_node
                 .add_prop("riscv,group-index-shift")?
-                .set_value_u32(&[imsic.geometry.group_index_shift()])?;
+                .set_value_u32(&[geometry.group_index_shift()])?;
         }
 
-        // Now add a 'reg' entry for each MMIO region. We replicate the same IMSIC topology, except
-        // shifted so that it starts at `guest_base_addr` in the address space.
+        // Now add a 'reg' entry for each MMIO region, replicating exactly the `reg` property
+        // set in the hypervisor's device tree.
         let mut regs = ArrayVec::<u64, { 2 * MAX_MMIO_REGIONS }>::new();
-        let offset = guest_base_addr.bits() - imsic.mmio_regions[0].base().bits();
-        for mmio in imsic.mmio_regions.iter() {
-            regs.push(mmio.base().bits() + offset);
+        for mmio in self.mmio_regions.iter() {
+            regs.push(mmio.base().bits());
             regs.push(mmio.length_bytes());
         }
         imsic_node.add_prop("reg")?.set_value_u64(&regs)?;
 
-        // Add an 'interrupts-extended' entry for each CPU.
+        // Add an 'interrupts-extended' entry for each CPU, which must be in hart-index order.
         let mut interrupts = ArrayVec::<u32, { 2 * MAX_CPUS }>::new();
         let num_cpus = CpuInfo::get().num_cpus();
+        let cpus = self.per_cpu.lock();
         for i in 0..num_cpus {
-            let cpu_id = CpuId::new(imsic.hart_index_map.iter().position(|&h| h == i).unwrap());
+            // Unwrap ok, each index must appear in `per_cpu_state` by construction.
+            let cpu_id = cpus.dt_index_to_cpu(i).unwrap();
             let phandle = CpuInfo::get().cpu_to_intc_phandle(cpu_id).unwrap();
             interrupts.push(phandle);
             interrupts.push(sie::sext.shift as u32);

@@ -241,23 +241,23 @@ mod tests {
         Imsic::probe_from(&tree, &mut mem_map).unwrap();
 
         let imsic = Imsic::get();
-        assert_eq!(imsic.guests_per_hart(), (1 << GUEST_BITS as usize) - 1);
+        let geometry = imsic.phys_geometry();
+        assert_eq!(geometry.guests_per_hart(), (1 << GUEST_BITS as usize) - 1);
         assert_eq!(imsic.phandle(), IMSIC_PHANDLE);
 
         // Make sure the interrupt file addresses are correct.
-        let group0_addr = imsic.base_addr();
+        let group0_addr = geometry.base_addr();
         assert_eq!(group0_addr.bits(), 0x4000_0000);
         let per_hart_pages = 1 << GUEST_BITS as u64;
+        let cpu1_loc = imsic.supervisor_file_location(CpuId::new(1)).unwrap();
         assert_eq!(
-            imsic.supervisor_file_addr(CpuId::new(1)).unwrap(),
+            geometry.location_to_addr(cpu1_loc).unwrap(),
             group0_addr.checked_add_pages(per_hart_pages).unwrap()
         );
         let group1_addr =
             PageAddr::new(RawAddr::supervisor(group0_addr.bits() + (1 << GROUP_SHIFT))).unwrap();
-        assert_eq!(
-            imsic.supervisor_file_addr(CpuId::new(2)).unwrap(),
-            group1_addr
-        );
+        let cpu2_loc = imsic.supervisor_file_location(CpuId::new(2)).unwrap();
+        assert_eq!(geometry.location_to_addr(cpu2_loc).unwrap(), group1_addr);
 
         // Make sure `HwMemMap` got updated.
         let mut iter = mem_map

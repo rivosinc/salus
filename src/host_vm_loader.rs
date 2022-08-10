@@ -5,7 +5,7 @@
 use arrayvec::ArrayString;
 use core::{fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
-use drivers::{imsic::Imsic, imsic::ImsicGuestId, pci::PcieRoot, CpuId, CpuInfo};
+use drivers::{imsic::Imsic, pci::PcieRoot, CpuId, CpuInfo};
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList};
 use riscv_page_tables::GuestStagePageTable;
 use riscv_pages::*;
@@ -82,7 +82,7 @@ impl HostDtBuilder {
     }
 
     /// Add any MMIO devices to the device tree.
-    pub fn add_device_nodes(mut self, imsic_addr: GuestPhysAddr) -> DeviceTreeResult<Self> {
+    pub fn add_device_nodes(mut self) -> DeviceTreeResult<Self> {
         // First add a 'soc' subnode of the root.
         let soc_node_id = self.tree.add_node("soc", self.tree.root())?;
         let soc_node = self.tree.get_mut_node(soc_node_id).unwrap();
@@ -93,7 +93,7 @@ impl HostDtBuilder {
         soc_node.add_prop("#size-cells")?.set_value_u32(&[2])?;
         soc_node.add_prop("ranges")?;
 
-        Imsic::get().add_host_imsic_node(&mut self.tree, imsic_addr)?;
+        Imsic::get().add_host_imsic_node(&mut self.tree)?;
         PcieRoot::get().add_host_pcie_node(&mut self.tree)?;
 
         Ok(self)
@@ -207,17 +207,13 @@ impl<T: GuestStagePageTable> HostVmLoader<T> {
         };
 
         // Construct a stripped-down device-tree for the host VM.
-        //
-        // We map the IMSIC at the same location in the guest address space as it is in the
-        // supervisor address space.
-        let imsic_base = RawAddr::guest(Imsic::get().base_addr().bits(), PageOwnerId::host());
         let mut host_dt_builder = HostDtBuilder::new(&self.hypervisor_dt)
             .unwrap()
             .add_memory_node(self.guest_ram_base, self.ram_size)
             .unwrap()
             .add_cpu_nodes()
             .unwrap()
-            .add_device_nodes(imsic_base)
+            .add_device_nodes()
             .unwrap();
         if let Some(r) = self.initramfs {
             host_dt_builder = host_dt_builder
@@ -253,37 +249,25 @@ impl<T: GuestStagePageTable> HostVmLoader<T> {
 
     /// Constructs the address space for the host VM, returning a `HostVm` that is ready to run.
     pub fn build_address_space(mut self) -> HostVm<T, VmStateFinalized> {
+        let imsic = Imsic::get();
+        // Add confidential memory regions covering each IMSIC group.
+        //
+        // TODO: The IMSIC pages will eventually need special treatment and should probably be
+        // in their own region.
+        let imsic_geometry = imsic.host_vm_geometry();
+        for range in imsic_geometry.group_ranges() {
+            self.vm
+                .add_confidential_memory_region(range.base(), range.length_bytes());
+        }
+        let cpu_info = CpuInfo::get();
         // Map the IMSIC interrupt files into the guest address space. The host VM's interrupt
         // file gets mapped to the location of the supervisor interrupt file.
-        let imsic = Imsic::get();
-        let cpu_info = CpuInfo::get();
         for i in 0..cpu_info.num_cpus() {
             let cpu_id = CpuId::new(i);
-            let mut imsic_gpa = PageAddr::new(RawAddr::guest(
-                imsic.supervisor_file_addr(cpu_id).unwrap().bits(),
-                PageOwnerId::host(),
-            ))
-            .unwrap();
-
-            // Add a confidential memory region covering this IMSIC.
-            //
-            // TODO: The IMSIC pages will eventually need special treatment and should probably be
-            // in their own region.
-            self.vm.add_confidential_memory_region(
-                imsic_gpa,
-                imsic.guests_per_hart() as u64 * PageSize::Size4k as u64,
-            );
-
-            let page = imsic.take_guest_file(cpu_id, ImsicGuestId::HostVm).unwrap();
-            self.vm.add_pages(imsic_gpa, [page].into_iter());
-            imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
-            for j in 0..(imsic.guests_per_hart() - 1) {
-                let page = imsic
-                    .take_guest_file(cpu_id, ImsicGuestId::GuestVm(j))
-                    .unwrap();
-                self.vm.add_pages(imsic_gpa, [page].into_iter());
-                imsic_gpa = imsic_gpa.checked_add_pages(1).unwrap();
-            }
+            let cpu_location = imsic.supervisor_file_location(cpu_id).unwrap();
+            let imsic_gpa = imsic_geometry.location_to_addr(cpu_location).unwrap();
+            let imsic_pages = imsic.take_guest_files(cpu_id).unwrap();
+            self.vm.add_pages(imsic_gpa, imsic_pages);
         }
 
         let pci = PcieRoot::get();

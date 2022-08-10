@@ -27,6 +27,10 @@ pub enum Error {
     InvalidMmioRegion(u64),
     /// Invalid parent interrupt specification in the device tree.
     InvalidParentInterrupt(u32, u32),
+    /// The given CPU does not have a valid IMSIC location specified in the device tree.
+    InvalidCpuLocation(CpuId),
+    /// The given CPU was referenced multiple times in the device tree.
+    DuplicateCpuEntries(CpuId),
     /// There were more interrupt files than CPUs found in the device tree.
     TooManyInterruptFiles,
     /// There were fewer interrupt files than CPUs found in the device tree.
@@ -35,12 +39,8 @@ pub enum Error {
     AddingMmioRegion(page_tracking::MemMapError),
     /// The requested CPU does not exist.
     InvalidCpu(CpuId),
-    /// No guest file for the specified guest.
-    InvalidGuestFile,
-    /// Guest file for this guest already taken.
-    GuestFileTaken,
-    /// Attempt to free a guest file that's not taken.
-    GuestFileFree,
+    /// Guest files for this CPU have already been taken.
+    GuestFilesTaken(CpuId),
 }
 
 /// Holds the result of IMSIC operations.

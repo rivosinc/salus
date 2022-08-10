@@ -8,7 +8,7 @@ use attestation::{
 };
 use core::{mem, slice};
 use der::Decode;
-use drivers::{imsic::ImsicGuestId, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
+use drivers::{imsic::ImsicFileId, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
 use riscv_pages::*;
@@ -323,7 +323,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
 
 impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
     /// Binds the specified vCPU to an IMSIC interrupt file.
-    fn bind_vcpu(&self, vcpu_id: u64, interrupt_file: ImsicGuestId) -> EcallResult<()> {
+    fn bind_vcpu(&self, vcpu_id: u64, interrupt_file: ImsicFileId) -> EcallResult<()> {
         let vcpu = self
             .vcpus
             .get_vcpu(vcpu_id)
@@ -1412,7 +1412,9 @@ enum MmioEmulationError {
 impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
     /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.
     pub fn run(&self, vcpu_id: u64) {
-        self.inner.bind_vcpu(vcpu_id, ImsicGuestId::HostVm).unwrap();
+        self.inner
+            .bind_vcpu(vcpu_id, ImsicFileId::guest(0))
+            .unwrap();
 
         // Always make vCPU0 the boot CPU.
         if vcpu_id == 0 {

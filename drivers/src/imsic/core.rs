@@ -13,11 +13,11 @@ use riscv_regs::{sie, stopei, RiscvCsrInterface, Writeable, CSR};
 use spin::{Mutex, Once};
 
 use super::error::{Error, Result};
+use super::geometry::*;
 use crate::{CpuId, CpuInfo, MAX_CPUS};
 
 const MAX_GUEST_FILES: usize = 7;
 const MAX_MMIO_REGIONS: usize = 8;
-const MIN_GROUP_SHIFT: u32 = 24; // As mandated by the AIA spec.
 
 /// IMSIC indirect CSRs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,11 +254,7 @@ struct ImsicState {
     per_cpu_state: ArrayVec<ImsicCpuState, MAX_CPUS>,
     hart_index_map: ArrayVec<usize, MAX_CPUS>,
     mmio_regions: ArrayVec<ImsicMmioRegion, MAX_MMIO_REGIONS>,
-    group_index_bits: u32,
-    group_index_shift: u32,
-    hart_index_bits: u32,
-    guest_index_bits: u32,
-    guests_per_hart: usize,
+    geometry: SupervisorImsicGeometry,
     interrupt_ids: u32,
     phandle: u32,
 }
@@ -298,7 +294,7 @@ fn get_guests_per_hart(_guest_index_bits: u32) -> usize {
 // environments.
 #[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
 fn get_guests_per_hart(guest_index_bits: u32) -> usize {
-    (1 << guest_index_bits as usize) - 1
+    (1 << guest_index_bits) - 1
 }
 
 fn indirect_csr_write(reg: ImsicRegister, val: u64) {
@@ -371,10 +367,7 @@ impl Imsic {
         // The actual number of guest files may be less than 2^(guest_index_bits) - 1; we need to
         // interrogate HGEIE.
         let guests_per_hart = get_guests_per_hart(guest_index_bits);
-        if guests_per_hart == 0
-            || guests_per_hart >= (1 << guest_index_bits)
-            || guests_per_hart > MAX_GUEST_FILES
-        {
+        if guests_per_hart == 0 || (guests_per_hart as usize) > MAX_GUEST_FILES {
             return Err(Error::InvalidGuestsPerHart(guests_per_hart));
         }
 
@@ -395,18 +388,36 @@ impl Imsic {
             .props()
             .find(|p| p.name() == "riscv,group-index-shift")
             .and_then(|p| p.value_u32().next())
-            .unwrap_or(MIN_GROUP_SHIFT);
-        let pfn_shift = (PageSize::Size4k as u64).ilog2();
-        if (group_index_shift + group_index_bits) >= u64::BITS
-            || group_index_shift < MIN_GROUP_SHIFT
-            || group_index_shift < (pfn_shift + hart_index_bits + guest_index_bits)
-        {
-            return Err(Error::InvalidGroupIndexShift(group_index_shift));
-        }
+            .unwrap_or(MIN_GROUP_INDEX_SHIFT);
+
+        let regs_prop = imsic_node
+            .props()
+            .find(|p| p.name() == "reg")
+            .ok_or(Error::MissingProperty("reg"))?;
+        let geometry = {
+            let mut regs = regs_prop.value_u64();
+            if regs.len() == 0 || (regs.len() % 2) != 0 {
+                return Err(Error::InvalidMmioRegionCount(regs.len()));
+            }
+            // Each MMIO range is expected to map a group (or range of groups). Mask out the
+            // group bits to get the base address pattern.
+            let base_addr = RawAddr::supervisor(
+                regs.next().unwrap() & !(((1 << group_index_bits) - 1) << group_index_shift),
+            );
+            ImsicGeometry::new(
+                PageAddr::new(base_addr)
+                    .ok_or_else(|| Error::MisalignedMmioRegion(base_addr.bits()))?,
+                group_index_bits,
+                group_index_shift,
+                hart_index_bits,
+                guest_index_bits,
+                guests_per_hart,
+            )
+        }?;
 
         // Now match up interrupt files to CPUs. The "hart index" for a CPU is the order in which
         // its interrupt appears in 'interrupt-parents'.
-        let per_hart_size = (1 << guest_index_bits) * PageSize::Size4k as u64;
+        let per_hart_size = (1 << geometry.guest_index_bits()) * PageSize::Size4k as u64;
         let mut hart_index_map = ArrayVec::new();
         for _ in 0..num_cpus {
             hart_index_map.push(0);
@@ -415,17 +426,14 @@ impl Imsic {
         let mut interrupts = interrupts_prop.value_u32();
         // We assume that each region listed in the 'reg' property is densely packed with per-hart
         // IMSIC files.
-        let mut regs = imsic_node
-            .props()
-            .find(|p| p.name() == "reg")
-            .ok_or(Error::MissingProperty("reg"))?
-            .value_u64();
-        if regs.len() % 2 != 0 {
-            return Err(Error::InvalidMmioRegionCount(regs.len()));
-        }
+        let mut regs = regs_prop.value_u64();
         let mut mmio_regions = ArrayVec::new();
         let mut per_cpu_state = ArrayVec::new();
         while let Some(region_base_addr) = regs.next() {
+            // Make sure the MMIO region matches the expected geometry.
+            if (region_base_addr & !geometry.index_mask()) != geometry.base_addr().bits() {
+                return Err(Error::InvalidMmioRegion(region_base_addr));
+            }
             let region_base_addr = PageAddr::new(RawAddr::supervisor(region_base_addr))
                 .ok_or(Error::MisalignedMmioRegion(region_base_addr))?;
             // Unwrap ok, we've guaranteed there are an even number of `reg` cells.
@@ -456,7 +464,10 @@ impl Imsic {
                 hart_index_map[cpu_id.raw()] = hart_index;
                 unsafe {
                     // We trust that the device-tree described the IMSIC topology correctly.
-                    per_cpu_state.push(ImsicCpuState::new(cpu_base_addr, guests_per_hart))
+                    per_cpu_state.push(ImsicCpuState::new(
+                        cpu_base_addr,
+                        geometry.guests_per_hart(),
+                    ))
                 };
 
                 hart_index += 1;
@@ -471,17 +482,8 @@ impl Imsic {
             return Err(Error::MissingInterruptFiles);
         }
 
-        // Now make sure all MMIO regions match the expected geometry, and add them to the system
-        // memory map.
-        let base_addr = mmio_regions[0].base_addr();
+        // Add the IMSIC ranges to the system memory map.
         for mmio in mmio_regions.iter() {
-            let masked_addr = mmio.base_addr().bits()
-                & !((1 << (pfn_shift + hart_index_bits + guest_index_bits)) - 1)
-                & !(((1 << group_index_bits) - 1) << group_index_shift);
-            if masked_addr != base_addr.bits() {
-                return Err(Error::InvalidGeometry);
-            }
-
             unsafe {
                 // We trust that the device-tree described the IMSIC topology correctly.
                 mem_map
@@ -498,11 +500,7 @@ impl Imsic {
             per_cpu_state,
             hart_index_map,
             mmio_regions,
-            group_index_bits,
-            group_index_shift,
-            hart_index_bits,
-            guest_index_bits,
-            guests_per_hart,
+            geometry,
             interrupt_ids,
             phandle,
         };
@@ -551,7 +549,7 @@ impl Imsic {
 
     /// Returns the number of guest interrupt files suppoorted on each CPU.
     pub fn guests_per_hart(&self) -> usize {
-        self.inner.lock().guests_per_hart
+        self.inner.lock().geometry.guests_per_hart()
     }
 
     /// Returns the base address of the system's IMSIC hierarchy.
@@ -628,22 +626,22 @@ impl Imsic {
             .set_value_u32(&[0])?;
         imsic_node
             .add_prop("riscv,guest-index-bits")?
-            .set_value_u32(&[imsic.guest_index_bits])?;
+            .set_value_u32(&[imsic.geometry.guest_index_bits()])?;
         imsic_node
             .add_prop("riscv,hart-index-bits")?
-            .set_value_u32(&[imsic.hart_index_bits])?;
+            .set_value_u32(&[imsic.geometry.hart_index_bits()])?;
         imsic_node.add_prop("riscv,ipi-id")?.set_value_u32(&[1])?;
         imsic_node
             .add_prop("riscv,num-ids")?
             .set_value_u32(&[imsic.interrupt_ids])?;
-        if imsic.group_index_bits > 0 {
+        if imsic.geometry.group_index_bits() > 0 {
             // These only matter when we have multiple groups.
             imsic_node
                 .add_prop("riscv,group-index-bits")?
-                .set_value_u32(&[imsic.group_index_bits])?;
+                .set_value_u32(&[imsic.geometry.group_index_bits()])?;
             imsic_node
                 .add_prop("riscv,group-index-shift")?
-                .set_value_u32(&[imsic.group_index_shift])?;
+                .set_value_u32(&[imsic.geometry.group_index_shift()])?;
         }
 
         // Now add a 'reg' entry for each MMIO region. We replicate the same IMSIC topology, except

@@ -315,11 +315,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Probe for the IMSIC.
     Imsic::probe_from(&hyp_dt, &mut mem_map).expect("Failed to probe IMSIC");
-    let imsic = Imsic::get();
+    let imsic_geometry = Imsic::get().phys_geometry();
     println!(
         "IMSIC at 0x{:08x}; {} guest interrupt files supported",
-        imsic.base_addr().bits(),
-        imsic.guests_per_hart()
+        imsic_geometry.base_addr().bits(),
+        imsic_geometry.guests_per_hart()
     );
     Imsic::setup_this_cpu();
 

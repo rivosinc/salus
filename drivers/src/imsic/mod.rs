@@ -6,7 +6,7 @@ mod core;
 mod error;
 mod geometry;
 
-pub use self::core::{Imsic, ImsicGuestId, ImsicGuestPage, ImsicInterruptId};
+pub use self::core::{Imsic, ImsicGuestPage, ImsicGuestPageIter, ImsicInterruptId};
 pub use error::Error as ImsicError;
 pub use error::Result as ImsicResult;
 pub use geometry::*;

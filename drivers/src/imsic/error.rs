@@ -13,22 +13,24 @@ pub enum Error {
     MissingProperty(&'static str),
     /// Unexpected number of parent interrupts specified in the device tree.
     InvalidParentInterruptCount(usize),
-    /// Invalid number of guest files per hart specified in the device tree.
+    /// Invalid number of guest files per hart specified in the IMSIC geometry.
     InvalidGuestsPerHart(usize),
-    /// Invalid group index shift specified in the device tree.
+    /// Invalid group index shift specified in the IMSIC geometry.
     InvalidGroupIndexShift(u32),
+    /// The base address in the IMSIC geometry has non-zero index bits.
+    InvalidAddressPattern(u64),
     /// Unexpected number of MMIO regions specified in the device tree.
     InvalidMmioRegionCount(usize),
     /// Misaligned MMIO region specified in the device tree.
     MisalignedMmioRegion(u64),
+    /// An MMIO region specified in the device tree did not match the expected pattern.
+    InvalidMmioRegion(u64),
     /// Invalid parent interrupt specification in the device tree.
     InvalidParentInterrupt(u32, u32),
     /// There were more interrupt files than CPUs found in the device tree.
     TooManyInterruptFiles,
     /// There were fewer interrupt files than CPUs found in the device tree.
     MissingInterruptFiles,
-    /// A group base address did not match the expected pattern.
-    InvalidGeometry,
     /// Failed to add an MMIO region to the system memory map.
     AddingMmioRegion(page_tracking::MemMapError),
     /// The requested CPU does not exist.

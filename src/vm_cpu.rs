@@ -18,8 +18,9 @@ use riscv_regs::{
     PrivilegeLevel, Readable, Trap, Writeable, CSR,
 };
 use sbi::{
-    Error as SbiError, PmuCounterConfigFlags, PmuCounterStopFlags, PmuEventType,
-    Result as SbiResult, SbiMessage, SbiReturnType, TvmMmioOpCode,
+    api::pmu::*, Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags,
+    PmuCounterStopFlags, PmuEventType, Result as SbiResult, SbiMessage, SbiReturnType,
+    TvmMmioOpCode,
 };
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
@@ -27,6 +28,7 @@ use crate::smp::PerCpu;
 use crate::vm::MmioOperation;
 use crate::vm_id::VmId;
 use crate::vm_pages::{ActiveVmPages, VmPages};
+use crate::{println, CONSOLE_DRIVER};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {
@@ -113,6 +115,7 @@ enum PmuCounterState {
     NotConfigured,
     Configured(CounterState),
     Started(CounterState),
+    Poisoned(CounterState),
 }
 
 impl Default for PmuCounterState {
@@ -310,8 +313,99 @@ impl VmPmuState {
             }
         }
     }
-}
 
+    /// Saves the internal state for PMU counters. Stops started counters, and resets all configured counters.
+    /// This should be called in anticipation of an outbound context switch.
+    fn save_counters(&mut self) {
+        use PmuCounterState::*;
+        fn reset_all_counters(counter_mask: u64) -> SbiResult<()> {
+            if counter_mask != 0 {
+                stop_counters(
+                    0,
+                    counter_mask,
+                    PmuCounterStopFlags::default().set_reset_flag(),
+                )
+                .or_else(|e| {
+                    // Treat already stopped error as success
+                    if matches!(e, SbiError::AlreadyStopped) {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        if let Ok(pmu_info) = pmu::PmuInfo::get() {
+            let num_counters = pmu_info.get_num_counters() as usize;
+            let mut counter_mask = 0;
+            for (i, state) in self.counter_state.iter().take(num_counters).enumerate() {
+                if matches!(state, Configured(_) | Started(_)) {
+                    counter_mask |= 1 << i;
+                }
+            }
+            let result = reset_all_counters(counter_mask);
+            if result.is_err() {
+                println!(
+                    "Warning: PMU failed to reset counters with mask {counter_mask:x}, {result:?}"
+                );
+            }
+        }
+    }
+
+    /// Restores PMU counters from the saved state, reconfiguring and starting them if necessary.
+    /// This should be called in anticipation of an outbound context switch.
+    fn restore_counters(&mut self) {
+        use PmuCounterState::*;
+        fn resume_counter(counter_index: u64, c: &CounterState) -> SbiResult<()> {
+            let start_flags = PmuCounterStartFlags::default().set_init_value();
+            start_counters(counter_index, 0x1, start_flags, c.value)
+        }
+
+        fn configure_counter(counter_index: u64, c: &CounterState) -> SbiResult<u64> {
+            let config_flags = c
+                .config_flags
+                .unset_auto_start()
+                .unset_skip_match()
+                .unset_clear_value();
+            configure_matching_counters(
+                counter_index,
+                0x1,
+                config_flags,
+                c.event_type,
+                c.event_data,
+            )
+        }
+
+        if let Ok(pmu_info) = pmu::PmuInfo::get() {
+            let num_counters = pmu_info.get_num_counters() as usize;
+            for (i, state) in self.counter_state.iter_mut().take(num_counters).enumerate() {
+                let counter_index = i as u64;
+                let is_started_counter = matches!(state, Started(_));
+                match state {
+                    Configured(c) | Started(c) => {
+                        let result = configure_counter(counter_index, c).and_then(|_| {
+                            if is_started_counter {
+                                resume_counter(counter_index, c)
+                            } else {
+                                Ok(())
+                            }
+                        });
+                        if result.is_err() {
+                            *state = Poisoned(*c);
+                            println!(
+                                "Warning: Failed to restore counter {counter_index}, {result:?}"
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
 /// (v)CPU register state that must be saved or restored when entering/exiting a VM or switching
 /// between VMs.
 #[derive(Default)]
@@ -806,11 +900,13 @@ impl<T: GuestStagePagingMode> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
     fn save(&mut self) {
         self.active_pages = None;
         self.save_vcpu_csrs();
+        self.pmu_state.save_counters();
     }
 
     fn restore(&mut self) {
         self.restore_vcpu_csrs();
         self.restore_vm_pages();
+        self.pmu_state.restore_counters();
     }
 }
 

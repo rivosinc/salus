@@ -238,7 +238,7 @@ mod tests {
         let tree = stub_tree();
         CpuInfo::parse_from(&tree);
         let mut mem_map = stub_mem_map();
-        Imsic::probe_from(&tree, &mut mem_map);
+        Imsic::probe_from(&tree, &mut mem_map).unwrap();
 
         let imsic = Imsic::get();
         assert_eq!(imsic.guests_per_hart(), (1 << GUEST_BITS as usize) - 1);

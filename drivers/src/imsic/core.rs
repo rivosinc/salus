@@ -325,56 +325,58 @@ impl Imsic {
     /// -------------------------------------------------------------
     ///
     /// For more details about the system IMSIC layout, see the AIA specification.
-    pub fn probe_from(dt: &DeviceTree, mem_map: &mut HwMemMap) {
+    pub fn probe_from(dt: &DeviceTree, mem_map: &mut HwMemMap) -> Result<()> {
         // If both M and S level IMSICs are present in the device-tree the M-level IMSIC should
         // have its status set to "disabled" by firmware.
         let imsic_node = dt
             .iter()
             .find(|n| n.compatible(["riscv,imsics"]) && !n.disabled())
-            .expect("No IMSIC node in deivce-tree");
+            .ok_or(Error::MissingImsicNode)?;
 
         // There must be a parent interrupt for each CPU.
         let num_cpus = CpuInfo::get().num_cpus();
         let interrupts_prop = imsic_node
             .props()
             .find(|p| p.name() == "interrupts-extended")
-            .expect("No 'interrupts-extended' property in IMSIC node");
+            .ok_or(Error::MissingProperty("interrupts-extended"))?;
         // Assumes CPU's #interrupt-cells is 1.
-        assert_eq!(interrupts_prop.value_u32().count(), num_cpus * 2);
+        let interrupts = interrupts_prop.value_u32();
+        if interrupts.len() != num_cpus * 2 {
+            return Err(Error::InvalidParentInterruptCount(interrupts.len()));
+        }
 
         // Find the IMSIC's phandle. The PCIe controller will refer to it via 'msi-parent'.
         let phandle = imsic_node
             .props()
             .find(|p| p.name() == "phandle")
-            .expect("No 'phandle' property in IMSIC node")
-            .value_u32()
-            .next()
-            .unwrap();
+            .and_then(|p| p.value_u32().next())
+            .ok_or(Error::MissingProperty("phandle"))?;
 
         let interrupt_ids = imsic_node
             .props()
             .find(|p| p.name() == "riscv,num-ids")
-            .expect("Number of interrupt IDs not set in IMSIC node")
-            .value_u32()
-            .next()
-            .unwrap();
+            .and_then(|p| p.value_u32().next())
+            .ok_or(Error::MissingProperty("riscv,num-ids"))?;
 
         // We must have at least one guest interrupt file to start the host.
         let guest_index_bits = imsic_node
             .props()
             .find(|p| p.name() == "riscv,guest-index-bits")
-            .expect("No 'riscv,guest-index-bits' in IMSIC node")
-            .value_u32()
-            .next()
-            .unwrap();
-        assert!(guest_index_bits > 0);
+            .and_then(|p| p.value_u32().next())
+            .ok_or(Error::MissingProperty("riscv,guest-index-bits"))?;
+        if guest_index_bits == 0 {
+            return Err(Error::InvalidGuestsPerHart(0));
+        }
 
         // The actual number of guest files may be less than 2^(guest_index_bits) - 1; we need to
         // interrogate HGEIE.
         let guests_per_hart = get_guests_per_hart(guest_index_bits);
-        assert!(guests_per_hart > 0);
-        assert!(guests_per_hart < (1 << guest_index_bits));
-        assert!(guests_per_hart <= MAX_GUEST_FILES);
+        if guests_per_hart == 0
+            || guests_per_hart >= (1 << guest_index_bits)
+            || guests_per_hart > MAX_GUEST_FILES
+        {
+            return Err(Error::InvalidGuestsPerHart(guests_per_hart));
+        }
 
         // The hart index bits immediately follow the guest index bits.
         let hart_index_bits = imsic_node
@@ -394,10 +396,13 @@ impl Imsic {
             .find(|p| p.name() == "riscv,group-index-shift")
             .and_then(|p| p.value_u32().next())
             .unwrap_or(MIN_GROUP_SHIFT);
-        assert!(group_index_shift < u64::BITS);
-        assert!(group_index_shift >= MIN_GROUP_SHIFT);
         let pfn_shift = (PageSize::Size4k as u64).ilog2();
-        assert!(group_index_shift >= pfn_shift + hart_index_bits + guest_index_bits);
+        if (group_index_shift + group_index_bits) >= u64::BITS
+            || group_index_shift < MIN_GROUP_SHIFT
+            || group_index_shift < (pfn_shift + hart_index_bits + guest_index_bits)
+        {
+            return Err(Error::InvalidGroupIndexShift(group_index_shift));
+        }
 
         // Now match up interrupt files to CPUs. The "hart index" for a CPU is the order in which
         // its interrupt appears in 'interrupt-parents'.
@@ -413,26 +418,36 @@ impl Imsic {
         let mut regs = imsic_node
             .props()
             .find(|p| p.name() == "reg")
-            .expect("No 'reg' property in IMSIC node")
+            .ok_or(Error::MissingProperty("reg"))?
             .value_u64();
+        if regs.len() % 2 != 0 {
+            return Err(Error::InvalidMmioRegionCount(regs.len()));
+        }
         let mut mmio_regions = ArrayVec::new();
         let mut per_cpu_state = ArrayVec::new();
         while let Some(region_base_addr) = regs.next() {
-            let region_base_addr = PageAddr::new(RawAddr::supervisor(region_base_addr)).unwrap();
+            let region_base_addr = PageAddr::new(RawAddr::supervisor(region_base_addr))
+                .ok_or(Error::MisalignedMmioRegion(region_base_addr))?;
+            // Unwrap ok, we've guaranteed there are an even number of `reg` cells.
             let region_size = regs.next().unwrap();
-            assert_eq!(region_size % per_hart_size, 0);
+            if region_size % per_hart_size != 0 {
+                return Err(Error::MisalignedMmioRegion(region_base_addr.bits()));
+            }
             let harts_in_region = region_size / per_hart_size;
 
             for i in 0..harts_in_region {
                 // Each 'interrupts-extended' property is of the from "<phandle> <interrupt-id>".
                 // The phandle refers to the CPU's 'interrupt-controller' node, and the interrupt
                 // ID should always be the supervisor external interrupt.
-                let cpu_intc_phandle = interrupts.next().unwrap();
-                let cpu_int = interrupts.next().unwrap();
-                assert_eq!(cpu_int, sie::sext.shift as u32);
+                let cpu_intc_phandle = interrupts.next().ok_or(Error::TooManyInterruptFiles)?;
+                let cpu_int = interrupts.next().ok_or(Error::TooManyInterruptFiles)?;
+                if cpu_int != (sie::sext.shift as u32) {
+                    return Err(Error::InvalidParentInterrupt(cpu_intc_phandle, cpu_int));
+                }
                 let cpu_id = CpuInfo::get()
                     .intc_phandle_to_cpu(cpu_intc_phandle)
-                    .unwrap();
+                    .ok_or(Error::InvalidParentInterrupt(cpu_intc_phandle, cpu_int))?;
+                // Unwrap ok since we must be page-aligned.
                 let cpu_base_addr = region_base_addr
                     .checked_add_pages(i * per_hart_size / PageSize::Size4k as u64)
                     .unwrap();
@@ -452,7 +467,9 @@ impl Imsic {
                 mmio_regions.push(ImsicMmioRegion::new(region_base_addr, region_size))
             };
         }
-        assert_eq!(per_cpu_state.len(), num_cpus);
+        if per_cpu_state.len() != num_cpus {
+            return Err(Error::MissingInterruptFiles);
+        }
 
         // Now make sure all MMIO regions match the expected geometry, and add them to the system
         // memory map.
@@ -461,7 +478,9 @@ impl Imsic {
             let masked_addr = mmio.base_addr().bits()
                 & !((1 << (pfn_shift + hart_index_bits + guest_index_bits)) - 1)
                 & !(((1 << group_index_bits) - 1) << group_index_shift);
-            assert_eq!(masked_addr, base_addr.bits());
+            if masked_addr != base_addr.bits() {
+                return Err(Error::InvalidGeometry);
+            }
 
             unsafe {
                 // We trust that the device-tree described the IMSIC topology correctly.
@@ -471,8 +490,8 @@ impl Imsic {
                         RawAddr::from(mmio.base_addr()),
                         mmio.size(),
                     )
-                    .unwrap();
-            }
+                    .map_err(Error::AddingMmioRegion)
+            }?;
         }
 
         let imsic = ImsicState {
@@ -490,6 +509,7 @@ impl Imsic {
         IMSIC.call_once(|| Self {
             inner: Mutex::new(imsic),
         });
+        Ok(())
     }
 
     /// Initializes the IMSIC-related CSRs on this CPU. Upon return, the IMSIC on this CPU is set

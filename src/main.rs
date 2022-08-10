@@ -44,7 +44,8 @@ use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, satp, scounteren};
 use riscv_regs::{
-    Exception, Interrupt, LocalRegisterCopy, ReadWriteable, SatpHelpers, Writeable, CSR,
+    Exception, Interrupt, LocalRegisterCopy, ReadWriteable, SatpHelpers, Writeable, CSR, CSR_CYCLE,
+    CSR_TIME,
 };
 use s_mode_utils::abort::abort;
 use smp::PerCpu;
@@ -390,8 +391,9 @@ pub fn setup_csrs() {
     hie.modify(Interrupt::VirtualSupervisorExternal.to_hie_field().unwrap());
     CSR.hie.set(hie.get());
 
-    // Make counters available to guests.
-    CSR.hcounteren.set(0xffff_ffff_ffff_ffff);
+    // TODO: Handle virtualization of timer/htimedelta (see issue #46)
+    // Enable access to timer for now.
+    CSR.hcounteren.set(1 << (CSR_TIME - CSR_CYCLE));
 
     // Make the basic counters available to any of our U-mode tasks.
     let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);

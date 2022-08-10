@@ -223,38 +223,12 @@ impl ImsicCpuState {
     }
 }
 
-/// A contiguous region of IMSICs. Usually one per IMSIC group in the system.
-#[derive(Clone, Copy, Debug)]
-struct ImsicMmioRegion {
-    base_addr: SupervisorPageAddr,
-    size: u64,
-}
-
-impl ImsicMmioRegion {
-    /// Creates a new IMSIC MMIO region at [`base_addr`, `base_addr` + `size`).
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that the specified address ranges maps to an IMSIC MMIO region.
-    unsafe fn new(base_addr: SupervisorPageAddr, size: u64) -> Self {
-        Self { base_addr, size }
-    }
-
-    fn base_addr(&self) -> SupervisorPageAddr {
-        self.base_addr
-    }
-
-    fn size(&self) -> u64 {
-        self.size
-    }
-}
-
 /// Holds the global state of the IMSICs across the system.
 struct ImsicState {
     per_cpu_state: ArrayVec<ImsicCpuState, MAX_CPUS>,
     hart_index_map: ArrayVec<usize, MAX_CPUS>,
-    mmio_regions: ArrayVec<ImsicMmioRegion, MAX_MMIO_REGIONS>,
-    geometry: SupervisorImsicGeometry,
+    mmio_regions: ArrayVec<SupervisorPageRange, MAX_MMIO_REGIONS>,
+    geometry: ImsicGeometry<SupervisorPhys>,
     interrupt_ids: u32,
     phandle: u32,
 }
@@ -473,10 +447,10 @@ impl Imsic {
                 hart_index += 1;
             }
 
-            unsafe {
-                // We trust that the device-tree described the IMSIC topology correctly.
-                mmio_regions.push(ImsicMmioRegion::new(region_base_addr, region_size))
-            };
+            mmio_regions.push(PageAddrRange::new(
+                region_base_addr,
+                PageSize::num_4k_pages(region_size),
+            ));
         }
         if per_cpu_state.len() != num_cpus {
             return Err(Error::MissingInterruptFiles);
@@ -489,8 +463,8 @@ impl Imsic {
                 mem_map
                     .add_mmio_region(
                         DeviceMemType::Imsic,
-                        RawAddr::from(mmio.base_addr()),
-                        mmio.size(),
+                        mmio.base().into(),
+                        mmio.length_bytes(),
                     )
                     .map_err(Error::AddingMmioRegion)
             }?;
@@ -554,7 +528,7 @@ impl Imsic {
 
     /// Returns the base address of the system's IMSIC hierarchy.
     pub fn base_addr(&self) -> SupervisorPageAddr {
-        self.inner.lock().mmio_regions[0].base_addr()
+        self.inner.lock().mmio_regions[0].base()
     }
 
     /// Returns the base address of the supervisor level interrupt file for the given CPU. Can
@@ -647,10 +621,10 @@ impl Imsic {
         // Now add a 'reg' entry for each MMIO region. We replicate the same IMSIC topology, except
         // shifted so that it starts at `guest_base_addr` in the address space.
         let mut regs = ArrayVec::<u64, { 2 * MAX_MMIO_REGIONS }>::new();
-        let offset = guest_base_addr.bits() - imsic.mmio_regions[0].base_addr().bits();
+        let offset = guest_base_addr.bits() - imsic.mmio_regions[0].base().bits();
         for mmio in imsic.mmio_regions.iter() {
-            regs.push(mmio.base_addr().bits() + offset);
-            regs.push(mmio.size());
+            regs.push(mmio.base().bits() + offset);
+            regs.push(mmio.length_bytes());
         }
         imsic_node.add_prop("reg")?.set_value_u64(&regs)?;
 

@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::{mem::size_of, ops::Deref, ops::DerefMut};
-use drivers::{CpuId, CpuInfo, ImsicGuestId};
+use drivers::{imsic::ImsicGuestId, CpuId, CpuInfo};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};

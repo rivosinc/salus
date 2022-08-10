@@ -11,7 +11,7 @@ use page_tracking::{HwMemMap, PageTracker};
 use riscv_pages::*;
 use spin::{Mutex, Once};
 
-use crate::Imsic;
+use crate::imsic::Imsic;
 
 use super::address::*;
 use super::bus::PciBus;

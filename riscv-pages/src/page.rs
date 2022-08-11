@@ -11,9 +11,11 @@ use crate::{
     AddressSpace, GuestPhys, GuestVirt, MemType, PageOwnerId, SupervisorPhys, SupervisorVirt,
 };
 
-// PFN constants, currently sv48x4 hard-coded
+/// The base page size is always 4kB.
+pub const PFN_SHIFT: u64 = 12;
+
+// PFN width, currently sv48x4 hard-coded
 // TODO parameterize based on address mode
-const PFN_SHIFT: u64 = 12;
 const PFN_BITS: u64 = 44;
 const PFN_MASK: u64 = (1 << PFN_BITS) - 1;
 

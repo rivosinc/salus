@@ -396,7 +396,7 @@ impl Imsic {
             .props()
             .find(|p| p.name() == "riscv,hart-index-bits")
             .and_then(|p| p.value_u32().next())
-            .unwrap_or_else(|| num_cpus.next_power_of_two().log2());
+            .unwrap_or_else(|| num_cpus.next_power_of_two().ilog2());
 
         // If there are multiple groups, their index must be in the upper 8 bits of the address.
         let group_index_bits = imsic_node
@@ -411,7 +411,7 @@ impl Imsic {
             .unwrap_or(MIN_GROUP_SHIFT);
         assert!(group_index_shift < u64::BITS);
         assert!(group_index_shift >= MIN_GROUP_SHIFT);
-        let pfn_shift = (PageSize::Size4k as u64).log2();
+        let pfn_shift = (PageSize::Size4k as u64).ilog2();
         assert!(group_index_shift >= pfn_shift + hart_index_bits + guest_index_bits);
 
         // Now match up interrupt files to CPUs. The "hart index" for a CPU is the order in which

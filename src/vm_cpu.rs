@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::{mem::size_of, ops::Deref, ops::DerefMut};
-use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, CpuId, CpuInfo};
+use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, pmu, CpuId, CpuInfo};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};
@@ -17,7 +17,10 @@ use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
     PrivilegeLevel, Readable, Trap, Writeable, CSR,
 };
-use sbi::{SbiMessage, SbiReturnType, TvmMmioOpCode};
+use sbi::{
+    Error as SbiError, PmuCounterConfigFlags, PmuCounterStopFlags, PmuEventType,
+    Result as SbiResult, SbiMessage, SbiReturnType, TvmMmioOpCode,
+};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
@@ -94,6 +97,219 @@ pub struct VmCpuTrapState {
     pub stval: u64,
     pub htval: u64,
     pub htinst: u64,
+}
+
+#[derive(Default, Copy, Clone)]
+#[allow(dead_code)]
+struct CounterState {
+    value: u64,
+    config_flags: PmuCounterConfigFlags,
+    event_type: PmuEventType,
+    event_data: u64,
+}
+
+#[derive(Copy, Clone)]
+enum PmuCounterState {
+    NotConfigured,
+    Configured(CounterState),
+    Started(CounterState),
+}
+
+impl Default for PmuCounterState {
+    fn default() -> Self {
+        Self::NotConfigured
+    }
+}
+
+pub struct VmPmuState {
+    // Stores information about the current state of PMU counters.
+    counter_state: [PmuCounterState; drivers::pmu::MAX_HARDWARE_COUNTERS],
+}
+
+impl Default for VmPmuState {
+    fn default() -> Self {
+        Self {
+            counter_state: [PmuCounterState::default(); drivers::pmu::MAX_HARDWARE_COUNTERS],
+        }
+    }
+}
+
+#[derive(Default, Copy, Clone)]
+struct CounterMaskIter {
+    counter_index: u64,
+    counter_mask: u64,
+    mask_index: u64,
+}
+
+impl CounterMaskIter {
+    fn new(counter_index: u64, counter_mask: u64) -> Self {
+        Self {
+            counter_index,
+            counter_mask,
+            mask_index: 0,
+        }
+    }
+}
+
+// Convenience iterator to return counter_state indexes relative to counter_index
+// if the counter_mask bit is set (assumes sanitized input).
+impl Iterator for CounterMaskIter {
+    type Item = usize;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.counter_mask == 0 {
+                break None;
+            }
+            let result = self.counter_index + self.mask_index;
+            let mask_bit_set = self.counter_mask & (1 << self.mask_index);
+            self.counter_mask &= !(1 << self.mask_index);
+            self.mask_index += 1;
+            if mask_bit_set != 0 {
+                break Some(result as usize);
+            }
+        }
+    }
+}
+
+impl VmPmuState {
+    /// Updates internal state for PMU counters.
+    /// This should be called following a successful SBI call to configure counters.
+    pub fn update_configured_counter(
+        &mut self,
+        counter_index: u64,
+        config_flags: PmuCounterConfigFlags,
+        event_type: PmuEventType,
+        event_data: u64,
+    ) -> SbiResult<()> {
+        use PmuCounterState::*;
+        let new_state = CounterState {
+            config_flags,
+            event_type,
+            event_data,
+            value: 0,
+        };
+        let pmu_info = pmu::PmuInfo::get()?;
+        // Ensure that platform configuration returned a valid counter index.
+        pmu_info
+            .get_counter_info(counter_index)
+            .map_err(|_| SbiError::NotSupported)?;
+        let state = &mut self.counter_state[counter_index as usize];
+        match state {
+            // If skip_match is set, counter must already be configured
+            Configured(c) | Started(c) if config_flags.is_skip_match() => {
+                if config_flags.is_auto_start() {
+                    *state = Started(*c);
+                }
+                Ok(())
+            }
+            NotConfigured if !config_flags.is_skip_match() => {
+                *state = if config_flags.is_auto_start() {
+                    Started(new_state)
+                } else {
+                    Configured(new_state)
+                };
+                Ok(())
+            }
+            _ => Err(SbiError::InvalidParam),
+        }
+    }
+
+    /// Updates internal state for PMU counters. Assumes a sanitized counter_index and counter_mask.
+    /// This should be called following a successful SBI call to start counters.
+    pub fn update_started_counters(&mut self, counter_index: u64, counter_mask: u64) {
+        use PmuCounterState::*;
+        let bitmask_iter = CounterMaskIter::new(counter_index, counter_mask);
+        for i in bitmask_iter {
+            if let Configured(c) = self.counter_state[i] {
+                self.counter_state[i] = Started(c);
+            }
+        }
+    }
+
+    /// Updates internal state for PMU counters. Assumes a sanitized counter_index and counter_mask.
+    /// This should be called following a successful SBI call to stop counters.
+    pub fn update_stopped_counters(
+        &mut self,
+        counter_index: u64,
+        counter_mask: u64,
+        stop_flags: PmuCounterStopFlags,
+    ) {
+        use PmuCounterState::*;
+        let bitmask_iter = CounterMaskIter::new(counter_index, counter_mask);
+        for i in bitmask_iter {
+            let state = &mut self.counter_state[i];
+            match state {
+                // Deliberately more permissive since the implementation permits
+                // operations even on stopped counters (example: stop_flag_reset).
+                Configured(c) | Started(c) => {
+                    if stop_flags.is_reset_flag() {
+                        *state = NotConfigured;
+                    } else {
+                        *state = Configured(*c);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Returns a filtered counter_mask if the PMU counter range can be started.
+    pub fn get_startable_counter_range(
+        &self,
+        counter_index: u64,
+        counter_mask: u64,
+    ) -> SbiResult<u64> {
+        use PmuCounterState::*;
+        let pmu_info = pmu::PmuInfo::get()?;
+        let counter_mask = pmu_info.filter_counter_mask(counter_index, counter_mask)?;
+        let mut bitmask_iter = CounterMaskIter::new(counter_index, counter_mask);
+        bitmask_iter
+            .find(|i| matches!(self.counter_state[*i], Configured(_)))
+            .map_or_else(|| Err(SbiError::InvalidParam), |_| Ok(counter_mask))
+    }
+
+    /// Returns a filtered counter mask if the PMU counter range can be stopped.
+    pub fn get_stoppable_counter_range(
+        &self,
+        counter_index: u64,
+        counter_mask: u64,
+    ) -> SbiResult<u64> {
+        let pmu_info = pmu::PmuInfo::get()?;
+        let counter_mask = pmu_info.filter_counter_mask(counter_index, counter_mask)?;
+        // The current PMU driver attempts to stop counters before configuration since some platform
+        // counters are automatically started. If we check for configured counters at this point,
+        // the subsequent call to start counters will fail with an AlreadyStarted error.
+        Ok(counter_mask)
+    }
+
+    /// Returns a filtered counter_mask if the PMU counter range can be configured.
+    pub fn get_configurable_counter_range(
+        &self,
+        counter_index: u64,
+        counter_mask: u64,
+        config_flags: PmuCounterConfigFlags,
+    ) -> SbiResult<u64> {
+        use PmuCounterState::*;
+        let pmu_info = pmu::PmuInfo::get()?;
+        let counter_mask = pmu_info.filter_counter_mask(counter_index, counter_mask)?;
+        if !config_flags.is_skip_match() {
+            let mut bitmask_iter = CounterMaskIter::new(counter_index, counter_mask);
+            bitmask_iter
+                .find(|i| matches!(self.counter_state[*i], NotConfigured))
+                .map_or_else(|| Err(SbiError::InvalidParam), |_| Ok(counter_mask))
+        } else {
+            // If skip_match is set, the counter must already be configured
+            let state = self
+                .counter_state
+                .get(counter_index as usize)
+                .ok_or(SbiError::InvalidParam)?;
+            if matches!(state, Started(_) | Configured(_)) {
+                Ok(counter_mask)
+            } else {
+                Err(SbiError::InvalidParam)
+            }
+        }
+    }
 }
 
 /// (v)CPU register state that must be saved or restored when entering/exiting a VM or switching
@@ -655,6 +871,7 @@ pub struct VmCpu {
     state: VmCpuState,
     virt_regs: VirtualRegisters,
     imsic_location: Option<ImsicLocation>,
+    pmu_state: VmPmuState,
     current_cpu: Option<CurrentCpu>,
     // TODO: interrupt_file should really be part of CurrentCpu, but we have no way to migrate it
     // at present.
@@ -697,6 +914,7 @@ impl VmCpu {
             pending_mmio_op: None,
             interrupt_file: None,
             guest_id,
+            pmu_state: VmPmuState::default(),
         }
     }
 
@@ -788,6 +1006,10 @@ impl VmCpu {
         }
 
         Ok(ActiveVmCpu::restore_from(self, vm_pages, parent_vcpu))
+    }
+
+    pub fn pmu(&mut self) -> &mut VmPmuState {
+        &mut self.pmu_state
     }
 }
 

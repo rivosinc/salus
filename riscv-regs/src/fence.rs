@@ -37,6 +37,13 @@ pub fn mmio_rmb() {
     unsafe { asm!("fence i,r") };
 }
 
+/// Hint that the CPU's rate of instruction retirement should be temporarily paused or reduced.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub fn pause() {
+    // TODO: Replace with `pause` once the toolchain supports it.
+    unsafe { asm!(".word 0x0100000f") };
+}
+
 // Make fence instructions a no-op for testing.
 #[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
 pub fn dma_wmb() {}
@@ -46,3 +53,5 @@ pub fn dma_rmb() {}
 pub fn mmio_wmb() {}
 #[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
 pub fn mmio_rmb() {}
+#[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
+pub fn pause() {}

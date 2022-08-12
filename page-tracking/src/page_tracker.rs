@@ -356,10 +356,21 @@ impl PageTracker {
     ) -> bool {
         let mut page_tracker = self.inner.lock();
         if let Ok(info) = page_tracker.get(addr) {
-            // We lazily update the
             info.owner() == Some(owner)
                 && info.mem_type() == mem_type
                 && (info.state() == PageState::Converted || info.is_convertible(tlb_version))
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if and only if `addr` is a `VmState` page owned by `owner`.
+    pub fn is_internal_state_page(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> bool {
+        let mut page_tracker = self.inner.lock();
+        if let Ok(info) = page_tracker.get(addr) {
+            info.owner() == Some(owner)
+                && info.mem_type() == MemType::Ram
+                && info.state() == PageState::VmState
         } else {
             false
         }

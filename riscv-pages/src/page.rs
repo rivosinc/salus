@@ -45,11 +45,25 @@ impl PageSize {
     }
 
     /// Rounds up the quantity to the nearest multiple of this page size.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use riscv_pages::PageSize;
+    /// assert_eq!(PageSize::Size4k.round_up(8000), 8192)
+    /// ```
     pub fn round_up(&self, val: u64) -> u64 {
         (val + *self as u64 - 1) & !(*self as u64 - 1)
     }
 
     /// Rounds down the quantity to the nearest multiple of this page size.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use riscv_pages::PageSize;
+    /// assert_eq!(PageSize::Size4k.round_down(8000), 4096)
+    /// ```
     pub fn round_down(&self, val: u64) -> u64 {
         val & !(*self as u64 - 1)
     }

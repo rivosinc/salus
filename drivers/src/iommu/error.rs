@@ -51,6 +51,12 @@ pub enum Error {
     DeviceAlreadyEnabled(DeviceId),
     /// The device does not have an active device context.
     DeviceNotEnabled(DeviceId),
+    /// The head/tail pointer is out of bounds for the queue.
+    InvalidQueuePointer(usize),
+    /// No more elements can be pushed to the queue.
+    QueueFull,
+    /// No elements are available to be popped from the queue.
+    QueueEmpty,
 }
 
 /// Holds results for IOMMU operations.

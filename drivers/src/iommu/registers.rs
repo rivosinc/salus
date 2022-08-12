@@ -28,6 +28,23 @@ register_bitfields![u64,
         Busy OFFSET(59) NUMBITS(1),
         Mode OFFSET(60) NUMBITS(4),
     ],
+
+    pub QueueBase [
+        Log2SzMinus1 OFFSET(0) NUMBITS(5),
+        Ppn OFFSET(5) NUMBITS(44),
+    ],
+];
+
+register_bitfields![u32,
+    pub CqControl [
+        Enable OFFSET(0) NUMBITS(1),
+        InterruptEnable OFFSET(1) NUMBITS(1),
+        MemoryFault OFFSET(8) NUMBITS(1),
+        CommandTimeout OFFSET(9) NUMBITS(1),
+        CommandIllegal OFFSET(10) NUMBITS(1),
+        On OFFSET(16) NUMBITS(1),
+        Busy OFFSET(17) NUMBITS(1),
+    ],
 ];
 
 /// The IOMMU register set.
@@ -37,16 +54,16 @@ pub struct IommuRegisters {
     pub fctrl: ReadWrite<u32>,
     _reserved0: u32,
     pub ddtp: ReadWrite<u64, DirectoryPointer::Register>,
-    pub cqb: ReadWrite<u64>,
-    pub cqh: ReadWrite<u32>,
-    pub cqt: ReadOnly<u32>,
-    pub fqb: ReadWrite<u64>,
+    pub cqb: ReadWrite<u64, QueueBase::Register>,
+    pub cqh: ReadOnly<u32>,
+    pub cqt: ReadWrite<u32>,
+    pub fqb: ReadWrite<u64, QueueBase::Register>,
     pub fqh: ReadWrite<u32>,
     pub fqt: ReadOnly<u32>,
-    pub pqb: ReadWrite<u64>,
+    pub pqb: ReadWrite<u64, QueueBase::Register>,
     pub pqh: ReadWrite<u32>,
     pub pqt: ReadOnly<u32>,
-    pub cqcsr: ReadWrite<u32>,
+    pub cqcsr: ReadWrite<u32, CqControl::Register>,
     pub fqcsr: ReadWrite<u32>,
     pub pqcsr: ReadWrite<u32>,
     pub ipsr: ReadWrite<u32>,

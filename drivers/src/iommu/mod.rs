@@ -6,6 +6,7 @@ mod core;
 mod device_directory;
 mod error;
 mod msi_page_table;
+mod queue;
 mod registers;
 
 pub use self::core::Iommu;
@@ -17,6 +18,7 @@ pub use msi_page_table::MsiPageTable;
 #[cfg(test)]
 mod tests {
     use super::device_directory::*;
+    use super::queue::*;
     use super::*;
     use crate::imsic::*;
     use page_tracking::{HwMemMapBuilder, HypPageAlloc, PageList, PageTracker};
@@ -191,5 +193,26 @@ mod tests {
             PageOwnerId::new(5).unwrap(),
         );
         assert!(ddt.enable_device(dev, &pt, &bad_msi_pt, gscid).is_err());
+    }
+
+    #[test]
+    fn command_queue() {
+        let (page_tracker, mut pages) = stub_mem();
+        let queue_page = page_tracker
+            .assign_page_for_internal_state(pages.pop().unwrap(), PageOwnerId::host())
+            .unwrap();
+        let mut cq = CommandQueue::new(queue_page);
+        assert!(cq.is_empty());
+        assert!(cq.push(Command::iotinval_gvma(None, None)).is_ok());
+        assert!(cq.push(Command::iodir_inval_ddt(DeviceId::new(2))).is_ok());
+        assert!(cq.push(Command::iofence()).is_ok());
+        assert!(!cq.is_empty());
+        assert_eq!(cq.tail(), 3);
+        assert!(cq.update_head(7).is_err());
+        assert!(cq.update_head(3).is_ok());
+        assert!(cq.push(Command::iodir_inval_ddt(None)).is_ok());
+        assert!(cq.push(Command::iofence()).is_ok());
+        assert!(cq.update_head(1).is_err());
+        assert!(cq.update_head(4).is_ok());
     }
 }

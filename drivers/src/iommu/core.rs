@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use riscv_pages::*;
-use riscv_regs::mmio_wmb;
-use spin::Once;
+use riscv_regs::{mmio_wmb, pause};
+use spin::{Mutex, Once};
 use tock_registers::interfaces::{Readable, Writeable};
 use tock_registers::LocalRegisterCopy;
 
 use super::device_directory::*;
 use super::error::{Error, Result};
+use super::queue::*;
 use super::registers::*;
 use crate::pci::{self, PciArenaId, PcieRoot};
 
@@ -17,6 +18,7 @@ use crate::pci::{self, PciArenaId, PcieRoot};
 pub struct Iommu {
     _arena_id: PciArenaId,
     registers: &'static mut IommuRegisters,
+    _command_queue: Mutex<CommandQueue>,
     _ddt: DeviceDirectory<Ddt3Level>,
 }
 
@@ -68,6 +70,19 @@ impl Iommu {
             return Err(Error::MissingMsiSupport);
         }
 
+        // Initialize the command queue.
+        let command_queue = CommandQueue::new(get_page().ok_or(Error::OutOfPages)?);
+        let mut cqb = LocalRegisterCopy::<u64, QueueBase::Register>::new(0);
+        cqb.modify(QueueBase::Log2SzMinus1.val(command_queue.capacity().ilog2() as u64 - 1));
+        cqb.modify(QueueBase::Ppn.val(command_queue.base_address().pfn().bits()));
+        registers.cqb.set(cqb.get());
+        registers.cqcsr.write(CqControl::Enable.val(1));
+        while !registers.cqcsr.is_set(CqControl::On) {
+            pause();
+        }
+
+        // TODO: Set up fault queue.
+
         // Set up an initial device directory table.
         let ddt = DeviceDirectory::new(get_page().ok_or(Error::OutOfPages)?);
         for dev in pci.devices() {
@@ -88,6 +103,7 @@ impl Iommu {
         let iommu = Iommu {
             _arena_id: arena_id,
             registers,
+            _command_queue: Mutex::new(command_queue),
             _ddt: ddt,
         };
         IOMMU.call_once(|| iommu);

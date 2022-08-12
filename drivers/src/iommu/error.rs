@@ -4,7 +4,7 @@
 
 use riscv_pages::SupervisorPageAddr;
 
-use super::device_directory::DeviceId;
+use super::device_directory::{DeviceId, GscId};
 use crate::imsic::ImsicLocation;
 use crate::pci::{Address, PciError};
 
@@ -57,6 +57,14 @@ pub enum Error {
     QueueFull,
     /// No elements are available to be popped from the queue.
     QueueEmpty,
+    /// Ran out of available GSCIDs.
+    OutOfGscIds,
+    /// The supplied GSCID was invalid.
+    InvalidGscId(GscId),
+    /// Attempted to free a GSCID that's not currently allocated.
+    GscIdAlreadyFree(GscId),
+    /// Attempted to free a GSCID that's currently being used for translation.
+    GscIdInUse(GscId),
 }
 
 /// Holds results for IOMMU operations.

@@ -2,9 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// TODO: Remove once hooked up to the public IOMMU interface.
-#![allow(dead_code)]
-
 use core::marker::PhantomData;
 use core::mem::size_of;
 use data_model::{DataInit, VolatileMemory, VolatileSlice};
@@ -76,6 +73,7 @@ impl<T: DataInit, Q> Queue<T, Q> {
     }
 
     /// Returns the head index of the queue.
+    #[allow(dead_code)]
     pub fn head(&self) -> usize {
         self.head
     }
@@ -116,6 +114,8 @@ impl<T: DataInit> Queue<T, Producer> {
     }
 }
 
+// TODO: Remove once we have support for the fault queue in place.
+#[allow(dead_code)]
 impl<T: DataInit> Queue<T, Consumer> {
     /// Updates the tail pointer of the queue to `tail`. Expected to be used to update the queue's
     /// software tail pointer with a tail pointer read from an IOMMU register.

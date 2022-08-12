@@ -2,9 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// TODO: Remove once hooked up to the public IOMMU interface.
-#![allow(dead_code)]
-
 use assertions::const_assert;
 use core::marker::PhantomData;
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
@@ -392,7 +389,7 @@ impl<D: DirectoryMode> DeviceDirectory<D> {
         gscid: GscId,
     ) -> Result<()> {
         if pt.page_owner_id() != msi_pt.owner() {
-            return Err(Error::PageTableOwnerMismatch);
+            return Err(Error::OwnerMismatch);
         }
         let mut inner = self.inner.lock();
         let entry = inner

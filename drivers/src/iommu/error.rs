@@ -43,8 +43,8 @@ pub enum Error {
     NotIntermediateTable,
     /// Unable to map a PCI BDF address to an IOMMU device ID.
     PciAddressTooLarge(Address),
-    /// Mismatch between MSI and CPU page table owners.
-    PageTableOwnerMismatch,
+    /// Mismatch between page table and device ownership.
+    OwnerMismatch,
     /// No device context found.
     DeviceNotFound(DeviceId),
     /// The device already has an active device context.

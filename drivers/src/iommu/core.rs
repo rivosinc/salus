@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{mmio_wmb, pause};
 use spin::{Mutex, Once};
@@ -10,14 +11,15 @@ use tock_registers::LocalRegisterCopy;
 
 use super::device_directory::*;
 use super::error::{Error, Result};
+use super::msi_page_table::MsiPageTable;
 use super::queue::*;
 use super::registers::*;
-use crate::pci::{self, PciArenaId, PcieRoot};
+use crate::pci::{self, PciArenaId, PciDevice, PcieRoot};
 
 // Tracks the state of an allocated global soft-context ID (GSCID).
 #[derive(Clone, Copy, Debug)]
 struct GscIdState {
-    _owner: PageOwnerId,
+    owner: PageOwnerId,
     ref_count: usize,
 }
 
@@ -32,8 +34,8 @@ const MAX_GSCIDS: usize = 64;
 pub struct Iommu {
     _arena_id: PciArenaId,
     registers: &'static mut IommuRegisters,
-    _command_queue: Mutex<CommandQueue>,
-    _ddt: DeviceDirectory<Ddt3Level>,
+    command_queue: Mutex<CommandQueue>,
+    ddt: DeviceDirectory<Ddt3Level>,
     gscids: Mutex<[Option<GscIdState>; MAX_GSCIDS]>,
 }
 
@@ -118,8 +120,8 @@ impl Iommu {
         let iommu = Iommu {
             _arena_id: arena_id,
             registers,
-            _command_queue: Mutex::new(command_queue),
-            _ddt: ddt,
+            command_queue: Mutex::new(command_queue),
+            ddt,
             gscids: Mutex::new([None; MAX_GSCIDS]),
         };
         IOMMU.call_once(|| iommu);
@@ -144,7 +146,7 @@ impl Iommu {
             .position(|g| g.is_none())
             .ok_or(Error::OutOfGscIds)?;
         let state = GscIdState {
-            _owner: owner,
+            owner,
             ref_count: 0,
         };
         gscids[next] = Some(state);
@@ -168,6 +170,91 @@ impl Iommu {
                 *state = None;
             }
         }
+        Ok(())
+    }
+
+    /// Enables DMA for the given PCI device, using `pt` for 2nd-stage and `msi_pt` for MSI
+    /// translation.
+    pub fn attach_pci_device<T: GuestStagePagingMode>(
+        &self,
+        dev: &mut PciDevice,
+        pt: &GuestStagePageTable<T>,
+        msi_pt: &MsiPageTable,
+        gscid: GscId,
+    ) -> Result<()> {
+        let dev_id = DeviceId::try_from(dev.info().address())?;
+        // Make sure the GSCID is valid and that it matches up with the device and page table
+        // owner.
+        let mut gscids = self.gscids.lock();
+        let mut state = gscids
+            .get_mut(gscid.bits() as usize)
+            .and_then(|g| g.as_mut())
+            .ok_or(Error::InvalidGscId(gscid))?;
+        if pt.page_owner_id() != state.owner
+            || msi_pt.owner() != state.owner
+            || dev.owner() != Some(state.owner)
+        {
+            return Err(Error::OwnerMismatch);
+        }
+        self.ddt.enable_device(dev_id, pt, msi_pt, gscid)?;
+        state.ref_count += 1;
+        Ok(())
+    }
+
+    /// Disables DMA translation for the given PCI device.
+    pub fn detach_pci_device(&self, dev: &mut PciDevice, gscid: GscId) -> Result<()> {
+        let dev_id = DeviceId::try_from(dev.info().address())?;
+        {
+            // Verify that the GSCID is valid and that it matches up with the device owner.
+            let mut gscids = self.gscids.lock();
+            let mut state = gscids
+                .get_mut(gscid.bits() as usize)
+                .and_then(|g| g.as_mut())
+                .ok_or(Error::InvalidGscId(gscid))?;
+            if dev.owner() != Some(state.owner) {
+                return Err(Error::OwnerMismatch);
+            }
+            self.ddt.disable_device(dev_id)?;
+            // Drop our reference to the GSCID used for the device.
+            state.ref_count -= 1;
+        }
+        // Flush translation caches for the device we just disabled.
+        let commands = [Command::iodir_inval_ddt(Some(dev_id)), Command::iofence()];
+        // Unwrap ok: we must have room for 2 commands in the CQ since we synchronously wait on
+        // commands to finish.
+        self.submit_commands_sync(&commands).unwrap();
+        Ok(())
+    }
+
+    /// Synchronizes the IOMMU's translation caches with updates made to the 2nd-stage and MSI
+    /// page tables identified by `gscid`. If `addr` is not `None`, only flushes translations
+    /// for `addr`.
+    pub fn fence(&self, gscid: GscId, addr: Option<GuestPageAddr>) {
+        let commands = [
+            Command::iotinval_gvma(Some(gscid), addr),
+            Command::iofence(),
+        ];
+        // Unwrap ok: we must have room for 2 commands in the CQ since we synchronously wait on
+        // commands to finish.
+        self.submit_commands_sync(&commands).unwrap();
+    }
+
+    // Posts the commands in `commands` to the CQ, synchronously waiting for their completion.
+    fn submit_commands_sync(&self, commands: &[Command]) -> Result<()> {
+        let mut cq = self.command_queue.lock();
+        for &cmd in commands.iter() {
+            cq.push(cmd)?;
+        }
+        // Make sure writes to the CQ have completed before we make them visible to HW.
+        mmio_wmb();
+        let tail = cq.tail() as u32;
+        self.registers.cqt.set(tail);
+        while self.registers.cqh.get() != tail {
+            // TODO: timeout?
+            pause();
+        }
+        // Unwrap ok since we're setting head == tail.
+        cq.update_head(tail as usize).unwrap();
         Ok(())
     }
 }

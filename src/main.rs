@@ -509,7 +509,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         hyp_mem.take_pages_for_host_state(1).into_iter().next()
     }) {
         Ok(_) => {
-            println!("Found RISC-V IOMMU version 0x{:x}", Iommu::get().version());
+            println!(
+                "Found RISC-V IOMMU version 0x{:x}",
+                Iommu::get().unwrap().version()
+            );
         }
         Err(e) => {
             println!("Failed to probe IOMMU: {:?}", e);

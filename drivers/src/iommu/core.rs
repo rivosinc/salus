@@ -94,10 +94,9 @@ impl Iommu {
         Ok(())
     }
 
-    /// Gets a reference to the `Iommu` singleton. Panics if `Iommu::probe_from()` has not yet
-    /// been called to initialize it.
-    pub fn get() -> &'static Self {
-        IOMMU.get().unwrap()
+    /// Gets a reference to the `Iommu` singleton.
+    pub fn get() -> Option<&'static Self> {
+        IOMMU.get()
     }
 
     /// Returns the version of this IOMMU device.

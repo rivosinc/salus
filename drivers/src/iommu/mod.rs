@@ -24,10 +24,45 @@ mod tests {
     use page_tracking::{HwMemMapBuilder, HypPageAlloc, PageList, PageTracker};
     use riscv_page_tables::{GuestStagePageTable, PagingMode, Sv48x4};
     use riscv_pages::*;
+    use std::marker::PhantomData;
 
     const IMSIC_START: u64 = 0x2800_0000;
     const IMSIC_SIZE: u64 = 0x0010_0000;
     const GUEST_IMSIC_START: u64 = 0x3800_0000;
+
+    struct StubImsicPage<S: State> {
+        addr: SupervisorPageAddr,
+        state: PhantomData<S>,
+    }
+
+    impl<S: State> PhysPage for StubImsicPage<S> {
+        unsafe fn new_with_size(addr: SupervisorPageAddr, _size: PageSize) -> Self {
+            Self {
+                addr,
+                state: PhantomData,
+            }
+        }
+
+        fn addr(&self) -> SupervisorPageAddr {
+            self.addr
+        }
+
+        fn size(&self) -> PageSize {
+            PageSize::Size4k
+        }
+
+        fn mem_type() -> MemType {
+            MemType::Mmio(DeviceMemType::Imsic)
+        }
+    }
+
+    impl ConvertedPhysPage for StubImsicPage<ConvertedClean> {
+        type DirtyPage = StubImsicPage<ConvertedClean>;
+    }
+    impl MappablePhysPage<MeasureOptional> for StubImsicPage<MappableClean> {}
+    impl AssignablePhysPage<MeasureOptional> for StubImsicPage<ConvertedClean> {
+        type MappablePage = StubImsicPage<MappableClean>;
+    }
 
     fn stub_mem() -> (PageTracker, PageList<Page<ConvertedClean>>) {
         const ONE_MEG: usize = 1024 * 1024;
@@ -124,7 +159,7 @@ mod tests {
         );
         let dest_addr = dest_geometry.location_to_addr(dest_loc).unwrap();
         // Not safe, just a test.
-        let imsic_page = unsafe { ImsicGuestPage::<ConvertedClean>::new(dest_addr) };
+        let imsic_page = unsafe { StubImsicPage::<ConvertedClean>::new(dest_addr) };
         page_tracker
             .assign_page_for_mapping(imsic_page, PageOwnerId::host())
             .unwrap();

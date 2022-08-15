@@ -70,7 +70,16 @@ impl ImsicInterruptId {
 /// A `PhysPage` implementation representing an IMSIC guest interrupt file page.
 pub struct ImsicGuestPage<S: State> {
     addr: SupervisorPageAddr,
+    location: ImsicLocation,
     state: PhantomData<S>,
+}
+
+impl<S: State> ImsicGuestPage<S> {
+    /// Returns the location of the IMSIC file that this page corresponds to in the physical IMSIC
+    /// geometry.
+    pub fn location(&self) -> ImsicLocation {
+        self.location
+    }
 }
 
 impl<S: State> PhysPage for ImsicGuestPage<S> {
@@ -81,8 +90,12 @@ impl<S: State> PhysPage for ImsicGuestPage<S> {
     /// The caller must ensure `addr` refers to a uniquely owned IMSIC guest interrupt file.
     unsafe fn new_with_size(addr: SupervisorPageAddr, size: PageSize) -> Self {
         assert_eq!(size, PageSize::Size4k);
+        // This page must refer to an IMSIC page, so it must have a valid location in the physical
+        // IMSIC geometry.
+        let location = Imsic::get().phys_geometry().addr_to_location(addr).unwrap();
         Self {
             addr,
+            location,
             state: PhantomData,
         }
     }

@@ -108,7 +108,7 @@ impl ImsicLocation {
 }
 
 /// Describes the layout of the IMSICs in a system.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImsicGeometry<AS: AddressSpace> {
     base_addr: PageAddr<AS>,
     group_index_bits: u32,

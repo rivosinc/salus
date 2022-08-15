@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::{mem::size_of, ops::Deref, ops::DerefMut};
-use drivers::{imsic::ImsicFileId, CpuId, CpuInfo};
+use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, CpuId, CpuInfo};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};
@@ -654,6 +654,7 @@ struct VirtualRegisters {
 pub struct VmCpu {
     state: VmCpuState,
     virt_regs: VirtualRegisters,
+    imsic_location: Option<ImsicLocation>,
     current_cpu: Option<CurrentCpu>,
     // TODO: interrupt_file should really be part of CurrentCpu, but we have no way to migrate it
     // at present.
@@ -691,6 +692,7 @@ impl VmCpu {
         Self {
             state,
             virt_regs: VirtualRegisters::default(),
+            imsic_location: None,
             current_cpu: None,
             pending_mmio_op: None,
             interrupt_file: None,
@@ -746,6 +748,16 @@ impl VmCpu {
             MmioLoad => self.virt_regs.mmio_load,
             MmioStore => self.virt_regs.mmio_store,
         }
+    }
+
+    /// Sets the location of this vCPU's virtualized IMSIC.
+    pub fn set_imsic_location(&mut self, imsic_location: ImsicLocation) {
+        self.imsic_location = Some(imsic_location);
+    }
+
+    /// Returns the location of this vCPU's virtualized IMSIC.
+    pub fn get_imsic_location(&self) -> Option<ImsicLocation> {
+        self.imsic_location
     }
 
     /// Sets the interrupt file for this vCPU.

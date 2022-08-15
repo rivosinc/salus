@@ -5,6 +5,7 @@
 use attestation::measurement::{AttestationManager, MeasurementIndex};
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
+use drivers::imsic::*;
 use page_tracking::collections::PageVec;
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
@@ -17,7 +18,7 @@ use riscv_regs::{
     hgatp, hstatus, DecodedInstruction, Exception, LocalRegisterCopy, PrivilegeLevel, Readable,
     RiscvCsrInterface, Writeable, CSR,
 };
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
 use crate::vm_cpu::VmCpus;
@@ -42,6 +43,7 @@ pub enum Error {
     SharedPageNotMapped,
     Measurement(attestation::Error),
     VmCreationFailed(crate::vm::Error),
+    ImsicGeometryAlreadySet,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -178,6 +180,8 @@ pub enum VmRegionType {
     Shared,
     /// Emulated MMIO region; accesses always cause a fault that is forwarded to the VM's host.
     Mmio,
+    /// IMSIC interrupt file pages.
+    Imsic,
 }
 
 /// A contiguous region of guest physical address space.
@@ -478,7 +482,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         measurement: &AttestationManager<D, H>,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
-        let mapper = to.map_pages(to_addr, count)?;
+        let mapper = to.map_pages(to_addr, count, VmRegionType::Confidential)?;
 
         // Make sure we can initialize the full set of pages before mapping them.
         let mut initialized_pages = LockedPageList::new(self.page_tracker.clone());
@@ -555,6 +559,9 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
                 Exception::GuestLoadPageFault | Exception::GuestStorePageFault => Mmio(fault_addr),
                 _ => Unmapped(exception),
             },
+            // TODO: Faults in an IMSIC region should report a separate fault type so that the host
+            // can "swap in" a vCPU currently using an MRIF.
+            Some(VmRegionType::Imsic) => Unmapped(exception),
             None => Unmapped(exception),
         }
     }
@@ -612,6 +619,7 @@ pub struct VmPages<T: GuestStagePagingMode, S = VmStateFinalized> {
     nesting: usize,
     root: GuestStagePageTable<T>,
     pte_pages: PtePagePool,
+    imsic_geometry: Once<GuestImsicGeometry>,
     phantom: PhantomData<S>,
 }
 
@@ -632,6 +640,11 @@ impl<T: GuestStagePagingMode, S> VmPages<T, S> {
         self.page_tracker.clone()
     }
 
+    /// Returns this VM's IMSIC geometry if it was set up for IMSIC virtualization.
+    pub fn imsic_geometry(&self) -> Option<GuestImsicGeometry> {
+        self.imsic_geometry.get().cloned()
+    }
+
     /// Add a page to be used for building the guest's page tables.
     /// Currently only supports 4k pages.
     pub fn add_pte_page(&self, page: Page<InternalClean>) -> Result<()> {
@@ -642,35 +655,16 @@ impl<T: GuestStagePagingMode, S> VmPages<T, S> {
         Ok(())
     }
 
-    /// Locks `count` 4kB pages starting at `page_addr` for mapping, returning a `VmPagesMapper` that
-    /// can be used to insert (and measure, if necessary) the pages.
-    pub fn map_pages(&self, page_addr: GuestPageAddr, count: u64) -> Result<VmPagesMapper<T, S>> {
-        VmPagesMapper::new_in_region(self, page_addr, count, VmRegionType::Confidential)
-    }
-
-    /// Maps num_pages of shared 4Kb pages starting at page_addr. The range must fit in
-    /// a range declared by a call to `add_shared_memory_region`.
-    pub fn add_shared_pages(
+    /// Locks `count` 4kB pages starting at `page_addr` for mapping in a region of type
+    /// `region_type`, returning a `VmPagesMapper` that can be used to insert (and measure, if
+    /// necessary) the pages.
+    pub fn map_pages(
         &self,
-        from_addr: GuestPageAddr,
-        num_pages: u64,
-        from: &VmPages<T, VmStateFinalized>,
-        guest_addr: GuestPageAddr,
-    ) -> Result<()> {
-        let shared_list = from
-            .root
-            .get_shareable_range::<Page<Shareable>>(from_addr, PageSize::Size4k, num_pages)
-            .map_err(|_| Error::SharedPageNotMapped)?;
-        let mapper =
-            VmPagesMapper::new_in_region(self, guest_addr, num_pages, VmRegionType::Shared)?;
-        let owner = from.root.page_owner_id();
-        for (page, addr) in shared_list.zip(guest_addr.iter_from()) {
-            // Unwrap ok: we have exclusve ownership, and get_shareable_range() has ensured success
-            let mappable = self.page_tracker.share_page(page, owner).unwrap();
-            // Unwrap ok: we have exclusive ownership and have already filled in the PTE.
-            mapper.map_page(addr, mappable).unwrap();
-        }
-        Ok(())
+        page_addr: GuestPageAddr,
+        count: u64,
+        region_type: VmRegionType,
+    ) -> Result<VmPagesMapper<T, S>> {
+        VmPagesMapper::new_in_region(self, page_addr, count, region_type)
     }
 }
 
@@ -836,7 +830,7 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
-        let mapper = to.map_pages(to_addr, count)?;
+        let mapper = to.map_pages(to_addr, count, VmRegionType::Confidential)?;
         let new_owner = to.page_owner_id();
         for (page, guest_addr) in converted_pages.zip(to_addr.iter_from()) {
             // Unwrap ok since we've guaranteed there's space for another owner.
@@ -848,6 +842,30 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
             mapper.map_page(guest_addr, mappable).unwrap();
         }
         Ok(count)
+    }
+
+    /// Maps num_pages of shared 4Kb pages starting at `from_addr` to the specified guest. The
+    /// range must fit in a range declared by a call to `add_shared_memory_region`.
+    pub fn add_shared_pages_to<S>(
+        &self,
+        from_addr: GuestPageAddr,
+        count: u64,
+        to: &VmPages<T, S>,
+        to_addr: GuestPageAddr,
+    ) -> Result<()> {
+        let shared_list = self
+            .root
+            .get_shareable_range::<Page<Shareable>>(from_addr, PageSize::Size4k, count)
+            .map_err(|_| Error::SharedPageNotMapped)?;
+        let mapper = to.map_pages(to_addr, count, VmRegionType::Shared)?;
+        let owner = self.page_owner_id();
+        for (page, addr) in shared_list.zip(to_addr.iter_from()) {
+            // Unwrap ok: we have exclusive ownership, and get_shareable_range() has ensured success
+            let mappable = self.page_tracker.share_page(page, owner).unwrap();
+            // Unwrap ok: we have exclusive ownership and have already filled in the PTE.
+            mapper.map_page(addr, mappable).unwrap();
+        }
+        Ok(())
     }
 
     /// Activates the address space represented by this `VmPages`. The reference to the address space
@@ -878,8 +896,34 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
             nesting,
             root,
             pte_pages: PtePagePool::new(page_tracker),
+            imsic_geometry: Once::new(),
             phantom: PhantomData,
         }
+    }
+
+    /// Sets the IMSIC geometry for this VM by adding the memory regions that will be occupied by
+    /// IMSIC interrupt files.
+    pub fn set_imsic_geometry(&self, geometry: GuestImsicGeometry) -> Result<()> {
+        let to_set = geometry.clone();
+        let actual = self
+            .imsic_geometry
+            .try_call_once(|| {
+                for range in geometry.group_ranges() {
+                    let end = range
+                        .base()
+                        .checked_add_pages(range.num_pages())
+                        .ok_or(Error::AddressOverflow)?;
+                    self.regions.add(range.base(), end, VmRegionType::Imsic)?;
+                }
+                Ok(geometry)
+            })?
+            .clone();
+        // Check if the IMSIC geometry we specified was the one that was actually set in
+        // `try_call_once()`; we may have raced with another thread.
+        if to_set != actual {
+            return Err(Error::ImsicGeometryAlreadySet);
+        }
+        Ok(())
     }
 
     /// Adds a confidential memory region of `len` bytes starting at `page_addr` to this VM's address space.
@@ -925,6 +969,7 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
             nesting: self.nesting,
             root: self.root,
             pte_pages: self.pte_pages,
+            imsic_geometry: self.imsic_geometry,
             phantom: PhantomData,
         }
     }

@@ -250,24 +250,13 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
     /// Constructs the address space for the host VM, returning a `HostVm` that is ready to run.
     pub fn build_address_space(mut self) -> HostVm<T, VmStateFinalized> {
         let imsic = Imsic::get();
-        // Add confidential memory regions covering each IMSIC group.
-        //
-        // TODO: The IMSIC pages will eventually need special treatment and should probably be
-        // in their own region.
-        let imsic_geometry = imsic.host_vm_geometry();
-        for range in imsic_geometry.group_ranges() {
-            self.vm
-                .add_confidential_memory_region(range.base(), range.length_bytes());
-        }
         let cpu_info = CpuInfo::get();
         // Map the IMSIC interrupt files into the guest address space. The host VM's interrupt
         // file gets mapped to the location of the supervisor interrupt file.
         for i in 0..cpu_info.num_cpus() {
             let cpu_id = CpuId::new(i);
-            let cpu_location = imsic.supervisor_file_location(cpu_id).unwrap();
-            let imsic_gpa = imsic_geometry.location_to_addr(cpu_location).unwrap();
             let imsic_pages = imsic.take_guest_files(cpu_id).unwrap();
-            self.vm.add_pages(imsic_gpa, imsic_pages);
+            self.vm.add_imsic_pages(cpu_id, imsic_pages);
         }
 
         let pci = PcieRoot::get();

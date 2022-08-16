@@ -166,6 +166,14 @@ impl PteFieldBits {
         ret
     }
 
+    /// Creates a new status for a leaf entry with the given `perms`.
+    pub fn user_leaf_with_perms(perms: PteLeafPerms) -> Self {
+        let mut ret = Self::default();
+        ret.bits |= perms as u64;
+        ret.set_bit(PteFieldBit::User);
+        ret
+    }
+
     /// Creates a new status for a non-leaf entry.
     /// Used for intermeidate levels of page tables.
     pub fn non_leaf() -> Self {

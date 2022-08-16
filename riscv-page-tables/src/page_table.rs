@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::pte::{Pte, PteFieldBit, PteFieldBits, PteLeafPerms};
+use crate::pte::{Pte, PteFieldBits, PteLeafPerms};
 use core::marker::PhantomData;
 use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
 use riscv_pages::*;
@@ -185,14 +185,9 @@ impl<'a, T: PagingMode> LockedPte<'a, T> {
     ///
     /// The caller must guarantee that `paddr` references a page uniquely owned by the root
     /// `GuestStagePageTable`.
-    unsafe fn map_leaf(self, paddr: SupervisorPageAddr, perms: PteLeafPerms) -> LeafPte<'a, T> {
+    unsafe fn map_leaf(self, paddr: SupervisorPageAddr, perms: PteFieldBits) -> LeafPte<'a, T> {
         assert!(paddr.is_aligned(self.level.leaf_page_size()));
-        let status = {
-            let mut s = PteFieldBits::leaf_with_perms(perms);
-            s.set_bit(PteFieldBit::User);
-            s
-        };
-        self.pte.set(paddr.pfn(), &status);
+        self.pte.set(paddr.pfn(), &perms);
         LeafPte::new(self.pte, self.level)
     }
 
@@ -523,7 +518,7 @@ impl<T: PagingMode> PageTableInner<T> {
         &mut self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         paddr: SupervisorPageAddr,
-        perms: PteLeafPerms,
+        perms: PteFieldBits,
     ) -> Result<()> {
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
@@ -917,9 +912,10 @@ impl<'a, T: PagingMode> GuestStageMapper<'a, T> {
         }
 
         let mut inner = self.owner.inner.lock();
+        let pte_fields = PteFieldBits::user_leaf_with_perms(PteLeafPerms::RWX);
         unsafe {
             // Safe since we uniquely own page_to_map.
-            inner.map_4k_leaf(vaddr, page_to_map.addr(), PteLeafPerms::RWX)
+            inner.map_4k_leaf(vaddr, page_to_map.addr(), pte_fields)
         }
     }
 }

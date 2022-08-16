@@ -5,7 +5,7 @@
 use attestation::measurement::{AttestationManager, MeasurementIndex};
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
-use drivers::{imsic::*, iommu::*};
+use drivers::{imsic::*, iommu::*, pci::PciDevice, pci::PcieRoot};
 use page_tracking::collections::PageVec;
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
@@ -51,6 +51,7 @@ pub enum Error {
     CreatingMsiPageTable(IommuError),
     InvalidImsicLocation,
     MsiTableMapping(IommuError),
+    AttachingDevice(IommuError),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -654,11 +655,27 @@ impl VmIommuContext {
 
 impl Drop for VmIommuContext {
     fn drop(&mut self) {
-        // TODO: Release devices.
+        // Unwrap ok: presence of an IOMMU is checked at creation time
+        let iommu = Iommu::get().unwrap();
 
-        // Unwrap ok: presence of an IOMMU is checked at creation time and `self.gscid` must be
-        // valid since it came from `Iommu::alloc_gscid()`.
-        Iommu::get().unwrap().free_gscid(self.gscid).unwrap();
+        // Detach any devices we own from the IOMMU.
+        let owner = self.msi_page_table.owner();
+        let pci = PcieRoot::get();
+        for dev in pci.devices() {
+            let mut dev = dev.lock();
+            if dev.owner() == Some(owner) {
+                // Unwrap ok: `self.gscid` must be valid and match the ownership of the device
+                // to have been attached in the first place.
+                //
+                // Silence buggy clippy warning.
+                #[allow(clippy::explicit_auto_deref)]
+                iommu.detach_pci_device(&mut *dev, self.gscid).unwrap();
+            }
+        }
+
+        // Unwrap ok: `self.gscid` must be valid and freeable since we've detached all devices
+        // using it.
+        iommu.free_gscid(self.gscid).unwrap();
     }
 }
 
@@ -1052,6 +1069,21 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
         )
         .ok_or(Error::UnalignedAddress)?;
         self.regions.add(page_addr, end, VmRegionType::Mmio)
+    }
+
+    /// Attaches the given PCI device to this VM by enabling DMA translation via the IOMMU using
+    /// this VM's page tables.
+    pub fn attach_pci_device(&self, dev: &mut PciDevice) -> Result<()> {
+        let iommu_context = self.iommu_context.get().ok_or(Error::NoIommu)?;
+        Iommu::get()
+            .unwrap()
+            .attach_pci_device(
+                dev,
+                &self.root,
+                &iommu_context.msi_page_table,
+                iommu_context.gscid,
+            )
+            .map_err(Error::AttachingDevice)
     }
 
     /// Consumes this `VmPages`, returning a finalized one.

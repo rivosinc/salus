@@ -5,7 +5,7 @@
 use arrayvec::ArrayString;
 use core::{fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
-use drivers::{imsic::Imsic, pci::PcieRoot, CpuId, CpuInfo};
+use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, CpuId, CpuInfo};
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList};
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::*;
@@ -270,6 +270,17 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
                 .add_confidential_memory_region(gpa, range.length_bytes());
             let pages = pci.take_host_resource(res_type).unwrap();
             self.vm.add_pages(gpa, pages);
+        }
+        // Attach our PCI devices to the IOMMU.
+        if Iommu::get().is_some() {
+            for dev in pci.devices() {
+                let mut dev = dev.lock();
+                if dev.owner() == Some(PageOwnerId::host()) {
+                    // Silence buggy clippy warning.
+                    #[allow(clippy::explicit_auto_deref)]
+                    self.vm.attach_pci_device(&mut *dev);
+                }
+            }
         }
 
         // Set up MMIO emulation for the PCIe config space.

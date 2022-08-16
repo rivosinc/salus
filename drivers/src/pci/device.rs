@@ -330,6 +330,7 @@ struct PciDeviceCommon {
     capabilities: PciCapabilities,
     bar_info: PciDeviceBarInfo,
     owner: Option<PageOwnerId>,
+    iommu_attached: bool,
 }
 
 /// Represents a PCI endpoint.
@@ -349,6 +350,7 @@ impl PciEndpoint {
             capabilities,
             bar_info,
             owner: None,
+            iommu_attached: false,
         };
         Ok(Self { registers, common })
     }
@@ -444,6 +446,7 @@ impl PciBridge {
             capabilities,
             bar_info,
             owner: None,
+            iommu_attached: false,
         };
         Ok(Self {
             registers,
@@ -827,6 +830,8 @@ impl PciDevice {
         if self.owner().is_some() {
             return Err(Error::DeviceOwned);
         }
+        // TODO: Need to prevent transfer of ownership if attached to an IOMMU. Not an issue yet
+        // since we don't allow devices to be reassigned.
         self.common_mut().owner = Some(owner);
         Ok(())
     }
@@ -929,8 +934,11 @@ impl PciDevice {
                         reg.modify(Command::MemoryEnable.val(0));
                     }
 
-                    // TODO: No DMA until the IOMMU is enabled.
-                    reg.modify(Command::BusMasterEnable.val(0));
+                    // Only allow DMA to be enabled if the device is attached to an IOMMU.
+                    if reg.is_set(Command::BusMasterEnable) && !self.common().iommu_attached {
+                        reg.modify(Command::BusMasterEnable.val(0));
+                    }
+
                     self.common_registers().command.set(reg.writeable_bits());
                 }
                 status::span!() => {
@@ -1006,6 +1014,21 @@ impl PciDevice {
         self.common_registers()
             .command
             .modify(Command::BusMasterEnable.val(1));
+    }
+
+    /// Marks the device as being attached to an active IOMMU context, allowing DMA to be safely
+    /// enabled.
+    pub(crate) fn set_iommu_attached(&mut self) {
+        self.common_mut().iommu_attached = true;
+    }
+
+    /// Marks the device as no longer being attached to an active IOMMU context.
+    pub(crate) fn clear_iommu_attached(&mut self) {
+        // Disable bus mastering to prevent any further DMAs.
+        self.common_registers()
+            .command
+            .modify(Command::BusMasterEnable.val(1));
+        self.common_mut().iommu_attached = false;
     }
 
     // Returns `Ok` if the specified BAR is assigned a valid address for the VM in `context`.

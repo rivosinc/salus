@@ -197,6 +197,7 @@ impl Iommu {
             return Err(Error::OwnerMismatch);
         }
         self.ddt.enable_device(dev_id, pt, msi_pt, gscid)?;
+        dev.set_iommu_attached();
         state.ref_count += 1;
         Ok(())
     }
@@ -214,6 +215,7 @@ impl Iommu {
             if dev.owner() != Some(state.owner) {
                 return Err(Error::OwnerMismatch);
             }
+            dev.clear_iommu_attached();
             self.ddt.disable_device(dev_id)?;
             // Drop our reference to the GSCID used for the device.
             state.ref_count -= 1;

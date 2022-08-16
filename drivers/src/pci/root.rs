@@ -208,14 +208,9 @@ impl PcieRoot {
         PCIE_ROOT.get().unwrap()
     }
 
-    /// Walks the PCIe hierarchy, calling `f` on each device function.
-    pub fn for_each_device<F: FnMut(&PciDevice)>(&self, mut f: F) {
-        // Silence bogus auto-deref lint, see https://github.com/rust-lang/rust-clippy/issues/9101.
-        #[allow(clippy::explicit_auto_deref)]
-        self.for_each_device_on(&self.root_bus, &mut |id| {
-            let dev = self.device_arena.get(id).unwrap();
-            f(&*dev.lock());
-        });
+    /// Returns an iterator over all PCI devices.
+    pub fn devices(&self) -> impl Iterator<Item = &Mutex<PciDevice>> {
+        self.device_arena.iter()
     }
 
     /// Returns the memory range occupied by this root complex's config space.
@@ -278,10 +273,9 @@ impl PcieRoot {
 
     /// Takes ownership over all unowned devices in the PCI hierarchy on behalf of the host VM.
     pub fn take_host_devices(&self) {
-        self.for_each_device_on(&self.root_bus, &mut |id| {
-            let dev = self.device_arena.get(id).unwrap();
+        for dev in self.devices() {
             let _ = dev.lock().take(PageOwnerId::host());
-        });
+        }
     }
 
     /// Takes ownership over the PCI device with the given `vendor_id` and `device_id`, and enables
@@ -292,14 +286,14 @@ impl PcieRoot {
         vendor_id: VendorId,
         device_id: DeviceId,
     ) -> Result<PciArenaId> {
-        let mut dev_id: Option<PciArenaId> = None;
-        self.for_each_device_on(&self.root_bus, &mut |id| {
-            let dev = self.device_arena.get(id).unwrap().lock();
-            if dev.info().vendor_id() == vendor_id && dev.info().device_id() == device_id {
-                dev_id = Some(id);
-            }
-        });
-        let dev_id = dev_id.ok_or(Error::DeviceNotFound)?;
+        let dev_id = self
+            .device_arena
+            .ids()
+            .find(|&id| {
+                let d = self.device_arena.get(id).unwrap().lock();
+                d.info().vendor_id() == vendor_id && d.info().device_id() == device_id
+            })
+            .ok_or(Error::DeviceNotFound)?;
         // Make sure the device is on the root bus. We don't support distributing resources behind
         // bridges.
         if !self.root_bus.devices().any(|bd| bd.id == dev_id) {
@@ -469,21 +463,6 @@ impl PcieRoot {
         };
         dev.emulate_config_write(dev_offset, value as u32, len, context);
         Ok(())
-    }
-
-    // Calls `f` for each device on `bus`.
-    fn for_each_device_on<F: FnMut(PciArenaId)>(&self, bus: &PciBus, f: &mut F) {
-        for bd in bus.devices() {
-            f(bd.id);
-            // If the ID appears on a bus, it must be in the arena.
-            let dev = self.device_arena.get(bd.id).unwrap();
-            if let PciDevice::Bridge(ref bridge) = *dev.lock() {
-                // Recursively walk the buses behind the bridge.
-                bridge
-                    .child_bus()
-                    .inspect(|b| self.for_each_device_on(b, f));
-            };
-        }
     }
 
     // Returns the device ID for the device at the virtualized PCI address `address` on `bus`.

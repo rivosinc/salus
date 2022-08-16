@@ -70,16 +70,14 @@ impl Iommu {
 
         // Set up an initial device directory table.
         let ddt = DeviceDirectory::new(get_page().ok_or(Error::OutOfPages)?);
-        let mut result: Result<()> = Ok(());
-        pci.for_each_device(|dev| {
-            let addr = dev.info().address();
+        for dev in pci.devices() {
+            let addr = dev.lock().info().address();
             if addr == iommu_addr {
                 // Skip the IOMMU itself.
-                return;
+                continue;
             }
-            result = result.and_then(|_| ddt.add_device(addr.try_into()?, get_page));
-        });
-        result?;
+            ddt.add_device(addr.try_into()?, get_page)?;
+        }
         let mut ddtp = LocalRegisterCopy::<u64, DirectoryPointer::Register>::new(0);
         ddtp.modify(DirectoryPointer::Ppn.val(ddt.base_address().pfn().bits()));
         ddtp.modify(DirectoryPointer::Mode.val(Ddt3Level::IOMMU_MODE));

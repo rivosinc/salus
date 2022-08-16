@@ -5,7 +5,7 @@
 use attestation::measurement::{AttestationManager, MeasurementIndex};
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
-use drivers::imsic::*;
+use drivers::{imsic::*, iommu::*};
 use page_tracking::collections::PageVec;
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
@@ -43,7 +43,14 @@ pub enum Error {
     SharedPageNotMapped,
     Measurement(attestation::Error),
     VmCreationFailed(crate::vm::Error),
+    NoImsicVirtualization,
     ImsicGeometryAlreadySet,
+    IommuContextAlreadySet,
+    NoIommu,
+    AllocatingGscId(IommuError),
+    CreatingMsiPageTable(IommuError),
+    InvalidImsicLocation,
+    MsiTableMapping(IommuError),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -286,8 +293,8 @@ impl VmRegionList {
 /// Wrapper for a `GuestStageMapper` created from the page table of `VmPages`. Measures pages as
 /// they are inserted, if necessary.
 pub struct VmPagesMapper<'a, T: GuestStagePagingMode, S> {
+    vm_pages: &'a VmPages<T, S>,
     mapper: GuestStageMapper<'a, T>,
-    phantom: PhantomData<S>,
 }
 
 impl<'a, T: GuestStagePagingMode, S> VmPagesMapper<'a, T, S> {
@@ -311,10 +318,7 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesMapper<'a, T, S> {
                 vm_pages.pte_pages.pop()
             })
             .map_err(Error::Paging)?;
-        Ok(Self {
-            mapper,
-            phantom: PhantomData,
-        })
+        Ok(Self { vm_pages, mapper })
     }
 
     /// Maps an unmeasured page into the guest's address space.
@@ -323,6 +327,30 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesMapper<'a, T, S> {
         P: MappablePhysPage<MeasureOptional>,
     {
         self.mapper.map_page(to_addr, page).map_err(Error::Paging)
+    }
+
+    /// Maps an IMSIC page into the guest's address space, also updating the MSI page tables if
+    /// necessary.
+    ///
+    /// TODO: Type-safety between IMSIC vs non-IMSIC `VmPagesMapper`s.
+    pub fn map_imsic_page(
+        &self,
+        to_addr: GuestPageAddr,
+        page: ImsicGuestPage<MappableClean>,
+    ) -> Result<()> {
+        let dest_location = page.location();
+        self.map_page(to_addr, page)?;
+        if let Some(geometry) = self.vm_pages.imsic_geometry() &&
+            let Some(iommu_context) = self.vm_pages.iommu_context.get()
+        {
+            let src_location = geometry
+                .addr_to_location(to_addr)
+                .ok_or(Error::InvalidImsicLocation)?;
+            iommu_context.msi_page_table
+                .map(src_location, dest_location)
+                .map_err(Error::MsiTableMapping)?;
+        }
+        Ok(())
     }
 }
 
@@ -603,6 +631,37 @@ impl Drop for PtePagePool {
     }
 }
 
+/// The IOMMU context for a VM.
+pub struct VmIommuContext {
+    msi_page_table: MsiPageTable,
+    // Global soft-context ID. Released on `drop()`.
+    gscid: GscId,
+}
+
+impl VmIommuContext {
+    // Creates a new `VmIommuContext` using `msi_page_table`.
+    fn new(msi_page_table: MsiPageTable) -> Result<Self> {
+        let gscid = Iommu::get()
+            .ok_or(Error::NoIommu)?
+            .alloc_gscid(msi_page_table.owner())
+            .map_err(Error::AllocatingGscId)?;
+        Ok(Self {
+            msi_page_table,
+            gscid,
+        })
+    }
+}
+
+impl Drop for VmIommuContext {
+    fn drop(&mut self) {
+        // TODO: Release devices.
+
+        // Unwrap ok: presence of an IOMMU is checked at creation time and `self.gscid` must be
+        // valid since it came from `Iommu::alloc_gscid()`.
+        Iommu::get().unwrap().free_gscid(self.gscid).unwrap();
+    }
+}
+
 /// VmPages is the single management point for memory used by virtual machines.
 ///
 /// After initial setup all memory not used for Hypervisor purposes is managed by a VmPages
@@ -620,6 +679,7 @@ pub struct VmPages<T: GuestStagePagingMode, S = VmStateFinalized> {
     root: GuestStagePageTable<T>,
     pte_pages: PtePagePool,
     imsic_geometry: Once<GuestImsicGeometry>,
+    iommu_context: Once<VmIommuContext>,
     phantom: PhantomData<S>,
 }
 
@@ -897,6 +957,7 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
             root,
             pte_pages: PtePagePool::new(page_tracker),
             imsic_geometry: Once::new(),
+            iommu_context: Once::new(),
             phantom: PhantomData,
         }
     }
@@ -922,6 +983,33 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
         // `try_call_once()`; we may have raced with another thread.
         if to_set != actual {
             return Err(Error::ImsicGeometryAlreadySet);
+        }
+        Ok(())
+    }
+
+    /// Creates an IOMMU context for this VM using `msi_table_pages` as the backing pages for
+    /// the MSI page table.
+    pub fn add_iommu_context(&self, msi_table_pages: SequentialPages<InternalClean>) -> Result<()> {
+        // No point having an IOMMU context if we aren't doing IMSIC virtualization.
+        let imsic_geometry = self
+            .imsic_geometry
+            .get()
+            .ok_or(Error::NoImsicVirtualization)?
+            .clone();
+        let msi_pt = MsiPageTable::new(
+            msi_table_pages,
+            imsic_geometry,
+            Imsic::get().phys_geometry(),
+            self.page_tracker.clone(),
+            self.page_owner_id,
+        )
+        .map_err(Error::CreatingMsiPageTable)?;
+        let iommu_context = VmIommuContext::new(msi_pt)?;
+        let gscid = iommu_context.gscid;
+        let set_gscid = self.iommu_context.call_once(|| iommu_context).gscid;
+        // Check if the `VmIommuContext` that was set was actually the one we created.
+        if gscid != set_gscid {
+            return Err(Error::IommuContextAlreadySet);
         }
         Ok(())
     }
@@ -970,6 +1058,7 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
             root: self.root,
             pte_pages: self.pte_pages,
             imsic_geometry: self.imsic_geometry,
+            iommu_context: self.iommu_context,
             phantom: PhantomData,
         }
     }

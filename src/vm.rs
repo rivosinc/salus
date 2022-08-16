@@ -8,7 +8,7 @@ use attestation::{
 };
 use core::{mem, slice};
 use der::Decode;
-use drivers::{imsic::*, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
+use drivers::{imsic::*, iommu::*, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
@@ -1313,18 +1313,30 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
         let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * MAX_CPUS as u64);
         let vcpus_pages = hyp_mem.take_pages_for_host_state(num_vcpu_pages as usize);
 
+        let imsic_geometry = Imsic::get().host_vm_geometry();
+        // Reserve MSI page table pages if we have an IOMMU.
+        let msi_table_pages = Iommu::get().map(|_| {
+            let msi_table_size = MsiPageTable::required_table_size(&imsic_geometry);
+            hyp_mem.take_pages_for_host_state_with_alignment(
+                PageSize::num_4k_pages(msi_table_size) as usize,
+                msi_table_size,
+            )
+        });
+
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root =
             GuestStagePageTable::new(root_table_pages, PageOwnerId::host(), page_tracker.clone())
                 .unwrap();
         let region_vec = VmRegionList::new(region_vec_pages, page_tracker.clone());
         let vm_pages = VmPages::new(root, region_vec, 0);
-        vm_pages
-            .set_imsic_geometry(Imsic::get().host_vm_geometry())
-            .unwrap();
+        vm_pages.set_imsic_geometry(imsic_geometry).unwrap();
         for p in pte_pages {
             vm_pages.add_pte_page(p).unwrap();
         }
+        if let Some(pages) = msi_table_pages {
+            vm_pages.add_iommu_context(pages).unwrap();
+        }
+
         let mut vm = Vm::new(
             vm_pages,
             VmCpus::new(PageOwnerId::host(), vcpus_pages, page_tracker).unwrap(),
@@ -1468,7 +1480,7 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
-            mapper.map_page(vm_addr, mappable).unwrap();
+            mapper.map_imsic_page(vm_addr, mappable).unwrap();
         }
     }
 

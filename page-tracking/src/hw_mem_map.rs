@@ -5,7 +5,8 @@
 use arrayvec::ArrayVec;
 use core::{fmt, result};
 use riscv_pages::{
-    DeviceMemType, MemType, PageAddr, PageSize, RawAddr, SupervisorPageAddr, SupervisorPhysAddr,
+    DeviceMemType, MemType, PageAddr, PageSize, RawAddr, SequentialPages, SupervisorPageAddr,
+    SupervisorPhysAddr,
 };
 
 /// The maximum number of regions in a `HwMemMap`. Statically sized since we don't have
@@ -87,6 +88,9 @@ pub enum HwReservedMemType {
     /// The hypervisor per-CPU memory area.
     HypervisorPerCpu,
 
+    /// Sv48 page tables for the hyeprvisor running in HS mode.
+    HypervisorPtes,
+
     /// The system page map.
     PageMap,
 
@@ -113,6 +117,9 @@ pub enum Error {
 
     /// No more entries available in the memory map.
     OutOfSpace,
+
+    /// Creation of SequentialPages failed
+    SequentialPages,
 }
 /// Holds the result of memory map operations.
 pub type Result<T> = result::Result<T, Error>;
@@ -284,6 +291,25 @@ impl HwMemMap {
         Ok(())
     }
 
+    /// Reserves a range of memory. See `HwMemMapBuilder::reserve_region()`. Then returns the
+    /// reserved pages as a `SequentialPages` type.
+    pub fn reserve_and_take_pages(
+        &mut self,
+        resv_type: HwReservedMemType,
+        base: SupervisorPageAddr,
+        page_size: PageSize,
+        count: u64,
+    ) -> Result<SequentialPages<riscv_pages::InternalDirty>> {
+        self.reserve_region(resv_type, base.into(), count * page_size as u64)?;
+
+        // Safe to create pages from these addresses because they are guaranteed to be uniquely
+        // owned by the above reservation.
+        unsafe {
+            SequentialPages::<riscv_pages::InternalDirty>::from_mem_range(base, page_size, count)
+                .map_err(|_| Error::SequentialPages)
+        }
+    }
+
     /// Adds an MMIO region. See `HwMemMapBuilder::add_mmio_region()`.
     ///
     /// # Safety
@@ -358,6 +384,7 @@ impl fmt::Display for HwReservedMemType {
             HwReservedMemType::HypervisorImage => write!(f, "hypervisor image"),
             HwReservedMemType::HypervisorHeap => write!(f, "hypervisor heap"),
             HwReservedMemType::HypervisorPerCpu => write!(f, "hypervisor pcpu"),
+            HwReservedMemType::HypervisorPtes => write!(f, "hypervisor page tables"),
             HwReservedMemType::PageMap => write!(f, "page map"),
             HwReservedMemType::HostKernelImage => write!(f, "host kernel"),
             HwReservedMemType::HostInitramfsImage => write!(f, "host initramfs"),

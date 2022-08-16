@@ -43,7 +43,8 @@ pub mod tlb;
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
 pub use page_table::{
-    FirstStagePagingMode, GuestStageMapper, GuestStagePageTable, GuestStagePagingMode, PagingMode,
+    FirstStagePageTable, FirstStagePagingMode, GuestStageMapper, GuestStagePageTable,
+    GuestStagePagingMode, PagingMode,
 };
 pub use pte::{PteFieldBits, PteLeafPerms};
 pub use sv48::Sv48;
@@ -173,18 +174,16 @@ mod tests {
     fn map_and_unmap_sv48() {
         let state = stub_sys_memory();
 
-        let page_tracker = state.page_tracker;
         let mut host_pages = state.host_pages;
-        let id = PageOwnerId::host();
-        let guest_page_table: GuestStagePageTable<Sv48> =
-            GuestStagePageTable::new(state.root_pages, id, page_tracker.clone())
+        let hyp_page_table: FirstStagePageTable<Sv48> =
+            FirstStagePageTable::new(state.root_pages.into_iter().next().unwrap())
                 .expect("creating sv48");
 
         let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
-        let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
         let mut pte_pages = state.pte_pages.into_iter();
         let gpa_base = PageAddr::new(RawAddr::supervisor_virt(0x8000_0000)).unwrap();
-        let mapper = guest_page_table
+        let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::RW);
+        let mapper = hyp_page_table
             .map_range(gpa_base, PageSize::Size4k, 2, &mut || pte_pages.next())
             .unwrap();
         for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
@@ -196,26 +195,8 @@ mod tests {
                     page.size() as usize / mem::size_of::<u64>(),
                 );
                 slice[0] = 0xdeadbeef;
+                assert!(mapper.map_4k_addr(gpa, page.addr(), pte_fields).is_ok());
             }
-            let mappable = page_tracker.assign_page_for_mapping(page, id).unwrap();
-            assert!(mapper.map_page(gpa, mappable).is_ok());
         }
-        let version = TlbVersion::new();
-        guest_page_table
-            .invalidate_range::<Page<Invalidated>>(gpa_base, PageSize::Size4k, 2)
-            .unwrap()
-            .for_each(|invalidated| page_tracker.convert_page(invalidated, version).unwrap());
-        let version = version.increment();
-        let mut converted_pages = guest_page_table
-            .get_converted_range::<Page<ConvertedDirty>>(gpa_base, PageSize::Size4k, 2, version)
-            .unwrap();
-        let dirty_page = converted_pages.next().unwrap();
-        assert_eq!(dirty_page.addr(), page_addrs[0]);
-        assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
-        page_tracker.unlock_page(dirty_page).unwrap();
-        let clean_page = converted_pages.next().unwrap().clean();
-        assert_eq!(clean_page.addr(), page_addrs[1]);
-        assert_eq!(clean_page.get_u64(0).unwrap(), 0);
-        page_tracker.unlock_page(clean_page).unwrap();
     }
 }

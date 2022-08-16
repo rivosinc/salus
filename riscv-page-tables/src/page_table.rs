@@ -613,6 +613,100 @@ impl<T: PagingMode> PageTableInner<T> {
 }
 
 /// A paging hierarchy for a given addressing type.
+/// This is used for HS and HU paging modes such as Sv48.
+///
+/// TODO: Support non-4k page sizes.
+pub struct FirstStagePageTable<T: FirstStagePagingMode> {
+    inner: Mutex<PageTableInner<T>>,
+}
+
+impl<T: FirstStagePagingMode> FirstStagePageTable<T> {
+    /// Creates a new page table root from the provided `root` that must be at least
+    /// `T::root_level().table_pages()` in length and aligned to `T::TOP_LEVEL_ALIGN`.
+    pub fn new(root: Page<InternalClean>) -> Result<Self> {
+        let inner = PageTableInner::new(root.into())?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Returns the address of the top level page table. The PFN of this address is what should be
+    /// written to the SATP or HGATP CSR to start using the translations provided by this page
+    /// table.
+    pub fn get_root_address(&self) -> SupervisorPageAddr {
+        self.inner.lock().root.base()
+    }
+
+    /// Prepares for mapping `num_pages` pages of size `page_size` starting at `addr` in the mapped
+    /// address space by locking the target PTEs and populating any intermediate page tables using
+    /// `get_pte_page`. Upon success, returns a `PageTableMapper` that is guaranteed to be able to
+    /// map the specified range.
+    pub fn map_range(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
+        num_pages: u64,
+        get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
+    ) -> Result<FirstStageMapper<T>> {
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
+        }
+
+        let mut inner = self.inner.lock();
+        for a in addr.iter_from().take(num_pages as usize) {
+            inner.lock_4k_leaf_for_mapping(a, get_pte_page)?;
+        }
+
+        Ok(FirstStageMapper::new(self, addr, num_pages))
+    }
+}
+
+/// A range of mapped address space that has been locked for mapping. The PTEs are unlocked when
+/// this struct is dropped. Mapping a page in this range is guaranteed to succeed as long as the
+/// address hasn't already been mapped by this `FirstStageMapper`.
+pub struct FirstStageMapper<'a, T: FirstStagePagingMode> {
+    owner: &'a FirstStagePageTable<T>,
+    vaddr: PageAddr<T::MappedAddressSpace>,
+    num_pages: u64,
+}
+
+impl<'a, T: FirstStagePagingMode> FirstStageMapper<'a, T> {
+    /// Creates a new `PageTableMapper` for `num_pages` starting at `vaddr`.
+    fn new(
+        owner: &'a FirstStagePageTable<T>,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        num_pages: u64,
+    ) -> Self {
+        Self {
+            owner,
+            vaddr,
+            num_pages,
+        }
+    }
+
+    /// Maps `vaddr` to `paddr`, The caller must guarantee that paddr points to a page it is safe to
+    /// map in this page table.
+    ///
+    /// # Safety
+    ///
+    /// Don't create aliases.
+    pub unsafe fn map_4k_addr(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        paddr: PageAddr<SupervisorPhys>,
+        pte_perms: PteFieldBits,
+    ) -> Result<()> {
+        let end_vaddr = self.vaddr.checked_add_pages(self.num_pages).unwrap();
+        if vaddr < self.vaddr || vaddr >= end_vaddr {
+            return Err(Error::OutOfMapRange);
+        }
+
+        let mut inner = self.owner.inner.lock();
+        inner.map_4k_leaf(vaddr, paddr, pte_perms)
+    }
+}
+
+/// A paging hierarchy for a given addressing type.
 ///
 /// TODO: Support non-4k page sizes.
 pub struct GuestStagePageTable<T: PagingMode> {

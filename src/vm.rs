@@ -1451,8 +1451,8 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
                             poweroff();
                         }
                     }
-                    _ => {
-                        println!("Unhandled host VM exit; shutting down");
+                    reason => {
+                        println!("Unhandled host VM exit {:?}; shutting down", reason);
                         poweroff();
                     }
                 };

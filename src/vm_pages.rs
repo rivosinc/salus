@@ -784,7 +784,14 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
 
     /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.
     pub fn initiate_fence(&self) -> Result<()> {
-        self.tlb_tracker.increment()
+        self.tlb_tracker.increment()?;
+        // If we have an IOMMU context then we need to issue a fence there as well as our page
+        // tables may be used for DMA translation.
+        if let Some(iommu_context) = self.iommu_context.get() {
+            // Unwrap ok since we must have an IOMMU to have a `VmIommuContext`.
+            Iommu::get().unwrap().fence(iommu_context.gscid, None);
+        }
+        Ok(())
     }
 
     /// Assigns the converted pages in `pages` to `new_owner` as state pages.

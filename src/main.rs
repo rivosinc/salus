@@ -465,7 +465,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Probe for a PCI bus.
     PcieRoot::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up PCIe");
-    PcieRoot::get().for_each_device(|dev| {
+    let pci = PcieRoot::get();
+    for dev in pci.devices() {
+        let dev = dev.lock();
         println!(
             "Found func {}; type: {}, MSI: {}, MSI-X: {}, PCIe: {}",
             dev.info(),
@@ -474,7 +476,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             dev.has_msix(),
             dev.is_pcie(),
         );
-
         for bar in dev.bar_info().bars() {
             println!(
                 "BAR{:}: type {:?}, size 0x{:x}",
@@ -483,7 +484,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 bar.size()
             );
         }
-    });
+    }
 
     setup_hyp_paging(&mut mem_map);
 

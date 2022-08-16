@@ -45,6 +45,7 @@ pub use page_table::Result as PageTableResult;
 pub use page_table::{
     FirstStagePageTable, GuestStagePageTable, PageTableMapper, PagingMode, PlatformPageTable,
 };
+pub use pte::{PteFieldBits, PteLeafPerms};
 pub use sv48::Sv48;
 pub use sv48x4::Sv48x4;
 

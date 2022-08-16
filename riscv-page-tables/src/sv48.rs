@@ -58,7 +58,7 @@ impl PageTableLevel for Sv48Level {
 /// The `Sv48` addressing mode for 1st-stage translation tables.
 pub enum Sv48 {}
 
-impl FirstStagePageTable for Sv48 {
+impl FirstStagePagingMode for Sv48 {
     const SATP_VALUE: u64 = 9;
 }
 

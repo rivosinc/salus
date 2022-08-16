@@ -7,7 +7,7 @@
 
 use assertions::const_assert;
 use core::marker::PhantomData;
-use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
+use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::dma_wmb;
 use spin::Mutex;
@@ -122,9 +122,9 @@ impl DeviceContext {
     }
 
     // Marks the device context as valid, using `pt` and `msi_pt` for translation.
-    fn set<T: GuestStagePageTable>(
+    fn set<T: GuestStagePagingMode>(
         &mut self,
-        pt: &PlatformPageTable<T>,
+        pt: &GuestStagePageTable<T>,
         msi_pt: &MsiPageTable,
         gscid: GscId,
     ) {
@@ -384,10 +384,10 @@ impl<D: DirectoryMode> DeviceDirectory<D> {
     /// Enables IOMMU translation for the specified device, using `pt` for 2nd-stage translation
     /// and `msi_pt` for MSI translation. The device must have been previously added with
     /// `add_device()`.
-    pub fn enable_device<T: GuestStagePageTable>(
+    pub fn enable_device<T: GuestStagePagingMode>(
         &self,
         id: DeviceId,
-        pt: &PlatformPageTable<T>,
+        pt: &GuestStagePageTable<T>,
         msi_pt: &MsiPageTable,
         gscid: GscId,
     ) -> Result<()> {

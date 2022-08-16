@@ -10,7 +10,7 @@
 //! the `riscv-pages` crate.
 //! - `PageTracker` tracks per-page ownership and typing information, and is used to verify the
 //! safety of page table operations. Provided by the `page-tracking` crate.
-//! - `PlatformPageTable` is a top-level page table structures used to manipulate address translation
+//! - `GuestStagePageTable` is a top-level page table structures used to manipulate address translation
 //! and protection.
 //! - `PageTable` provides a generic implementation of a single level of multi-level translation.
 //! - `Sv48x4`, `Sv48`, etc. define standard RISC-V translation modes for 1st or 2nd-stage translation
@@ -18,7 +18,7 @@
 //!
 //! ## Safety
 //!
-//! Safe interfaces are exposed by giving each `PlatformPageTable` ownership of the pages used to
+//! Safe interfaces are exposed by giving each `GuestStagePageTable` ownership of the pages used to
 //! construct the page tables. In this way the pages can be manipulated as needed, but only by the
 //! owning page table. The details of managing the pages are contained in the page table.
 //!
@@ -43,7 +43,7 @@ pub mod tlb;
 pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
 pub use page_table::{
-    FirstStagePageTable, GuestStagePageTable, PageTableMapper, PagingMode, PlatformPageTable,
+    FirstStagePagingMode, GuestStageMapper, GuestStagePageTable, GuestStagePagingMode, PagingMode,
 };
 pub use pte::{PteFieldBits, PteLeafPerms};
 pub use sv48::Sv48;
@@ -115,7 +115,7 @@ mod tests {
 
         // Should fail as root_pages owner is not set.
         assert!(
-            PlatformPageTable::<Sv48x4>::new(state.root_pages, id, page_tracker.clone()).is_err()
+            GuestStagePageTable::<Sv48x4>::new(state.root_pages, id, page_tracker.clone()).is_err()
         );
     }
 
@@ -126,8 +126,8 @@ mod tests {
         let page_tracker = state.page_tracker;
         let mut host_pages = state.host_pages;
         let id = PageOwnerId::host();
-        let guest_page_table: PlatformPageTable<Sv48x4> =
-            PlatformPageTable::new(state.root_pages, id, page_tracker.clone())
+        let guest_page_table: GuestStagePageTable<Sv48x4> =
+            GuestStagePageTable::new(state.root_pages, id, page_tracker.clone())
                 .expect("creating sv48x4");
 
         let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
@@ -176,8 +176,8 @@ mod tests {
         let page_tracker = state.page_tracker;
         let mut host_pages = state.host_pages;
         let id = PageOwnerId::host();
-        let guest_page_table: PlatformPageTable<Sv48> =
-            PlatformPageTable::new(state.root_pages, id, page_tracker.clone())
+        let guest_page_table: GuestStagePageTable<Sv48> =
+            GuestStagePageTable::new(state.root_pages, id, page_tracker.clone())
                 .expect("creating sv48");
 
         let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];

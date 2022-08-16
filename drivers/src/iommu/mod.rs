@@ -20,7 +20,7 @@ mod tests {
     use super::*;
     use crate::imsic::*;
     use page_tracking::{HwMemMapBuilder, HypPageAlloc, PageList, PageTracker};
-    use riscv_page_tables::{PagingMode, PlatformPageTable, Sv48x4};
+    use riscv_page_tables::{GuestStagePageTable, PagingMode, Sv48x4};
     use riscv_pages::*;
 
     const IMSIC_START: u64 = 0x2800_0000;
@@ -90,7 +90,7 @@ mod tests {
         page_tracker: PageTracker,
         pages: &mut PageList<Page<ConvertedClean>>,
         owner: PageOwnerId,
-    ) -> PlatformPageTable<Sv48x4> {
+    ) -> GuestStagePageTable<Sv48x4> {
         // Find 4 properly aligned pages from `pages`.
         let root_pages = SequentialPages::from_pages(
             pages
@@ -103,7 +103,7 @@ mod tests {
                 }),
         )
         .unwrap();
-        PlatformPageTable::new(root_pages, owner, page_tracker).unwrap()
+        GuestStagePageTable::new(root_pages, owner, page_tracker).unwrap()
     }
 
     #[test]

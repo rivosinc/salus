@@ -7,7 +7,7 @@ use core::{fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
 use drivers::{imsic::Imsic, pci::PcieRoot, CpuId, CpuInfo};
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList};
-use riscv_page_tables::GuestStagePageTable;
+use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::*;
 
 use crate::print_util::*;
@@ -143,7 +143,7 @@ enum FdtPages {
 /// creation (specifically, the root of the G-stage page-table), we guarantee that each
 /// contiguous T::TOP_LEVEL_ALIGN block of the guest physical address space of the host VM maps to
 /// a contiguous T::TOP_LEVEL_ALIGN block of the host physical address space.
-pub struct HostVmLoader<T: GuestStagePageTable> {
+pub struct HostVmLoader<T: GuestStagePagingMode> {
     hypervisor_dt: DeviceTree,
     kernel: HwMemRegion,
     initramfs: Option<HwMemRegion>,
@@ -154,7 +154,7 @@ pub struct HostVmLoader<T: GuestStagePageTable> {
     ram_size: u64,
 }
 
-impl<T: GuestStagePageTable> HostVmLoader<T> {
+impl<T: GuestStagePagingMode> HostVmLoader<T> {
     /// Creates a new loader with the given device-tree and kernel & initramfs images. Uses
     /// `page_alloc` to allocate any additional pages that are necessary to load the VM.
     pub fn new(

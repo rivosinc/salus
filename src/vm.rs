@@ -8,7 +8,7 @@ use attestation::{
 };
 use core::{mem, slice};
 use der::Decode;
-use drivers::{imsic::*, iommu::*, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
+use drivers::{imsic::*, iommu::*, pci::PciDevice, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
@@ -1482,6 +1482,11 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
                 .unwrap();
             mapper.map_imsic_page(vm_addr, mappable).unwrap();
         }
+    }
+
+    /// Attaches the given PCI device to the host VM.
+    pub fn attach_pci_device(&self, dev: &mut PciDevice) {
+        self.inner.vm_pages.attach_pci_device(dev).unwrap();
     }
 
     /// Completes intialization of the host, returning it in a finalized state.

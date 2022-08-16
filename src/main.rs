@@ -41,8 +41,10 @@ use page_tracking::*;
 use print_util::*;
 use riscv_page_tables::*;
 use riscv_pages::*;
-use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
-use riscv_regs::{Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR};
+use riscv_regs::{hedeleg, henvcfg, hideleg, hie, satp, scounteren};
+use riscv_regs::{
+    Exception, Interrupt, LocalRegisterCopy, ReadWriteable, SatpHelpers, Writeable, CSR,
+};
 use s_mode_utils::abort::abort;
 use smp::PerCpu;
 use spin::Once;
@@ -61,6 +63,9 @@ extern "C" {
 
 /// The allocator used for boot-time dynamic memory allocations.
 static HYPERVISOR_ALLOCATOR: Once<HypAlloc> = Once::new();
+
+/// The hypervisor page table root address and mode to load in satp on secondary CPUs
+static SATP_VAL: Once<u64> = Once::new();
 
 // Implementation of GlobalAlloc that forwards allocations to the boot-time allocator.
 struct GeneralGlobalAlloc;
@@ -180,14 +185,146 @@ fn build_memory_map<T: GuestStagePagingMode>(fdt: &Fdt) -> MemMapResult<HwMemMap
     Ok(mem_map)
 }
 
+// Returns the number of PTE pages needed to map all regions in the given memory map.
+// Slightly overestimates of number of pages needed as some regions will share PTE pages in reality.
+fn pte_page_count(mem_map: &HwMemMap) -> u64 {
+    mem_map.regions().fold(0, |acc, r| {
+        acc + Sv48::max_pte_pages(r.size() / PageSize::Size4k as u64)
+    })
+}
+
+// Returns the base address of the first available region in the memory map that is at least `size`
+// bytes long. Returns None if no region is big enough.
+fn find_available_region(mem_map: &HwMemMap, size: u64) -> Option<SupervisorPageAddr> {
+    mem_map
+        .regions()
+        .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= size)
+        .map(|r| r.base())
+}
+
+// Returns the base, size, and permission pair for the given region if that region type should be
+// mapped in the hypervisor's virtual address space.
+fn hyp_map_params(r: &HwMemRegion) -> Option<(PageAddr<SupervisorPhys>, u64, PteLeafPerms)> {
+    match r.region_type() {
+        HwMemRegionType::Available => {
+            // map available memory as rwx - unser what it'll be used for.
+            Some((r.base(), r.size(), PteLeafPerms::RWX))
+        }
+        HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved) => {
+            // No need to map regions reserved for firmware use
+            None
+        }
+        HwMemRegionType::Reserved(HwReservedMemType::HypervisorImage)
+        | HwMemRegionType::Reserved(HwReservedMemType::HostKernelImage)
+        | HwMemRegionType::Reserved(HwReservedMemType::HostInitramfsImage) => {
+            Some((r.base(), r.size(), PteLeafPerms::RWX))
+        }
+        HwMemRegionType::Reserved(HwReservedMemType::HypervisorHeap)
+        | HwMemRegionType::Reserved(HwReservedMemType::HypervisorPerCpu)
+        | HwMemRegionType::Reserved(HwReservedMemType::HypervisorPtes)
+        | HwMemRegionType::Reserved(HwReservedMemType::PageMap) => {
+            Some((r.base(), r.size(), PteLeafPerms::RW))
+        }
+        HwMemRegionType::Mmio(_) => Some((r.base(), r.size(), PteLeafPerms::RW)),
+    }
+}
+
+// Adds an identity mapping to the given Sv48 table for the specified address range.
+fn hyp_map_region(
+    sv48: &FirstStagePageTable<Sv48>,
+    base: PageAddr<SupervisorPhys>,
+    size: u64,
+    perms: PteLeafPerms,
+    get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
+) {
+    let region_page_count = PageSize::Size4k.round_up(size) / PageSize::Size4k as u64;
+    // Pass through mappings, vaddr=paddr.
+    let vaddr = PageAddr::new(RawAddr::supervisor_virt(base.bits())).unwrap();
+    // Add mapping for this region to the page table
+    let mapper = sv48
+        .map_range(vaddr, PageSize::Size4k, region_page_count, get_pte_page)
+        .unwrap();
+    let pte_fields = PteFieldBits::leaf_with_perms(perms);
+    for (virt, phys) in vaddr
+        .iter_from()
+        .zip(base.iter_from())
+        .take(region_page_count as usize)
+    {
+        // Safe as we will create exactly one mapping to each page and will switch to
+        // using that mapping exclusively.
+        unsafe {
+            mapper.map_4k_addr(virt, phys, pte_fields).unwrap();
+        }
+    }
+}
+
+// Creates the Sv48 page table based on the accessible regions of memory in the provided memory
+// map.
+fn setup_hyp_paging(mem_map: &mut HwMemMap) {
+    let num_pte_pages = pte_page_count(mem_map);
+    let pte_base = find_available_region(mem_map, num_pte_pages * PageSize::Size4k as u64)
+        .expect("Not enough free memory for hypervisor Sv48 page table");
+    let mut pte_pages = mem_map
+        .reserve_and_take_pages(
+            HwReservedMemType::HypervisorPtes,
+            SupervisorPageAddr::new(RawAddr::from(pte_base)).unwrap(),
+            PageSize::Size4k,
+            num_pte_pages,
+        )
+        .unwrap()
+        .clean()
+        .into_iter();
+    // Create empty sv48 page table
+    let root_page = pte_pages.next().unwrap();
+    let sv48: FirstStagePageTable<Sv48> =
+        FirstStagePageTable::new(root_page).expect("creating sv48");
+
+    // Map all the regions in the memory map that the hypervisor could need.
+    for (base, size, perms) in mem_map.regions().filter_map(hyp_map_params) {
+        hyp_map_region(&sv48, base, size, perms, &mut || pte_pages.next());
+    }
+
+    // TODO- discover these from DT and un-hard code?
+    map_fixed_device(UART_BASE, &sv48, &mut || pte_pages.next());
+    // TODO - reset device is hard coded in vm.rs
+    map_fixed_device(0x10_0000, &sv48, &mut || pte_pages.next());
+
+    // Install the page table in satp
+    let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
+    satp.set_from(&sv48, 0);
+    // Store the SATP value for other CPUs. They load from the global in start_secondary.
+    SATP_VAL.call_once(|| satp.get());
+    CSR.satp.set(satp.get());
+    tlb::sfence_vma(None, None);
+}
+
+// Adds some hard-coded device location to the given sv48 page table so that the devices can be
+// accessed by the hypervisor. Identity maps a single page at base to base.
+fn map_fixed_device(
+    base: u64,
+    sv48: &FirstStagePageTable<Sv48>,
+    get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
+) {
+    // TODO: since the UART driver hard-codes the UART registers they need to be special cased.
+    let virt_base = PageAddr::new(RawAddr::supervisor_virt(base)).unwrap();
+    let phys_base = PageAddr::new(RawAddr::supervisor(base)).unwrap();
+    let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::RW);
+    let mapper = sv48
+        .map_range(virt_base, PageSize::Size4k, 1, get_pte_page)
+        .unwrap();
+    // Safe to map access to the UART because this will be the only mapping it is used through.
+    unsafe {
+        mapper
+            .map_4k_addr(virt_base, phys_base, pte_fields)
+            .unwrap();
+    }
+}
+
 /// Creates a heap from the given `mem_map`, marking the region occupied by the heap as reserved.
 fn create_heap(mem_map: &mut HwMemMap) {
     const HEAP_SIZE: u64 = 16 * 1024 * 1024;
 
-    let heap_base = mem_map
-        .regions()
-        .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= HEAP_SIZE)
-        .map(|r| r.base())
+    let heap_base = find_available_region(mem_map, HEAP_SIZE)
         .expect("Not enough free memory for hypervisor heap");
     mem_map
         .reserve_region(
@@ -262,6 +399,8 @@ pub fn setup_csrs() {
     trap::install_trap_handler();
 }
 
+const UART_BASE: u64 = 0x1000_0000;
+
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
@@ -270,7 +409,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Safety: This is the very beginning of the kernel, there are no other users of the UART and
     // we expect that a UART is at this address.
-    unsafe { UartDriver::init(RawAddr::supervisor(0x1000_0000)) };
+    unsafe { UartDriver::init(RawAddr::supervisor(UART_BASE)) };
     println!("Salus: Boot test VM");
 
     // Safe because we trust that the firmware passed a valid FDT.
@@ -278,6 +417,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.expect("Failed to read FDT");
 
     let mut mem_map = build_memory_map::<Sv48x4>(&hyp_fdt).expect("Failed to build memory map");
+
     // Find where QEMU loaded the host kernel image.
     let host_kernel = *mem_map
         .regions()
@@ -345,9 +485,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         }
     });
 
+    setup_hyp_paging(&mut mem_map);
+
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);
-    smp::start_secondary_cpus();
 
     // We start RAM in the host address space at the same location as it is in the supervisor
     // address space.
@@ -389,6 +530,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Lock down the boot time allocator before allowing the host VM to be entered.
     HYPERVISOR_ALLOCATOR.get().unwrap().seal();
 
+    smp::start_secondary_cpus();
+
     HOST_VM.call_once(|| host);
     let cpu_id = PerCpu::this_cpu().cpu_id();
     HOST_VM.get().unwrap().run(cpu_id.raw() as u64);
@@ -397,6 +540,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 #[no_mangle]
 extern "C" fn secondary_init(_hart_id: u64) {
     setup_csrs();
+
+    CSR.satp.set(*SATP_VAL.get().unwrap());
+    tlb::sfence_vma(None, None);
+
     let cpu_info = CpuInfo::get();
     if cpu_info.has_sstc() {
         CSR.henvcfg.modify(henvcfg::stce.val(1));

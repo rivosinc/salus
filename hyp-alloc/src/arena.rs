@@ -112,6 +112,21 @@ impl<T, A: Allocator> Arena<T, A> {
     pub fn get_mut(&mut self, id: ArenaId<T>) -> Option<&mut T> {
         self.vals.get_mut(id.index)?.as_mut()
     }
+
+    /// Returns an iterator over the valid IDs in the arena.
+    pub fn ids(&self) -> impl Iterator<Item = ArenaId<T>> + '_ {
+        self.vals.iter().enumerate().filter_map(|(i, v)| {
+            v.as_ref().map(|_| ArenaId {
+                index: i,
+                phantom: PhantomData,
+            })
+        })
+    }
+
+    /// Returns an iterator over the items in the arena.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.vals.iter().filter_map(|v| v.as_ref())
+    }
 }
 
 impl<T: Default, A: Allocator> Arena<T, A> {

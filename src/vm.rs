@@ -10,7 +10,7 @@ use core::{mem, slice};
 use der::Decode;
 use drivers::{imsic::ImsicFileId, pci::PcieRoot, CpuId, CpuInfo, MAX_CPUS};
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
-use riscv_page_tables::{GuestStagePageTable, PlatformPageTable};
+use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::abort::abort;
@@ -206,14 +206,14 @@ impl From<EcallResult<u64>> for EcallAction {
 type AttestationSha384 = AttestationManager<sha2::Sha384>;
 
 /// A VM that is being run.
-pub struct Vm<T: GuestStagePageTable, S = VmStateFinalized> {
+pub struct Vm<T: GuestStagePagingMode, S = VmStateFinalized> {
     vcpus: VmCpus,
     vm_pages: VmPages<T, S>,
     guests: Option<Guests<T>>,
     attestation_mgr: AttestationSha384,
 }
 
-impl<T: GuestStagePageTable, S> Vm<T, S> {
+impl<T: GuestStagePagingMode, S> Vm<T, S> {
     /// Returns this VM's ID.
     pub fn page_owner_id(&self) -> PageOwnerId {
         self.vm_pages.page_owner_id()
@@ -231,7 +231,7 @@ impl<T: GuestStagePageTable, S> Vm<T, S> {
     }
 }
 
-impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
+impl<T: GuestStagePagingMode> Vm<T, VmStateInitializing> {
     /// Create a new guest using the given initial page table and vCPU tracking table.
     pub fn new(vm_pages: VmPages<T, VmStateInitializing>, vcpus: VmCpus) -> Result<Self> {
         let vm_id = vm_pages.page_owner_id().raw();
@@ -321,7 +321,7 @@ impl<T: GuestStagePageTable> Vm<T, VmStateInitializing> {
     }
 }
 
-impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
+impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
     /// Binds the specified vCPU to an IMSIC interrupt file.
     fn bind_vcpu(&self, vcpu_id: u64, interrupt_file: ImsicFileId) -> EcallResult<()> {
         let vcpu = self
@@ -1261,11 +1261,11 @@ impl<T: GuestStagePageTable> Vm<T, VmStateFinalized> {
 }
 
 /// Represents the special VM that serves as the host for the system.
-pub struct HostVm<T: GuestStagePageTable, S = VmStateFinalized> {
+pub struct HostVm<T: GuestStagePagingMode, S = VmStateFinalized> {
     inner: Vm<T, S>,
 }
 
-impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
+impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
     /// Creates an initializing host VM with an expected guest physical address space size of
     /// `host_gpa_size` from the hypervisor page allocator. Returns the remaining free pages
     /// from the allocator, along with the newly constructed `HostVm`.
@@ -1288,7 +1288,7 @@ impl<T: GuestStagePageTable> HostVm<T, VmStateInitializing> {
 
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root =
-            PlatformPageTable::new(root_table_pages, PageOwnerId::host(), page_tracker.clone())
+            GuestStagePageTable::new(root_table_pages, PageOwnerId::host(), page_tracker.clone())
                 .unwrap();
         let region_vec = VmRegionList::new(region_vec_pages, page_tracker.clone());
         let vm_pages = VmPages::new(root, region_vec, 0);
@@ -1409,7 +1409,7 @@ enum MmioEmulationError {
     InvalidAddress(u64),
 }
 
-impl<T: GuestStagePageTable> HostVm<T, VmStateFinalized> {
+impl<T: GuestStagePagingMode> HostVm<T, VmStateFinalized> {
     /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.
     pub fn run(&self, vcpu_id: u64) {
         self.inner

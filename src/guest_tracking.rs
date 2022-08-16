@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 use page_tracking::collections::{PageArc, PageVec};
 use page_tracking::PageTracker;
-use riscv_page_tables::GuestStagePageTable;
+use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{InternalClean, Page, PageOwnerId, SequentialPages};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
@@ -26,13 +26,13 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// Wrapper enum for a `Vm<T, S>` for each possible state S so that we can store `Vm`s of any
 /// state in a `PageArc`.
-enum GuestStateInner<T: GuestStagePageTable> {
+enum GuestStateInner<T: GuestStagePagingMode> {
     Init(Vm<T, VmStateInitializing>),
     Running(Vm<T, VmStateFinalized>),
     Temp,
 }
 
-impl<T: GuestStagePageTable> GuestStateInner<T> {
+impl<T: GuestStagePagingMode> GuestStateInner<T> {
     /// Returns a reference to `self` as an initializing VM.
     fn as_initializing_vm(&self) -> Option<&Vm<T, VmStateInitializing>> {
         match self {
@@ -88,12 +88,12 @@ impl<T: GuestStagePageTable> GuestStateInner<T> {
 
 /// A refernce to a VM in a paritcular state. While this refernce is held the wrapped `Vm` is
 /// guaranteed not to change state.
-pub struct VmRef<'a, T: GuestStagePageTable, S> {
+pub struct VmRef<'a, T: GuestStagePagingMode, S> {
     vm: RwLockReadGuard<'a, GuestStateInner<T>>,
     phantom: PhantomData<S>,
 }
 
-impl<'a, T: GuestStagePageTable> Deref for VmRef<'a, T, VmStateInitializing> {
+impl<'a, T: GuestStagePagingMode> Deref for VmRef<'a, T, VmStateInitializing> {
     type Target = Vm<T, VmStateInitializing>;
 
     fn deref(&self) -> &Self::Target {
@@ -101,7 +101,7 @@ impl<'a, T: GuestStagePageTable> Deref for VmRef<'a, T, VmStateInitializing> {
     }
 }
 
-impl<'a, T: GuestStagePageTable> Deref for VmRef<'a, T, VmStateFinalized> {
+impl<'a, T: GuestStagePagingMode> Deref for VmRef<'a, T, VmStateFinalized> {
     type Target = Vm<T, VmStateFinalized>;
 
     fn deref(&self) -> &Self::Target {
@@ -110,11 +110,11 @@ impl<'a, T: GuestStagePageTable> Deref for VmRef<'a, T, VmStateFinalized> {
 }
 
 /// A (reference-counted) reference to a guest VM.
-pub struct GuestState<T: GuestStagePageTable> {
+pub struct GuestState<T: GuestStagePagingMode> {
     inner: PageArc<RwLock<GuestStateInner<T>>>,
 }
 
-impl<T: GuestStagePageTable> Clone for GuestState<T> {
+impl<T: GuestStagePagingMode> Clone for GuestState<T> {
     fn clone(&self) -> GuestState<T> {
         GuestState {
             inner: self.inner.clone(),
@@ -122,7 +122,7 @@ impl<T: GuestStagePageTable> Clone for GuestState<T> {
     }
 }
 
-impl<T: GuestStagePageTable> GuestState<T> {
+impl<T: GuestStagePagingMode> GuestState<T> {
     /// Creates a new initializing `GuestState` from `vm`, using `page` as storage.
     pub fn new(vm: Vm<T, VmStateInitializing>, page: Page<InternalClean>) -> Self {
         let page_tracker = vm.page_tracker();
@@ -158,11 +158,11 @@ impl<T: GuestStagePageTable> GuestState<T> {
 }
 
 /// Tracks the guest VMs for a host VM.
-pub struct Guests<T: GuestStagePageTable> {
+pub struct Guests<T: GuestStagePagingMode> {
     guests: Mutex<PageVec<GuestState<T>>>,
 }
 
-impl<T: GuestStagePageTable> Guests<T> {
+impl<T: GuestStagePagingMode> Guests<T> {
     /// Creates a new `Guests` using `vec_pages` as storage.
     pub fn new(vec_pages: SequentialPages<InternalClean>, page_tracker: PageTracker) -> Self {
         Self {

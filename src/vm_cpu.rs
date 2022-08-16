@@ -8,7 +8,7 @@ use drivers::{imsic::ImsicFileId, CpuId, CpuInfo};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};
-use riscv_page_tables::GuestStagePageTable;
+use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{
     GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages,
 };
@@ -285,7 +285,7 @@ trait VmCpuSaveState {
 }
 
 /// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
-pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePageTable> {
+pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> {
     vcpu: &'vcpu mut VmCpu,
     vm_pages: &'pages VmPages<T>,
     // `None` if this vCPU is itself running a child vCPU. Restored when the child vCPU exits.
@@ -294,7 +294,7 @@ pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePageTable> {
     parent_vcpu: Option<&'prev mut dyn VmCpuSaveState>,
 }
 
-impl<'vcpu, 'pages, 'prev, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, 'prev, T> {
+impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, 'prev, T> {
     // Restores and activates the vCPU state from `vcpu`, with the VM address space represented by
     // `vm_pages`.
     fn restore_from(
@@ -586,7 +586,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePageTable> ActiveVmCpu<'vcpu, 'pages, 'p
     }
 }
 
-impl<T: GuestStagePageTable> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
+impl<T: GuestStagePagingMode> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
     fn save(&mut self) {
         self.active_pages = None;
         self.save_vcpu_csrs();
@@ -598,7 +598,7 @@ impl<T: GuestStagePageTable> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
     }
 }
 
-impl<T: GuestStagePageTable> Deref for ActiveVmCpu<'_, '_, '_, T> {
+impl<T: GuestStagePagingMode> Deref for ActiveVmCpu<'_, '_, '_, T> {
     type Target = VmCpu;
 
     fn deref(&self) -> &VmCpu {
@@ -606,13 +606,13 @@ impl<T: GuestStagePageTable> Deref for ActiveVmCpu<'_, '_, '_, T> {
     }
 }
 
-impl<T: GuestStagePageTable> DerefMut for ActiveVmCpu<'_, '_, '_, T> {
+impl<T: GuestStagePagingMode> DerefMut for ActiveVmCpu<'_, '_, '_, T> {
     fn deref_mut(&mut self) -> &mut VmCpu {
         self.vcpu
     }
 }
 
-impl<T: GuestStagePageTable> Drop for ActiveVmCpu<'_, '_, '_, T> {
+impl<T: GuestStagePagingMode> Drop for ActiveVmCpu<'_, '_, '_, T> {
     fn drop(&mut self) {
         self.save();
         if let Some(ref mut p) = self.parent_vcpu {
@@ -762,7 +762,7 @@ impl VmCpu {
     /// Activates `vcpu` with the VM address space in `vm_pages`, returning a reference to it as an
     /// `ActiveVmCpu`. If `parent_vcpu` is not `None`, its state is saved before this vCPU is
     /// activated and is restored when the returned `ActiveVmCpu` is dropped.
-    pub fn activate<'vcpu, 'pages, 'prev: 'vcpu + 'pages, T: GuestStagePageTable>(
+    pub fn activate<'vcpu, 'pages, 'prev: 'vcpu + 'pages, T: GuestStagePagingMode>(
         &'vcpu mut self,
         vm_pages: &'pages VmPages<T>,
         mut parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,

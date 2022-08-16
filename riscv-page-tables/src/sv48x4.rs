@@ -73,7 +73,7 @@ impl PageTableLevel for Sv48x4Level {
 /// The `Sv48x4` addressing mode for 2nd-stage translation tables.
 pub enum Sv48x4 {}
 
-impl GuestStagePageTable for Sv48x4 {
+impl GuestStagePagingMode for Sv48x4 {
     const HGATP_VALUE: u64 = 9;
 }
 

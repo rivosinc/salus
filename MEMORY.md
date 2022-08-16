@@ -77,15 +77,15 @@ classDiagram
         active_guests: Vec of PageOwnerId
         pages: PageMap
     }
-    PlatformPageTable "N" o-- "1" PageTracker
-    class PlatformPageTable {
+    GuestStagePageTable "N" o-- "1" PageTracker
+    class GuestStagePageTable {
         root: Top-level page table
         owner: PageOwnerId
         pages: PageTracker
     }
-    VmPages "N" *-- "1" PlatformPageTable
+    VmPages "N" *-- "1" GuestStagePageTable
     class VmPages {
-        root: PlatformPageTable
+        root: GuestStagePageTable
         regions: Vec of VmRegion
         measurement: ...
     }
@@ -126,14 +126,14 @@ page in the system. It allows indexing the pages by a page address.
 `PageTracker` is a system-side singleton that contains `PageMap` and a
 list of active page owners (VM guests).
 
-A `PlatformPageTable` is created for each running VM and is used to
+A `GuestStagePageTable` is created for each running VM and is used to
 manage the 2nd-stage translation tables for the VM, with `root` pointing to
 the 16kB root page table of the paging hierarchy. This is the entity that is
 assigned a unique `PageOwnerId` for the VM and it maintains a reference to
 `PageTracker` for checking which pages are allowed to be mapped or unmapped
 from the VM.
 
-`VmPages` is a per-VM structure that has a `PlatformPageTable` and
+`VmPages` is a per-VM structure that has a `GuestStagePageTable` and
 a `VmRegionList`, which tracks the parts of the physical address space are
 eligible to be used for confidential or shared memory. `VmPages` is used to
 coordinate the assignment, reclaim, or sharing of pages with a child VM.

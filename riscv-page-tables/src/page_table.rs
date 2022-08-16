@@ -37,7 +37,7 @@ pub enum Error {
     PteNotLocked,
     /// At least one of the pages for building a table root were not owned by the table's owner.
     RootPageNotOwned,
-    /// The page was not in the range that the `PageTableMapper` covers.
+    /// The page was not in the range that the `GuestStageMapper` covers.
     OutOfMapRange,
     /// The page cannot be shared
     PageNotShareable,
@@ -149,7 +149,7 @@ impl<'a, T: PagingMode> UnusedPte<'a, T> {
     /// # Safety
     ///
     /// The caller must guarantee that `table_paddr` references a page-table page uniquely owned by
-    /// the root `PlatformPageTable`.
+    /// the root `GuestStagePageTable`.
     unsafe fn map_table(self, table_paddr: SupervisorPageAddr) -> PageTablePte<'a, T> {
         self.pte.set(table_paddr.pfn(), &PteFieldBits::non_leaf());
         PageTablePte::new(self.pte, self.level)
@@ -184,7 +184,7 @@ impl<'a, T: PagingMode> LockedPte<'a, T> {
     /// # Safety
     ///
     /// The caller must guarantee that `paddr` references a page uniquely owned by the root
-    /// `PlatformPageTable`.
+    /// `GuestStagePageTable`.
     unsafe fn map_leaf(self, paddr: SupervisorPageAddr, perms: PteLeafPerms) -> LeafPte<'a, T> {
         assert!(paddr.is_aligned(self.level.leaf_page_size()));
         let status = {
@@ -235,7 +235,7 @@ impl<'a, T: PagingMode> PageTablePte<'a, T> {
         //  - all valid, non-leaf PTEs must point to an intermediate page table which must
         //    consume exactly one page, and
         //  - all pages pointed to by PTEs in this paging hierarchy are owned by the root
-        //    `PlatformPageTable` and have their lifetime bound to the root.
+        //    `GuestStagePageTable` and have their lifetime bound to the root.
         unsafe { PageTable::from_pte(self.pte, self.level.next().unwrap()) }
     }
 }
@@ -246,12 +246,12 @@ impl<'a, T: PagingMode> PageTablePte<'a, T> {
 struct PageTable<'a, T: PagingMode> {
     table_addr: SupervisorPageAddr,
     level: T::Level,
-    // Bind our lifetime to that of the top-level `PlatformPageTable`.
+    // Bind our lifetime to that of the top-level `GuestStagePageTable`.
     phantom: PhantomData<&'a mut PageTableInner<T>>,
 }
 
 impl<'a, T: PagingMode> PageTable<'a, T> {
-    /// Creates a `PageTable` from the root of a `PlatformPageTable`.
+    /// Creates a `PageTable` from the root of a `GuestStagePageTable`.
     fn from_root(owner: &'a mut PageTableInner<T>) -> Self {
         Self {
             table_addr: owner.root.base(),
@@ -265,8 +265,8 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
     /// # Safety
     ///
     /// The given `Pte` must be valid and point to an intermediate paging structure at the specified
-    /// level. The pointed-to page table must be owned by the same `PlatformPageTable` that owns the
-    /// `Pte`.
+    /// level. The pointed-to page table must be owned by the same `GuestStagePageTable` that owns
+    /// the `Pte`.
     unsafe fn from_pte(pte: &'a mut Pte, level: T::Level) -> Self {
         assert!(pte.valid());
         // Beyond the root, every level must be only one 4kB page.
@@ -465,14 +465,14 @@ pub trait PagingMode {
 
 /// A page table for a S or U mode. It's enabled by storing its root address in `satp`.
 /// Examples include `Sv39`, `Sv48`, or `Sv57`
-pub trait FirstStagePageTable: PagingMode<MappedAddressSpace = SupervisorVirt> {
+pub trait FirstStagePagingMode: PagingMode<MappedAddressSpace = SupervisorVirt> {
     /// `SATP_VALUE` must be set to the paging mode stored in register satp.
     const SATP_VALUE: u64;
 }
 
 /// A page table for a VM. It's enabled by storing its root address in `hgatp`.
 /// Examples include `Sv39x4`, `Sv48x4`, or `Sv57x4`
-pub trait GuestStagePageTable: PagingMode<MappedAddressSpace = GuestPhys> {
+pub trait GuestStagePagingMode: PagingMode<MappedAddressSpace = GuestPhys> {
     /// `HGATP_VALUE` must be set to the paging mode stored in register hgatp.
     const HGATP_VALUE: u64;
 }
@@ -518,7 +518,7 @@ impl<T: PagingMode> PageTableInner<T> {
     /// # Safety
     ///
     /// The caller must guarantee that `paddr` references a page uniquely owned by the root
-    /// `PlatformPageTable`.
+    /// `GuestStagePageTable`.
     unsafe fn map_4k_leaf(
         &mut self,
         vaddr: PageAddr<T::MappedAddressSpace>,
@@ -620,13 +620,13 @@ impl<T: PagingMode> PageTableInner<T> {
 /// A paging hierarchy for a given addressing type.
 ///
 /// TODO: Support non-4k page sizes.
-pub struct PlatformPageTable<T: PagingMode> {
+pub struct GuestStagePageTable<T: PagingMode> {
     inner: Mutex<PageTableInner<T>>,
     page_tracker: PageTracker,
     owner: PageOwnerId,
 }
 
-impl<T: PagingMode> PlatformPageTable<T> {
+impl<T: PagingMode> GuestStagePageTable<T> {
     /// Creates a new page table root from the provided `root` that must be at least
     /// `T::root_level().table_pages()` in length and aligned to `T::TOP_LEVEL_ALIGN`.
     pub fn new(
@@ -674,7 +674,7 @@ impl<T: PagingMode> PlatformPageTable<T> {
 
     /// Prepares for mapping `num_pages` pages of size `page_size` starting at `addr` in the mapped
     /// address space by locking the target PTEs and populating any intermediate page tables using
-    /// `get_pte_page`. Upon success, returns a `PageTableMapper` that is guaranteed to be able to
+    /// `get_pte_page`. Upon success, returns a `GuestStageMapper` that is guaranteed to be able to
     /// map the specified range.
     pub fn map_range(
         &self,
@@ -682,12 +682,12 @@ impl<T: PagingMode> PlatformPageTable<T> {
         page_size: PageSize,
         num_pages: u64,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
-    ) -> Result<PageTableMapper<T>> {
+    ) -> Result<GuestStageMapper<T>> {
         if page_size.is_huge() {
             return Err(Error::PageSizeNotSupported(page_size));
         }
 
-        let mut mapper = PageTableMapper::new(self, addr, 0);
+        let mut mapper = GuestStageMapper::new(self, addr, 0);
         let mut inner = self.inner.lock();
         for a in addr.iter_from().take(num_pages as usize) {
             inner.lock_4k_leaf_for_mapping(a, get_pte_page)?;
@@ -857,7 +857,7 @@ impl<T: PagingMode> PlatformPageTable<T> {
     }
 }
 
-impl<T: PagingMode> Drop for PlatformPageTable<T> {
+impl<T: PagingMode> Drop for GuestStagePageTable<T> {
     fn drop(&mut self) {
         let mut inner = self.inner.lock();
         // Walk the page table starting from the root, freeing any referenced pages.
@@ -879,17 +879,17 @@ impl<T: PagingMode> Drop for PlatformPageTable<T> {
 
 /// A range of mapped address space that has been locked for mapping. The PTEs are unlocked when
 /// this struct is dropped. Mapping a page in this range is guaranteed to succeed as long as the
-/// address hasn't already been mapped by this `PageTableMapper`.
-pub struct PageTableMapper<'a, T: PagingMode> {
-    owner: &'a PlatformPageTable<T>,
+/// address hasn't already been mapped by this `GuestStageMapper`.
+pub struct GuestStageMapper<'a, T: PagingMode> {
+    owner: &'a GuestStagePageTable<T>,
     vaddr: PageAddr<T::MappedAddressSpace>,
     num_pages: u64,
 }
 
-impl<'a, T: PagingMode> PageTableMapper<'a, T> {
-    /// Creates a new `PageTableMapper` for `num_pages` starting at `vaddr`.
+impl<'a, T: PagingMode> GuestStageMapper<'a, T> {
+    /// Creates a new `GuestStageMapper` for `num_pages` starting at `vaddr`.
     fn new(
-        owner: &'a PlatformPageTable<T>,
+        owner: &'a GuestStagePageTable<T>,
         vaddr: PageAddr<T::MappedAddressSpace>,
         num_pages: u64,
     ) -> Self {
@@ -924,13 +924,14 @@ impl<'a, T: PagingMode> PageTableMapper<'a, T> {
     }
 }
 
-impl<'a, T: PagingMode> Drop for PageTableMapper<'a, T> {
+impl<'a, T: PagingMode> Drop for GuestStageMapper<'a, T> {
     fn drop(&mut self) {
         let mut inner = self.owner.inner.lock();
         for a in self.vaddr.iter_from().take(self.num_pages as usize) {
             // Ignore the return value since this is expected to fail if the PTE was successfully
-            // mapped (which will unlock the PTE), but may succeed if the holder of the PageTableMapper
-            // bailed before having filled the entire range (e.g. because of another failure).
+            // mapped (which will unlock the PTE), but may succeed if the holder of the
+            // GuestStageMapper bailed before having filled the entire range (e.g. because of
+            // another failure).
             let _ = inner.unlock_4k_leaf(a);
         }
     }

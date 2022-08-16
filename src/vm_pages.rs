@@ -10,7 +10,7 @@ use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
 };
 use riscv_page_tables::{
-    tlb, GuestStagePageTable, PageTableError, PageTableMapper, PlatformPageTable,
+    tlb, GuestStageMapper, GuestStagePageTable, GuestStagePagingMode, PageTableError,
 };
 use riscv_pages::*;
 use riscv_regs::{
@@ -279,14 +279,14 @@ impl VmRegionList {
     }
 }
 
-/// Wrapper for a `PageTableMapper` created from the page table of `VmPages`. Measures pages as
+/// Wrapper for a `GuestStageMapper` created from the page table of `VmPages`. Measures pages as
 /// they are inserted, if necessary.
-pub struct VmPagesMapper<'a, T: GuestStagePageTable, S> {
-    mapper: PageTableMapper<'a, T>,
+pub struct VmPagesMapper<'a, T: GuestStagePagingMode, S> {
+    mapper: GuestStageMapper<'a, T>,
     phantom: PhantomData<S>,
 }
 
-impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
+impl<'a, T: GuestStagePagingMode, S> VmPagesMapper<'a, T, S> {
     /// Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr`, which must lie within
     /// a region of type `region_type`.
     fn new_in_region(
@@ -322,7 +322,7 @@ impl<'a, T: GuestStagePageTable, S> VmPagesMapper<'a, T, S> {
     }
 }
 
-impl<'a, T: GuestStagePageTable> VmPagesMapper<'a, T, VmStateInitializing> {
+impl<'a, T: GuestStagePagingMode> VmPagesMapper<'a, T, VmStateInitializing> {
     /// Maps a page into the guest's address space and measures it.
     pub fn map_page_with_measurement<S, M, D, H>(
         &self,
@@ -365,12 +365,12 @@ pub enum PageFaultType {
 
 /// Represents the active VM address space. Holds a reference to the TLB version of the address space
 /// at the time the address space was activated. Used to directly access a guest's memory.
-pub struct ActiveVmPages<'a, T: GuestStagePageTable> {
+pub struct ActiveVmPages<'a, T: GuestStagePagingMode> {
     tlb_version: TlbVersion,
     vm_pages: &'a VmPages<T>,
 }
 
-impl<'a, T: GuestStagePageTable> Drop for ActiveVmPages<'a, T> {
+impl<'a, T: GuestStagePagingMode> Drop for ActiveVmPages<'a, T> {
     fn drop(&mut self) {
         // Unwrap ok since tlb_tracker won't increment the version while there are outstanding
         // references.
@@ -381,7 +381,7 @@ impl<'a, T: GuestStagePageTable> Drop for ActiveVmPages<'a, T> {
     }
 }
 
-impl<'a, T: GuestStagePageTable> Deref for ActiveVmPages<'a, T> {
+impl<'a, T: GuestStagePagingMode> Deref for ActiveVmPages<'a, T> {
     type Target = VmPages<T>;
 
     fn deref(&self) -> &VmPages<T> {
@@ -389,7 +389,7 @@ impl<'a, T: GuestStagePageTable> Deref for ActiveVmPages<'a, T> {
     }
 }
 
-impl<'a, T: GuestStagePageTable> ActiveVmPages<'a, T> {
+impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
     fn new(vm_pages: &'a VmPages<T>, vmid: VmId, prev_tlb_version: Option<TlbVersion>) -> Self {
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
         hgatp.modify(hgatp::vmid.val(vmid.vmid()));
@@ -603,19 +603,19 @@ impl Drop for PtePagePool {
 ///
 /// Machines are allowed to donate pages to child machines and to share donated pages with parent
 /// machines.
-pub struct VmPages<T: GuestStagePageTable, S = VmStateFinalized> {
+pub struct VmPages<T: GuestStagePagingMode, S = VmStateFinalized> {
     page_owner_id: PageOwnerId,
     page_tracker: PageTracker,
     tlb_tracker: TlbTracker,
     regions: VmRegionList,
     // How many nested TVMs deep this VM is, with 0 being the host.
     nesting: usize,
-    root: PlatformPageTable<T>,
+    root: GuestStagePageTable<T>,
     pte_pages: PtePagePool,
     phantom: PhantomData<S>,
 }
 
-impl<T: GuestStagePageTable, S> VmPages<T, S> {
+impl<T: GuestStagePagingMode, S> VmPages<T, S> {
     /// Returns the `PageOwnerId` associated with the pages contained in this machine.
     pub fn page_owner_id(&self) -> PageOwnerId {
         self.page_owner_id
@@ -674,7 +674,7 @@ impl<T: GuestStagePageTable, S> VmPages<T, S> {
     }
 }
 
-impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
+impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
     /// Returns a list of converted and locked pages created from `num_pages` starting at `page_addr`.
     fn get_converted_pages(
         &self,
@@ -786,7 +786,7 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
         let guest_root_pages =
             SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
         let guest_root =
-            PlatformPageTable::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
+            GuestStagePageTable::new(guest_root_pages, id, self.page_tracker.clone()).unwrap();
 
         let mut state_pages = self.assign_state_pages_for(state_pages, id);
         let box_page = state_pages.next().unwrap();
@@ -866,9 +866,9 @@ impl<T: GuestStagePageTable> VmPages<T, VmStateFinalized> {
     }
 }
 
-impl<T: GuestStagePageTable> VmPages<T, VmStateInitializing> {
+impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
     /// Creates a new `VmPages` from the given root page table.
-    pub fn new(root: PlatformPageTable<T>, regions: VmRegionList, nesting: usize) -> Self {
+    pub fn new(root: GuestStagePageTable<T>, regions: VmRegionList, nesting: usize) -> Self {
         let page_tracker = root.page_tracker();
         Self {
             page_owner_id: root.page_owner_id(),

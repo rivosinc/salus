@@ -25,10 +25,8 @@ _copy_to_guest:
 1:
     beq   t2, a2, _ret_from_copy
     lb    t3, (a1)
-    // HSV.B encoding:
-    //   0110001 rs2[4:0] rs1[4:0] 100 00000 1110011
 2:
-    .word 0x63c54073 // hsv.b t3, (a0)
+    hsv.b t3, (a0)
     add_extable 2b
     addi  a0, a0, 1
     addi  a1, a1, 1
@@ -45,10 +43,8 @@ _copy_from_guest:
     mv    t2, zero
 1:
     beq   t2, a2, _ret_from_copy
-    // HLV.B encoding:
-    //   0110000 00000 rs1[4:0] 100 rd[4:0] 1110011
 2:
-    .word 0x6005ce73 // hlv.b t3, (a1)
+    hlv.b t3, (a1)
     add_extable 2b
     sb    t3, (a0)
     addi  a0, a0, 1
@@ -74,10 +70,8 @@ _fetch_guest_instruction:
     // handle_trap assumes t0 holds the address of where we want to jump to when we encounter
     // a fault and will stick SCAUSE in t1.
     la    t0, 4f
-    // HLVX.HU encoding:
-    //   0110010 00011 rs1[4:0] 100 rd[4:0] 1110011
 1:
-    .word 0x643543f3 // hlvx.hu t2, (a0)
+    hlvx.hu t2, (a0)
     add_extable 1b
     sw    t2, (a1)
     addi  a0, a0, 2
@@ -88,7 +82,7 @@ _fetch_guest_instruction:
     bne   t2, t3, 3f
     // Load the next half-word.
 2:
-    .word 0x643543f3 // hlvx.hu t2, (a0)
+    hlvx.hu t2, (a0)
     add_extable 2b
     sw    t2, (a1)
 3:

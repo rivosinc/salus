@@ -9,21 +9,78 @@ rustup target add riscv64gc-unknown-none-elf
 cargo build
 ```
 
-## running
+Note that Salus relies on unstable features from the nightly toolchain so there
+may be build breakages from time-to-time. Try running `rustup upgrade` first
+should you run into build failures.
 
-There is a `Makefile` provided with targets for running various hosts in qemu.
+## Running
+
+There is a `Makefile` provided with targets for running various hosts in QEMU.
 
 ### Prerequisites
 
-- rust toolchain from [rustup](rustup.rs)
-- rustup target add riscv64gc-unknown-none-elf
-- install `gcc-riscv64-unknown-elf` for `riscv64-unknown-elf-objcopy`
-- qemu-system-riscv64 - build using  qemu
-  [instructions](https://wiki.qemu.org/Hosts/Linux) with
-  `--target-list=riscv64-softmmu`
-  - Note qemu 7.0.0 has a bug emulating riscv and a newer version from git must be used.
+Toolchains:
+- Rust: Install [rustup](rustup.rs), then: `rustup target add riscv64gc-unknown-none-elf`
+- GCC: Install `gcc-riscv64-unknown-elf`
 
-## Test VM
+QEMU:
+- Out-of-tree patches are required; see table below.
+- Build using QEMU [instructions](https://wiki.qemu.org/Hosts/Linux) with
+  `--target-list=riscv64-softmmu`
+- Set the `QEMU=` variable to point to the compiled QEMU tree when using the
+  `make run_*` targets described below.
+
+Linux kernel:
+- Out-of-tree patches are required; see table below.
+- Build: `ARCH=riscv CROSS_COMPILE=riscv64-unknown-linux-gnu- make defconfig Image`
+- Set the `LINUX=` variable to point to the compiled Linux kernel tree when
+  using the `make run_linux` and `make run_debian` targets described below.
+
+Debian:
+- Download and extract a pre-baked `riscv64-virt` image from https://people.debian.org/~gio/dqib/.
+- Set the `DEBIAN=` variable to point to the extracted archive when using the
+  `make run_debian` target described below.
+
+Latest known-working branches:
+
+| Project | Branch |
+| ------- | ------ |
+| QEMU    | https://github.com/rivosinc/qemu/tree/salus-integration-08172022 |
+| Linux   | https://github.com/rivosinc/linux/tree/salus-integration-08172022 |
+
+### Linux VM
+
+The `make run_linux` target will boot a bare Linux kernel as the host VM
+that will panic upon reaching `init` due to the lack of a root filesystem.
+
+To boot a more functional Linux VM, use the `make run_debian` target which
+will boot a Debian VM with emulated storage and network devices using pre-baked
+Debian initrd and rootfs images.
+
+Example:
+
+```
+make run_debian \
+    QEMU=<path-to-qemu-tree> \
+    LINUX=<path-to-linux-tree> \
+    DEBIAN=<path-to-pre-baked-image>
+```
+
+Once booted, the VM can be SSH'ed into with `root:root` at `localhost:7722`.
+
+Additional emulated devices may be added with the `EXTRA_QEMU_ARGS` Makefile
+variable. Note that only PCI devices using MSI/MSI-X will be usable by the VM.
+`virtio-pci` devices may also be used with `iommu_platform=on,disable-legacy=on`
+flags.
+
+Example:
+
+```
+make run_debian ... \
+     EXTRA_QEMU_ARGS="-device virtio-net-pci,iommu_platform=on,disable-legacy=on"
+```
+
+### Test VM
 
 A pair of test VMs are located in `test-workloads`.
 

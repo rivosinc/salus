@@ -42,27 +42,20 @@ pub fn sfence_vma(vaddr: Option<u64>, asid: Option<u64>) {
 /// otherwise translations for all VMIDs are invalidated.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn hfence_gvma(gaddr: Option<u64>, vmid: Option<u64>) {
-    // LLVM 14.x doesn't support hypervisor instruction mnemonics :(
-    //
-    // HFENCE.VMA encoding: 011001 rs2[4:0] rs1[4:0] 000 00000 1110011
     match (gaddr, vmid) {
         // Safety: HFENCE.GVMA's behavior is well-defined and its only side effect is to invalidate
         // address translation caches.
         (Some(addr), Some(id)) => unsafe {
-            // hfence.gvma a0, a1
-            asm!(".word 0x62b50073", in("a0") addr >> 2, in("a1") id);
+            asm!("hfence.gvma {rs1}, {rs2}", rs1 = in(reg) addr >> 2, rs2 = in(reg) id);
         },
         (Some(addr), None) => unsafe {
-            // hfence.gvma a0, zero
-            asm!(".word 0x62050073", in("a0") addr >> 2);
+            asm!("hfence.gvma {rs1}, zero", rs1 = in(reg) addr >> 2);
         },
         (None, Some(id)) => unsafe {
-            // hfence.gvma zero, a0
-            asm!(".word 0x62a00073", in("a0") id);
+            asm!("hfence.gvma zero, {rs2}", rs2 = in(reg) id);
         },
         (None, None) => unsafe {
-            // hfence.gvma zero, zero
-            asm!(".word 0x62000073");
+            asm!("hfence.gvma");
         },
     }
 }

@@ -165,5 +165,9 @@ The code in this repository. An HS-mode hypervisor.
 
 M-mode code.
 
-OpenSBI currently - boots the system, loads salus to memory and passes it the
-device tree.
+OpenSBI currently boots salus from the memory (0x80200000) where qemu loader
+loaded it and passes the device tree to Salus.
+
+The above instructions use OpenSBI inbuilt in Qemu. If OpenSBI needs to be
+built from scratch, fw_dynamic should be used for `-bios` argument in the qemu
+commandline.

@@ -120,26 +120,29 @@ fn build_memory_map<T: GuestStagePagingMode>(fdt: &Fdt) -> MemMapResult<HwMemMap
     // Safe because we trust the linker placed these symbols correctly.
     let start = unsafe { core::ptr::addr_of!(_start) as u64 };
     let stack_end = unsafe { core::ptr::addr_of!(_stack_end) as u64 };
-    // FDT must be after the hypervisor image.
-    let fdt_start = fdt.base_addr() as u64;
-    assert!(stack_end <= fdt_start);
-    let fdt_end = fdt_start
-        .checked_add(fdt.size().try_into().unwrap())
-        .unwrap();
 
     // Find the region of DRAM that the hypervisor is in.
     let resv_base = fdt
         .memory_regions()
-        .find(|r| start >= r.base() && fdt_end <= r.base().checked_add(r.size()).unwrap())
+        .find(|r| start >= r.base() && stack_end <= r.base().checked_add(r.size()).unwrap())
         .map(|r| RawAddr::supervisor(r.base()))
         .expect("Hypervisor image does not reside in a contiguous range of DRAM");
 
-    // Reserve everything from the start of the region the hypervisor is in up until the end
-    // of the FDT.
+    // Reserve everything from the start of the region the hypervisor is in up until the top of
+    // the hypervisor stack.
     builder = builder.reserve_region(
         HwReservedMemType::HypervisorImage,
         resv_base,
-        fdt_end - resv_base.bits(),
+        stack_end - resv_base.bits(),
+    )?;
+
+    // FDT must be after the hypervisor image.
+    let fdt_start = fdt.base_addr() as u64;
+    assert!(stack_end <= fdt_start);
+    builder = builder.reserve_region(
+        HwReservedMemType::HypervisorImage,
+        RawAddr::supervisor(fdt_start),
+        fdt.size() as u64,
     )?;
 
     // Reserve the regions marked reserved by firmware.

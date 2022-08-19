@@ -807,7 +807,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
                 | sbi::EXT_HART_STATE
                 | sbi::EXT_RESET
                 | sbi::EXT_TEE
-                | sbi::EXT_MEASUREMENT => 1,
+                | sbi::EXT_ATTESTATION => 1,
                 sbi::EXT_PMU if PmuInfo::get().is_ok() => 1,
                 _ => 0,
             },

@@ -663,6 +663,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
+            SbiMessage::TeeAia(_) => EcallAction::Continue(SbiReturn::from(SbiError::NotSupported)),
             SbiMessage::Pmu(pmu_func) => self.handle_pmu_msg(pmu_func, active_vcpu).into(),
         }
     }
@@ -807,7 +808,8 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
                 | sbi::EXT_HART_STATE
                 | sbi::EXT_RESET
                 | sbi::EXT_TEE
-                | sbi::EXT_ATTESTATION => 1,
+                | sbi::EXT_ATTESTATION
+                | sbi::EXT_TEE_AIA => 1,
                 sbi::EXT_PMU if PmuInfo::get().is_ok() => 1,
                 _ => 0,
             },

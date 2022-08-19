@@ -14,5 +14,9 @@ pub mod state;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod tsm;
 
+/// Host interfaces for confidential computing interrupt virtualization.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub mod tsm_aia;
+
 /// Host interfaces for PMU.
 pub mod pmu;

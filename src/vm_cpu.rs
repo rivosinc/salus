@@ -1000,9 +1000,9 @@ pub enum VirtualRegister {
     Cause0,
     /// 2nd detailed exit cause register. Usage depends on the exit code.
     Cause1,
-    /// xxx
+    /// Result of an emulated MMIO load.
     MmioLoad,
-    /// xxx
+    /// Source value of an emulated MMIO store.
     MmioStore,
 }
 

@@ -663,7 +663,9 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
-            SbiMessage::TeeAia(_) => EcallAction::Continue(SbiReturn::from(SbiError::NotSupported)),
+            SbiMessage::TeeAia(aia_func) => {
+                self.handle_aia_msg(aia_func, active_vcpu.active_pages())
+            }
             SbiMessage::Pmu(pmu_func) => self.handle_pmu_msg(pmu_func, active_vcpu).into(),
         }
     }
@@ -974,6 +976,24 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             } => self
                 .guest_extend_measurement(measurement_addr, len as usize, active_pages)
                 .into(),
+        }
+    }
+
+    fn handle_aia_msg(
+        &self,
+        aia_func: TeeAiaFunction,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallAction {
+        use TeeAiaFunction::*;
+        match aia_func {
+            TvmAiaInit {
+                tvm_id,
+                params_addr,
+                len,
+            } => self
+                .guest_aia_init(tvm_id, params_addr, len as usize, active_pages)
+                .into(),
+            _ => EcallAction::Continue(SbiReturn::from(SbiError::NotSupported)),
         }
     }
 
@@ -1382,6 +1402,53 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         _active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
         Err(EcallError::Sbi(SbiError::NotSupported))
+    }
+
+    fn guest_aia_init(
+        &self,
+        guest_id: u64,
+        params_addr: u64,
+        params_len: usize,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallResult<u64> {
+        // Read the params from the VM's address space.
+        let params_addr = RawAddr::guest(params_addr, self.vm_pages.page_owner_id());
+        let mut param_bytes = [0u8; mem::size_of::<sbi::TvmAiaParams>()];
+        if params_len < param_bytes.len() {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
+        active_pages
+            .copy_from_guest(param_bytes.as_mut_slice(), params_addr)
+            .map_err(EcallError::from)?;
+        // Safety: `param_bytes` points to `size_of::<TvmAiaParams>()` contiguous, initialized
+        // bytes.
+        let params: sbi::TvmAiaParams =
+            unsafe { core::ptr::read_unaligned(param_bytes.as_slice().as_ptr().cast()) };
+
+        // Validate the supplied IMSIC geometry. We don't support nested IMSIC virtualization, so
+        // reject attempts to configure a guest with guest interrupt files.
+        if params.guests_per_hart != 0 {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let base_addr = guest_vm.guest_addr_from_raw(params.imsic_base_addr)?;
+        let geometry = ImsicGeometry::new(
+            base_addr,
+            params.group_index_bits,
+            params.group_index_shift,
+            params.hart_index_bits,
+            params.guest_index_bits,
+            0,
+        )
+        .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        guest_vm
+            .vm_pages
+            .set_imsic_geometry(geometry)
+            .map_err(EcallError::from)?;
+        Ok(0)
     }
 
     /// Destroys this `Vm`.

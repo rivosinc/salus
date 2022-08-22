@@ -34,6 +34,8 @@ use sbi::{api::pmu, Error as SbiError};
 pub enum Error {
     AttestationManagerCreationFailed(attestation::Error),
     AttestationManagerFinalizeFailed(attestation::Error),
+    MissingImsicAddress,
+    AliasedImsicAddresses,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -334,6 +336,9 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateInitializing> {
             .get_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
+        if vcpu.get_imsic_location().is_some() {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
         vcpu.set_imsic_location(location);
         Ok(())
     }
@@ -350,8 +355,40 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateInitializing> {
         Ok(())
     }
 
+    // Check that all vCPUs have been assigned an IMSIC address and that there are no conflicts
+    // prior to guest finalization.
+    fn validate_imsic_addrs(&self) -> Result<()> {
+        if self.vm_pages.imsic_geometry().is_some() {
+            for i in 0..self.vcpus.num_vcpus() {
+                // Check that this vCPU was assigned an IMSIC address.
+                let location = if let Ok(vcpu) = self.vcpus.get_vcpu(i as u64) {
+                    vcpu.lock()
+                        .get_imsic_location()
+                        .ok_or(Error::MissingImsicAddress)
+                } else {
+                    continue;
+                }?;
+
+                // And make sure it doesn't conflict with any other vCPUs.
+                for j in i + 1..self.vcpus.num_vcpus() {
+                    let other = self
+                        .vcpus
+                        .get_vcpu(j as u64)
+                        .ok()
+                        .and_then(|v| v.lock().get_imsic_location());
+                    if other == Some(location) {
+                        return Err(Error::AliasedImsicAddresses);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Completes intialization of the `Vm`, returning it in a finalized state.
     pub fn finalize(self) -> Result<Vm<T, VmStateFinalized>> {
+        self.validate_imsic_addrs()?;
         self.attestation_mgr
             .finalize()
             .map_err(Error::AttestationManagerFinalizeFailed)?;
@@ -993,7 +1030,13 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             } => self
                 .guest_aia_init(tvm_id, params_addr, len as usize, active_pages)
                 .into(),
-            _ => EcallAction::Continue(SbiReturn::from(SbiError::NotSupported)),
+            TvmCpuSetImsicAddr {
+                tvm_id,
+                vcpu_id,
+                imsic_addr,
+            } => self
+                .guest_set_vcpu_imsic_addr(tvm_id, vcpu_id, imsic_addr)
+                .into(),
         }
     }
 
@@ -1428,7 +1471,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         // Validate the supplied IMSIC geometry. We don't support nested IMSIC virtualization, so
         // reject attempts to configure a guest with guest interrupt files.
         if params.guests_per_hart != 0 {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
+            return Err(EcallError::Sbi(SbiError::NotSupported));
         }
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
@@ -1448,6 +1491,29 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             .vm_pages
             .set_imsic_geometry(geometry)
             .map_err(EcallError::from)?;
+        Ok(0)
+    }
+
+    fn guest_set_vcpu_imsic_addr(
+        &self,
+        guest_id: u64,
+        vcpu_id: u64,
+        imsic_addr: u64,
+    ) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let imsic_addr = guest_vm.guest_addr_from_raw(imsic_addr)?;
+        let geometry = guest_vm
+            .vm_pages
+            .imsic_geometry()
+            .ok_or(EcallError::Sbi(SbiError::NotSupported))?;
+        let location = geometry
+            .addr_to_location(imsic_addr)
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        // We'll verify that there's no aliasing between locations during finalize().
+        guest_vm.set_vcpu_imsic_location(vcpu_id, location)?;
         Ok(0)
     }
 

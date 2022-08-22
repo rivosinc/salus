@@ -1260,6 +1260,11 @@ impl VmCpus {
         Ok(Self { inner })
     }
 
+    /// Returns the number of vCPUs in this `VmCpus`.
+    pub fn num_vcpus(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Adds the vCPU at `vcpu_id` as an available vCPU, returning a reference to it.
     pub fn add_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
         let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;

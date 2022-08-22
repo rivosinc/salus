@@ -1368,7 +1368,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
 
         active_pages
             .copy_to_guest(cert_gpa, cert_bytes)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidAddress))?;
+            .map_err(EcallError::from)?;
 
         Ok(cert_bytes_len as u64)
     }

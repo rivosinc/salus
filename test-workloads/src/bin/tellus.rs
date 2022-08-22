@@ -21,7 +21,7 @@ use riscv_regs::{CSR, CSR_CYCLE, CSR_INSTRET};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::print_sbi::*;
-use sbi::api::{pmu, reset, tsm};
+use sbi::api::{pmu, reset, tsm, tsm_aia};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
     PmuHardware, SbiMessage,
@@ -214,6 +214,18 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Add vCPU0.
     tsm::add_vcpu(vmid, 0).expect("Tellus - TvmCpuCreate returned error");
+
+    // Set the IMSIC params for the TVM.
+    let aia_params = sbi::TvmAiaParams {
+        imsic_base_addr: 0x2800_0000,
+        group_index_bits: 0,
+        group_index_shift: 24,
+        hart_index_bits: 8,
+        guest_index_bits: 0,
+        guests_per_hart: 0,
+    };
+    tsm_aia::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
+    tsm_aia::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000).expect("Tellus - TvmCpuSetImsicAddr failed");
 
     /*
         The Tellus composite image includes the guest image

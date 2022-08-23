@@ -450,6 +450,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // don't support the *envcfg registers.
         CSR.henvcfg.modify(henvcfg::stce.val(1));
     }
+    if cpu_info.has_sscofpmf() {
+        // Only probe for PMU counters if we have Sscofpmf; we can't expose counters to guests
+        // unless we have support for per-mode filtering.
+        println!("Sscofpmf support present");
+        if let Err(e) = PmuInfo::init() {
+            println!("PmuInfo::init() failed with {:?}", e);
+        }
+    }
     println!(
         "{} CPU(s) present. Booting on CPU{} (hart {})",
         cpu_info.num_cpus(),
@@ -525,12 +533,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             println!("Failed to probe IOMMU: {:?}", e);
         }
     };
-
-    // Get platform PMU counter information
-    let result = PmuInfo::init();
-    if result.is_err() {
-        println!("PmuInfo::init() failed with {:?}", result);
-    }
 
     // Now load the host VM.
     let host = HostVmLoader::new(

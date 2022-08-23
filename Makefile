@@ -39,7 +39,8 @@ BOOTARGS := console=hvc0 earlycon=sbi
 NCPU ?= 1
 MEM_SIZE ?= 4096
 EXTRA_QEMU_ARGS ?=
-MACH_ARGS := -M virt,aia=aplic-imsic,aia-guests=4 -cpu rv64,x-aia=true
+CPU_ARGS := rv64,x-aia=true,sscofpmf=true
+MACH_ARGS := -M virt,aia=aplic-imsic,aia-guests=4 -cpu $(CPU_ARGS)
 MACH_ARGS += -smp $(NCPU) -m $(MEM_SIZE) -nographic
 
 HOST_TRIPLET := $(shell cargo -Vv | grep '^host:' | awk ' { print $$2; } ')

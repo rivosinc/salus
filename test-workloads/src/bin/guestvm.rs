@@ -21,7 +21,7 @@ use attestation::{
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
-use s_mode_utils::print_sbi::*;
+use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::reset;
 use sbi::SbiMessage;
 
@@ -60,6 +60,8 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
     const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
     const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
+
+    SbiConsole::set_as_console();
 
     let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
 

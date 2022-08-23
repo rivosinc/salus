@@ -8,7 +8,7 @@
 #![no_std]
 
 use s_mode_utils::abort::abort;
-use s_mode_utils::print_sbi::*;
+use s_mode_utils::print::*;
 
 mod asm;
 

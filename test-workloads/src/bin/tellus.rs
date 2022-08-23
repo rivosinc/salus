@@ -20,7 +20,7 @@ use device_tree::Fdt;
 use riscv_regs::{CSR, CSR_CYCLE, CSR_INSTRET};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
-use s_mode_utils::print_sbi::*;
+use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::{pmu, reset, tsm, tsm_aia};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
@@ -156,7 +156,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         abort();
     }
 
-    console_write_bytes(b"Tellus: Booting the test VM\n");
+    SbiConsole::set_as_console();
+
+    println!("Tellus: Booting the test VM");
 
     // Safe because we trust the host to boot with a valid fdt_addr pass in register a1.
     let fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {

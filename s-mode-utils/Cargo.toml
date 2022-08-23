@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 sbi = { path = "../sbi" }
+spin = { version = "*", default-features = false }

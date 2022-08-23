@@ -24,6 +24,8 @@ pub mod iommu;
 pub mod pci;
 /// Caches information about platform hardware and firmware PMU counters.
 pub mod pmu;
+/// Provides a simple UART driver for console output.
+pub mod uart;
 
 pub use cpu::{CpuId, CpuInfo, MAX_CPUS};
 

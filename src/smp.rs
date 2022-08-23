@@ -8,11 +8,11 @@ use drivers::{imsic::Imsic, CpuId, CpuInfo};
 use page_tracking::{HwMemMap, HwMemRegionType, HwReservedMemType};
 use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
 use riscv_regs::{sstatus, ReadWriteable, CSR};
+use s_mode_utils::print::*;
 use sbi::api::state;
 use spin::Once;
 
 use crate::vm_id::VmIdTracker;
-use crate::{print_util::*, println};
 
 // The secondary CPU entry point, defined in start.S.
 extern "C" {

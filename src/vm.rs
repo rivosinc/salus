@@ -2,16 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::guest_tracking::{GuestState, Guests};
-use crate::print_util::*;
-use crate::smp;
-use crate::vm_cpu::{ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
-use crate::vm_pages::Error as VmPagesError;
-use crate::vm_pages::{
-    ActiveVmPages, InstructionFetchError, PageFaultType, VmPages, VmRegionList, VmRegionType,
-    TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
-};
-use crate::{print, println};
 use attestation::{
     certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CERT_LEN,
     MAX_CSR_LEN,
@@ -27,8 +17,18 @@ use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::abort::abort;
+use s_mode_utils::print::*;
 use sbi::*;
 use sbi::{api::pmu, Error as SbiError};
+
+use crate::guest_tracking::{GuestState, Guests};
+use crate::smp;
+use crate::vm_cpu::{ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
+use crate::vm_pages::Error as VmPagesError;
+use crate::vm_pages::{
+    ActiveVmPages, InstructionFetchError, PageFaultType, VmPages, VmRegionList, VmRegionType,
+    TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
+};
 
 #[derive(Debug)]
 pub enum Error {

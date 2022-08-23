@@ -9,9 +9,8 @@ use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, CpuId, CpuInfo};
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList};
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::*;
+use s_mode_utils::print::*;
 
-use crate::print_util::*;
-use crate::println;
 use crate::vm::{HostVm, VmStateFinalized, VmStateInitializing};
 
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.

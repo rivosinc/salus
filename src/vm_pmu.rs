@@ -4,12 +4,11 @@
 
 use drivers::pmu;
 use riscv_regs::{RiscvCsrInterface, CSR, CSR_CYCLE};
+use s_mode_utils::print::*;
 use sbi::{
     api::pmu::*, Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags,
     PmuCounterStopFlags, PmuEventType, Result as SbiResult,
 };
-
-use crate::{println, CONSOLE_DRIVER};
 
 #[derive(Default, Copy, Clone)]
 struct CounterMaskIter {

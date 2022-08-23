@@ -45,7 +45,7 @@ Latest known-working branches:
 
 | Project | Branch |
 | ------- | ------ |
-| QEMU    | https://github.com/rivosinc/qemu/tree/salus-integration-08172022 |
+| QEMU    | https://github.com/rivosinc/qemu/tree/salus-integration-08232022 |
 | Linux   | https://github.com/rivosinc/linux/tree/salus-integration-08172022 |
 
 ### Linux VM

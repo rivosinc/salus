@@ -38,37 +38,17 @@ const CDI_LEN: usize = 32;
 /// The TVM CDI ID is derived from the TSM CDI.
 pub const CDI_ID_LEN: usize = 20;
 
-macro_rules! is_static_measurement {
-    ($idx:ident) => {{
-        if $idx < STATIC_MSMT_REGISTERS {
-            true
-        } else {
-            false
-        }
-    }};
-}
-
-macro_rules! is_stable_measurement {
-    ($pcr:ident) => {{
-        if *$pcr == MeasurementIndex::PlatformConfig as u8 {
-            false
-        } else {
-            true
-        }
-    }};
-}
-
 /// Measurement register indexes aliases.
 #[repr(u8)]
 pub enum MeasurementIndex {
     /// Platform configuration measurement (PCR 1)
     PlatformConfig = 1,
 
-    /// TVM pages extend the first OS measurement register (PCR 8)
+    /// TVM pages extend PCR 2
     TvmPage = 2,
 
-    /// Dynamic TVM pages use the first DRTM register (PCR17)
-    TvmPageExtension = 4,
+    /// TVM configuration and data extend PCR 3
+    TvmConfiguration = 3,
 }
 
 #[derive(Clone, Debug)]
@@ -78,15 +58,90 @@ enum CsrCdi {}
 #[derive(Clone, Debug)]
 enum SealingCdi {}
 
-const TCG_PCR_MAPPING: [u8; MSMT_REGISTERS] = [
-    0,  // TCG PCR 0  - SRTM
-    1,  // TCG PCR 1  - Platform config
-    8,  // TCG PCR 8  - OS
-    9,  // TCG PCR 9  - OS
-    17, // TCG PCR 17 - DRTM
-    18, // TCG PCR 18 - DRTM
-    19, // TCG PCR 19 - DRTM
-    20, // TCG PCR 20 - DRTM
+struct MeasurementRegisterBuilder {
+    // The DiceTcbInfo FWIDs list index.
+    fwid_index: u8,
+
+    // TCG PCR index.
+    pcr_index: u8,
+
+    // A static register cannot be extended after the platform is booted, i.e.
+    // after the static TCB is finalized.
+    // A call to `finalize` will lock static registers, making subsequent calls
+    // to `extend` fail.
+    static_measurement: bool,
+
+    // For a given workload, a stable measurement register must not change
+    // between boots. If it does change, this means the workload TCB actually
+    // changed. Examples of stable measurements include include the OS one, but
+    // a platform configuration measurement is not stable.
+    // A sealing CDI must only be derived from stable measurements, as we don't
+    // want sealed data to depend on layers that could change between platforms.
+    // An attestation CDI must include non-stable measurements.
+    stable: bool,
+}
+
+impl MeasurementRegisterBuilder {
+    fn build<D: Digest>(&self, hash_algorithm: ObjectIdentifier) -> MeasurementRegister<D> {
+        MeasurementRegister {
+            tcb_layer: None,
+            fwid_index: self.fwid_index,
+            pcr_index: self.pcr_index,
+            extensible: true,
+            static_measurement: self.static_measurement,
+            stable: self.stable,
+            hash_algorithm,
+            digest: GenericArray::default(),
+        }
+    }
+}
+
+macro_rules! msmt_reg {
+    ($fw_index:expr, $pcr_index:expr, $static:expr, $stable:expr) => {{
+        MeasurementRegisterBuilder {
+            fwid_index: $fw_index,
+            pcr_index: $pcr_index,
+            static_measurement: $static,
+            stable: $stable,
+        }
+    }};
+}
+
+macro_rules! msmt_static_reg {
+    ($fw_index:expr, $pcr_index:expr, $stable:expr) => {{
+        msmt_reg!($fw_index, $pcr_index, true, $stable)
+    }};
+}
+
+macro_rules! msmt_dynamic_reg {
+    ($fw_index:expr, $pcr_index:expr, $stable:expr) => {{
+        msmt_reg!($fw_index, $pcr_index, false, $stable)
+    }};
+}
+
+const TVM_MSMT_REGISTERS: [MeasurementRegisterBuilder; MSMT_REGISTERS] = [
+    // TCG PCR 0 - Platform trusted firmware code.
+    // This comes from the hardware RoT.
+    msmt_static_reg!(0, 0, true),
+    // TCG PCR 1 - Platform trusted firmware configuration and data
+    // This comes from the hardware RoT.
+    // This is not a stable measurement, i.e. the TVM TCB could still be trusted
+    // if this measurement changes.
+    msmt_static_reg!(1, 1, false),
+    // TCG PCR 2 - TVM pages
+    // The TVM pages, as measured by the TSM.
+    msmt_static_reg!(2, 2, true),
+    // TCG PCR 3 - TVM configuration and data
+    // The TVM configuration, including its EPC and ARG.
+    msmt_static_reg!(3, 3, true),
+    // TCG PCR 17 - Dynamic measurements
+    msmt_dynamic_reg!(4, 17, true),
+    // TCG PCR 18 - Dynamic measurements
+    msmt_dynamic_reg!(5, 18, true),
+    // TCG PCR 19 - Dynamic measurements
+    msmt_dynamic_reg!(6, 19, true),
+    // TCG PCR 20 - Dynamic measurements
+    msmt_dynamic_reg!(7, 20, true),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,7 +159,7 @@ struct MeasurementRegister<D: Digest> {
     // Can this register be extended?
     extensible: bool,
 
-    // A static register can not be extended after the platform is booted, i.e.
+    // A static register cannot be extended after the platform is booted, i.e.
     // after the static TCB is finalized.
     // A call to `finalize` will lock static registers, making subsequent calls
     // to `extend` fail.
@@ -114,6 +169,9 @@ struct MeasurementRegister<D: Digest> {
     // between boots. If it does change, this means the workload TCB actually
     // changed. For example, a platform config measurement is not stable, while
     // an OS one is.
+    // A sealing CDI must only be derived from stable measurements, as we don't
+    // want sealed data to depend on layers that could change between platforms.
+    // An attestation CDI must include non-stable measurements.
     stable: bool,
 
     // The measured data hash algorithm.
@@ -124,25 +182,6 @@ struct MeasurementRegister<D: Digest> {
 }
 
 impl<D: Digest> MeasurementRegister<D> {
-    fn new(
-        fwid_index: u8,
-        pcr_index: u8,
-        static_measurement: bool,
-        stable: bool,
-        hash_algorithm: ObjectIdentifier,
-    ) -> Self {
-        MeasurementRegister {
-            tcb_layer: None,
-            fwid_index,
-            pcr_index,
-            extensible: true,
-            static_measurement,
-            stable,
-            hash_algorithm,
-            digest: GenericArray::default(),
-        }
-    }
-
     fn extend(&mut self, bytes: &[u8], address: Option<u64>) -> Result<()> {
         let mut hasher = self
             .extensible
@@ -309,17 +348,8 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
 
         let mut measurements = ArrayVec::<MeasurementRegister<D>, MSMT_REGISTERS>::new();
 
-        for (idx, tcg_pcr) in TCG_PCR_MAPPING.iter().enumerate().take(MSMT_REGISTERS) {
-            measurements.insert(
-                idx,
-                MeasurementRegister::new(
-                    idx as u8,
-                    *tcg_pcr,
-                    is_static_measurement!(idx),
-                    is_stable_measurement!(tcg_pcr),
-                    hash_algorithm,
-                ),
-            );
+        for (idx, msmt) in TVM_MSMT_REGISTERS.iter().enumerate().take(MSMT_REGISTERS) {
+            measurements.insert(idx, msmt.build(hash_algorithm));
         }
 
         Ok(AttestationManager {
@@ -351,6 +381,7 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     }
 
     fn attestation_tci(&self) -> GenericArray<u8, <D as OutputSizeUser>::OutputSize> {
+        // The attestation TCI only includes the static measurements.
         let mut hasher = D::new();
         self.measurements
             .read()
@@ -362,7 +393,7 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     }
 
     fn sealing_tci(&self) -> GenericArray<u8, <D as OutputSizeUser>::OutputSize> {
-        // The sealing TCI includes *all* measurements.
+        // The sealing TCI includes all stable measurements.
         let mut hasher = D::new();
         self.measurements
             .read()

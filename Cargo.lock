@@ -521,6 +521,7 @@ name = "s_mode_utils"
 version = "0.1.0"
 dependencies = [
  "sbi",
+ "spin 0.5.2",
 ]
 
 [[package]]

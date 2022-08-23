@@ -35,7 +35,7 @@ mod vm_pages;
 mod vm_pmu;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, CpuInfo, uart::UartDriver};
+use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, uart::UartDriver, CpuInfo};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;
@@ -48,6 +48,7 @@ use riscv_regs::{
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
+use s_mode_utils::sbi_console::SbiConsole;
 use smp::PerCpu;
 use spin::Once;
 use vm::HostVm;
@@ -289,8 +290,6 @@ fn setup_hyp_paging(mem_map: &mut HwMemMap) {
         hyp_map_region(&sv48, base, size, perms, &mut || pte_pages.next());
     }
 
-    // TODO- discover these from DT and un-hard code?
-    map_fixed_device(UART_BASE, &sv48, &mut || pte_pages.next());
     // TODO - reset device is hard coded in vm.rs
     map_fixed_device(0x10_0000, &sv48, &mut || pte_pages.next());
 
@@ -310,14 +309,13 @@ fn map_fixed_device(
     sv48: &FirstStagePageTable<Sv48>,
     get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
 ) {
-    // TODO: since the UART driver hard-codes the UART registers they need to be special cased.
     let virt_base = PageAddr::new(RawAddr::supervisor_virt(base)).unwrap();
     let phys_base = PageAddr::new(RawAddr::supervisor(base)).unwrap();
     let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::RW);
     let mapper = sv48
         .map_range(virt_base, PageSize::Size4k, 1, get_pte_page)
         .unwrap();
-    // Safe to map access to the UART because this will be the only mapping it is used through.
+    // Safe to map access to the device because this will be the only mapping it is used through.
     unsafe {
         mapper
             .map_4k_addr(virt_base, phys_base, pte_fields)
@@ -405,17 +403,13 @@ pub fn setup_csrs() {
     trap::install_trap_handler();
 }
 
-const UART_BASE: u64 = 0x1000_0000;
-
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Reset CSRs to a sane state.
     setup_csrs();
 
-    // Safety: This is the very beginning of the kernel, there are no other users of the UART and
-    // we expect that a UART is at this address.
-    unsafe { UartDriver::init(RawAddr::supervisor(UART_BASE)) };
+    SbiConsole::set_as_console();
     println!("Salus: Boot test VM");
 
     // Safe because we trust that the firmware passed a valid FDT.
@@ -439,8 +433,12 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Create a heap for boot-time memory allocations.
     create_heap(&mut mem_map);
 
-    // Discover the CPU topology.
     let hyp_dt = DeviceTree::from(&hyp_fdt).expect("Failed to construct device-tree");
+
+    // Find the UART and switch to it as the system console.
+    UartDriver::probe_from(&hyp_dt, &mut mem_map).expect("Failed to probe UART");
+
+    // Discover the CPU topology.
     CpuInfo::parse_from(&hyp_dt);
     let cpu_info = CpuInfo::get();
     if cpu_info.has_sstc() {

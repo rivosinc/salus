@@ -3,19 +3,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Host interfaces for reset extension.
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod reset;
 
 /// Host interfaces for hart state management.
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod state;
 
 /// Host interfaces for confidential computing.
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod tsm;
 
 /// Host interfaces for confidential computing interrupt virtualization.
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod tsm_aia;
 
 /// Host interfaces for PMU.

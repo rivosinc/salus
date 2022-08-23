@@ -4,31 +4,10 @@
 
 use core::ptr::NonNull;
 use riscv_pages::SupervisorPhysAddr;
+use s_mode_utils::print::*;
 use spin::{Mutex, Once};
 
-/// Provides basic print support in the bare-metal hypervisor environment.
-#[macro_export]
-macro_rules! print {
-    ($($args:tt)*) => {
-	unsafe {
-	    use core::fmt::Write;
-	    CONSOLE_DRIVER.get_mut().map(|c| write!(c, $($args)*));
-	}
-    };
-}
-
-/// Provides basic println support in the bare-metal hypervisor environment.
-#[macro_export]
-macro_rules! println {
-    ($($args:tt)*) => {
-	unsafe {
-	    use core::fmt::Write;
-	    CONSOLE_DRIVER.get_mut().map(|c| writeln!(c, $($args)*));
-	}
-    };
-}
-
-pub static mut CONSOLE_DRIVER: Once<UartDriver> = Once::new();
+static UART_DRIVER: Once<UartDriver> = Once::new();
 
 /// Driver for a standard UART.
 pub struct UartDriver {
@@ -45,11 +24,14 @@ impl UartDriver {
         let uart = UartDriver {
             base_address: Mutex::new(NonNull::new_unchecked(base_address.bits() as _)),
         };
-        CONSOLE_DRIVER.call_once(|| uart);
+        UART_DRIVER.call_once(|| uart);
+        Console::set_writer(UART_DRIVER.get().unwrap());
     }
+}
 
+impl ConsoleWriter for UartDriver {
     /// Write an entire byte sequence to this UART.
-    pub fn write_bytes(&self, bytes: &[u8]) {
+    fn write_bytes(&self, bytes: &[u8]) {
         let base_address = self.base_address.lock();
         for &b in bytes {
             // Safety: the caller of ::new() had to guarantee that the given address belongs to an
@@ -59,9 +41,7 @@ impl UartDriver {
     }
 }
 
-impl core::fmt::Write for UartDriver {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.write_bytes(s.as_bytes());
-        core::fmt::Result::Ok(())
-    }
-}
+// Safety: Access to the pointer to the UART's registers is guarded by a Mutex and the UartDriver
+// API guarantees that it is used safely.
+unsafe impl Send for UartDriver {}
+unsafe impl Sync for UartDriver {}

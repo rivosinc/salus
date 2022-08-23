@@ -10,9 +10,7 @@ use riscv_regs::{
     sie, GeneralPurposeRegisters, GprIndex, Interrupt, Readable, RiscvCsrInterface, Trap,
     Writeable, CSR,
 };
-
-use crate::print_util::*;
-use crate::{print, println};
+use s_mode_utils::print::*;
 
 /// Stores the trap context as pushed onto the stack by the trap handler.
 #[repr(C)]

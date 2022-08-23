@@ -49,6 +49,7 @@ use riscv_regs::{
     CSR_TIME,
 };
 use s_mode_utils::abort::abort;
+use s_mode_utils::print::*;
 use smp::PerCpu;
 use spin::Once;
 use vm::HostVm;

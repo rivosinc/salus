@@ -34,6 +34,8 @@ impl CpuId {
 pub struct CpuInfo {
     // True if the Sstc extension is supported.
     has_sstc: bool,
+    // True if the Sscofpmf extension is supported.
+    has_sscofpmf: bool,
     // CPU timer frequency.
     timer_frequency: u32,
     // ISA string as reprted in the device-tree. All CPUs are expected to have the same ISA.
@@ -71,6 +73,10 @@ fn intc_phandle_from_cpu_node(dt: &DeviceTree, node: &DeviceTreeNode) -> u32 {
         .value_u32()
         .next()
         .unwrap()
+}
+
+fn isa_string_has_extension(isa_string: &str, extension: &str) -> bool {
+    isa_string.split('_').any(|f| f == extension)
 }
 
 impl CpuInfo {
@@ -143,7 +149,8 @@ impl CpuInfo {
         }
 
         let cpu_info = CpuInfo {
-            has_sstc: isa_string.split('_').any(|f| f == "sstc"),
+            has_sstc: isa_string_has_extension(isa_string, "sstc"),
+            has_sscofpmf: isa_string_has_extension(isa_string, "sscofpmf"),
             isa_string: ArrayString::from(isa_string).unwrap(),
             timer_frequency,
             hart_ids,
@@ -161,6 +168,11 @@ impl CpuInfo {
     /// Returns true if the Sstc extension is supported.
     pub fn has_sstc(&self) -> bool {
         self.has_sstc
+    }
+
+    /// Returns true if the Sscofpmf extension is supported.
+    pub fn has_sscofpmf(&self) -> bool {
+        self.has_sscofpmf
     }
 
     /// Returns the total number of CPUs.

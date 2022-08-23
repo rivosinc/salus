@@ -33,6 +33,7 @@ mod vm;
 mod vm_cpu;
 mod vm_id;
 mod vm_pages;
+mod vm_pmu;
 
 use device_tree::{DeviceTree, Fdt};
 use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, CpuInfo};

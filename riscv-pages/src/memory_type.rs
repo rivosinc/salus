@@ -23,6 +23,8 @@ pub enum DeviceMemType {
     PciConfig,
     /// PCI BAR (either IO or memory) space.
     PciBar,
+    /// UART device.
+    Uart,
     // TODO: Add more types here.
 }
 
@@ -41,6 +43,7 @@ impl fmt::Display for DeviceMemType {
             DeviceMemType::Imsic => write!(f, "IMSIC"),
             DeviceMemType::PciConfig => write!(f, "PCI ECAM"),
             DeviceMemType::PciBar => write!(f, "PCI BAR"),
+            DeviceMemType::Uart => write!(f, "UART"),
         }
     }
 }

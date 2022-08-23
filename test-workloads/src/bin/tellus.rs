@@ -104,6 +104,7 @@ fn exercise_pmu_functionality() {
     let result =
         configure_matching_counters(0, (1 << num_counters) - 1, config_flags, event_type, 0);
     let counter_index = result.expect("configure_matching_counters failed with {result:?}");
+    println!("Assigned counter {} for instruction count", counter_index);
 
     let start_flags = PmuCounterStartFlags::default();
     let result = start_counters(counter_index, 0x1, start_flags, 0);
@@ -114,9 +115,13 @@ fn exercise_pmu_functionality() {
     let result = stop_counters(counter_index, 0x1, PmuCounterStopFlags::default());
     result.expect("stop_counters failed with {result:?}");
 
-    if CSR.hpmcounter[(CSR_INSTRET - CSR_CYCLE) as usize].get_value() == 0 {
-        panic!("Read CSR of CSR_INSTRET returned 0");
+    let info = pmu::get_counter_info(counter_index).expect("Tellus - GetCounterInfo failed");
+    let csr_index = (info.get_csr() as u16) - CSR_CYCLE;
+    let inst_count = CSR.hpmcounter[csr_index as usize].get_value();
+    if inst_count == 0 {
+        panic!("Read of counter {} returned 0", csr_index);
     }
+    println!("Instruction counter: {}", inst_count);
 
     let event_type = PmuEventType::Firmware(PmuFirmware::AccessLoad);
     pmu::configure_matching_counters(

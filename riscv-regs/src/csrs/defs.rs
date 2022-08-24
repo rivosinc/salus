@@ -386,6 +386,41 @@ register_bitfields![u64,
     ]
 ];
 
+// Vector start position
+register_bitfields![u64,
+    pub vstart [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+// Vector control and status register
+register_bitfields![u64,
+    pub vcsr [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+// Vector length
+register_bitfields![u64,
+    pub vl [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+// Vector data type register
+register_bitfields![u64,
+    pub vtype [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+// VLEN/8 (vector register width in bytes)
+register_bitfields![u64,
+    pub vlenb [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
 pub trait HgatpHelpers {
     fn set_from<T: GuestStagePagingMode>(&mut self, pt_root: &GuestStagePageTable<T>, vmid: u64);
 }

@@ -436,6 +436,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     sbi::TvmCpuExitCode::WaitForInterrupt => {
                         continue;
                     }
+                    sbi::TvmCpuExitCode::UnhandledException => {
+                        let cause0 = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
+                        println!("Tellus - Unhandled exception {:#x}", cause0);
+                        break;
+                    }
                     _ => {
                         println!("Tellus - Guest exited with status {:?}", cause);
                         break;

@@ -41,6 +41,8 @@ use page_tracking::*;
 use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, satp, scounteren};
+#[cfg(target_feature = "v")]
+use riscv_regs::{sstatus, vlenb, Readable, RiscvCsrInterface, MAX_VECTOR_REGISTER};
 use riscv_regs::{
     Exception, Interrupt, LocalRegisterCopy, ReadWriteable, SatpHelpers, Writeable, CSR, CSR_CYCLE,
     CSR_TIME,
@@ -402,6 +404,28 @@ pub fn setup_csrs() {
     trap::install_trap_handler();
 }
 
+#[cfg(target_feature = "v")]
+fn verify_vector_registers() {
+    // Because we just ran setup_csrs(), we know vectors are off
+    // Turn vectors on
+    CSR.sstatus.read_and_set_bits(sstatus::vs::Initial.value);
+
+    // vlenb converted from bytes to bits
+    let rwidth = CSR.vlenb.read(vlenb::value);
+    println!("vector register width: {} bits", rwidth * 8);
+    if rwidth > MAX_VECTOR_REGISTER as u64 {
+        println!(
+            "Vector registers too wide: {} bits, maximum is {} bits",
+            rwidth,
+            MAX_VECTOR_REGISTER * 8
+        );
+        println!("Aborting boot.");
+        abort();
+    }
+    // Turn vectors off
+    CSR.sstatus.read_and_clear_bits(sstatus::vs::Dirty.value);
+}
+
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
@@ -410,6 +434,12 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     SbiConsole::set_as_console();
     println!("Salus: Boot test VM");
+
+    // No return value. Just leave a message and hang
+    // if the the register width is longer than we
+    // can handle. (currently 256 bits)
+    #[cfg(target_feature = "v")]
+    verify_vector_registers();
 
     // Safe because we trust that the firmware passed a valid FDT.
     let hyp_fdt =

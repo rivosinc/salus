@@ -12,6 +12,9 @@ use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{
     GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages,
 };
+#[cfg(target_feature = "v")]
+use riscv_regs::VectorRegister;
+use riscv_regs::VectorRegisters;
 use riscv_regs::{hstatus, scounteren, sstatus};
 use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
@@ -62,11 +65,17 @@ struct HostCpuState {
 struct GuestCpuState {
     gprs: GeneralPurposeRegisters,
     fprs: FloatingPointRegisters,
+    vprs: VectorRegisters,
     fcsr: u64,
     sstatus: u64,
     hstatus: u64,
     scounteren: u64,
     sepc: u64,
+
+    vstart: u64,
+    vcsr: u64,
+    vtype: u64,
+    vl: u64,
 }
 
 /// The CSRs that are only in effect when virtualization is enabled (V=1) and must be saved and
@@ -122,6 +131,12 @@ extern "C" {
     fn _restore_fp(state: *mut VmCpuState);
 }
 
+#[cfg(target_feature = "v")]
+extern "C" {
+    fn _run_guest_vector(g: *mut VmCpuState);
+    fn _guest_exit_vector(g: *mut VmCpuState);
+}
+
 #[allow(dead_code)]
 const fn host_gpr_offset(index: GprIndex) -> usize {
     offset_of!(VmCpuState, host_regs)
@@ -138,6 +153,13 @@ const fn guest_gpr_offset(index: GprIndex) -> usize {
 
 const fn guest_fpr_offset(index: usize) -> usize {
     offset_of!(VmCpuState, guest_regs) + offset_of!(GuestCpuState, fprs) + index * size_of::<u64>()
+}
+
+#[cfg(target_feature = "v")]
+const fn guest_vpr_offset(index: usize) -> usize {
+    offset_of!(VmCpuState, guest_regs)
+        + offset_of!(GuestCpuState, vprs)
+        + index * size_of::<VectorRegister>()
 }
 
 macro_rules! host_csr_offset {
@@ -253,6 +275,23 @@ global_asm!(
     guest_sepc = const guest_csr_offset!(sepc),
 );
 
+#[cfg(target_feature = "v")]
+global_asm!(
+    include_str!("vectors.S"),
+    guest_v0 =     const guest_vpr_offset(0),
+    guest_v8 =     const guest_vpr_offset(8),
+    guest_v16 =    const guest_vpr_offset(16),
+    guest_v24 =    const guest_vpr_offset(24),
+    guest_vstart = const guest_csr_offset!(vstart),
+    guest_vcsr =   const guest_csr_offset!(vcsr),
+    guest_vtype =  const guest_csr_offset!(vtype),
+    guest_vl =     const guest_csr_offset!(vl),
+    guest_sstatus = const guest_csr_offset!(sstatus),
+    sstatus_vs_dirty = const sstatus::vs::Dirty.value,
+    sstatus_vs_clean = const sstatus::vs::Clean.value,
+    sstatus_vs_enable = const sstatus::vs::Initial.value,
+);
+
 /// Identifies the exit cause for a vCPU.
 pub enum VmCpuExit {
     /// ECALLs from VS mode.
@@ -295,6 +334,26 @@ pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> {
     // The parent vCPU which activated us.
     parent_vcpu: Option<&'prev mut dyn VmCpuSaveState>,
 }
+
+#[cfg(target_feature = "v")]
+fn run_guest_vector(_state: *mut VmCpuState) {
+    unsafe {
+        // safe because the only memory it touches is known offsets of _state
+        _run_guest_vector(_state);
+    }
+}
+#[cfg(target_feature = "v")]
+fn guest_exit_vector(_state: *mut VmCpuState) {
+    unsafe {
+        // safe because the only memory it touches is known offsets of _state
+        _guest_exit_vector(_state);
+    }
+}
+
+#[cfg(not(target_feature = "v"))]
+fn run_guest_vector(_state: *mut VmCpuState) {}
+#[cfg(not(target_feature = "v"))]
+fn guest_exit_vector(_state: *mut VmCpuState) {}
 
 impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, 'prev, T> {
     // Restores and activates the vCPU state from `vcpu`, with the VM address space represented by
@@ -340,6 +399,12 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
         // TODO: Enforce that the vCPU has an assigned interrupt file before running.
 
+        let has_vector = CpuInfo::get().has_vector();
+
+        if has_vector {
+            run_guest_vector(&mut self.state as *mut VmCpuState);
+        }
+
         unsafe {
             // Safe since _restore_fp() only reads within the bounds of the floating point
             // register state in VmCpuState.
@@ -348,6 +413,10 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table.
             _run_guest(&mut self.state);
+        }
+
+        if has_vector {
+            guest_exit_vector(&mut self.state as *mut VmCpuState);
         }
 
         // Save off the trap information.
@@ -701,6 +770,8 @@ impl VmCpu {
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
         sstatus.modify(sstatus::spp::Supervisor);
         sstatus.modify(sstatus::fs::Initial);
+        #[cfg(target_feature = "v")]
+        sstatus.modify(sstatus::vs::Initial);
         state.guest_regs.sstatus = sstatus.get();
 
         let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);

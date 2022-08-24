@@ -23,8 +23,13 @@ DEBIAN ?=
 ROOTFS_IMAGE := $(DEBIAN)/image.qcow2
 INITRD_IMAGE := $(DEBIAN)/initrd
 
+ifneq ($(VECTORS),)
+RELEASE_BINS := target/riscv64gcv-unknown-none-elf/release/
+DEBUG_BINS := target/riscv64gcv-unknown-none-elf/debug/
+else
 RELEASE_BINS := target/riscv64gc-unknown-none-elf/release/
 DEBUG_BINS := target/riscv64gc-unknown-none-elf/debug/
+endif
 
 KERNEL_ADDR := 0xc0200000
 INITRD_ADDR := 0xc2200000
@@ -39,7 +44,15 @@ BOOTARGS := console=hvc0 earlycon=sbi
 NCPU ?= 1
 MEM_SIZE ?= 4096
 EXTRA_QEMU_ARGS ?=
-CPU_ARGS := rv64,x-aia=true,sscofpmf=true
+
+ifneq ($(VECTORS),)
+CPU_TYPE := rv64,v=on,vlen=256,elen=64
+else
+CPU_TYPE := rv64
+endif
+
+CPU_ARGS := $(CPU_TYPE),x-aia=true,sscofpmf=true
+
 MACH_ARGS := -M virt,aia=aplic-imsic,aia-guests=4 -cpu $(CPU_ARGS)
 MACH_ARGS += -smp $(NCPU) -m $(MEM_SIZE) -nographic
 
@@ -55,13 +68,18 @@ check:
 		--exclude test_workloads \
 		--lib
 
+CARGO_FLAGS :=
+ifneq ($(VECTORS),)
+CARGO_FLAGS += -Z build-std=core,alloc,proc_macro --target=riscv64gcv-unknown-none-elf.json
+endif
+
 .PHONY: salus
 salus:
-	cargo build --release --bin salus
+	cargo build $(CARGO_FLAGS) --release --bin salus
 
 .PHONY: salus_debug
 salus_debug:
-	cargo build --bin salus
+	cargo build $(CARGO_FLAGS) --bin salus
 
 tellus_bin: tellus
 	${OBJCOPY} -O binary $(RELEASE_BINS)tellus tellus_raw
@@ -69,11 +87,11 @@ tellus_bin: tellus
 	./create_guest_image.sh tellus_raw guestvm_raw tellus_guestvm
 
 guestvm:
-	RUSTFLAGS='-Clink-arg=-Tlds/guest.lds' cargo build --package test_workloads --release --bin guestvm
+	RUSTFLAGS='-Clink-arg=-Tlds/guest.lds' cargo build $(CARGO_FLAGS) --package test_workloads --release --bin guestvm
 
 .PHONY: tellus
 tellus: guestvm
-	cargo build --package test_workloads --bin tellus --release
+	cargo build $(CARGO_FLAGS) --package test_workloads --bin tellus --release
 
 # Runnable targets:
 #

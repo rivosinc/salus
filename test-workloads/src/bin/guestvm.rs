@@ -22,8 +22,8 @@ use attestation::{
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::reset;
-use sbi::SbiMessage;
+use sbi::api::{base, reset};
+use sbi::{SbiMessage, EXT_ATTESTATION};
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -49,28 +49,16 @@ pub fn alloc_error(_layout: Layout) -> ! {
 /// Test `CertReq` encoded as ASN.1 DER
 const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 
-#[no_mangle]
-#[allow(clippy::zero_ptr)]
-extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
-    const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
-    const NUM_GUEST_DATA_PAGES: u64 = 160;
-    const NUM_GUEST_ZERO_PAGES: u64 = 10;
-    const PAGE_SIZE_4K: u64 = 4096;
-    const GUEST_MMIO_ADDRESS: u64 = 0x1000_8000;
-    // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
-    const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
-    const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
-
-    SbiConsole::set_as_console();
-
-    let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
+fn test_attestation(csr_addr: u64) {
+    let cert_bytes = [0u8; MAX_CERT_LEN];
+    if base::probe_sbi_extension(EXT_ATTESTATION).is_err() {
+        println!("Platform doesn't support attestation extension");
+        return;
+    }
 
     if TEST_CSR.len() > MAX_CSR_LEN as usize {
         panic!("Test CSR is too large")
     }
-
-    let csr_addr = next_page;
-    let cert_bytes = [0u8; MAX_CERT_LEN];
 
     // Safety: csr_addr is the unique reference to the CSR page.
     unsafe {
@@ -82,11 +70,6 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
         cert_addr: cert_bytes.as_ptr() as u64,
         cert_len: cert_bytes.len() as u64,
     });
-    next_page += PAGE_SIZE_4K;
-
-    println!("*****************************************");
-    println!("Hello world from Tellus guest            ");
-
     // Safety: msg contains a unique reference to the CSR and certificate pages
     // and SBI is safe to write to that page.
     let cert_len = match unsafe { ecall_send(&attestation_msg) } {
@@ -113,7 +96,7 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     let cert = Certificate::from_der(&cert_bytes[..cert_len as usize]).expect("Cert parsing error");
 
     // Look for a DiceTcbInfo extension
-    cert.tbs_certificate.extensions.as_ref().map(|extensions| {
+    if let Some(extensions) = cert.tbs_certificate.extensions.as_ref() {
         for extn in extensions.iter() {
             if extn.extn_id != TCG_DICE_TCB_INFO {
                 continue;
@@ -121,7 +104,7 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
 
             tcb_info_extn = DiceTcbInfo::from_der(extn.extn_value).expect("Invalid TCB DER");
         }
-    });
+    };
 
     // Extract the TVM pages measurement register from the list of FwIds.
     let tvm_fwid = tcb_info_extn
@@ -130,16 +113,38 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
         .map(|fwids| fwids.get(TvmPage as usize).expect("Missing TVM page fwid"))
         .expect("Missing TVM fwids");
 
-    println!(
-        "Certificate version:{:?} Issuer:{} Signature algorithm:{} Guest measurement:{:x?} (Hash algorithm {} - {} bytes)",
-        cert.tbs_certificate.version,
-        cert.tbs_certificate.issuer,
-        cert.signature_algorithm.oid,
-        tvm_fwid.digest.as_bytes(),
-        tvm_fwid.hash_alg,
-        tvm_fwid.digest.as_bytes().len(),
+    print!(
+        "Certificate version:{:?} Issuer:{} Signature algorithm:{}",
+        cert.tbs_certificate.version, cert.tbs_certificate.issuer, cert.signature_algorithm.oid
     );
 
+    println!(
+        "Guest measurement:{:x?} (Hash algorithm {} - {} bytes)",
+        tvm_fwid.digest.as_bytes(),
+        tvm_fwid.hash_alg,
+        tvm_fwid.digest.as_bytes().len()
+    );
+}
+
+#[no_mangle]
+#[allow(clippy::zero_ptr)]
+extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
+    const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
+    const NUM_GUEST_DATA_PAGES: u64 = 160;
+    const NUM_GUEST_ZERO_PAGES: u64 = 10;
+    const PAGE_SIZE_4K: u64 = 4096;
+    const GUEST_MMIO_ADDRESS: u64 = 0x1000_8000;
+    // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
+    const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
+    const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
+
+    SbiConsole::set_as_console();
+
+    println!("*****************************************");
+    println!("Hello world from Tellus guest            ");
+
+    let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
+    test_attestation(next_page);
     // Touch the rest of the data pages to force Tellus to fault them in.
     let end =
         USABLE_RAM_START_ADDRESS + (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K;

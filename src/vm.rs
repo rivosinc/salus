@@ -1037,7 +1037,8 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             } => self
                 .guest_set_vcpu_imsic_addr(tvm_id, vcpu_id, imsic_addr)
                 .into(),
-            _ => EcallAction::Continue(SbiReturn::from(SbiError::NotSupported)),
+            TsmConvertImsic { imsic_addr } => self.convert_imsic(imsic_addr).into(),
+            TsmReclaimImsic { imsic_addr } => self.reclaim_imsic(imsic_addr).into(),
         }
     }
 
@@ -1515,6 +1516,22 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         // We'll verify that there's no aliasing between locations during finalize().
         guest_vm.set_vcpu_imsic_location(vcpu_id, location)?;
+        Ok(0)
+    }
+
+    fn convert_imsic(&self, imsic_addr: u64) -> EcallResult<u64> {
+        let imsic_addr = self.guest_addr_from_raw(imsic_addr)?;
+        self.vm_pages
+            .convert_imsic(imsic_addr)
+            .map_err(EcallError::from)?;
+        Ok(0)
+    }
+
+    fn reclaim_imsic(&self, imsic_addr: u64) -> EcallResult<u64> {
+        let imsic_addr = self.guest_addr_from_raw(imsic_addr)?;
+        self.vm_pages
+            .reclaim_imsic(imsic_addr)
+            .map_err(EcallError::from)?;
         Ok(0)
     }
 

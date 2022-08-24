@@ -77,6 +77,26 @@ pub enum TeeAiaFunction {
         /// a2 = guest physical address of vCPU's IMSIC
         imsic_addr: u64,
     },
+    /// Converts the non-confidential guest interrupt file at `imsic_addr` for use with a TVM. A TSM
+    /// fence sequence must be completed before the interrupt file may be assigned to a child TVM.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 2
+    TsmConvertImsic {
+        /// a0 = physical address of interrupt file to be converted
+        imsic_addr: u64,
+    },
+    /// Reclaims the confidential guest interrupt file at `imsic_addr`. The interrupt file must not
+    /// currently be assigned to a TVM.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 3
+    TsmReclaimImsic {
+        /// a0 = physical address of interrupt file to be reclaimed
+        imsic_addr: u64,
+    },
 }
 
 impl TeeAiaFunction {
@@ -94,6 +114,12 @@ impl TeeAiaFunction {
                 vcpu_id: args[1],
                 imsic_addr: args[2],
             }),
+            2 => Ok(TsmConvertImsic {
+                imsic_addr: args[0],
+            }),
+            3 => Ok(TsmReclaimImsic {
+                imsic_addr: args[0],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -105,6 +131,8 @@ impl SbiFunction for TeeAiaFunction {
         match self {
             TvmAiaInit { .. } => 0,
             TvmCpuSetImsicAddr { .. } => 1,
+            TsmConvertImsic { .. } => 2,
+            TsmReclaimImsic { .. } => 3,
         }
     }
 
@@ -121,6 +149,8 @@ impl SbiFunction for TeeAiaFunction {
                 vcpu_id: _,
                 imsic_addr: _,
             } => *tvm_id,
+            TsmConvertImsic { imsic_addr } => *imsic_addr,
+            TsmReclaimImsic { imsic_addr } => *imsic_addr,
         }
     }
 
@@ -137,6 +167,7 @@ impl SbiFunction for TeeAiaFunction {
                 vcpu_id,
                 imsic_addr: _,
             } => *vcpu_id,
+            _ => 0,
         }
     }
 
@@ -153,6 +184,7 @@ impl SbiFunction for TeeAiaFunction {
                 vcpu_id: _,
                 imsic_addr,
             } => *imsic_addr,
+            _ => 0,
         }
     }
 

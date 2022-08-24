@@ -30,3 +30,25 @@ pub fn set_vcpu_imsic_addr(tvm_id: u64, vcpu_id: u64, imsic_addr: u64) -> Result
     unsafe { ecall_send(&msg) }?;
     Ok(())
 }
+
+/// Converts the guest interrupt file at `imsic_addr` for use with a TVM.
+///
+/// # Safety
+///
+/// The caller must not access the guest interrupt file again until it has been reclaimed.
+pub unsafe fn convert_imsic(imsic_addr: u64) -> Result<()> {
+    let msg = SbiMessage::TeeAia(TsmConvertImsic { imsic_addr });
+    // The caller must guarantee that they won't access the page at `imsic_addr`.
+    ecall_send(&msg)?;
+    Ok(())
+}
+
+/// Reclaims the guest interrupt file at `imsic_addr` that was previously converted with
+/// `convert_imsic()`.
+pub fn reclaim_imsic(imsic_addr: u64) -> Result<()> {
+    let msg = SbiMessage::TeeAia(TsmReclaimImsic { imsic_addr });
+    // Safety: The referenced page is made available again, which is safe since it hasn't been
+    // accessible since conversion.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}

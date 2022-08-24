@@ -17,14 +17,14 @@ extern crate alloc;
 extern crate test_workloads;
 
 use device_tree::Fdt;
-use riscv_regs::{CSR, CSR_CYCLE, CSR_INSTRET};
+use riscv_regs::{CSR, CSR_CYCLE};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::{pmu, reset, tsm, tsm_aia};
+use sbi::api::{base, pmu, reset, tsm, tsm_aia};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
-    PmuHardware, SbiMessage,
+    PmuHardware, SbiMessage, EXT_PMU, EXT_TEE, EXT_TEE_AIA,
 };
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -91,6 +91,10 @@ fn set_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister, value: u64) {
 
 fn exercise_pmu_functionality() {
     use sbi::api::pmu::{configure_matching_counters, start_counters, stop_counters};
+    if base::probe_sbi_extension(EXT_PMU).is_err() {
+        println!("Platform doesn't support PMU extensions");
+        return;
+    }
     let num_counters = pmu::get_num_counters().expect("Tellus - GetNumCounters returned error");
     for i in 0u64..num_counters {
         let result = pmu::get_counter_info(i);
@@ -108,8 +112,8 @@ fn exercise_pmu_functionality() {
 
     let start_flags = PmuCounterStartFlags::default();
     let result = start_counters(counter_index, 0x1, start_flags, 0);
-    if result.is_err() && !matches!(result.err().unwrap(), sbi::Error::AlreadyStarted) {
-        result.expect("start_counters failed with result {result:?}");
+    if !matches!(result, Ok(_) | Err(sbi::Error::AlreadyStarted)) {
+        panic!("start_counters failed with result {result:?}");
     }
 
     let result = stop_counters(counter_index, 0x1, PmuCounterStopFlags::default());
@@ -172,6 +176,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         mem_range.size()
     );
 
+    base::probe_sbi_extension(EXT_TEE).expect("Platform doesn't support TEE extension");
     let tsm_info = tsm::get_info().expect("Tellus - TsmGetInfo failed");
     let tvm_create_pages = 4
         + tsm_info.tvm_state_pages
@@ -222,17 +227,22 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Add vCPU0.
     tsm::add_vcpu(vmid, 0).expect("Tellus - TvmCpuCreate returned error");
 
-    // Set the IMSIC params for the TVM.
-    let aia_params = sbi::TvmAiaParams {
-        imsic_base_addr: 0x2800_0000,
-        group_index_bits: 0,
-        group_index_shift: 24,
-        hart_index_bits: 8,
-        guest_index_bits: 0,
-        guests_per_hart: 0,
-    };
-    tsm_aia::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
-    tsm_aia::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000).expect("Tellus - TvmCpuSetImsicAddr failed");
+    if base::probe_sbi_extension(EXT_TEE_AIA).is_ok() {
+        // Set the IMSIC params for the TVM.
+        let aia_params = sbi::TvmAiaParams {
+            imsic_base_addr: 0x2800_0000,
+            group_index_bits: 0,
+            group_index_shift: 24,
+            hart_index_bits: 8,
+            guest_index_bits: 0,
+            guests_per_hart: 0,
+        };
+        tsm_aia::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
+        tsm_aia::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000)
+            .expect("Tellus - TvmCpuSetImsicAddr failed");
+    } else {
+        println!("Platform doesn't support TEE AIA extension");
+    }
 
     /*
         The Tellus composite image includes the guest image

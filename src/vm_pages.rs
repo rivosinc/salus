@@ -799,6 +799,74 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
         Ok(())
     }
 
+    /// Converts the guest interrupt file at `imsic_addr` to confidential.
+    pub fn convert_imsic(&self, imsic_addr: GuestPageAddr) -> Result<()> {
+        if self.nesting >= MAX_PAGE_OWNERS - 1 {
+            // We shouldn't bother converting pages if we won't be able to assign them.
+            return Err(Error::NestingTooDeep);
+        }
+
+        // Make sure it's actually an IMSIC address and that it's a guest (not supervisor) file.
+        let geometry = self
+            .imsic_geometry
+            .get()
+            .ok_or(Error::NoImsicVirtualization)?;
+        let location = geometry
+            .addr_to_location(imsic_addr)
+            .ok_or(Error::InvalidImsicLocation)?;
+        if location.file() == ImsicFileId::Supervisor {
+            return Err(Error::InvalidImsicLocation);
+        }
+
+        let mut invalidated = self
+            .root
+            .invalidate_range::<ImsicGuestPage<Invalidated>>(imsic_addr, PageSize::Size4k, 1)
+            .map_err(Error::Paging)?;
+        // Unwrap ok since the page was just invalidated.
+        invalidated
+            .next()
+            .and_then(|p| {
+                self.page_tracker
+                    .convert_page(p, self.tlb_tracker.current())
+                    .ok()
+            })
+            .unwrap();
+
+        // Unmap it from our MSI page table as well, if we have one.
+        if let Some(iommu_context) = self.iommu_context.get() {
+            // Unwrap ok: we've already checked that `location` is valid and it must've been mapped
+            // in the MSI page table if it was in the CPU page tables.
+            iommu_context.msi_page_table.unmap(location).unwrap();
+        }
+
+        Ok(())
+    }
+
+    /// Reclaims the confidential guest interrupt file at `imsic_addr`.
+    pub fn reclaim_imsic(&self, imsic_addr: GuestPageAddr) -> Result<()> {
+        let mut converted = self
+            .root
+            .get_converted_range::<ImsicGuestPage<ConvertedClean>>(
+                imsic_addr,
+                PageSize::Size4k,
+                1,
+                self.tlb_tracker.current(),
+            )
+            .map_err(Error::Paging)?;
+        // Unwrap ok since the PTE for the page must have previously been invalid and all of
+        // the intermediate page-tables must already have been populated.
+        let mapper =
+            VmPagesMapper::new_in_region(self, imsic_addr, 1, VmRegionType::Imsic).unwrap();
+        // Unwrap ok since it must be a converted page.
+        let mappable = converted
+            .next()
+            .and_then(|p| self.page_tracker.reclaim_page(p).ok())
+            .unwrap();
+        // Unwrap ok since `imsic_addr` is within the range of the mapper.
+        mapper.map_imsic_page(imsic_addr, mappable).unwrap();
+        Ok(())
+    }
+
     /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.
     pub fn initiate_fence(&self) -> Result<()> {
         self.tlb_tracker.increment()?;

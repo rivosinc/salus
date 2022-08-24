@@ -143,6 +143,8 @@ fn exercise_pmu_functionality() {
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const SHARED_PAGES_START_ADDRESS: u64 = 0x1_0000_0000;
+    // TODO: Get from device tree.
+    const IMSIC_START_ADDRESS: u64 = 0x2800_0000;
     const NUM_VCPUS: u64 = 1;
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_GUEST_DATA_PAGES: u64 = 160;
@@ -227,7 +229,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Add vCPU0.
     tsm::add_vcpu(vmid, 0).expect("Tellus - TvmCpuCreate returned error");
 
-    if base::probe_sbi_extension(EXT_TEE_AIA).is_ok() {
+    let has_aia = base::probe_sbi_extension(EXT_TEE_AIA).is_ok();
+    // CPU0, guest interrupt file 0.
+    let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K;
+    if has_aia {
         // Set the IMSIC params for the TVM.
         let aia_params = sbi::TvmAiaParams {
             imsic_base_addr: 0x2800_0000,
@@ -240,6 +245,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         tsm_aia::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
         tsm_aia::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000)
             .expect("Tellus - TvmCpuSetImsicAddr failed");
+
+        // Try to convert a guest interfupt file.
+        //
+        // Safety: We trust that the IMSIC is actually at IMSIC_START_ADDRESS, and we aren't
+        // touching this page at all in this program.
+        unsafe { tsm_aia::convert_imsic(imsic_file_addr) }
+            .expect("Tellus - TsmConvertImsic failed");
+        tsm::initiate_fence().expect("Tellus - TsmInitiateFence failed");
     } else {
         println!("Platform doesn't support TEE AIA extension");
     }
@@ -447,6 +460,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES,
     );
     reclaim_pages(state_pages_base, tvm_create_pages);
+    if has_aia {
+        tsm_aia::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
+    }
     exercise_pmu_functionality();
     println!("Tellus - All OK");
     poweroff();

@@ -1037,6 +1037,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             } => self
                 .guest_set_vcpu_imsic_addr(tvm_id, vcpu_id, imsic_addr)
                 .into(),
+            _ => EcallAction::Continue(SbiReturn::from(SbiError::NotSupported)),
         }
     }
 

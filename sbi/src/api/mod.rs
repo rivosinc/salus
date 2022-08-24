@@ -20,3 +20,6 @@ pub mod tsm_aia;
 
 /// Host interfaces for PMU.
 pub mod pmu;
+
+/// Base SBI inferfaces.
+pub mod base;

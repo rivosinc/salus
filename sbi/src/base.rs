@@ -18,7 +18,7 @@ pub enum BaseFunction {
     ProbeSbiExtension(u64),
     /// Returns the vendor that produced this machine(`mvendorid`).
     GetMachineVendorID,
-    /// Returns the architecture implementation ID this machine(`marchid`).
+    /// Returns the architecture implementation ID of this machine(`marchid`).
     GetMachineArchitectureID,
     /// Returns the implementation ID of this machine(`mimpid`).
     GetMachineImplementationID,

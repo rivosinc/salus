@@ -287,8 +287,14 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateInitializing> {
         let mut vcpu = vcpu.lock();
         use TvmCpuRegister::*;
         match register {
-            EntryPc => vcpu.set_sepc(value),
-            EntryArg => vcpu.set_gpr(GprIndex::A1, value),
+            EntryPc => {
+                self.attestation_mgr.set_epc(value);
+                vcpu.set_sepc(value);
+            }
+            EntryArg => {
+                self.attestation_mgr.set_arg(value);
+                vcpu.set_gpr(GprIndex::A1, value);
+            }
             _ => {
                 return Err(EcallError::Sbi(SbiError::Denied));
             }

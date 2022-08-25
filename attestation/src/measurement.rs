@@ -319,6 +319,16 @@ pub struct TvmConfiguration {
     entry_arg: u64,
 }
 
+impl TvmConfiguration {
+    fn set_epc(&mut self, epc: u64) {
+        self.entry_pc = epc;
+    }
+
+    fn set_arg(&mut self, a1: u64) {
+        self.entry_arg = a1;
+    }
+}
+
 /// The attestation manager.
 #[derive(Debug)]
 pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
@@ -508,5 +518,15 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             public: (&secret).into(),
             secret,
         })
+    }
+
+    /// Set the TVM initial PC.
+    pub fn set_epc(&self, epc: u64) {
+        self.tvm_config.write().set_epc(epc);
+    }
+
+    /// Set the TVM initial argument (A1).
+    pub fn set_arg(&self, a1: u64) {
+        self.tvm_config.write().set_arg(a1);
     }
 }

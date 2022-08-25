@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use attestation::measurement::{AttestationManager, MeasurementIndex};
+use attestation::measurement::AttestationManager;
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
 use drivers::{imsic::*, iommu::*, pci::PciDevice, pci::PcieRoot};
@@ -370,11 +370,7 @@ impl<'a, T: GuestStagePagingMode> VmPagesMapper<'a, T, VmStateInitializing> {
         H: hkdf::HmacImpl<D>,
     {
         measurement
-            .extend_msmt_register(
-                MeasurementIndex::TvmPage,
-                page.as_bytes(),
-                Some(to_addr.bits()),
-            )
+            .extend_tvm_page(page.as_bytes(), to_addr.bits())
             .map_err(Error::Measurement)?;
         self.mapper.map_page(to_addr, page).map_err(Error::Paging)
     }

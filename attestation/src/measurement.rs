@@ -380,6 +380,13 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
         self.measurements.write()[idx].extend(bytes, address)
     }
 
+    /// Extend the TVM pages measurement.
+    /// This is a extend_msmt_register wrapper, where the address is not
+    /// optional, and the measurement register is fixed to TvmPage.
+    pub fn extend_tvm_page(&self, bytes: &[u8], address: u64) -> Result<()> {
+        self.extend_msmt_register(MeasurementIndex::TvmPage, bytes, Some(address))
+    }
+
     fn attestation_tci(&self) -> GenericArray<u8, <D as OutputSizeUser>::OutputSize> {
         // The attestation TCI only includes the static measurements.
         let mut hasher = D::new();

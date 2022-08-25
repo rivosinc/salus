@@ -308,6 +308,17 @@ impl<'a> CdiBuilder<'a> for Cdi<SealingCdi> {
     }
 }
 
+/// The TVM configuration data.
+/// This structure extends PCR3 when the TVM finalizes.
+#[derive(Clone, Default, Debug)]
+pub struct TvmConfiguration {
+    // Initial program counter for the TVM.
+    entry_pc: u64,
+
+    // Initial TVM argument (ARG1).
+    entry_arg: u64,
+}
+
 /// The attestation manager.
 #[derive(Debug)]
 pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
@@ -327,6 +338,10 @@ pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
 
     // TVM identifier
     vm_id: u64,
+
+    // TVM configuration.
+    // The data here goes into PCR3 when the TVM finalizes.
+    tvm_config: RwLock<TvmConfiguration>,
 
     _pd: PhantomData<H>,
 }
@@ -358,6 +373,7 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             csr_cdi: RwLock::new(Cdi::new::<D, H>(attestation_cdi)?),
             sealing_cdi: RwLock::new(Cdi::new::<D, H>(sealing_cdi)?),
             vm_id,
+            tvm_config: RwLock::new(Default::default()),
             _pd: PhantomData,
         })
     }
@@ -385,6 +401,22 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// optional, and the measurement register is fixed to TvmPage.
     pub fn extend_tvm_page(&self, bytes: &[u8], address: u64) -> Result<()> {
         self.extend_msmt_register(MeasurementIndex::TvmPage, bytes, Some(address))
+    }
+
+    /// Extend the TVM configuration measurement.
+    /// This is a extend_msmt_register wrapper, where the address is not
+    /// optional, and the measurement register is fixed to TvmPage.
+    pub fn extend_tvm_configuration(&self) -> Result<()> {
+        self.extend_msmt_register(
+            MeasurementIndex::TvmConfiguration,
+            &self.tvm_config.read().entry_pc.to_le_bytes(),
+            None,
+        )?;
+        self.extend_msmt_register(
+            MeasurementIndex::TvmConfiguration,
+            &self.tvm_config.read().entry_arg.to_le_bytes(),
+            None,
+        )
     }
 
     fn attestation_tci(&self) -> GenericArray<u8, <D as OutputSizeUser>::OutputSize> {
@@ -415,6 +447,9 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// extended. This should be called after the platform boot process is
     /// finished in order to only allow for dynamic measurements.
     pub fn finalize(&self) -> Result<()> {
+        // Extend the TVM configuration PCR.
+        self.extend_tvm_configuration()?;
+
         for m in self.measurements.write().iter_mut() {
             m.finalize()
         }

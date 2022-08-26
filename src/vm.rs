@@ -3,8 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use attestation::{
-    certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CERT_LEN,
-    MAX_CSR_LEN,
+    certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CSR_LEN,
 };
 use core::ops::ControlFlow;
 use core::{mem, slice};
@@ -19,7 +18,7 @@ use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
 use sbi::*;
-use sbi::{api::pmu, Error as SbiError};
+use sbi::{api::attestation::MAX_CERT_SIZE, api::pmu, Error as SbiError};
 
 use crate::guest_tracking::{GuestState, Guests};
 use crate::smp;
@@ -999,16 +998,20 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         use AttestationFunction::*;
         match attestation_func {
             GetEvidence {
-                csr_addr,
-                csr_len,
-                cert_addr,
-                cert_len,
+                cert_request_addr,
+                cert_request_size,
+                request_data_addr,
+                evidence_format,
+                cert_addr_out,
+                cert_size,
             } => self
                 .guest_get_evidence(
-                    csr_addr,
-                    csr_len as usize,
-                    cert_addr,
-                    cert_len as usize,
+                    cert_request_addr,
+                    cert_request_size as usize,
+                    request_data_addr,
+                    evidence_format,
+                    cert_addr_out,
+                    cert_size as usize,
                     active_pages,
                 )
                 .into(),
@@ -1399,26 +1402,28 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         Ok(num_pages)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn guest_get_evidence(
         &self,
-        csr_addr: u64,
-        csr_len: usize,
-        cert_addr: u64,
-        cert_len: usize,
+        cert_request_addr: u64,
+        cert_request_size: usize,
+        _request_data_addr: u64,
+        _evidence_format: u64,
+        cert_addr_out: u64,
+        cert_size: usize,
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
-        if csr_len > MAX_CSR_LEN {
+        if cert_request_size > MAX_CSR_LEN {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
         let mut csr_bytes = [0u8; MAX_CSR_LEN];
-        let csr_gpa = RawAddr::guest(csr_addr, self.vm_pages.page_owner_id());
+        let csr_gpa = RawAddr::guest(cert_request_addr, self.vm_pages.page_owner_id());
         active_pages
-            .copy_from_guest(&mut csr_bytes.as_mut_slice()[..csr_len], csr_gpa)
+            .copy_from_guest(&mut csr_bytes.as_mut_slice()[..cert_request_size], csr_gpa)
             .map_err(EcallError::from)?;
-        println!("CSR len {}", csr_len);
 
-        let csr = CertReq::from_der(&csr_bytes[..csr_len])
+        let csr = CertReq::from_der(&csr_bytes[..cert_request_size])
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         println!(
             "CSR version {:?} Signature algorithm {:?}",
@@ -1428,14 +1433,14 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         csr.verify()
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
 
-        let cert_gpa = RawAddr::guest(cert_addr, self.vm_pages.page_owner_id());
-        let mut cert_bytes_buffer = [0u8; MAX_CERT_LEN];
+        let cert_gpa = RawAddr::guest(cert_addr_out, self.vm_pages.page_owner_id());
+        let mut cert_bytes_buffer = [0u8; MAX_CERT_SIZE];
         let cert_bytes = Certificate::from_csr(&csr, &self.attestation_mgr, &mut cert_bytes_buffer)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let cert_bytes_len = cert_bytes.len();
 
         // Check that the guest gave us enough space
-        if cert_len < cert_bytes_len {
+        if cert_size < cert_bytes_len {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 

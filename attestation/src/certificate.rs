@@ -22,7 +22,7 @@ use crate::{
     name::{Name, RdnSequence, RelativeDistinguishedName},
     request::CertReq,
     time::{Time, Validity},
-    Error, Result, MAX_CERT_ATV, MAX_CERT_EXTENSIONS, MAX_CERT_LEN, MAX_CERT_RDN,
+    Error, Result, MAX_CERT_ATV, MAX_CERT_EXTENSIONS, MAX_CERT_RDN,
 };
 
 /// Certificate `Version` as defined in [RFC 5280 Section 4.1].
@@ -255,7 +255,7 @@ impl<'a> Certificate<'a> {
         };
 
         // We can now sign the TBS and generate the actual certificate
-        let mut tbs_bytes_buffer = [0u8; MAX_CERT_LEN];
+        let mut tbs_bytes_buffer = [0u8; sbi::api::attestation::MAX_CERT_SIZE];
         let tbs_bytes = tbs_certificate
             .encode_to_slice(&mut tbs_bytes_buffer)
             .map_err(Error::InvalidDer)?;

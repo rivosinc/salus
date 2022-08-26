@@ -6,9 +6,6 @@
 //! Pure Rust, heapless attestation crate.
 #![no_std]
 
-/// Maximum supported length for a certificate
-pub const MAX_CERT_LEN: usize = 4096;
-
 /// Maximum supported length for a CSR
 pub const MAX_CSR_LEN: usize = 4096;
 

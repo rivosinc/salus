@@ -7,7 +7,7 @@ use ed25519::pkcs8::{DecodePublicKey, PublicKeyBytes};
 use ed25519_dalek::{PublicKey, Signature, Verifier};
 use spki::AlgorithmIdentifier;
 
-use crate::{request::CertReq, Error, Result, MAX_CERT_LEN};
+use crate::{request::CertReq, Error, Result, MAX_CSR_LEN};
 
 pub trait CertVerifier {
     /// Verifies a CSR signature
@@ -35,7 +35,7 @@ impl CertVerifier for Ed25519Verifier {
         let pub_key = PublicKey::from_bytes(&pub_key_bytes.to_bytes())
             .map_err(|_| Error::InvalidPublicKey)?;
 
-        let mut csr_info_bytes = [0u8; MAX_CERT_LEN];
+        let mut csr_info_bytes = [0u8; MAX_CSR_LEN];
         let csr_info = csr
             .info
             .encode_to_slice(&mut csr_info_bytes)

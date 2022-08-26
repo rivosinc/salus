@@ -19,3 +19,6 @@ pub mod pmu;
 
 /// Base SBI inferfaces.
 pub mod base;
+
+/// Host interfaces for attestation.
+pub mod attestation;

@@ -16,5 +16,6 @@ generic-array = "0.14.5"
 hex = { version = "0.4.3", default-features = false }
 hkdf = "0.12.3"
 hmac = "0.12.1"
+sbi = { path = "../sbi" }
 spin = { version = "*", default-features = false, features = ["rwlock"] }
 spki = "0.6.0"

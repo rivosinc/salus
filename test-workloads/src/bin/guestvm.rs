@@ -13,17 +13,15 @@ use der::Decode;
 extern crate alloc;
 extern crate test_workloads;
 
-use attestation::{
+use ::attestation::{
     certificate::Certificate,
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
     measurement::MeasurementIndex::TvmPage,
-    MAX_CERT_LEN, MAX_CSR_LEN,
+    MAX_CSR_LEN,
 };
 use s_mode_utils::abort::abort;
-use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::{base, reset};
-use sbi::{SbiMessage, EXT_ATTESTATION};
+use sbi::api::{attestation, base, reset};
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -177,9 +175,8 @@ pub fn test_vector() {
 /// Test `CertReq` encoded as ASN.1 DER
 const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 
-fn test_attestation(csr_addr: u64) {
-    let cert_bytes = [0u8; MAX_CERT_LEN];
-    if base::probe_sbi_extension(EXT_ATTESTATION).is_err() {
+fn test_attestation() {
+    if base::probe_sbi_extension(sbi::EXT_ATTESTATION).is_err() {
         println!("Platform doesn't support attestation extension");
         return;
     }
@@ -188,40 +185,27 @@ fn test_attestation(csr_addr: u64) {
         panic!("Test CSR is too large")
     }
 
-    // Safety: csr_addr is the unique reference to the CSR page.
-    unsafe {
-        core::ptr::copy(TEST_CSR.as_ptr(), csr_addr as *mut u8, TEST_CSR.len());
-    }
-    let attestation_msg = SbiMessage::Attestation(sbi::AttestationFunction::GetEvidence {
-        csr_addr,
-        csr_len: TEST_CSR.len() as u64,
-        cert_addr: cert_bytes.as_ptr() as u64,
-        cert_len: cert_bytes.len() as u64,
-    });
-    // Safety: msg contains a unique reference to the CSR and certificate pages
-    // and SBI is safe to write to that page.
-    let cert_len = match unsafe { ecall_send(&attestation_msg) } {
+    let request_data = [0u8; sbi::EVIDENCE_DATA_BLOB_SIZE];
+    let cert_bytes = match attestation::get_evidence(
+        TEST_CSR,
+        &request_data,
+        sbi::EvidenceFormat::DiceTcbInfo,
+    ) {
         Err(e) => {
             println!("Attestation error {e:?}");
             panic!("Guest evidence call failed");
         }
-        Ok(cert_len) => cert_len,
+        Ok(cert_bytes) => cert_bytes,
     };
 
     println!(
         "Evidence certificate is at 0x{:x} - len {}",
         cert_bytes.as_ptr() as u64,
-        cert_len
+        cert_bytes.len()
     );
 
-    // This is mostly as a good practice, because the TSM implementation
-    // should return an error if the provided certificate buffer is too small.
-    if cert_len > cert_bytes.len() as u64 {
-        panic!("Generated certificate is too large")
-    }
-
     let mut tcb_info_extn = DiceTcbInfo::default();
-    let cert = Certificate::from_der(&cert_bytes[..cert_len as usize]).expect("Cert parsing error");
+    let cert = Certificate::from_der(&cert_bytes.as_slice()).expect("Cert parsing error");
 
     // Look for a DiceTcbInfo extension
     if let Some(extensions) = cert.tbs_certificate.extensions.as_ref() {
@@ -272,7 +256,7 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     println!("Hello world from Tellus guest            ");
 
     let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
-    test_attestation(next_page);
+    test_attestation();
     // Touch the rest of the data pages to force Tellus to fault them in.
     let end =
         USABLE_RAM_START_ADDRESS + (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K;

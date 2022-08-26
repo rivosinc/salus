@@ -5,28 +5,60 @@
 use crate::error::*;
 use crate::function::*;
 
+/// The data blob passed to the GetEvidence call must be 64 bytes long.
+pub const EVIDENCE_DATA_BLOB_SIZE: usize = 64;
+
+/// Attestation evidence formats.
+#[derive(Copy, Clone, Debug)]
+#[repr(u64)]
+pub enum EvidenceFormat {
+    /// Single layer DICE TCB
+    /// https://trustedcomputinggroup.org/resource/dice-attestation-architecture/
+    DiceTcbInfo = 0,
+
+    /// X.509 extension for multiple layers DICE TCB.
+    /// https://trustedcomputinggroup.org/resource/dice-attestation-architecture/
+    DiceMultiTcbInfo = 1,
+
+    /// Open DICE profile
+    /// https://pigweed.googlesource.com/open-dice/+/HEAD/docs/specification.md
+    OpenDice = 2,
+}
+
 /// Functions provided by the attestation extension.
 #[derive(Copy, Clone)]
 pub enum AttestationFunction {
-    /// Get an attestion evidence from a CSR (https://datatracker.ietf.org/doc/html/rfc2986).
+    /// Get an attestion evidence from a Certificate Signing Request (CSR)
+    /// (https://datatracker.ietf.org/doc/html/rfc2986).
     /// The caller passes the CSR and its length through the first 2 arguments.
-    /// The third argument is the address where the generated certificate will be placed.
+    /// The third argument is the address where the caller places a data blob
+    /// that will be included in the generated certificate. Typically, this is a
+    /// cryptographic nonce.
+    /// The fourth argument is the evidence format: DiceTcbInfo (0),
+    /// DiceMultiTcbInfo (1) or OpenDice (2).
+    /// The fifthh argument is the address where the generated certificate will be placed.
     /// The evidence is formatted an x.509 DiceTcbInfo certificate extension
     ///
     /// a6 = 0
     /// a0 = CSR address
     /// a1 = CSR length
-    /// a2 = Generated certificate address
-    /// a3 = Reserved length for the generated certificate address
+    /// a2 = Data blob address
+    /// a3 = Attestation evidence format
+    /// a4 = Generated certificate address
+    /// a5 = Reserved length for the generated certificate address
     GetEvidence {
         /// a0 = CSR address
-        csr_addr: u64,
+        cert_request_addr: u64,
         /// a1 = CSR length
-        csr_len: u64,
-        /// a2 = Generated Certificate address
-        cert_addr: u64,
-        /// a3 = Reserved length for the generated certificate address
-        cert_len: u64,
+        cert_request_size: u64,
+        /// a2 = User data blob
+        request_data_addr: u64,
+        /// a3 = Attestation evidence format
+        evidence_format: u64,
+        /// a4 = Generated Certificate address
+        cert_addr_out: u64,
+        /// a5 = Reserved length for the generated certificate address
+        cert_size: u64,
     },
 
     /// Extend the TCB measurement with an additional measurement.
@@ -50,10 +82,12 @@ impl AttestationFunction {
         use AttestationFunction::*;
         match args[6] {
             0 => Ok(GetEvidence {
-                csr_addr: args[0],
-                csr_len: args[1],
-                cert_addr: args[2],
-                cert_len: args[3],
+                cert_request_addr: args[0],
+                cert_request_size: args[1],
+                request_data_addr: args[2],
+                evidence_format: args[3],
+                cert_addr_out: args[4],
+                cert_size: args[5],
             }),
 
             1 => Ok(ExtendMeasurement {
@@ -71,10 +105,12 @@ impl SbiFunction for AttestationFunction {
         use AttestationFunction::*;
         match self {
             GetEvidence {
-                csr_addr: _,
-                csr_len: _,
-                cert_addr: _,
-                cert_len: _,
+                cert_request_addr: _,
+                cert_request_size: _,
+                request_data_addr: _,
+                evidence_format: _,
+                cert_addr_out: _,
+                cert_size: _,
             } => 0,
 
             ExtendMeasurement {
@@ -84,20 +120,48 @@ impl SbiFunction for AttestationFunction {
         }
     }
 
+    fn a5(&self) -> u64 {
+        use AttestationFunction::*;
+        match self {
+            GetEvidence {
+                cert_request_addr: _,
+                cert_request_size: _,
+                request_data_addr: _,
+                evidence_format: _,
+                cert_addr_out: _,
+                cert_size,
+            } => *cert_size,
+            _ => 0,
+        }
+    }
+
+    fn a4(&self) -> u64 {
+        use AttestationFunction::*;
+        match self {
+            GetEvidence {
+                cert_request_addr: _,
+                cert_request_size: _,
+                request_data_addr: _,
+                evidence_format: _,
+                cert_addr_out,
+                cert_size: _,
+            } => *cert_addr_out,
+            _ => 0,
+        }
+    }
+
     fn a3(&self) -> u64 {
         use AttestationFunction::*;
         match self {
             GetEvidence {
-                csr_addr: _,
-                csr_len: _,
-                cert_addr: _,
-                cert_len,
-            } => *cert_len,
-
-            ExtendMeasurement {
-                measurement_addr: _,
-                len,
-            } => *len,
+                cert_request_addr: _,
+                cert_request_size: _,
+                request_data_addr: _,
+                evidence_format,
+                cert_addr_out: _,
+                cert_size: _,
+            } => *evidence_format,
+            _ => 0,
         }
     }
 
@@ -105,11 +169,13 @@ impl SbiFunction for AttestationFunction {
         use AttestationFunction::*;
         match self {
             GetEvidence {
-                csr_addr: _,
-                csr_len: _,
-                cert_addr,
-                cert_len: _,
-            } => *cert_addr,
+                cert_request_addr: _,
+                cert_request_size: _,
+                request_data_addr,
+                evidence_format: _,
+                cert_addr_out: _,
+                cert_size: _,
+            } => *request_data_addr,
 
             ExtendMeasurement {
                 measurement_addr: _,
@@ -122,11 +188,13 @@ impl SbiFunction for AttestationFunction {
         use AttestationFunction::*;
         match self {
             GetEvidence {
-                csr_addr: _,
-                csr_len,
-                cert_addr: _,
-                cert_len: _,
-            } => *csr_len,
+                cert_request_addr: _,
+                cert_request_size,
+                request_data_addr: _,
+                evidence_format: _,
+                cert_addr_out: _,
+                cert_size: _,
+            } => *cert_request_size,
 
             ExtendMeasurement {
                 measurement_addr: _,
@@ -139,11 +207,13 @@ impl SbiFunction for AttestationFunction {
         use AttestationFunction::*;
         match self {
             GetEvidence {
-                csr_addr,
-                csr_len: _,
-                cert_addr: _,
-                cert_len: _,
-            } => *csr_addr,
+                cert_request_addr,
+                cert_request_size: _,
+                request_data_addr: _,
+                evidence_format: _,
+                cert_addr_out: _,
+                cert_size: _,
+            } => *cert_request_addr,
 
             ExtendMeasurement {
                 measurement_addr,

@@ -27,6 +27,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "sbi",
  "spin",
  "spki",
 ]
@@ -546,6 +547,9 @@ dependencies = [
 [[package]]
 name = "sbi"
 version = "0.1.0"
+dependencies = [
+ "arrayvec",
+]
 
 [[package]]
 name = "scopeguard"

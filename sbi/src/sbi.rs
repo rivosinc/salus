@@ -170,6 +170,7 @@ impl SbiMessage {
             SbiMessage::Tee(f) => f.a5(),
             SbiMessage::TeeAia(f) => f.a5(),
             SbiMessage::Pmu(f) => f.a5(),
+            SbiMessage::Attestation(f) => f.a5(),
             _ => 0,
         }
     }
@@ -180,6 +181,7 @@ impl SbiMessage {
             SbiMessage::Tee(f) => f.a4(),
             SbiMessage::TeeAia(f) => f.a4(),
             SbiMessage::Pmu(f) => f.a4(),
+            SbiMessage::Attestation(f) => f.a4(),
             _ => 0,
         }
     }

@@ -13,7 +13,6 @@
     lang_items,
     if_let_guard,
     asm_const,
-    const_ptr_offset_from,
     ptr_sub_ptr,
     slice_ptr_get
 )]

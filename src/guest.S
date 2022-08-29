@@ -173,51 +173,6 @@ _guest_exit:
     csrr  t0, sscratch
     sd    t0, ({guest_a0})(a0)
 
-    /* Save floating point state, if necessary. */
-    csrr  t1, sstatus
-    li    t0, {sstatus_fs_dirty}
-    and   t2, t1, t0
-    bne   t2, t0, _restore_csrs
-    not   t0, t0
-    and   t1, t1, t0
-    li    t0, {sstatus_fs_clean}
-    or    t1, t1, t0
-    fsd   f0, ({guest_f0})(a0)
-    fsd   f1, ({guest_f1})(a0)
-    fsd   f2, ({guest_f2})(a0)
-    fsd   f3, ({guest_f3})(a0)
-    fsd   f4, ({guest_f4})(a0)
-    fsd   f5, ({guest_f5})(a0)
-    fsd   f6, ({guest_f6})(a0)
-    fsd   f7, ({guest_f7})(a0)
-    fsd   f8, ({guest_f8})(a0)
-    fsd   f9, ({guest_f9})(a0)
-    fsd   f10, ({guest_f10})(a0)
-    fsd   f11, ({guest_f11})(a0)
-    fsd   f12, ({guest_f12})(a0)
-    fsd   f13, ({guest_f13})(a0)
-    fsd   f14, ({guest_f14})(a0)
-    fsd   f15, ({guest_f15})(a0)
-    fsd   f16, ({guest_f16})(a0)
-    fsd   f17, ({guest_f17})(a0)
-    fsd   f18, ({guest_f18})(a0)
-    fsd   f19, ({guest_f19})(a0)
-    fsd   f20, ({guest_f20})(a0)
-    fsd   f21, ({guest_f21})(a0)
-    fsd   f22, ({guest_f22})(a0)
-    fsd   f23, ({guest_f23})(a0)
-    fsd   f24, ({guest_f24})(a0)
-    fsd   f25, ({guest_f25})(a0)
-    fsd   f26, ({guest_f26})(a0)
-    fsd   f27, ({guest_f27})(a0)
-    fsd   f28, ({guest_f28})(a0)
-    fsd   f29, ({guest_f29})(a0)
-    fsd   f30, ({guest_f30})(a0)
-    fsd   f31, ({guest_f31})(a0)
-    frcsr t2
-    sd    t2, ({guest_fcsr})(a0)
-    csrw  sstatus, t1
-
 _restore_csrs:
     /* Swap in host CSRs. */
     ld    t1, ({host_sstatus})(a0)
@@ -267,4 +222,94 @@ _restore_csrs:
     ld   s11, ({host_s11})(a0)
     ld   sp, ({host_sp})(a0)
 
+    ret
+
+/// Restore guest FPU state. A0 = pointer to VmCpuState.
+.global _restore_fp
+_restore_fp:
+    /* Temporarily enable FPU access, saving/restoring sstatus. */
+    csrr  t1, sstatus
+    li    t0, {sstatus_fs_dirty}
+    or    t0, t0, t1
+    csrw  sstatus, t0
+    fld   f0, ({guest_f0})(a0)
+    fld   f1, ({guest_f1})(a0)
+    fld   f2, ({guest_f2})(a0)
+    fld   f3, ({guest_f3})(a0)
+    fld   f4, ({guest_f4})(a0)
+    fld   f5, ({guest_f5})(a0)
+    fld   f6, ({guest_f6})(a0)
+    fld   f7, ({guest_f7})(a0)
+    fld   f8, ({guest_f8})(a0)
+    fld   f9, ({guest_f9})(a0)
+    fld   f10, ({guest_f10})(a0)
+    fld   f11, ({guest_f11})(a0)
+    fld   f12, ({guest_f12})(a0)
+    fld   f13, ({guest_f13})(a0)
+    fld   f14, ({guest_f14})(a0)
+    fld   f15, ({guest_f15})(a0)
+    fld   f16, ({guest_f16})(a0)
+    fld   f17, ({guest_f17})(a0)
+    fld   f18, ({guest_f18})(a0)
+    fld   f19, ({guest_f19})(a0)
+    fld   f20, ({guest_f20})(a0)
+    fld   f21, ({guest_f21})(a0)
+    fld   f22, ({guest_f22})(a0)
+    fld   f23, ({guest_f23})(a0)
+    fld   f24, ({guest_f24})(a0)
+    fld   f25, ({guest_f25})(a0)
+    fld   f26, ({guest_f26})(a0)
+    fld   f27, ({guest_f27})(a0)
+    fld   f28, ({guest_f28})(a0)
+    fld   f29, ({guest_f29})(a0)
+    fld   f30, ({guest_f30})(a0)
+    fld   f31, ({guest_f31})(a0)
+    ld    t0, ({guest_fcsr})(a0)
+    fscsr t0
+    csrw  sstatus, t1
+    ret
+
+/// Save guest FPU state. A0 = pointer to VmCpuState.
+.global _save_fp
+_save_fp:
+    /* Temporarily enable FPU access, saving/restoring sstatus. */
+    csrr  t1, sstatus
+    li    t0, {sstatus_fs_dirty}
+    or    t0, t0, t1
+    csrw  sstatus, t0
+    fsd   f0, ({guest_f0})(a0)
+    fsd   f1, ({guest_f1})(a0)
+    fsd   f2, ({guest_f2})(a0)
+    fsd   f3, ({guest_f3})(a0)
+    fsd   f4, ({guest_f4})(a0)
+    fsd   f5, ({guest_f5})(a0)
+    fsd   f6, ({guest_f6})(a0)
+    fsd   f7, ({guest_f7})(a0)
+    fsd   f8, ({guest_f8})(a0)
+    fsd   f9, ({guest_f9})(a0)
+    fsd   f10, ({guest_f10})(a0)
+    fsd   f11, ({guest_f11})(a0)
+    fsd   f12, ({guest_f12})(a0)
+    fsd   f13, ({guest_f13})(a0)
+    fsd   f14, ({guest_f14})(a0)
+    fsd   f15, ({guest_f15})(a0)
+    fsd   f16, ({guest_f16})(a0)
+    fsd   f17, ({guest_f17})(a0)
+    fsd   f18, ({guest_f18})(a0)
+    fsd   f19, ({guest_f19})(a0)
+    fsd   f20, ({guest_f20})(a0)
+    fsd   f21, ({guest_f21})(a0)
+    fsd   f22, ({guest_f22})(a0)
+    fsd   f23, ({guest_f23})(a0)
+    fsd   f24, ({guest_f24})(a0)
+    fsd   f25, ({guest_f25})(a0)
+    fsd   f26, ({guest_f26})(a0)
+    fsd   f27, ({guest_f27})(a0)
+    fsd   f28, ({guest_f28})(a0)
+    fsd   f29, ({guest_f29})(a0)
+    fsd   f30, ({guest_f30})(a0)
+    fsd   f31, ({guest_f31})(a0)
+    frcsr t0
+    sd    t0, ({guest_fcsr})(a0)
+    csrw  sstatus, t1
     ret

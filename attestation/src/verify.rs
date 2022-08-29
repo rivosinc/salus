@@ -5,7 +5,6 @@
 use der::Encode;
 use ed25519::pkcs8::{DecodePublicKey, PublicKeyBytes};
 use ed25519_dalek::{PublicKey, Signature, Verifier};
-use lazy_static::lazy_static;
 use spki::AlgorithmIdentifier;
 
 use crate::{request::CertReq, Error, Result, MAX_CERT_LEN};
@@ -16,6 +15,8 @@ pub trait CertVerifier {
 }
 
 pub struct Ed25519Verifier {}
+
+static ED25519_V: Ed25519Verifier = Ed25519Verifier {};
 
 impl Ed25519Verifier {
     const PUB_KEY_DER_SIZE: usize = 64;
@@ -51,12 +52,7 @@ impl CertVerifier for Ed25519Verifier {
 
 pub fn verifier_from_algorithm(alg: AlgorithmIdentifier) -> Result<&'static dyn CertVerifier> {
     match alg.oid {
-        ed25519::pkcs8::ALGORITHM_OID => {
-            lazy_static! {
-                static ref ED25519_V: Ed25519Verifier = Ed25519Verifier {};
-            }
-            Ok(&*ED25519_V)
-        }
+        ed25519::pkcs8::ALGORITHM_OID => Ok(&ED25519_V),
 
         _ => Err(Error::UnsupportedAlgorithm(alg.oid)),
     }

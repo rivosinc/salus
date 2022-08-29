@@ -27,8 +27,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
- "lazy_static",
- "spin 0.9.4",
+ "spin",
  "spki",
 ]
 
@@ -203,7 +202,7 @@ dependencies = [
  "riscv_regs",
  "s_mode_utils",
  "sbi",
- "spin 0.9.4",
+ "spin",
  "tock-registers",
 ]
 
@@ -323,16 +322,7 @@ name = "hyp_alloc"
 version = "0.1.0"
 dependencies = [
  "riscv_pages",
- "spin 0.9.4",
-]
-
-[[package]]
-name = "lazy_static"
-version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
-dependencies = [
- "spin 0.5.2",
+ "spin",
 ]
 
 [[package]]
@@ -398,7 +388,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "riscv_pages",
- "spin 0.9.4",
+ "spin",
 ]
 
 [[package]]
@@ -481,7 +471,7 @@ version = "0.1.0"
 dependencies = [
  "page_tracking",
  "riscv_pages",
- "spin 0.9.4",
+ "spin",
 ]
 
 [[package]]
@@ -521,7 +511,7 @@ name = "s_mode_utils"
 version = "0.1.0"
 dependencies = [
  "sbi",
- "spin 0.5.2",
+ "spin",
 ]
 
 [[package]]
@@ -549,7 +539,7 @@ dependencies = [
  "s_mode_utils",
  "sbi",
  "sha2 0.10.2",
- "spin 0.9.4",
+ "spin",
  "test_workloads",
 ]
 
@@ -625,12 +615,6 @@ name = "signature"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f054c6c1a6e95179d6f23ed974060dcefb2d9388bb7256900badad682c499de4"
-
-[[package]]
-name = "spin"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 
 [[package]]
 name = "spin"

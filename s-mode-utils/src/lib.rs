@@ -10,8 +10,7 @@
     allocator_api,
     alloc_error_handler,
     lang_items,
-    asm_const,
-    const_ptr_offset_from
+    asm_const
 )]
 
 pub use core::alloc::{GlobalAlloc, Layout};

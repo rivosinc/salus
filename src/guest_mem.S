@@ -73,7 +73,7 @@ _fetch_guest_instruction:
 1:
     hlvx.hu t2, (a0)
     add_extable 1b
-    sw    t2, (a1)
+    sh    t2, (a1)
     addi  a0, a0, 2
     addi  a1, a1, 2
     // If it's a compressed instrution (bits [1:0] != 'b11) then we're done.
@@ -84,7 +84,7 @@ _fetch_guest_instruction:
 2:
     hlvx.hu t2, (a0)
     add_extable 2b
-    sw    t2, (a1)
+    sh    t2, (a1)
 3:
     mv    a0, zero
     ret

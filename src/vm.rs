@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use attestation::{
-    certificate::Certificate, measurement::AttestationManager, request::CertReq, MAX_CSR_LEN,
+    certificate::Certificate, measurement::AttestationManager, request::CertReq,
+    Error as AttestationError, MAX_CSR_LEN,
 };
 use core::ops::ControlFlow;
 use core::{mem, slice};
@@ -18,7 +19,9 @@ use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
 use sbi::*;
-use sbi::{api::attestation::MAX_CERT_SIZE, api::pmu, Error as SbiError};
+use sbi::{
+    api::attestation as SbiAttestation, api::pmu, AttestationCapabilities, Error as SbiError,
+};
 
 use crate::guest_tracking::{GuestState, Guests};
 use crate::smp;
@@ -173,6 +176,19 @@ impl From<VmPagesError> for EcallError {
             // TODO: Map individual error types. InvalidAddress is likely not the right value for
             // each error.
             _ => EcallError::Sbi(SbiError::InvalidAddress),
+        }
+    }
+}
+
+impl From<AttestationError> for EcallError {
+    fn from(error: AttestationError) -> EcallError {
+        match error {
+            AttestationError::InvalidMeasurementRegisterDescIndex(_) => {
+                EcallError::Sbi(SbiError::Failed)
+            }
+            // TODO: Map individual error types.
+            // InvalidParam may not be the right value for each error.
+            _ => EcallError::Sbi(SbiError::InvalidParam),
         }
     }
 }
@@ -997,6 +1013,12 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
     ) -> EcallAction {
         use AttestationFunction::*;
         match attestation_func {
+            GetCapabilities {
+                caps_addr_out,
+                caps_size,
+            } => self
+                .get_attestation_capabilities(caps_addr_out, caps_size as usize, active_pages)
+                .into(),
             GetEvidence {
                 cert_request_addr,
                 cert_request_size,
@@ -1402,6 +1424,36 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         Ok(num_pages)
     }
 
+    fn get_attestation_capabilities(
+        &self,
+        caps_addr_out: u64,
+        caps_size: usize,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallResult<u64> {
+        if caps_size < core::mem::size_of::<AttestationCapabilities>() {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
+        let caps = self
+            .attestation_mgr
+            .capabilities()
+            .map_err(EcallError::from)?;
+
+        let caps_gpa = RawAddr::guest(caps_addr_out, self.vm_pages.page_owner_id());
+        // Safety: &caps points to an AttestationCapabilities structure, as
+        // specified by the attestation manager `capabilities()` method.
+        let caps_bytes: &[u8] = unsafe {
+            slice::from_raw_parts(
+                (&caps as *const AttestationCapabilities).cast(),
+                core::mem::size_of::<AttestationCapabilities>(),
+            )
+        };
+        active_pages
+            .copy_to_guest(caps_gpa, caps_bytes)
+            .map_err(EcallError::from)?;
+
+        Ok(0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn guest_get_evidence(
         &self,
@@ -1434,7 +1486,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
 
         let cert_gpa = RawAddr::guest(cert_addr_out, self.vm_pages.page_owner_id());
-        let mut cert_bytes_buffer = [0u8; MAX_CERT_SIZE];
+        let mut cert_bytes_buffer = [0u8; SbiAttestation::MAX_CERT_SIZE];
         let cert_bytes = Certificate::from_csr(&csr, &self.attestation_mgr, &mut cert_bytes_buffer)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let cert_bytes_len = cert_bytes.len();

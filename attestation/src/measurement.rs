@@ -10,6 +10,7 @@ use digest::{Digest, OutputSizeUser};
 use ed25519_dalek::{Keypair, SecretKey, SECRET_KEY_LENGTH};
 use generic_array::GenericArray;
 use hkdf::HmacImpl;
+use sbi::{AttestationCapabilities, EvidenceFormat, HashAlgorithm, MeasurementRegisterDescriptor};
 use spin::RwLock;
 
 use crate::{
@@ -28,6 +29,9 @@ pub const STATIC_MSMT_REGISTERS: usize = 4;
 pub const DYNAMIC_MSMT_REGISTERS: usize = 4;
 
 const MSMT_REGISTERS: usize = STATIC_MSMT_REGISTERS + DYNAMIC_MSMT_REGISTERS;
+
+// TODO Get the SVN from the RoT
+const TCB_SVN: u64 = 0xdeadbeef;
 
 /// Largest possible DiceTcbInfo extension length
 pub const MAX_TCB_INFO_EXTN_LEN: usize = (MSMT_REGISTERS * MAX_FWID_LEN) + MAX_TCB_INFO_HEADER_LEN;
@@ -199,6 +203,15 @@ impl<D: Digest> MeasurementRegister<D> {
 
     fn finalize(&mut self) {
         self.static_measurement.then(|| self.extensible = false);
+    }
+
+    fn to_sbi_descriptor(&self) -> MeasurementRegisterDescriptor {
+        MeasurementRegisterDescriptor::new(
+            self.tcb_layer.unwrap_or(0),
+            self.fwid_index,
+            self.pcr_index,
+            !self.static_measurement,
+        )
     }
 }
 
@@ -528,5 +541,23 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// Set the TVM initial argument (A1).
     pub fn set_arg(&self, a1: u64) {
         self.tvm_config.write().set_arg(a1);
+    }
+
+    /// Build the attestation capabilities.
+    pub fn capabilities(&self) -> Result<AttestationCapabilities> {
+        let mut caps = AttestationCapabilities::new(
+            TCB_SVN,
+            HashAlgorithm::Sha384,
+            EvidenceFormat::DiceTcbInfo,
+            STATIC_MSMT_REGISTERS as u8,
+            DYNAMIC_MSMT_REGISTERS as u8,
+        );
+
+        for (idx, m) in self.measurements.read().iter().enumerate() {
+            caps.add_measurement_register(m.to_sbi_descriptor(), idx)
+                .map_err(|_| Error::InvalidMeasurementRegisterDescIndex(idx))?;
+        }
+
+        Ok(caps)
     }
 }

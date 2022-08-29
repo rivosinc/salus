@@ -63,6 +63,9 @@ pub enum Error {
     /// Invalid measurement register index
     InvalidMeasurementRegisterIndex(usize),
 
+    /// Invalid measurement register descriptor index
+    InvalidMeasurementRegisterDescIndex(usize),
+
     /// Invalid data digest
     InvalidDigest(der::Error),
 

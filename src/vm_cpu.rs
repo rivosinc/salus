@@ -117,7 +117,9 @@ struct VmCpuState {
 
 // The vCPU context switch, defined in guest.S
 extern "C" {
-    fn _run_guest(g: *mut VmCpuState);
+    fn _run_guest(state: *mut VmCpuState);
+    fn _save_fp(state: *mut VmCpuState);
+    fn _restore_fp(state: *mut VmCpuState);
 }
 
 #[allow(dead_code)]
@@ -245,7 +247,6 @@ global_asm!(
     guest_f31 = const guest_fpr_offset(31),
     guest_fcsr = const guest_csr_offset!(fcsr),
     sstatus_fs_dirty = const sstatus::fs::Dirty.value,
-    sstatus_fs_clean = const sstatus::fs::Clean.value,
     guest_sstatus = const guest_csr_offset!(sstatus),
     guest_hstatus = const guest_csr_offset!(hstatus),
     guest_scounteren = const guest_csr_offset!(scounteren),
@@ -340,9 +341,13 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         // TODO: Enforce that the vCPU has an assigned interrupt file before running.
 
         unsafe {
+            // Safe since _restore_fp() only reads within the bounds of the floating point
+            // register state in VmCpuState.
+            _restore_fp(&mut self.state);
+
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table.
-            _run_guest(&mut self.state as *mut VmCpuState);
+            _run_guest(&mut self.state);
         }
 
         // Save off the trap information.
@@ -350,6 +355,17 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         self.state.trap_csrs.stval = CSR.stval.get();
         self.state.trap_csrs.htval = CSR.htval.get();
         self.state.trap_csrs.htinst = CSR.htinst.get();
+
+        // Check if FPU state needs to be saved.
+        let mut sstatus = LocalRegisterCopy::new(self.state.guest_regs.sstatus);
+        if sstatus.matches_all(sstatus::fs::Dirty) {
+            // Safe since _save_fp() only writes within the bounds of the floating point register
+            // state in VmCpuState.
+            unsafe { _save_fp(&mut self.state) };
+
+            sstatus.modify(sstatus::fs::Clean);
+            self.state.guest_regs.sstatus = sstatus.get();
+        }
 
         // Determine the exit cause from the trap CSRs.
         use Exception::*;

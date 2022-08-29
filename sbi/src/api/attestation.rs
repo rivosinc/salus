@@ -5,12 +5,26 @@
 use arrayvec::ArrayVec;
 
 use crate::{
-    ecall_send, AttestationFunction, Error, EvidenceFormat, Result, SbiMessage,
-    EVIDENCE_DATA_BLOB_SIZE,
+    ecall_send, AttestationCapabilities, AttestationFunction, Error, EvidenceFormat, Result,
+    SbiMessage, EVIDENCE_DATA_BLOB_SIZE,
 };
 
 /// Maximum supported size for the attestation evidence certificate.
 pub const MAX_CERT_SIZE: usize = 4096;
+
+/// Get the attestation capabilities.
+pub fn get_capabilities() -> Result<AttestationCapabilities> {
+    let caps = AttestationCapabilities::default();
+    let msg = SbiMessage::Attestation(AttestationFunction::GetCapabilities {
+        caps_addr_out: (&caps as *const AttestationCapabilities) as u64,
+        caps_size: core::mem::size_of::<AttestationCapabilities>() as u64,
+    });
+
+    // Safety: &caps is the single reference to a variable defined in this scope.
+    unsafe { ecall_send(&msg) }?;
+
+    Ok(caps)
+}
 
 /// Get an attestation evidence.
 /// This function returns a serialized, DER formatted X.509 certificate.

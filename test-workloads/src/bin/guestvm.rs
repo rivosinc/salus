@@ -181,6 +181,18 @@ fn test_attestation() {
         return;
     }
 
+    let caps = attestation::get_capabilities().expect("Failed to get attestation capabilities");
+    println!(
+        "caps: SVN {:#x} Evidence formats {:?}",
+        caps.tcb_svn, caps.evidence_formats
+    );
+    if !caps
+        .evidence_formats
+        .contains(sbi::EvidenceFormat::DiceTcbInfo)
+    {
+        panic!("DICE TcbInfo format is not supported")
+    }
+
     if TEST_CSR.len() > MAX_CSR_LEN as usize {
         panic!("Test CSR is too large")
     }

@@ -59,44 +59,6 @@ _run_guest:
     csrrw t1, sscratch, a0
     sd    t1, ({host_sscratch})(a0)
 
-    /* Restore the guest floating-point state from GuestInfo. */
-    csrr t1, sstatus
-    fld  f0, ({guest_f0})(a0)
-    fld  f1, ({guest_f1})(a0)
-    fld  f2, ({guest_f2})(a0)
-    fld  f3, ({guest_f3})(a0)
-    fld  f4, ({guest_f4})(a0)
-    fld  f5, ({guest_f5})(a0)
-    fld  f6, ({guest_f6})(a0)
-    fld  f7, ({guest_f7})(a0)
-    fld  f8, ({guest_f8})(a0)
-    fld  f9, ({guest_f9})(a0)
-    fld  f10, ({guest_f10})(a0)
-    fld  f11, ({guest_f11})(a0)
-    fld  f12, ({guest_f12})(a0)
-    fld  f13, ({guest_f13})(a0)
-    fld  f14, ({guest_f14})(a0)
-    fld  f15, ({guest_f15})(a0)
-    fld  f16, ({guest_f16})(a0)
-    fld  f17, ({guest_f17})(a0)
-    fld  f18, ({guest_f18})(a0)
-    fld  f19, ({guest_f19})(a0)
-    fld  f20, ({guest_f20})(a0)
-    fld  f21, ({guest_f21})(a0)
-    fld  f22, ({guest_f22})(a0)
-    fld  f23, ({guest_f23})(a0)
-    fld  f24, ({guest_f24})(a0)
-    fld  f25, ({guest_f25})(a0)
-    fld  f26, ({guest_f26})(a0)
-    fld  f27, ({guest_f27})(a0)
-    fld  f28, ({guest_f28})(a0)
-    fld  f29, ({guest_f29})(a0)
-    fld  f30, ({guest_f30})(a0)
-    fld  f31, ({guest_f31})(a0)
-    ld   t0, ({guest_fcsr})(a0)
-    fscsr t0
-    csrw sstatus, t1
-
     /* Restore the gprs from this GuestInfo */
     ld   ra, ({guest_ra})(a0)
     ld   gp, ({guest_gp})(a0)

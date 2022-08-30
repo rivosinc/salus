@@ -10,3 +10,10 @@ rustflags = [
     # new in 1.60 and generates false positives
     "-Aclippy::only_used_in_recursion",
 ]
+
+[target.riscv64gcv-unknown-none-elf]
+rustflags = [
+    '-Clink-arg=-Tlds/qemu.lds',
+    # new in 1.60 and generates false positives
+    "-Aclippy::only_used_in_recursion",
+]

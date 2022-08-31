@@ -46,6 +46,134 @@ pub fn alloc_error(_layout: Layout) -> ! {
     abort()
 }
 
+#[cfg(target_feature = "v")]
+pub fn print_vector_csrs() {
+    let mut vl: u64;
+    let mut vcsr: u64;
+    let mut vtype: u64;
+    let mut vlenb: u64;
+
+    unsafe {
+        // safe because we are only reading csr's
+        asm!(
+            "csrrs {vl}, vl, zero",
+            "csrrs {vcsr}, vcsr, zero",
+            "csrrs {vtype}, vtype, zero",
+            "csrrs {vlenb}, vlenb, zero",
+            vlenb = out(reg) vlenb,
+            vl= out(reg) vl,
+            vcsr = out(reg) vcsr,
+            vtype = out(reg) vtype,
+            options(nostack)
+        );
+    }
+    println!("vl    {}", vl);
+    println!("vlenb {}", vlenb);
+    println!("vcsr  {:#x}", vcsr);
+    println!("vtype {:#x}", vtype);
+}
+
+#[cfg(target_feature = "v")]
+pub fn test_vector() {
+    let vec_len: u64 = 8;
+    let vtype: u64 = 0xda;
+    let enable: u64 = 0x200;
+
+    unsafe {
+        // safe because we are only setting a bit in a csr
+        asm!(
+            "csrrs zero, sstatus, {enable}",
+            enable = in(reg) enable,
+        );
+    }
+    println!("Vectors Enabled");
+    print_vector_csrs();
+
+    unsafe {
+        // safe because we are only setting the vector csr's
+        asm!(
+            "vsetvl x0, {vec_len}, {vtype}",
+            vec_len = in(reg) vec_len,
+            vtype = in(reg) vtype,
+            options(nostack),
+        )
+    }
+
+    print_vector_csrs();
+
+    const REG_WIDTH_IN_U64S: usize = 4;
+
+    let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
+    let mut refbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
+    for i in 0..inbuf.len() {
+        inbuf[i] = 1 << (i % 53) as u64;
+        refbuf[i] = inbuf[i];
+    }
+
+    let bufp1 = inbuf.as_ptr();
+    let bufp2: *const u64;
+    let bufp3: *const u64;
+    let bufp4: *const u64;
+    unsafe {
+        // safe because we don't go past the length of inbuf
+        bufp2 = bufp1.add(8 * REG_WIDTH_IN_U64S);
+        bufp3 = bufp1.add(16 * REG_WIDTH_IN_U64S);
+        bufp4 = bufp1.add(24 * REG_WIDTH_IN_U64S);
+    }
+    println!("Loading vector registers");
+    unsafe {
+        // safe because the assembly reads into the vector register file
+        asm!(
+            "vl8r.v  v0, ({bufp1})",
+            "vl8r.v  v8, ({bufp2})",
+            "vl8r.v  v16, ({bufp3})",
+            "vl8r.v  v24, ({bufp4})",
+            bufp1 = in(reg) bufp1,
+            bufp2 = in(reg) bufp2,
+            bufp3 = in(reg) bufp3,
+            bufp4 = in(reg) bufp4,
+            options(nostack)
+        );
+    }
+
+    print_vector_csrs();
+
+    // Overwrite memory to verify that it changes
+    for i in 0..inbuf.len() {
+        inbuf[i] = 99_u64;
+    }
+
+    println!("Reading vector registers");
+    unsafe {
+        // safe because enough memory provided to store entire register file
+        asm!(
+            "vs8r.v  v0, ({bufp1})",
+            "vs8r.v  v8, ({bufp2})",
+            "vs8r.v  v16, ({bufp3})",
+            "vs8r.v  v24, ({bufp4})",
+            bufp1 = in(reg) bufp1,
+            bufp2 = in(reg) bufp2,
+            bufp3 = in(reg) bufp3,
+            bufp4 = in(reg) bufp4,
+            options(nostack)
+        )
+    }
+    print_vector_csrs();
+
+    println!("Verify registers");
+    let mut should_panic = false;
+    for i in 0..inbuf.len() {
+        if inbuf[i] != refbuf[i] {
+            println!("error:  {} {} {}", i, refbuf[i], inbuf[i]);
+            should_panic = true;
+        }
+    }
+
+    if should_panic {
+        panic!("Vector registers did not restore correctly");
+    }
+}
+
 /// Test `CertReq` encoded as ASN.1 DER
 const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 
@@ -167,6 +295,9 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
             core::ptr::write_volatile(shared_page_addr as *mut u64, GUEST_SHARE_PONG);
         }
     }
+
+    #[cfg(target_feature = "v")]
+    test_vector();
 
     // Try reading and writing MMIO.
     let write_ptr = GUEST_MMIO_ADDRESS as *mut u32;

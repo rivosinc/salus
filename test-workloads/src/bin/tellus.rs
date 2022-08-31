@@ -16,6 +16,8 @@ use core::alloc::{GlobalAlloc, Layout};
 extern crate alloc;
 extern crate test_workloads;
 
+#[cfg(target_feature = "v")]
+use core::arch::asm;
 use device_tree::Fdt;
 use riscv_regs::{CSR, CSR_CYCLE};
 use s_mode_utils::abort::abort;
@@ -136,6 +138,105 @@ fn exercise_pmu_functionality() {
         0,
     )
     .expect_err("Successfully configured FW counter");
+}
+
+#[cfg(target_feature = "v")]
+fn store_into_vectors() {
+    let vec_len: u64 = 8;
+    let vtype: u64 = 0xda;
+    let enable: u64 = 0x200;
+
+    println!("Writing tellus vector registers");
+    unsafe {
+        // safe because we are only setting the vector csr's
+        asm!(
+            "csrrs zero, sstatus, {enable}",
+            "vsetvl x0, {vec_len}, {vtype}",
+            vec_len = in(reg) vec_len,
+            vtype = in(reg) vtype,
+            enable = in(reg) enable,
+            options(nostack),
+        )
+    }
+
+    const REG_WIDTH_IN_U64S: usize = 4;
+
+    let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
+    for i in 0..inbuf.len() {
+        inbuf[i] = 0xDEADBEEFCAFEBABE;
+    }
+
+    let bufp1 = inbuf.as_ptr();
+    let bufp2: *const u64;
+    let bufp3: *const u64;
+    let bufp4: *const u64;
+    unsafe {
+        // safe because we don't go past the length of inbuf
+        bufp2 = bufp1.add(8 * REG_WIDTH_IN_U64S);
+        bufp3 = bufp1.add(16 * REG_WIDTH_IN_U64S);
+        bufp4 = bufp1.add(24 * REG_WIDTH_IN_U64S);
+    }
+    unsafe {
+        // safe because the assembly reads into the vector register file
+        asm!(
+            "vl8r.v  v0, ({bufp1})",
+            "vl8r.v  v8, ({bufp2})",
+            "vl8r.v  v16, ({bufp3})",
+            "vl8r.v  v24, ({bufp4})",
+            bufp1 = in(reg) bufp1,
+            bufp2 = in(reg) bufp2,
+            bufp3 = in(reg) bufp3,
+            bufp4 = in(reg) bufp4,
+            options(nostack)
+        );
+    }
+}
+
+#[cfg(target_feature = "v")]
+fn check_vectors() {
+    println!("Reading vector registers");
+    const REG_WIDTH_IN_U64S: usize = 4;
+
+    let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
+    let bufp1 = inbuf.as_ptr();
+    let bufp2: *const u64;
+    let bufp3: *const u64;
+    let bufp4: *const u64;
+
+    unsafe {
+        // safe because we don't go past the length of inbuf
+        bufp2 = bufp1.add(8 * REG_WIDTH_IN_U64S);
+        bufp3 = bufp1.add(16 * REG_WIDTH_IN_U64S);
+        bufp4 = bufp1.add(24 * REG_WIDTH_IN_U64S);
+    }
+
+    unsafe {
+        // safe because enough memory provided to store entire register file
+        asm!(
+            "vs8r.v  v0, ({bufp1})",
+            "vs8r.v  v8, ({bufp2})",
+            "vs8r.v  v16, ({bufp3})",
+            "vs8r.v  v24, ({bufp4})",
+            bufp1 = in(reg) bufp1,
+            bufp2 = in(reg) bufp2,
+            bufp3 = in(reg) bufp3,
+            bufp4 = in(reg) bufp4,
+            options(nostack)
+        )
+    }
+
+    println!("Verify registers");
+    let mut should_panic = false;
+    for i in 0..inbuf.len() {
+        if inbuf[i] != 0xDEADBEEFCAFEBABE {
+            println!("error:  {} {} {}", i, 0xDEADBEEFCAFEBABE_u64, inbuf[i]);
+            should_panic = true;
+        }
+    }
+
+    if should_panic {
+        panic!("Vector registers did not restore correctly");
+    }
 }
 
 /// The entry point of the Rust part of the kernel.
@@ -360,6 +461,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // TODO test that access to pages crashes somehow
     tsm::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
 
+    #[cfg(target_feature = "v")]
+    store_into_vectors();
+
     loop {
         // Safety: running a VM can't affect host memory as that memory isn't accessible to the VM.
         match tsm::tvm_run(vmid, 0) {
@@ -436,6 +540,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     sbi::TvmCpuExitCode::WaitForInterrupt => {
                         continue;
                     }
+                    sbi::TvmCpuExitCode::UnhandledException => {
+                        let cause0 = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
+                        println!("Tellus - Unhandled exception {:#x}", cause0);
+                        break;
+                    }
                     _ => {
                         println!("Tellus - Guest exited with status {:?}", cause);
                         break;
@@ -444,6 +553,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             }
         }
     }
+
+    #[cfg(target_feature = "v")]
+    check_vectors();
 
     tsm::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
 

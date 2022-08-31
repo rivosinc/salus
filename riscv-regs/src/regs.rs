@@ -117,3 +117,20 @@ impl GeneralPurposeRegisters {
 #[derive(Default)]
 #[repr(C)]
 pub struct FloatingPointRegisters([u64; 32]);
+
+/// The vector register file. We don't expect to directly interact with a guest's vector state
+/// other than for saving/restoring the registers, so simply treat the register file as an array
+/// of 256b values. This actually depends on the vlenb csr, so if the register is greater than 256
+/// bits (i.e. the vlenb csr is greater than 32) we will need to increase this.
+
+// The width of a vector register in bytes
+pub const MAX_VECTOR_REGISTER_LEN: usize = 32;
+const U64S_IN_REGISTER: usize = MAX_VECTOR_REGISTER_LEN >> 3;
+
+#[derive(Default)]
+#[repr(C)]
+pub struct VectorRegister([u64; U64S_IN_REGISTER]);
+
+#[derive(Default)]
+#[repr(C)]
+pub struct VectorRegisters([VectorRegister; 32]);

@@ -67,6 +67,12 @@ pub struct CSR {
     pub vsatp: ReadWriteRiscvCsr<satp::Register, CSR_VSATP>,
     pub vstopi: ReadWriteRiscvCsr<stopi::Register, 0xeb0>,
 
+    pub vstart: ReadWriteRiscvCsr<vstart::Register, 0x008>,
+    pub vcsr: ReadWriteRiscvCsr<vcsr::Register, 0x00F>,
+    pub vl: ReadWriteRiscvCsr<vl::Register, 0xC20>,
+    pub vtype: ReadWriteRiscvCsr<vtype::Register, 0xC21>,
+    pub vlenb: ReadWriteRiscvCsr<vlenb::Register, 0xC22>,
+
     pub hpmcounter: [&'static dyn RiscvCsrInterface<R = hpmcounter::Register>; 32],
 }
 
@@ -117,6 +123,12 @@ pub const CSR: &CSR = &CSR {
     vstopei: ReadWriteRiscvCsr::new(),
     vsatp: ReadWriteRiscvCsr::new(),
     vstopi: ReadWriteRiscvCsr::new(),
+
+    vstart: ReadWriteRiscvCsr::new(),
+    vcsr: ReadWriteRiscvCsr::new(),
+    vl: ReadWriteRiscvCsr::new(),
+    vtype: ReadWriteRiscvCsr::new(),
+    vlenb: ReadWriteRiscvCsr::new(),
 
     // TODO: Use a procedural macro to generate these.
     hpmcounter: [

@@ -14,7 +14,8 @@
     if_let_guard,
     asm_const,
     ptr_sub_ptr,
-    slice_ptr_get
+    slice_ptr_get,
+    let_chains
 )]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};

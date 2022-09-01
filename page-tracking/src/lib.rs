@@ -22,7 +22,7 @@
 //!                                  -------> `SequentialPages` for hypervisor setup
 
 #![no_std]
-#![feature(allocator_api, try_reserve_kind)]
+#![feature(allocator_api, try_reserve_kind, let_chains)]
 
 extern crate alloc;
 

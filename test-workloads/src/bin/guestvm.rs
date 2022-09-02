@@ -237,7 +237,7 @@ fn test_attestation() {
         .map(|fwids| fwids.get(TvmPage as usize).expect("Missing TVM page fwid"))
         .expect("Missing TVM fwids");
 
-    print!(
+    println!(
         "Certificate version:{:?} Issuer:{} Signature algorithm:{}",
         cert.tbs_certificate.version, cert.tbs_certificate.issuer, cert.signature_algorithm.oid
     );

@@ -6,7 +6,7 @@ use crate::error::*;
 use crate::function::*;
 
 /// The exit cause for a TVM vCPU returned from TvmCpuRun. Certain exit causes may be accompanied
-/// by more detailed cuase information (e.g. faulting address) in which case that information can
+/// by more detailed cause information (e.g. faulting address) in which case that information can
 /// be retrieved by accessing the virtual `ExitCause` registers of the vCPU.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -276,6 +276,7 @@ pub enum TeeFunction {
         len: u64,
     },
     /// Message to destroy a TVM created with `TvmCreate`.
+    ///
     /// a6 = 1
     TvmDestroy {
         /// a0 = guest id returned from `TvmCreate`.
@@ -284,7 +285,6 @@ pub enum TeeFunction {
     /// Adds `num_pages` 4kB pages of confidential memory starting at `page_addr` to the page-table
     /// page pool for the specified guest.
     ///
-    /// 4k Pages.
     /// a6 = 2
     AddPageTablePages {
         /// a0 = guest_id
@@ -293,35 +293,6 @@ pub enum TeeFunction {
         page_addr: u64,
         /// a2 = number of pages
         num_pages: u64,
-    },
-    /// Marks the specified range of guest physical address space as reserved for the mapping of
-    /// confidential memory. The region is initially unpopulated. Pages of confidential memory may
-    /// be inserted with `TvmAddZeroPages` and `TvmAddMeasuredPages`. Both `guest_addr` and `len`
-    /// must be 4kB-aligned. Confidential memory regions may only be added to TVMs prior to
-    /// finalization.
-    ///
-    /// a6 = 17
-    TvmAddConfidentialMemoryRegion {
-        /// a0 = guest_id
-        guest_id: u64,
-        /// a1 = start of the confidential memory region
-        guest_addr: u64,
-        /// a2 = length of the confidential memory region
-        len: u64,
-    },
-    /// Marks the specified range of guest physical address space as used for emulated MMIO.
-    /// The region is unpopulated; attempts by a TVM vCPU to access this region will cause a
-    /// `MmioPageFault` exit from `TvmCpuRun`. Both `guest_addr` and `len` must be 4kB-aligned.
-    /// Emulated MMIO regions may only be added to TVMs prior to finalization.
-    ///
-    /// a6 = 18
-    TvmAddEmulatedMmioRegion {
-        /// a0 = guest_id
-        guest_id: u64,
-        /// a1 = start of the emulated MMIO region
-        guest_addr: u64,
-        /// a2 = length of the emulated MMIO region
-        len: u64,
     },
     /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
     /// specified guest's address space at `guest_addr`. The mapping must lie within a region of
@@ -341,34 +312,15 @@ pub enum TeeFunction {
         /// a4 = guest physical address
         guest_addr: u64,
     },
-    /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
-    /// memory at `dest_addr`, then measures and maps the pages at `dest_addr` into the specified
-    /// guest's address space at `guest_addr`. The mapping must lie within a region of confidential
-    /// memory created with `TvmAddConfidentialMemoryRegion`. Measured pages may only be added prior
-    /// to TVM finalization.
-    ///
-    /// a6 = 11
-    TvmAddMeasuredPages {
-        /// a0 = guest_id
-        guest_id: u64,
-        /// a1 = physical address of the pages to copy from
-        src_addr: u64,
-        /// a2 = physical address of the pages to insert
-        dest_addr: u64,
-        /// a3 = page size
-        page_type: TsmPageType,
-        /// a4 = number of pages
-        num_pages: u64,
-        /// a5 = guest physical address
-        guest_addr: u64,
-    },
     /// Moves a VM from the initializing state to the Runnable state
+    ///
     /// a6 = 4
     Finalize {
         /// a0 = guest id
         guest_id: u64,
     },
     /// Runs the given vCPU in the TVM
+    ///
     /// a6 = 5
     TvmCpuRun {
         /// a0 = guest id
@@ -400,19 +352,6 @@ pub enum TeeFunction {
         /// a3 = register value
         value: u64,
     },
-    /// Gets the regsiter identified by `register` in the vCPU with ID `vcpu_id`. See the definition
-    /// of `TvmCpuRegister` for details on which registers are readable and when. The contents of
-    /// the specified register are returned upon success.
-    ///
-    /// a6 = 16
-    TvmCpuGetRegister {
-        /// a0 = guest id
-        guest_id: u64,
-        /// a1 = vCPU id
-        vcpu_id: u64,
-        /// a2 = register id
-        register: TvmCpuRegister,
-    },
     /// Writes up to `len` bytes of the `TsmInfo` structure to the non-confidential physical address
     /// `dest_addr`. Returns the number of bytes written.
     ///
@@ -422,6 +361,27 @@ pub enum TeeFunction {
         dest_addr: u64,
         /// a1 = maximum number of bytes to be written
         len: u64,
+    },
+    /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
+    /// memory at `dest_addr`, then measures and maps the pages at `dest_addr` into the specified
+    /// guest's address space at `guest_addr`. The mapping must lie within a region of confidential
+    /// memory created with `TvmAddConfidentialMemoryRegion`. Measured pages may only be added prior
+    /// to TVM finalization.
+    ///
+    /// a6 = 11
+    TvmAddMeasuredPages {
+        /// a0 = guest_id
+        guest_id: u64,
+        /// a1 = physical address of the pages to copy from
+        src_addr: u64,
+        /// a2 = physical address of the pages to insert
+        dest_addr: u64,
+        /// a3 = page size
+        page_type: TsmPageType,
+        /// a4 = number of pages
+        num_pages: u64,
+        /// a5 = guest physical address
+        guest_addr: u64,
     },
     /// Converts `num_pages` of non-confidential memory starting at `page_addr`. The converted pages
     /// remain non-confidential, and thus may not be assinged for use by a child TVM, until the
@@ -462,6 +422,48 @@ pub enum TeeFunction {
     ///
     /// a6 = 15
     TsmLocalFence,
+    /// Gets the regsiter identified by `register` in the vCPU with ID `vcpu_id`. See the definition
+    /// of `TvmCpuRegister` for details on which registers are readable and when. The contents of
+    /// the specified register are returned upon success.
+    ///
+    /// a6 = 16
+    TvmCpuGetRegister {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = vCPU id
+        vcpu_id: u64,
+        /// a2 = register id
+        register: TvmCpuRegister,
+    },
+    /// Marks the specified range of guest physical address space as reserved for the mapping of
+    /// confidential memory. The region is initially unpopulated. Pages of confidential memory may
+    /// be inserted with `TvmAddZeroPages` and `TvmAddMeasuredPages`. Both `guest_addr` and `len`
+    /// must be 4kB-aligned. Confidential memory regions may only be added to TVMs prior to
+    /// finalization.
+    ///
+    /// a6 = 17
+    TvmAddConfidentialMemoryRegion {
+        /// a0 = guest_id
+        guest_id: u64,
+        /// a1 = start of the confidential memory region
+        guest_addr: u64,
+        /// a2 = length of the confidential memory region
+        len: u64,
+    },
+    /// Marks the specified range of guest physical address space as used for emulated MMIO.
+    /// The region is unpopulated; attempts by a TVM vCPU to access this region will cause a
+    /// `MmioPageFault` exit from `TvmCpuRun`. Both `guest_addr` and `len` must be 4kB-aligned.
+    /// Emulated MMIO regions may only be added to TVMs prior to finalization.
+    ///
+    /// a6 = 18
+    TvmAddEmulatedMmioRegion {
+        /// a0 = guest_id
+        guest_id: u64,
+        /// a1 = start of the emulated MMIO region
+        guest_addr: u64,
+        /// a2 = length of the emulated MMIO region
+        len: u64,
+    },
     /// Marks the specified range of guest physical address space as reserved for the mapping of
     /// shared memory. The region is initially unpopulated. Pages of shared memory may
     /// be inserted with `TvmAddSharedPages`. Both `guest_addr` and `len` must be 4kB-aligned.

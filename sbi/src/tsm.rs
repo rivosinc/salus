@@ -131,12 +131,12 @@ impl TvmMmioOpCode {
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TvmCpuRegister {
-    /// Entry point (initial SEPC) of the boot CPU of a TVM. Raed-write prior to TVM finalization;
+    /// Entry point (initial SEPC) of the boot CPU of a TVM. Read-write prior to TVM finalization;
     /// inaccessible after the TVM has started.
     EntryPc = 0,
 
     /// Boot argument (stored in A1, usually a pointer to a device-tree) of the boot CPU of a TVM.
-    /// Raed-write prior to TVM finalization; inaccessible after the TVM has started.
+    /// Read-write prior to TVM finalization; inaccessible after the TVM has started.
     EntryArg = 1,
 
     /// Detailed TVM CPU exit cause register. Read-only, and only accessible after the TVM has
@@ -150,7 +150,7 @@ pub enum TvmCpuRegister {
     /// after the TVM has started.
     MmioLoadValue = 4,
 
-    /// Value stored by a TVM CPU to an emulated MMIO region. Read-only, and only accessilbe after
+    /// Value stored by a TVM CPU to an emulated MMIO region. Read-only, and only accessible after
     /// the TVM has started.
     MmioStoreValue = 5,
 }
@@ -384,7 +384,7 @@ pub enum TeeFunction {
         guest_addr: u64,
     },
     /// Converts `num_pages` of non-confidential memory starting at `page_addr`. The converted pages
-    /// remain non-confidential, and thus may not be assinged for use by a child TVM, until the
+    /// remain non-confidential, and thus may not be assigned for use by a child TVM, until the
     /// fence procedure, described below, has been completed.
     ///
     /// a6 = 12
@@ -422,7 +422,7 @@ pub enum TeeFunction {
     ///
     /// a6 = 15
     TsmLocalFence,
-    /// Gets the regsiter identified by `register` in the vCPU with ID `vcpu_id`. See the definition
+    /// Gets the register identified by `register` in the vCPU with ID `vcpu_id`. See the definition
     /// of `TvmCpuRegister` for details on which registers are readable and when. The contents of
     /// the specified register are returned upon success.
     ///
@@ -465,8 +465,10 @@ pub enum TeeFunction {
         len: u64,
     },
     /// Marks the specified range of guest physical address space as reserved for the mapping of
-    /// shared memory. The region is initially unpopulated. Pages of shared memory may
-    /// be inserted with `TvmAddSharedPages`. Both `guest_addr` and `len` must be 4kB-aligned.
+    /// shared memory. The region is initially unpopulated. Pages of shared memory may be inserted with
+    /// `TvmAddSharedPages`. Attempts by a TVM vCPU to access an unpopulated region will cause a `SharedPageFault`
+    /// exit from `TvmCpuRun` Both `guest_addr` and `len` must be 4kB-aligned.
+    /// Shared memory regions may only be added to TVMs prior to finalization.
     ///
     /// a6 = 19
     TvmAddSharedMemoryRegion {
@@ -479,6 +481,7 @@ pub enum TeeFunction {
     },
     /// Maps non-confidential shared pages in a range previously defined by `TvmAddSharedMemoryRegion`.
     /// The call may be made before or after TVM finalization, and shared pages can be mapped-in on demand.
+    ///
     /// a6 = 20
     TvmAddSharedPages {
         /// a0 = guest id

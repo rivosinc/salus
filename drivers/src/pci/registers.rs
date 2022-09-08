@@ -10,7 +10,7 @@ use tock_registers::{register_bitfields, LocalRegisterCopy, RegisterLongName, UI
 
 // PCI register definitions. See the PCI Express Base Specification for more details.
 //
-// Note that the definitions of legacy, PCI-only regsiters and bits are largely omitted.
+// Note that the definitions of legacy, PCI-only registers and bits are largely omitted.
 
 register_bitfields![u16,
     pub Command [

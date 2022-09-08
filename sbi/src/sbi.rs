@@ -278,7 +278,7 @@ impl SbiMessage {
 ///
 /// # Safety
 ///
-/// The caller must verify that any memory references contained in `msg` obey rust's memory
+/// The caller must verify that any memory references contained in `msg` obey Rust's memory
 /// safety rules. For example, any pointers to memory that will be modified in the handling of
 /// the ecall must be uniquely owned. Similarly any pointers read by the ecall must not be
 /// mutably borrowed.

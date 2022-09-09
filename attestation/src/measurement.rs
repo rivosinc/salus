@@ -42,17 +42,50 @@ const CDI_LEN: usize = 32;
 /// The TVM CDI ID is derived from the TSM CDI.
 pub const CDI_ID_LEN: usize = 20;
 
-/// Measurement register indexes aliases.
+/// Our TCG PCR indexes mapping.
 #[repr(u8)]
-pub enum MeasurementIndex {
-    /// Platform configuration measurement (PCR 1)
-    PlatformConfig = 1,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TcgPcrIndex {
+    /// Platform code Measurement (PCR0)
+    PlatformCode = 0,
 
-    /// TVM pages extend PCR 2
+    /// Platform configuration measurement (PCR1)
+    PlatformConfiguration = 1,
+
+    /// TVM pages (PCR2)
     TvmPage = 2,
 
-    /// TVM configuration and data extend PCR 3
+    /// TVM configuration and data (PCR3)
     TvmConfiguration = 3,
+
+    /// Runtime measurement (PCR17)
+    RuntimePcr0 = 17,
+
+    /// Runtime measurement (PCR18)
+    RuntimePcr1 = 18,
+
+    /// Runtime measurement (PCR19)
+    RuntimePcr2 = 19,
+
+    /// Runtime measurement (PCR20)
+    RuntimePcr3 = 20,
+}
+
+impl TryFrom<u8> for TcgPcrIndex {
+    type Error = crate::Error;
+    fn try_from(item: u8) -> Result<Self> {
+        match item {
+            0 => Ok(TcgPcrIndex::PlatformCode),
+            1 => Ok(TcgPcrIndex::PlatformConfiguration),
+            2 => Ok(TcgPcrIndex::TvmPage),
+            3 => Ok(TcgPcrIndex::TvmConfiguration),
+            17 => Ok(TcgPcrIndex::RuntimePcr0),
+            18 => Ok(TcgPcrIndex::RuntimePcr1),
+            19 => Ok(TcgPcrIndex::RuntimePcr2),
+            20 => Ok(TcgPcrIndex::RuntimePcr3),
+            _ => Err(Error::InvalidMeasurementRegisterIndex(item as usize)),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +137,7 @@ macro_rules! msmt_reg {
     ($fw_index:expr, $pcr_index:expr, $static:expr, $stable:expr) => {{
         MeasurementRegisterBuilder {
             fwid_index: $fw_index,
-            pcr_index: $pcr_index,
+            pcr_index: $pcr_index as u8,
             static_measurement: $static,
             stable: $stable,
         }
@@ -126,26 +159,26 @@ macro_rules! msmt_dynamic_reg {
 const TVM_MSMT_REGISTERS: [MeasurementRegisterBuilder; MSMT_REGISTERS] = [
     // TCG PCR 0 - Platform trusted firmware code.
     // This comes from the hardware RoT.
-    msmt_static_reg!(0, 0, true),
+    msmt_static_reg!(0, TcgPcrIndex::PlatformCode, true),
     // TCG PCR 1 - Platform trusted firmware configuration and data
     // This comes from the hardware RoT.
     // This is not a stable measurement, i.e. the TVM TCB could still be trusted
     // if this measurement changes.
-    msmt_static_reg!(1, 1, false),
+    msmt_static_reg!(1, TcgPcrIndex::PlatformConfiguration, false),
     // TCG PCR 2 - TVM pages
     // The TVM pages, as measured by the TSM.
-    msmt_static_reg!(2, 2, true),
+    msmt_static_reg!(2, TcgPcrIndex::TvmPage, true),
     // TCG PCR 3 - TVM configuration and data
     // The TVM configuration, including its EPC and ARG.
-    msmt_static_reg!(3, 3, true),
+    msmt_static_reg!(3, TcgPcrIndex::TvmConfiguration, true),
     // TCG PCR 17 - Dynamic measurements
-    msmt_dynamic_reg!(4, 17, true),
+    msmt_dynamic_reg!(4, TcgPcrIndex::RuntimePcr0, true),
     // TCG PCR 18 - Dynamic measurements
-    msmt_dynamic_reg!(5, 18, true),
+    msmt_dynamic_reg!(5, TcgPcrIndex::RuntimePcr1, true),
     // TCG PCR 19 - Dynamic measurements
-    msmt_dynamic_reg!(6, 19, true),
+    msmt_dynamic_reg!(6, TcgPcrIndex::RuntimePcr2, true),
     // TCG PCR 20 - Dynamic measurements
-    msmt_dynamic_reg!(7, 20, true),
+    msmt_dynamic_reg!(7, TcgPcrIndex::RuntimePcr3, true),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -407,23 +440,23 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// its address.
     pub fn extend_msmt_register(
         &self,
-        msmt_idx: MeasurementIndex,
+        msmt_idx: TcgPcrIndex,
         bytes: &[u8],
         address: Option<u64>,
     ) -> Result<()> {
-        let idx = msmt_idx as usize;
-        if idx > MSMT_REGISTERS - 1 {
-            return Err(Error::InvalidMeasurementRegisterIndex(idx));
-        }
-
-        self.measurements.write()[idx].extend(bytes, address)
+        self.measurements
+            .write()
+            .iter_mut()
+            .find(|m| m.pcr_index == msmt_idx as u8)
+            .ok_or(Error::InvalidMeasurementRegisterIndex(msmt_idx as usize))?
+            .extend(bytes, address)
     }
 
     /// Extend the TVM pages measurement.
     /// This is a extend_msmt_register wrapper, where the address is not
     /// optional, and the measurement register is fixed to TvmPage.
     pub fn extend_tvm_page(&self, bytes: &[u8], address: u64) -> Result<()> {
-        self.extend_msmt_register(MeasurementIndex::TvmPage, bytes, Some(address))
+        self.extend_msmt_register(TcgPcrIndex::TvmPage, bytes, Some(address))
     }
 
     /// Extend the TVM configuration measurement.
@@ -431,12 +464,12 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// optional, and the measurement register is fixed to TvmPage.
     pub fn extend_tvm_configuration(&self) -> Result<()> {
         self.extend_msmt_register(
-            MeasurementIndex::TvmConfiguration,
+            TcgPcrIndex::TvmConfiguration,
             &self.tvm_config.read().entry_pc.to_le_bytes(),
             None,
         )?;
         self.extend_msmt_register(
-            MeasurementIndex::TvmConfiguration,
+            TcgPcrIndex::TvmConfiguration,
             &self.tvm_config.read().entry_arg.to_le_bytes(),
             None,
         )

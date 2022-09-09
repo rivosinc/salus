@@ -16,7 +16,7 @@ extern crate test_workloads;
 use ::attestation::{
     certificate::Certificate,
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
-    measurement::MeasurementIndex::TvmPage,
+    measurement::TcgPcrIndex::TvmPage,
     MAX_CSR_LEN,
 };
 use s_mode_utils::abort::abort;

@@ -171,6 +171,115 @@ impl TvmCpuRegister {
     }
 }
 
+/// Identifies a register set in the vCPU shared-memory state area layout.
+///
+/// Register sets are roughly grouped by the specification or extension that defines them.
+/// While it is likely that registers from multiple register sets will be used in the course
+/// of handling a vCPU exit, the register sets are grouped in this way in order to allow for
+/// extensibility by future extensions, and to avoid being overly prescriptive with regards
+/// to TSM or hypervisor implementation.
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisterSetId {
+    /// General purpose registers.
+    Gprs = 0,
+    /// Supervisor CSRs.
+    SupervisorCsrs = 1,
+    /// HS-level CSRs.
+    HypervisorCsrs = 2,
+}
+
+impl RegisterSetId {
+    /// Returns the `RegisterSetId` corresponding to `val`.
+    pub fn from_raw(val: u16) -> Result<Self> {
+        match val {
+            0 => Ok(RegisterSetId::Gprs),
+            1 => Ok(RegisterSetId::SupervisorCsrs),
+            2 => Ok(RegisterSetId::HypervisorCsrs),
+            _ => Err(Error::InvalidParam),
+        }
+    }
+
+    /// Returns the size in bytes of the register set structure corresponding to this ID.
+    pub fn struct_size(&self) -> usize {
+        match self {
+            RegisterSetId::Gprs => core::mem::size_of::<Gprs>(),
+            RegisterSetId::SupervisorCsrs => core::mem::size_of::<SupervisorCsrs>(),
+            RegisterSetId::HypervisorCsrs => core::mem::size_of::<HypervisorCsrs>(),
+        }
+    }
+}
+
+/// Specifies the location of a particular register set in the vCPU shared-memory state area.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegisterSetLocation {
+    /// The type of the register set, identified by the `RegisterSetId` enum.
+    pub id: u16,
+    /// The version of the register set structure.
+    ///
+    /// As the definition of a particular register set may change across revisions of this API,
+    /// this version number can be used to identify the specific layout that is being used.
+    pub version: u16,
+    /// The offset of the register set from the start of the vCPU's shared-memory state area.
+    pub offset: u32,
+}
+
+/// General purpose registers. Structure for register sets of type `RegisterSetId::Gprs`.
+///
+/// The TSM will always read or write the minimum number of registers in this set to complete
+/// the requested action, in order to avoid leaking information from the TVM.
+///
+/// The TSM will write to these registers upon return from `TvmCpuRun` when:
+///  - The vCPU takes a store guest page fault in an emulated MMIO region.
+///  - The vCPU makes an ECALL that is to be forwarded to the host.
+///
+/// The TSM will read from these registers when:
+///  - The vCPU takes a load guest page fault in an emulated MMIO region.
+///  - The host calls `TvmFinalize`, latching the entry point argument (stored in 'A1') for the
+///    TVM's boot vCPU.
+#[repr(C)]
+#[derive(Default)]
+pub struct Gprs(pub [u64; 32]);
+
+/// Supervisor CSRs. Structure for register sets of type `RegisterSetId::SupervisorCsrs`.
+#[repr(C)]
+#[derive(Default)]
+pub struct SupervisorCsrs {
+    /// Initial SEPC value (entry point) of a TVM vCPU. Latched for the TVM's boot vCPU at
+    /// `TvmFinalzie`; ignored for all other vCPUs.
+    pub sepc: u64,
+    /// SCAUSE value for the trap taken by the TVM vCPU. Written by the TSM upon return from
+    /// `TvmCpuRun`.
+    pub scause: u64,
+    /// STVAL value for guest page faults or virtual instruction exceptions taken by the TVM vCPU.
+    /// Written by the TSM upon return from `TvmCpuRun`.
+    ///
+    /// Note that guest virtual addresses are not exposed by the TSM, so only the 2 LSBs will
+    /// ever be non-zero for guest page fault exceptions.
+    pub stval: u64,
+}
+
+/// HS-level CSRs. Structure for register sets of type `RegisterSetId::HypervisorCsrs`.
+#[repr(C)]
+#[derive(Default)]
+pub struct HypervisorCsrs {
+    /// HTVAL value for guest page faults taken by the TVM vCPU. Written by the TSM upon return
+    /// from `TvmCpuRun`.
+    pub htval: u64,
+    /// HTINST value for guest page faults or virtual instruction exceptions taken by the TVM vCPU.
+    /// Written (in certain circumstances) by the TSM upon return from `TvmCpuRun`.
+    ///
+    /// The TSM will only write `htinst` in the following cases:
+    ///  - MMIO load page faults. The value written to the register in `gprs` corresponding to the
+    ///    'rd' register in the instruction will be used to complete the load upon the next call to
+    ///    `TvmCpuRun` for this vCPU.
+    ///  - MMIO store page faults. The TSM will write the value to be stored by the vCPU to the
+    ///    register in `gprs` corresponding to the 'rs2' register in the instruction upon return
+    ///    from `TvmCpuRun`.
+    pub htinst: u64,
+}
+
 /// Provides the state of the confidential VM supervisor.
 #[repr(u32)]
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
@@ -328,8 +437,33 @@ pub enum TeeFunction {
         /// a1 = vCPU id
         vcpu_id: u64,
     },
-    /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`. vCPUs may not be added after the TVM
-    /// is finalized.
+    /// Writes the layout that the TSM will use for the vCPU shared-memory state area for vCPUs
+    /// of the TVM identified by `guest_id` to the non-confidential physical address `layout_addr`.
+    /// The caller uses this to discover the size and layout of the structure that will be used
+    /// to communicate vCPU state in shared-memory.
+    ///
+    /// Returns the number of bytes written to `layout_addr` upon success, or an error if
+    /// `layout_addr` is invalid or `layout_len` is insufficiently large to describe the entire
+    /// layout.
+    ///
+    /// a6 = 21
+    TvmCpuGetMemLayout {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = base physical address of the array of `RegisterSetLayout` structs
+        layout_addr: u64,
+        /// a2 = length of the `RegisterSetLayout` array in bytes
+        layout_len: u64,
+    },
+    /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`, registering `shared_page_addr` as
+    /// the location of the shared-memory state area for this vCPU.
+    ///
+    /// `shared_page_addr` must be page-aligned and point to a sufficient number of non-confidential
+    /// pages to hold a structure with the layout specified by `TvmCpuGetMemLayout`. These pages
+    /// are "pinned" in the non-confidential state (i.e. cannot be converted to confidential) until
+    /// the TVM is destroyed.
+    ///
+    /// vCPUs may not be added after the TVM is finalized.
     ///
     /// a6 = 8
     TvmCpuCreate {
@@ -337,9 +471,13 @@ pub enum TeeFunction {
         guest_id: u64,
         /// a1 = vCPU id
         vcpu_id: u64,
+        /// a2 = page address of shared state structure
+        shared_page_addr: u64,
     },
     /// Sets the register identified by `register` to `value` in the vCPU with ID `vcpu_id`. See
     /// the defintion of `TvmCpuRegister` for details on which registers are writeable and when.
+    ///
+    /// TODO: Remove once communication of vCPU state over shared memory is implemented.
     ///
     /// a6 = 9
     TvmCpuSetRegister {
@@ -425,6 +563,8 @@ pub enum TeeFunction {
     /// Gets the register identified by `register` in the vCPU with ID `vcpu_id`. See the definition
     /// of `TvmCpuRegister` for details on which registers are readable and when. The contents of
     /// the specified register are returned upon success.
+    ///
+    /// TODO: Remove once communication of vCPU state over shared memory is implemented.
     ///
     /// a6 = 16
     TvmCpuGetRegister {
@@ -527,6 +667,7 @@ impl TeeFunction {
             8 => Ok(TvmCpuCreate {
                 guest_id: args[0],
                 vcpu_id: args[1],
+                shared_page_addr: args[2],
             }),
             9 => Ok(TvmCpuSetRegister {
                 guest_id: args[0],
@@ -585,6 +726,11 @@ impl TeeFunction {
                 num_pages: args[3],
                 guest_addr: args[4],
             }),
+            21 => Ok(TvmCpuGetMemLayout {
+                guest_id: args[0],
+                layout_addr: args[1],
+                layout_len: args[2],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -619,6 +765,7 @@ impl SbiFunction for TeeFunction {
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id: _,
+                shared_page_addr: _,
             } => 8,
             TvmCpuSetRegister {
                 guest_id: _,
@@ -677,6 +824,11 @@ impl SbiFunction for TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => 20,
+            TvmCpuGetMemLayout {
+                guest_id: _,
+                layout_addr: _,
+                layout_len: _,
+            } => 21,
         }
     }
 
@@ -708,6 +860,7 @@ impl SbiFunction for TeeFunction {
             TvmCpuCreate {
                 guest_id,
                 vcpu_id: _,
+                shared_page_addr: _,
             } => *guest_id,
             TvmCpuSetRegister {
                 guest_id,
@@ -761,6 +914,11 @@ impl SbiFunction for TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *guest_id,
+            TvmCpuGetMemLayout {
+                guest_id,
+                layout_addr: _,
+                layout_len: _,
+            } => *guest_id,
             _ => 0,
         }
     }
@@ -791,6 +949,7 @@ impl SbiFunction for TeeFunction {
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id,
+                shared_page_addr: _,
             } => *vcpu_id,
             TvmCpuSetRegister {
                 guest_id: _,
@@ -844,6 +1003,11 @@ impl SbiFunction for TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_addr,
+            TvmCpuGetMemLayout {
+                guest_id: _,
+                layout_addr,
+                layout_len: _,
+            } => *layout_addr,
             _ => 0,
         }
     }
@@ -863,6 +1027,11 @@ impl SbiFunction for TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_type as u64,
+            TvmCpuCreate {
+                guest_id: _,
+                vcpu_id: _,
+                shared_page_addr,
+            } => *shared_page_addr,
             TvmCpuSetRegister {
                 guest_id: _,
                 vcpu_id: _,
@@ -914,6 +1083,11 @@ impl SbiFunction for TeeFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_type as u64,
+            TvmCpuGetMemLayout {
+                guest_id: _,
+                layout_addr: _,
+                layout_len,
+            } => *layout_len,
             _ => 0,
         }
     }

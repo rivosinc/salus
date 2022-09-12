@@ -328,7 +328,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
     // Add vCPU0.
-    tsm::add_vcpu(vmid, 0).expect("Tellus - TvmCpuCreate returned error");
+    //
+    // TODO: Properly size and use vcpu_state once it's implemented on the TSM side.
+    let vcpu_state_addr = next_page;
+    next_page += PAGE_SIZE_4K;
+    // Safety: We own `vcpu_state_addr` and will only access it through volatile reads/writes.
+    unsafe { tsm::add_vcpu(vmid, 0, vcpu_state_addr) }
+        .expect("Tellus - TvmCpuCreate returned error");
 
     let has_aia = base::probe_sbi_extension(EXT_TEE_AIA).is_ok();
     // CPU0, guest interrupt file 0.

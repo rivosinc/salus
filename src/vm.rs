@@ -1040,7 +1040,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TvmCpuRun { guest_id, vcpu_id } => {
                 self.guest_run_vcpu(guest_id, vcpu_id, active_vcpu).into()
             }
-            TvmCpuCreate { guest_id, vcpu_id } => self.guest_add_vcpu(guest_id, vcpu_id).into(),
+            TvmCpuGetMemLayout { .. } => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
+            TvmCpuCreate {
+                guest_id,
+                vcpu_id,
+                shared_page_addr: _,
+            } => self.guest_add_vcpu(guest_id, vcpu_id).into(),
             TvmCpuSetRegister {
                 guest_id,
                 vcpu_id,

@@ -4,7 +4,9 @@
 
 use crate::TeeFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};
-use crate::{TsmInfo, TsmPageType, TvmCpuExitCode, TvmCpuRegister, TvmCreateParams};
+use crate::{
+    RegisterSetLocation, TsmInfo, TsmPageType, TvmCpuExitCode, TvmCpuRegister, TvmCreateParams,
+};
 
 /// Initiates a TSM fence on this CPU.
 pub fn initiate_fence() -> Result<()> {
@@ -141,14 +143,34 @@ pub fn add_page_table_pages(vmid: u64, page_addr: u64, num_pages: u64) -> Result
     Ok(())
 }
 
-/// Adds a VCPU with the given id to the specified TVM.
-pub fn add_vcpu(vmid: u64, vcpu_id: u64) -> Result<()> {
+/// Writes the layout used for the vCPU shared-memory state area for vCPUs of `vmid` to `layout`.
+/// Returns the number of entries written to `layout`.
+pub fn get_vcpu_mem_layout(vmid: u64, layout: &mut [RegisterSetLocation]) -> Result<usize> {
+    let msg = SbiMessage::Tee(TvmCpuGetMemLayout {
+        guest_id: vmid,
+        layout_addr: layout.as_mut_ptr() as u64,
+        layout_len: (layout.len() * core::mem::size_of::<RegisterSetLocation>()) as u64,
+    });
+    let written = unsafe { ecall_send(&msg) }?;
+    Ok((written as usize) / core::mem::size_of::<RegisterSetLocation>())
+}
+
+/// Adds a vCPU with ID `vcpu_id` to the guest `vmid`, registering `shared_page_addr` as the
+/// location of the vCPU's shared-memory state area.
+///
+/// # Safety
+///
+/// The caller must own the pages referenced by `shared_page_addr`, for the number of pages
+/// sufficient to hold the structure layout returned from `get_vcpu_mem_layout()`. Since memory
+/// within the shared-memory state area may be read or written by the TSM at any time, the caller
+/// must treat the memory as volatile for the lifetime of the TVM.
+pub unsafe fn add_vcpu(vmid: u64, vcpu_id: u64, shared_page_addr: u64) -> Result<()> {
     let msg = SbiMessage::Tee(TvmCpuCreate {
         guest_id: vmid,
         vcpu_id,
+        shared_page_addr,
     });
-    // Safety: Creating a vcpu doesn't touch any memory owned here.
-    unsafe { ecall_send(&msg) }?;
+    ecall_send(&msg)?;
     Ok(())
 }
 

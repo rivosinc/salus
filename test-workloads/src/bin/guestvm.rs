@@ -9,6 +9,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use der::Decode;
+use hex_literal::hex;
 
 extern crate alloc;
 extern crate test_workloads;
@@ -16,7 +17,7 @@ extern crate test_workloads;
 use ::attestation::{
     certificate::Certificate,
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
-    measurement::TcgPcrIndex::TvmPage,
+    measurement::TcgPcrIndex::{RuntimePcr1, TvmPage},
     MAX_CSR_LEN,
 };
 use s_mode_utils::abort::abort;
@@ -192,6 +193,11 @@ fn test_attestation() {
     {
         panic!("DICE TcbInfo format is not supported")
     }
+
+    // SHA384 for "helloworld"
+    let digest = hex!("97982a5b1414b9078103a1c008c4e3526c27b41cdbcf80790560a40f2a9bf2ed4427ab1428789915ed4b3dc07c454bd9");
+    attestation::extend_measurement(&digest, RuntimePcr1 as usize)
+        .expect("Failed to extend runtime PCR #1");
 
     if TEST_CSR.len() > MAX_CSR_LEN as usize {
         panic!("Test CSR is too large")

@@ -9,6 +9,7 @@ edition = "2021"
 attestation = { path = "../attestation" }
 der = "0.6.0"
 device_tree = { path = "../device-tree" }
+hex-literal = "0.3.4"
 s_mode_utils = { path = "../s-mode-utils" }
 sbi = { path = "../sbi" }
 riscv_regs = { path = "../riscv-regs" }

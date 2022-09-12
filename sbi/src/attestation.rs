@@ -42,6 +42,19 @@ pub enum HashAlgorithm {
     Sha512 = 2,
 }
 
+impl HashAlgorithm {
+    /// The hash algorithm output size, in bytes.
+    pub fn size(&self) -> usize {
+        match self {
+            HashAlgorithm::Sha384 => 48,
+            HashAlgorithm::Sha512 => 64,
+        }
+    }
+}
+
+/// The largest supported hash algorithm output size.
+pub const MAX_HASH_SIZE: usize = 64;
+
 /// Attestation Capabilities
 ///
 /// This structure exposes the supported attestation capabilities to the SBI
@@ -181,18 +194,29 @@ pub enum AttestationFunction {
         cert_size: u64,
     },
 
-    /// Extend the TCB measurement with an additional measurement.
-    /// TBD: Do we allow for a specific PCR index to be passed, or do we extend
-    /// one dedicated PCR with all runtime extended measurements?
+    /// Extend a measurement register with an additional measurement.
+    /// The first parameter is the address of the measurement buffer.
+    /// The second argument is the length of the measurement buffer, which must
+    /// be the same as the hash algorithm size reported by `GetCapabilities`.
+    /// The third parameter is the measurement register index, and it must be
+    /// one of the reported 'TCG_PCR_INDEX` from the runtime measurement
+    /// registers array.
+    ///
+    /// This function is not supported if the SBI implementation does not
+    /// support runtime measurements (i.e. `NUM_RMSMT_REGS` as reported by the
+    /// `GetCapabilities` function is set to 0).
     ///
     /// a6 = 2
-    /// a0 = Measurement entry address
-    /// a1 = Measurement entry length
+    /// a0 = Measurement data buffer address
+    /// a1 = Measurement data buffer length
+    /// a2 = Measurement register index.
     ExtendMeasurement {
-        /// a0 = measurement address
-        measurement_addr: u64,
-        /// a1 = measurement length
-        len: u64,
+        /// a0 = measurement data buffer address
+        measurement_data_addr: u64,
+        /// a1 = measurement data buffer length
+        measurement_data_size: u64,
+        /// a2 = measurement register index
+        measurement_index: u64,
     },
 }
 
@@ -216,8 +240,9 @@ impl AttestationFunction {
             }),
 
             2 => Ok(ExtendMeasurement {
-                measurement_addr: args[0],
-                len: args[1],
+                measurement_data_addr: args[0],
+                measurement_data_size: args[1],
+                measurement_index: args[2],
             }),
 
             _ => Err(Error::InvalidParam),
@@ -244,8 +269,9 @@ impl SbiFunction for AttestationFunction {
             } => 1,
 
             ExtendMeasurement {
-                measurement_addr: _,
-                len: _,
+                measurement_data_addr: _,
+                measurement_data_size: _,
+                measurement_index: _,
             } => 2,
         }
     }
@@ -308,9 +334,11 @@ impl SbiFunction for AttestationFunction {
             } => *request_data_addr,
 
             ExtendMeasurement {
-                measurement_addr: _,
-                len,
-            } => *len,
+                measurement_data_addr: _,
+                measurement_data_size: _,
+                measurement_index,
+            } => *measurement_index,
+
             _ => 0,
         }
     }
@@ -333,9 +361,10 @@ impl SbiFunction for AttestationFunction {
             } => *cert_request_size,
 
             ExtendMeasurement {
-                measurement_addr: _,
-                len,
-            } => *len,
+                measurement_data_addr: _,
+                measurement_data_size,
+                measurement_index: _,
+            } => *measurement_data_size,
         }
     }
 
@@ -357,9 +386,10 @@ impl SbiFunction for AttestationFunction {
             } => *cert_request_addr,
 
             ExtendMeasurement {
-                measurement_addr,
-                len: _,
-            } => *measurement_addr,
+                measurement_data_addr,
+                measurement_data_size: _,
+                measurement_index: _,
+            } => *measurement_data_addr,
         }
     }
 }

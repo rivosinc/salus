@@ -1039,10 +1039,16 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
                 .into(),
 
             ExtendMeasurement {
-                measurement_addr,
-                len,
+                measurement_data_addr,
+                measurement_data_size,
+                measurement_index,
             } => self
-                .guest_extend_measurement(measurement_addr, len as usize, active_pages)
+                .guest_extend_measurement(
+                    measurement_data_addr,
+                    measurement_data_size as usize,
+                    measurement_index as usize,
+                    active_pages,
+                )
                 .into(),
         }
     }
@@ -1431,7 +1437,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
         if caps_size < core::mem::size_of::<AttestationCapabilities>() {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
+            return Err(EcallError::Sbi(SbiError::InsufficientBufferCapacity));
         }
         let caps = self
             .attestation_mgr
@@ -1466,7 +1472,7 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
         if cert_request_size > MAX_CSR_LEN {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
+            return Err(EcallError::Sbi(SbiError::InsufficientBufferCapacity));
         }
 
         let mut csr_bytes = [0u8; MAX_CSR_LEN];
@@ -1505,11 +1511,43 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
 
     fn guest_extend_measurement(
         &self,
-        _msmt_addr: u64,
-        _len: usize,
-        _active_pages: &ActiveVmPages<T>,
+        msmt_addr: u64,
+        msmt_size: usize,
+        index: usize,
+        active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
-        Err(EcallError::Sbi(SbiError::NotSupported))
+        let caps = self
+            .attestation_mgr
+            .capabilities()
+            .map_err(EcallError::from)?;
+
+        // Check that the measurement buffer size matches exactly the hash
+        // algorithm one.
+        if msmt_size != caps.hash_algorithm.size() {
+            return Err(EcallError::Sbi(SbiError::InsufficientBufferCapacity));
+        }
+
+        let mut measurement_data = [0u8; sbi::MAX_HASH_SIZE];
+        let measurement_data_gpa = RawAddr::guest(msmt_addr, self.vm_pages.page_owner_id());
+        active_pages
+            .copy_from_guest(
+                &mut measurement_data.as_mut_slice()[..msmt_size],
+                measurement_data_gpa,
+            )
+            .map_err(EcallError::from)?;
+
+        // Ask the attestation manager extend the measurement register.
+        // If the passed index is invalid, `extend_msmt_register` will return
+        // an error.
+        self.attestation_mgr
+            .extend_msmt_register(
+                (index as u8).try_into().map_err(EcallError::from)?,
+                &measurement_data,
+                None,
+            )
+            .map_err(EcallError::from)?;
+
+        Ok(0)
     }
 
     fn guest_aia_init(

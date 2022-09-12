@@ -24,6 +24,8 @@ pub enum Error {
     AlreadyStarted = -7,
     /// Some of the given counters have already been stopped.
     AlreadyStopped = -8,
+    /// The buffer passed as a parameter is not large enough.
+    InsufficientBufferCapacity = -9,
 }
 
 impl Error {
@@ -39,6 +41,7 @@ impl Error {
             -6 => AlreadyAvailable,
             -7 => AlreadyStarted,
             -8 => AlreadyStopped,
+            -9 => InsufficientBufferCapacity,
             _ => Failed,
         }
     }

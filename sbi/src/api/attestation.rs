@@ -74,3 +74,23 @@ pub fn get_evidence(
 
     Ok(cert_bytes)
 }
+
+/// Extend a measurement register.
+/// # Arguments
+///
+/// * `digest` - The digest to extend the measurement register with.
+/// * `index` - The TCG PCR index of the extended measurement register.
+pub fn extend_measurement(digest: &[u8], index: usize) -> Result<()> {
+    let msg = SbiMessage::Attestation(AttestationFunction::ExtendMeasurement {
+        measurement_data_addr: digest.as_ptr() as u64,
+        measurement_data_size: digest.len() as u64,
+        measurement_index: index as u64,
+    });
+
+    // Safety: ExtendMeasurement only reads the pages pointed to by `digest`.
+    // This is safe because they're owned by the borrowed slice passed as an
+    // argument to this function.
+    unsafe { ecall_send(&msg) }?;
+
+    Ok(())
+}

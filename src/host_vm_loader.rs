@@ -264,11 +264,9 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         for (res_type, range) in pci.resources() {
             let gpa =
                 PageAddr::new(RawAddr::guest(range.base().bits(), PageOwnerId::host())).unwrap();
-            // TODO: PCI resources should have their own region type.
-            self.vm
-                .add_confidential_memory_region(gpa, range.length_bytes());
+            self.vm.add_pci_region(gpa, range.length_bytes());
             let pages = pci.take_host_resource(res_type).unwrap();
-            self.vm.add_pages(gpa, pages);
+            self.vm.add_pci_pages(gpa, pages);
         }
         // Attach our PCI devices to the IOMMU.
         if Iommu::get().is_some() {
@@ -302,7 +300,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             .add_confidential_memory_region(current_gpa, self.ram_size);
 
         let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
-        self.vm.add_pages(
+        self.vm.add_zero_pages(
             current_gpa,
             self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
         );
@@ -321,7 +319,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         if let Some(r) = self.initramfs {
             let num_pages =
                 (INITRAMFS_OFFSET - (KERNEL_OFFSET + self.kernel.size())) / PageSize::Size4k as u64;
-            self.vm.add_pages(
+            self.vm.add_zero_pages(
                 current_gpa,
                 self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
             );
@@ -340,7 +338,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
 
         let num_pages = (FDT_OFFSET - (current_gpa.bits() - self.guest_ram_base.bits()))
             / PageSize::Size4k as u64;
-        self.vm.add_pages(
+        self.vm.add_zero_pages(
             current_gpa,
             self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
         );
@@ -355,7 +353,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             .add_measured_pages(current_gpa, fdt_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
-        self.vm.add_pages(current_gpa, self.zero_pages);
+        self.vm.add_zero_pages(current_gpa, self.zero_pages);
         self.vm.set_launch_args(
             self.guest_ram_base
                 .checked_increment(KERNEL_OFFSET)

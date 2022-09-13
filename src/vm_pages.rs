@@ -190,6 +190,8 @@ pub enum VmRegionType {
     Mmio,
     /// IMSIC interrupt file pages.
     Imsic,
+    /// PCI BAR pages.
+    Pci,
 }
 
 /// A contiguous region of guest physical address space.
@@ -587,7 +589,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
             // TODO: Faults in an IMSIC region should report a separate fault type so that the host
             // can "swap in" a vCPU currently using an MRIF.
             Some(VmRegionType::Imsic) => Unmapped(exception),
-            None => Unmapped(exception),
+            _ => Unmapped(exception),
         }
     }
 }
@@ -1102,37 +1104,44 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
         Ok(())
     }
 
-    /// Adds a confidential memory region of `len` bytes starting at `page_addr` to this VM's address space.
+    // Adds a region of type `region_type`.
+    fn do_add_region(
+        &self,
+        page_addr: GuestPageAddr,
+        len: u64,
+        region_type: VmRegionType,
+    ) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+        self.regions.add(page_addr, end, region_type)
+    }
+
+    /// Adds a confidential memory region of `len` bytes starting at `page_addr` to this VM's
+    /// address space.
     pub fn add_confidential_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        let end = PageAddr::new(
-            RawAddr::from(page_addr)
-                .checked_increment(len)
-                .ok_or(Error::AddressOverflow)?,
-        )
-        .ok_or(Error::UnalignedAddress)?;
-        self.regions.add(page_addr, end, VmRegionType::Confidential)
+        self.do_add_region(page_addr, len, VmRegionType::Confidential)
     }
 
-    /// Adds a shared memory region of `len` bytes starting at `page_addr` to this VM's address space.
+    /// Adds a shared memory region of `len` bytes starting at `page_addr` to this VM's address
+    /// space.
     pub fn add_shared_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        let end = PageAddr::new(
-            RawAddr::from(page_addr)
-                .checked_increment(len)
-                .ok_or(Error::AddressOverflow)?,
-        )
-        .ok_or(Error::UnalignedAddress)?;
-        self.regions.add(page_addr, end, VmRegionType::Shared)
+        self.do_add_region(page_addr, len, VmRegionType::Shared)
     }
 
-    /// Adds an emulated MMIO region of `len` bytes starting at `page_addr` to this VM's address space.
+    /// Adds an emulated MMIO region of `len` bytes starting at `page_addr` to this VM's address
+    /// space.
     pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        let end = PageAddr::new(
-            RawAddr::from(page_addr)
-                .checked_increment(len)
-                .ok_or(Error::AddressOverflow)?,
-        )
-        .ok_or(Error::UnalignedAddress)?;
-        self.regions.add(page_addr, end, VmRegionType::Mmio)
+        self.do_add_region(page_addr, len, VmRegionType::Mmio)
+    }
+
+    /// Adds a PCI BAR memory region of `len` bytes starting at `page_addr` to this VM's address
+    /// space.
+    pub fn add_pci_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_add_region(page_addr, len, VmRegionType::Pci)
     }
 
     /// Attaches the given PCI device to this VM by enabling DMA translation via the IOMMU using

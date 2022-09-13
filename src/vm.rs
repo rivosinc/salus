@@ -10,7 +10,8 @@ use core::ops::ControlFlow;
 use core::{mem, slice};
 use der::Decode;
 use drivers::{
-    imsic::*, iommu::*, pci::PciDevice, pci::PcieRoot, pmu::PmuInfo, CpuId, CpuInfo, MAX_CPUS,
+    imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot, pmu::PmuInfo, CpuId,
+    CpuInfo, MAX_CPUS,
 };
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
@@ -1832,6 +1833,11 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
         self.inner.vm_pages.add_mmio_region(addr, len).unwrap();
     }
 
+    /// Adds a PCI BAR memory region to the host VM.
+    pub fn add_pci_region(&mut self, addr: GuestPageAddr, len: u64) {
+        self.inner.vm_pages.add_pci_region(addr, len).unwrap();
+    }
+
     /// Adds data pages that are measured and mapped to the page tables for the host. Requires
     /// that the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
     pub fn add_measured_pages<I, S, M>(&mut self, to_addr: GuestPageAddr, pages: I)
@@ -1862,12 +1868,11 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
         }
     }
 
-    /// Add pages which need not be measured to the host page tables. For RAM pages, requires that
-    /// the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
-    pub fn add_pages<I, P>(&mut self, to_addr: GuestPageAddr, pages: I)
+    /// Add zero pages to the host page tables. Requires that the GPA map the SPA in
+    /// T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
+    pub fn add_zero_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
     where
-        I: ExactSizeIterator<Item = P>,
-        P: AssignablePhysPage<MeasureOptional>,
+        I: ExactSizeIterator<Item = Page<ConvertedClean>>,
     {
         let page_tracker = self.inner.vm_pages.page_tracker();
         // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
@@ -1878,13 +1883,10 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
             .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
-            if P::mem_type() == MemType::Ram {
-                // GPA -> SPA mappings need to match T::TOP_LEVEL_ALIGN alignment for RAM pages.
-                assert_eq!(
-                    vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                    page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
-                );
-            }
+            assert_eq!(
+                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
+                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+            );
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
@@ -1935,6 +1937,28 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
             mapper.map_imsic_page(vm_addr, mappable).unwrap();
+        }
+    }
+
+    /// Add PCI BAR pages to the host page tables.
+    pub fn add_pci_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
+    where
+        I: ExactSizeIterator<Item = PciBarPage<ConvertedClean>>,
+    {
+        let page_tracker = self.inner.vm_pages.page_tracker();
+        // Unwrap ok since we've donated sufficient PT pages to map the entire address space up
+        // front.
+        let mapper = self
+            .inner
+            .vm_pages
+            .map_pages(to_addr, pages.len() as u64, VmRegionType::Pci)
+            .unwrap();
+        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
+            assert_eq!(page.size(), PageSize::Size4k);
+            let mappable = page_tracker
+                .assign_page_for_mapping(page, self.inner.page_owner_id())
+                .unwrap();
+            mapper.map_page(vm_addr, mappable).unwrap();
         }
     }
 

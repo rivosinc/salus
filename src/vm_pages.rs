@@ -5,7 +5,7 @@
 use attestation::measurement::AttestationManager;
 use core::arch::global_asm;
 use core::{marker::PhantomData, ops::Deref};
-use drivers::{imsic::*, iommu::*, pci::PciDevice, pci::PcieRoot};
+use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
 use page_tracking::collections::PageVec;
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
@@ -295,14 +295,15 @@ impl VmRegionList {
 
 /// Wrapper for a `GuestStageMapper` created from the page table of `VmPages`. Measures pages as
 /// they are inserted, if necessary.
-pub struct VmPagesMapper<'a, T: GuestStagePagingMode, S> {
+pub struct VmPagesMapper<'a, T: GuestStagePagingMode, S, M> {
     vm_pages: &'a VmPages<T, S>,
     mapper: GuestStageMapper<'a, T>,
+    _mapper_type: PhantomData<M>,
 }
 
-impl<'a, T: GuestStagePagingMode, S> VmPagesMapper<'a, T, S> {
-    /// Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr`, which must lie within
-    /// a region of type `region_type`.
+impl<'a, T: GuestStagePagingMode, S, M> VmPagesMapper<'a, T, S, M> {
+    // Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr`, which must lie within
+    // a region of type `region_type`.
     fn new_in_region(
         vm_pages: &'a VmPages<T, S>,
         page_addr: GuestPageAddr,
@@ -321,45 +322,41 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesMapper<'a, T, S> {
                 vm_pages.pte_pages.pop()
             })
             .map_err(Error::Paging)?;
-        Ok(Self { vm_pages, mapper })
+        Ok(Self {
+            vm_pages,
+            mapper,
+            _mapper_type: PhantomData,
+        })
     }
 
-    /// Maps an unmeasured page into the guest's address space.
-    pub fn map_page<P>(&self, to_addr: GuestPageAddr, page: P) -> Result<()>
+    // Maps `page` at `to_addr`.
+    fn do_map_page<P, MR>(&self, to_addr: GuestPageAddr, page: P) -> Result<()>
     where
-        P: MappablePhysPage<MeasureOptional>,
+        P: MappablePhysPage<MR>,
+        MR: MeasureRequirement,
     {
         self.mapper.map_page(to_addr, page).map_err(Error::Paging)
     }
+}
 
-    /// Maps an IMSIC page into the guest's address space, also updating the MSI page tables if
-    /// necessary.
-    ///
-    /// TODO: Type-safety between IMSIC vs non-IMSIC `VmPagesMapper`s.
-    pub fn map_imsic_page(
-        &self,
-        to_addr: GuestPageAddr,
-        page: ImsicGuestPage<MappableClean>,
-    ) -> Result<()> {
-        let dest_location = page.location();
-        self.map_page(to_addr, page)?;
-        if let Some(geometry) = self.vm_pages.imsic_geometry() &&
-            let Some(iommu_context) = self.vm_pages.iommu_context.get()
-        {
-            let src_location = geometry
-                .addr_to_location(to_addr)
-                .ok_or(Error::InvalidImsicLocation)?;
-            iommu_context.msi_page_table
-                .map(src_location, dest_location)
-                .map_err(Error::MsiTableMapping)?;
-        }
-        Ok(())
+pub enum ZeroPages {}
+/// A `VmPagesMapper` for confidential zero pages.
+pub type ZeroPagesMapper<'a, T, S> = VmPagesMapper<'a, T, S, ZeroPages>;
+
+impl<'a, T: GuestStagePagingMode, S> ZeroPagesMapper<'a, T, S> {
+    /// Maps a zero page into the guest's address space.
+    pub fn map_page(&self, to_addr: GuestPageAddr, page: Page<MappableClean>) -> Result<()> {
+        self.do_map_page(to_addr, page)
     }
 }
 
-impl<'a, T: GuestStagePagingMode> VmPagesMapper<'a, T, VmStateInitializing> {
+pub enum MeasuredPages {}
+/// A `VmPagesMapper` for confidential measured pages.
+pub type MeasuredPagesMapper<'a, T> = VmPagesMapper<'a, T, VmStateInitializing, MeasuredPages>;
+
+impl<'a, T: GuestStagePagingMode> MeasuredPagesMapper<'a, T> {
     /// Maps a page into the guest's address space and measures it.
-    pub fn map_page_with_measurement<S, M, D, H>(
+    pub fn map_page<S, M, D, H>(
         &self,
         to_addr: GuestPageAddr,
         page: Page<S>,
@@ -374,7 +371,57 @@ impl<'a, T: GuestStagePagingMode> VmPagesMapper<'a, T, VmStateInitializing> {
         measurement
             .extend_tvm_page(page.as_bytes(), to_addr.bits())
             .map_err(Error::Measurement)?;
-        self.mapper.map_page(to_addr, page).map_err(Error::Paging)
+        self.do_map_page(to_addr, page)
+    }
+}
+
+pub enum SharedPages {}
+/// A `VmPagesMapper` for shared (non-confidential) pages.
+pub type SharedPagesMapper<'a, T, S> = VmPagesMapper<'a, T, S, SharedPages>;
+
+impl<'a, T: GuestStagePagingMode, S> SharedPagesMapper<'a, T, S> {
+    /// Maps a shared page into the guest's address space.
+    pub fn map_page(&self, to_addr: GuestPageAddr, page: Page<MappableShared>) -> Result<()> {
+        self.do_map_page(to_addr, page)
+    }
+}
+
+pub enum ImsicPages {}
+/// A `VmPagesMapper` for IMSIC guest file pages.
+pub type ImsicPagesMapper<'a, T, S> = VmPagesMapper<'a, T, S, ImsicPages>;
+
+impl<'a, T: GuestStagePagingMode, S> ImsicPagesMapper<'a, T, S> {
+    /// Maps an IMSIC page into the guest's address space, also updating the MSI page tables if
+    /// necessary.
+    pub fn map_page(
+        &self,
+        to_addr: GuestPageAddr,
+        page: ImsicGuestPage<MappableClean>,
+    ) -> Result<()> {
+        let dest_location = page.location();
+        self.do_map_page(to_addr, page)?;
+        if let Some(geometry) = self.vm_pages.imsic_geometry() &&
+            let Some(iommu_context) = self.vm_pages.iommu_context.get()
+        {
+            let src_location = geometry
+                .addr_to_location(to_addr)
+                .ok_or(Error::InvalidImsicLocation)?;
+            iommu_context.msi_page_table
+                .map(src_location, dest_location)
+                .map_err(Error::MsiTableMapping)?;
+        }
+        Ok(())
+    }
+}
+
+pub enum PciPages {}
+/// A `VmPagesMapper` for PCI BAR memory pages.
+pub type PciPagesMapper<'a, T, S> = VmPagesMapper<'a, T, S, PciPages>;
+
+impl<'a, T: GuestStagePagingMode, S> PciPagesMapper<'a, T, S> {
+    /// Maps a PCI BAR memory page into the guest's address space.
+    pub fn map_page(&self, to_addr: GuestPageAddr, page: PciBarPage<MappableClean>) -> Result<()> {
+        self.do_map_page(to_addr, page)
     }
 }
 
@@ -509,7 +556,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         measurement: &AttestationManager<D, H>,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
-        let mapper = to.map_pages(to_addr, count, VmRegionType::Confidential)?;
+        let mapper = to.map_measured_pages(to_addr, count)?;
 
         // Make sure we can initialize the full set of pages before mapping them.
         let mut initialized_pages = LockedPageList::new(self.page_tracker.clone());
@@ -533,9 +580,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
                 .assign_page_for_mapping(initialized, new_owner)
                 .unwrap();
             // Unwrap ok since the address is in range and we haven't mapped it yet.
-            mapper
-                .map_page_with_measurement(to_addr, mappable, measurement)
-                .unwrap();
+            mapper.map_page(to_addr, mappable, measurement).unwrap();
         }
 
         Ok(count)
@@ -730,16 +775,51 @@ impl<T: GuestStagePagingMode, S> VmPages<T, S> {
         Ok(())
     }
 
-    /// Locks `count` 4kB pages starting at `page_addr` for mapping in a region of type
-    /// `region_type`, returning a `VmPagesMapper` that can be used to insert (and measure, if
-    /// necessary) the pages.
-    pub fn map_pages(
+    fn do_map_pages<M>(
         &self,
         page_addr: GuestPageAddr,
         count: u64,
         region_type: VmRegionType,
-    ) -> Result<VmPagesMapper<T, S>> {
+    ) -> Result<VmPagesMapper<T, S, M>> {
         VmPagesMapper::new_in_region(self, page_addr, count, region_type)
+    }
+
+    /// Locks `count` 4kB pages starting at `page_addr` for mapping of zero-filled pages in a
+    /// region of confidential memory, returning a `VmPagesMapper` that can be used to insert
+    /// the pages.
+    pub fn map_zero_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<ZeroPagesMapper<T, S>> {
+        self.do_map_pages(page_addr, count, VmRegionType::Confidential)
+    }
+
+    /// Same as `map_zero_pages()`, but for pages in shared (non-confidential) regions.
+    pub fn map_shared_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<SharedPagesMapper<T, S>> {
+        self.do_map_pages(page_addr, count, VmRegionType::Shared)
+    }
+
+    /// Same as `map_zero_pages()`, but for IMSIC guest interrupt file pages.
+    pub fn map_imsic_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<ImsicPagesMapper<T, S>> {
+        self.do_map_pages(page_addr, count, VmRegionType::Imsic)
+    }
+
+    /// Same as `map_zero_pages()`, but for PCI BAR memory pages.
+    pub fn map_pci_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<PciPagesMapper<T, S>> {
+        self.do_map_pages(page_addr, count, VmRegionType::Pci)
     }
 }
 
@@ -786,9 +866,7 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
         let converted_pages = self.get_converted_pages(page_addr, num_pages)?;
         // Unwrap ok since the PTE for the page must have previously been invalid and all of
         // the intermediate page-tables must already have been populatd.
-        let mapper =
-            VmPagesMapper::new_in_region(self, page_addr, num_pages, VmRegionType::Confidential)
-                .unwrap();
+        let mapper = self.map_zero_pages(page_addr, num_pages).unwrap();
         for (page, addr) in converted_pages.zip(page_addr.iter_from()) {
             // Unwrap ok since we know that it's a converted page.
             let mappable = self.page_tracker.reclaim_page(page.clean()).unwrap();
@@ -853,15 +931,14 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
             .map_err(Error::Paging)?;
         // Unwrap ok since the PTE for the page must have previously been invalid and all of
         // the intermediate page-tables must already have been populated.
-        let mapper =
-            VmPagesMapper::new_in_region(self, imsic_addr, 1, VmRegionType::Imsic).unwrap();
+        let mapper = self.map_imsic_pages(imsic_addr, 1).unwrap();
         // Unwrap ok since it must be a converted page.
         let mappable = converted
             .next()
             .and_then(|p| self.page_tracker.reclaim_page(p).ok())
             .unwrap();
         // Unwrap ok since `imsic_addr` is within the range of the mapper.
-        mapper.map_imsic_page(imsic_addr, mappable).unwrap();
+        mapper.map_page(imsic_addr, mappable).unwrap();
         Ok(())
     }
 
@@ -980,7 +1057,7 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;
-        let mapper = to.map_pages(to_addr, count, VmRegionType::Confidential)?;
+        let mapper = to.map_zero_pages(to_addr, count)?;
         let new_owner = to.page_owner_id();
         for (page, guest_addr) in converted_pages.zip(to_addr.iter_from()) {
             // Unwrap ok since we've guaranteed there's space for another owner.
@@ -1007,7 +1084,7 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateFinalized> {
             .root
             .get_shareable_range::<Page<Shareable>>(from_addr, PageSize::Size4k, count)
             .map_err(|_| Error::SharedPageNotMapped)?;
-        let mapper = to.map_pages(to_addr, count, VmRegionType::Shared)?;
+        let mapper = to.map_shared_pages(to_addr, count)?;
         let owner = self.page_owner_id();
         for (page, addr) in shared_list.zip(to_addr.iter_from()) {
             // Unwrap ok: we have exclusive ownership, and get_shareable_range() has ensured success
@@ -1142,6 +1219,16 @@ impl<T: GuestStagePagingMode> VmPages<T, VmStateInitializing> {
     /// space.
     pub fn add_pci_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
         self.do_add_region(page_addr, len, VmRegionType::Pci)
+    }
+
+    /// Like `map_zero_pages()`, but for measured pages mapped into a region of confidential
+    /// memory.
+    pub fn map_measured_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<MeasuredPagesMapper<T>> {
+        self.do_map_pages(page_addr, count, VmRegionType::Confidential)
     }
 
     /// Attaches the given PCI device to this VM by enabling DMA translation via the IOMMU using

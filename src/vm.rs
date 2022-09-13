@@ -29,7 +29,7 @@ use crate::smp;
 use crate::vm_cpu::{ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
-    ActiveVmPages, InstructionFetchError, PageFaultType, VmPages, VmRegionList, VmRegionType,
+    ActiveVmPages, InstructionFetchError, PageFaultType, VmPages, VmRegionList,
     TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
 };
 
@@ -1851,7 +1851,7 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
         let mapper = self
             .inner
             .vm_pages
-            .map_pages(to_addr, pages.len() as u64, VmRegionType::Confidential)
+            .map_measured_pages(to_addr, pages.len() as u64)
             .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
@@ -1863,7 +1863,7 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
             mapper
-                .map_page_with_measurement(vm_addr, mappable, &self.inner.attestation_mgr)
+                .map_page(vm_addr, mappable, &self.inner.attestation_mgr)
                 .unwrap();
         }
     }
@@ -1879,7 +1879,7 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
         let mapper = self
             .inner
             .vm_pages
-            .map_pages(to_addr, pages.len() as u64, VmRegionType::Confidential)
+            .map_zero_pages(to_addr, pages.len() as u64)
             .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
@@ -1917,7 +1917,7 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
         let mapper = self
             .inner
             .vm_pages
-            .map_pages(to_addr, pages.len() as u64, VmRegionType::Imsic)
+            .map_imsic_pages(to_addr, pages.len() as u64)
             .unwrap();
         let page_tracker = self.inner.vm_pages.page_tracker();
         for (i, (page, vm_addr)) in pages.zip(to_addr.iter_from()).enumerate() {
@@ -1936,7 +1936,7 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
             let mappable = page_tracker
                 .assign_page_for_mapping(page, self.inner.page_owner_id())
                 .unwrap();
-            mapper.map_imsic_page(vm_addr, mappable).unwrap();
+            mapper.map_page(vm_addr, mappable).unwrap();
         }
     }
 
@@ -1951,7 +1951,7 @@ impl<T: GuestStagePagingMode> HostVm<T, VmStateInitializing> {
         let mapper = self
             .inner
             .vm_pages
-            .map_pages(to_addr, pages.len() as u64, VmRegionType::Pci)
+            .map_pci_pages(to_addr, pages.len() as u64)
             .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);

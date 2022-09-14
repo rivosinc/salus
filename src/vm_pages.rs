@@ -4,7 +4,7 @@
 
 use attestation::measurement::AttestationManager;
 use core::arch::global_asm;
-use core::{marker::PhantomData, ops::Deref};
+use core::marker::PhantomData;
 use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
 use page_tracking::collections::PageVec;
 use page_tracking::{
@@ -459,14 +459,6 @@ impl<'a, T: GuestStagePagingMode> Drop for ActiveVmPages<'a, T> {
     }
 }
 
-impl<'a, T: GuestStagePagingMode> Deref for ActiveVmPages<'a, T> {
-    type Target = VmPages<T>;
-
-    fn deref(&self) -> &VmPages<T> {
-        self.vm_pages
-    }
-}
-
 impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
     fn new(vm_pages: &'a VmPages<T>, vmid: VmId, prev_tlb_version: Option<TlbVersion>) -> Self {
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
@@ -555,17 +547,18 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         to_addr: GuestPageAddr,
         measurement: &AttestationManager<D, H>,
     ) -> Result<u64> {
-        let converted_pages = self.get_converted_pages(from_addr, count)?;
+        let converted_pages = self.vm_pages.get_converted_pages(from_addr, count)?;
         let mapper = to.map_measured_pages(to_addr, count)?;
 
         // Make sure we can initialize the full set of pages before mapping them.
-        let mut initialized_pages = LockedPageList::new(self.page_tracker.clone());
+        let page_tracker = self.vm_pages.page_tracker.clone();
+        let mut initialized_pages = LockedPageList::new(page_tracker.clone());
         for (dirty, src_addr) in converted_pages.zip(src_addr.iter_from()) {
             match dirty.try_initialize(|bytes| self.copy_from_guest(bytes, src_addr.into())) {
                 Ok(p) => initialized_pages.push(p).unwrap(),
                 Err((e, p)) => {
                     // Unwrap ok since the page must have been locked.
-                    self.page_tracker.unlock_page(p).unwrap();
+                    page_tracker.unlock_page(p).unwrap();
                     return Err(e);
                 }
             };
@@ -575,8 +568,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         let new_owner = to.page_owner_id();
         for (initialized, to_addr) in initialized_pages.zip(to_addr.iter_from()) {
             // Unwrap ok since we've guaranteed there's space for another owner.
-            let mappable = self
-                .page_tracker
+            let mappable = page_tracker
                 .assign_page_for_mapping(initialized, new_owner)
                 .unwrap();
             // Unwrap ok since the address is in range and we haven't mapped it yet.
@@ -618,7 +610,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         fault_addr: GuestPhysAddr,
     ) -> PageFaultType {
         use PageFaultType::*;
-        match self.regions.find(fault_addr) {
+        match self.vm_pages.regions.find(fault_addr) {
             // Mask off the page offset for confidential and shared faults to avoid revealing more
             // information than necessary to the host.
             Some(VmRegionType::Confidential) => {

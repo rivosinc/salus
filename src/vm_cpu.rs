@@ -24,7 +24,7 @@ use spin::{Mutex, RwLock, RwLockReadGuard};
 use crate::smp::PerCpu;
 use crate::vm::MmioOperation;
 use crate::vm_id::VmId;
-use crate::vm_pages::{ActiveVmPages, VmPages};
+use crate::vm_pages::{ActiveVmPages, FinalizedVmPages};
 use crate::vm_pmu::VmPmuState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -323,7 +323,7 @@ trait VmCpuSaveState {
 /// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
 pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> {
     vcpu: &'vcpu mut VmCpu,
-    vm_pages: &'pages VmPages<T>,
+    vm_pages: FinalizedVmPages<'pages, T>,
     // `None` if this vCPU is itself running a child vCPU. Restored when the child vCPU exits.
     active_pages: Option<ActiveVmPages<'pages, T>>,
     // The parent vCPU which activated us.
@@ -356,7 +356,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     // `vm_pages`.
     fn restore_from(
         vcpu: &'vcpu mut VmCpu,
-        vm_pages: &'pages VmPages<T>,
+        vm_pages: FinalizedVmPages<'pages, T>,
         parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
     ) -> Self {
         let this_cpu = PerCpu::this_cpu();
@@ -866,7 +866,7 @@ impl VmCpu {
     /// activated and is restored when the returned `ActiveVmCpu` is dropped.
     pub fn activate<'vcpu, 'pages, 'prev: 'vcpu + 'pages, T: GuestStagePagingMode>(
         &'vcpu mut self,
-        vm_pages: &'pages VmPages<T>,
+        vm_pages: FinalizedVmPages<'pages, T>,
         mut parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
     ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'prev, T>> {
         if self.guest_id != vm_pages.page_owner_id() {

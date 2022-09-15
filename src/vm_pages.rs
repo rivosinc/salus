@@ -761,6 +761,11 @@ impl<T: GuestStagePagingMode> VmPages<T> {
         self.page_owner_id
     }
 
+    /// Returns the global page tracking structure.
+    pub fn page_tracker(&self) -> PageTracker {
+        self.page_tracker.clone()
+    }
+
     /// Returns a `VmPagesRef` to `self` in state `S`. The caller must ensure that `S` matches
     /// the current state of the VM to which this `VmPages` belongs.
     pub fn as_ref<S>(&self) -> VmPagesRef<T, S> {
@@ -797,7 +802,7 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
 
     /// Returns the global page tracking structure.
     pub fn page_tracker(&self) -> PageTracker {
-        self.inner.page_tracker.clone()
+        self.inner.page_tracker()
     }
 
     /// Returns this VM's IMSIC geometry if it was set up for IMSIC virtualization.
@@ -1043,7 +1048,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         state_addr: GuestPageAddr,
         vcpus_addr: GuestPageAddr,
         num_vcpu_pages: u64,
-    ) -> Result<(Vm<T, VmStateInitializing>, Page<InternalClean>)> {
+    ) -> Result<(Vm<T>, Page<InternalClean>)> {
         if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedAddress);
         }

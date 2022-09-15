@@ -15,7 +15,8 @@
     asm_const,
     ptr_sub_ptr,
     slice_ptr_get,
-    let_chains
+    let_chains,
+    is_some_with
 )]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};

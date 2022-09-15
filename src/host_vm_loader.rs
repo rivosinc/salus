@@ -11,7 +11,7 @@ use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::*;
 use s_mode_utils::print::*;
 
-use crate::vm::{HostVm, VmStateFinalized, VmStateInitializing};
+use crate::vm::HostVm;
 
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
 //
@@ -146,7 +146,7 @@ pub struct HostVmLoader<T: GuestStagePagingMode> {
     hypervisor_dt: DeviceTree,
     kernel: HwMemRegion,
     initramfs: Option<HwMemRegion>,
-    vm: HostVm<T, VmStateInitializing>,
+    vm: HostVm<T>,
     fdt_pages: FdtPages,
     zero_pages: PageList<Page<ConvertedClean>>,
     guest_ram_base: GuestPhysAddr,
@@ -247,7 +247,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
     }
 
     /// Constructs the address space for the host VM, returning a `HostVm` that is ready to run.
-    pub fn build_address_space(mut self) -> HostVm<T, VmStateFinalized> {
+    pub fn build_address_space(mut self) -> HostVm<T> {
         let imsic = Imsic::get();
         let cpu_info = CpuInfo::get();
         // Map the IMSIC interrupt files into the guest address space. The host VM's interrupt
@@ -360,6 +360,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
                 .unwrap(),
             self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
         );
-        self.vm.finalize().unwrap()
+        self.vm.finalize().unwrap();
+        self.vm
     }
 }

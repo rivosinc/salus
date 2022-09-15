@@ -3,14 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::marker::PhantomData;
-use core::ops::Deref;
 use page_tracking::collections::{PageArc, PageVec};
 use page_tracking::PageTracker;
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{InternalClean, Page, PageOwnerId, SequentialPages};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
-use crate::vm::{Vm, VmStateFinalized, VmStateInitializing};
+use crate::vm::{AnyVm, FinalizedVm, InitializingVm, Vm, VmRef};
 
 /// Guest tracking-related errors.
 #[derive(Debug)]
@@ -24,142 +23,124 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Wrapper enum for a `Vm<T, S>` for each possible state S so that we can store `Vm`s of any
-/// state in a `PageArc`.
-enum GuestStateInner<T: GuestStagePagingMode> {
-    Init(Vm<T, VmStateInitializing>),
-    Running(Vm<T, VmStateFinalized>),
-    Temp,
+// The possible states of a guest `Vm`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuestState {
+    Init,
+    Running,
 }
 
-impl<T: GuestStagePagingMode> GuestStateInner<T> {
-    /// Returns a reference to `self` as an initializing VM.
-    fn as_initializing_vm(&self) -> Option<&Vm<T, VmStateInitializing>> {
-        match self {
-            Self::Init(ref v) => Some(v),
-            Self::Running(_) => None,
-            Self::Temp => unreachable!(),
+// Wrapper enum for a `Vm<T>` plus its state.
+struct GuestVmInner<T: GuestStagePagingMode> {
+    vm: Vm<T>,
+    state: GuestState,
+}
+
+impl<T: GuestStagePagingMode> GuestVmInner<T> {
+    // Creates a new initializing `GuestVmInner` from `vm`.
+    fn new(vm: Vm<T>) -> Self {
+        Self {
+            vm,
+            state: GuestState::Init,
         }
     }
 
-    /// Returns a reference to `self` as a finalized VM.
-    fn as_finalized_vm(&self) -> Option<&Vm<T, VmStateFinalized>> {
-        match self {
-            Self::Init(_) => None,
-            Self::Running(ref v) => Some(v),
-            Self::Temp => unreachable!(),
-        }
-    }
-
-    /// Returns the `PageOwnerId` for the wrapped VM.
-    fn page_owner_id(&self) -> PageOwnerId {
-        match self {
-            Self::Init(vm) => vm.page_owner_id(),
-            Self::Running(vm) => vm.page_owner_id(),
-            Self::Temp => unreachable!(),
-        }
-    }
-
-    /// Converts `self` from an initializing VM to a finalized VM.
+    // Converts `self` from an initializing VM to a finalized VM.
     fn finalize(&mut self) -> Result<()> {
-        if !matches!(self, Self::Init(_)) {
+        if self.state != GuestState::Init {
             return Err(Error::GuestNotInitializing);
         }
-        let mut temp = Self::Temp;
-        core::mem::swap(self, &mut temp);
-        let mut running = match temp {
-            Self::Init(v) => Self::Running(v.finalize().map_err(Error::VmFinalizeFailed)?),
-            _ => unreachable!(),
-        };
-        core::mem::swap(self, &mut running);
+        self.vm.finalize().map_err(Error::VmFinalizeFailed)?;
+        self.state = GuestState::Running;
         Ok(())
     }
+}
 
-    /// Destroys `self`.
-    fn destroy(&mut self) {
-        // TODO: Use Drop instead, which is currently not possible due to a move from self in finalize.
-        match self {
-            Self::Init(ref mut v) => v.destroy(),
-            Self::Running(ref mut v) => v.destroy(),
-            Self::Temp => unreachable!(),
-        };
+/// A shared reference to a `Vm` in a particular state. While this reference is held the wrapped
+/// `Vm` is guaranteed not to change state.
+pub struct GuestStateGuard<'a, T: GuestStagePagingMode, S> {
+    inner: RwLockReadGuard<'a, GuestVmInner<T>>,
+    _vm_state: PhantomData<S>,
+}
+
+impl<'a, T: GuestStagePagingMode, S> GuestStateGuard<'a, T, S> {
+    fn new(inner: RwLockReadGuard<'a, GuestVmInner<T>>) -> Self {
+        Self {
+            inner,
+            _vm_state: PhantomData,
+        }
     }
-}
 
-/// A refernce to a VM in a paritcular state. While this refernce is held the wrapped `Vm` is
-/// guaranteed not to change state.
-pub struct VmRef<'a, T: GuestStagePagingMode, S> {
-    vm: RwLockReadGuard<'a, GuestStateInner<T>>,
-    phantom: PhantomData<S>,
-}
-
-impl<'a, T: GuestStagePagingMode> Deref for VmRef<'a, T, VmStateInitializing> {
-    type Target = Vm<T, VmStateInitializing>;
-
-    fn deref(&self) -> &Self::Target {
-        self.vm.as_initializing_vm().unwrap()
-    }
-}
-
-impl<'a, T: GuestStagePagingMode> Deref for VmRef<'a, T, VmStateFinalized> {
-    type Target = Vm<T, VmStateFinalized>;
-
-    fn deref(&self) -> &Self::Target {
-        self.vm.as_finalized_vm().unwrap()
+    /// Returns a reference to the wrapped `Vm`.
+    pub fn vm(&self) -> &Vm<T> {
+        &self.inner.vm
     }
 }
 
 /// A (reference-counted) reference to a guest VM.
-pub struct GuestState<T: GuestStagePagingMode> {
-    inner: PageArc<RwLock<GuestStateInner<T>>>,
+pub struct GuestVm<T: GuestStagePagingMode> {
+    inner: PageArc<RwLock<GuestVmInner<T>>>,
 }
 
-impl<T: GuestStagePagingMode> Clone for GuestState<T> {
-    fn clone(&self) -> GuestState<T> {
-        GuestState {
+impl<T: GuestStagePagingMode> Clone for GuestVm<T> {
+    fn clone(&self) -> GuestVm<T> {
+        GuestVm {
             inner: self.inner.clone(),
         }
     }
 }
 
-impl<T: GuestStagePagingMode> GuestState<T> {
-    /// Creates a new initializing `GuestState` from `vm`, using `page` as storage.
-    pub fn new(vm: Vm<T, VmStateInitializing>, page: Page<InternalClean>) -> Self {
+impl<T: GuestStagePagingMode> GuestVm<T> {
+    /// Creates a new initializing `GuestVm` from `vm`, using `page` as storage.
+    pub fn new(vm: Vm<T>, page: Page<InternalClean>) -> Self {
         let page_tracker = vm.page_tracker();
         Self {
-            inner: PageArc::new_with(RwLock::new(GuestStateInner::Init(vm)), page, page_tracker),
+            inner: PageArc::new_with(RwLock::new(GuestVmInner::new(vm)), page, page_tracker),
         }
     }
 
     /// Returns a reference to `self` as an initializing VM.
-    pub fn as_initializing_vm(&self) -> Option<VmRef<T, VmStateInitializing>> {
+    pub fn as_initializing_vm(&self) -> Option<InitializingVm<T>> {
         let guest = self.inner.read();
-        guest.as_initializing_vm()?;
-        Some(VmRef {
-            vm: guest,
-            phantom: PhantomData,
-        })
+        match guest.state {
+            GuestState::Init => Some(VmRef::new(GuestStateGuard::new(guest))),
+            _ => None,
+        }
     }
 
     /// Returns a reference to `self` as a finalized VM.
-    pub fn as_finalized_vm(&self) -> Option<VmRef<T, VmStateFinalized>> {
+    pub fn as_finalized_vm(&self) -> Option<FinalizedVm<T>> {
         let guest = self.inner.read();
-        guest.as_finalized_vm()?;
-        Some(VmRef {
-            vm: guest,
-            phantom: PhantomData,
-        })
+        match guest.state {
+            GuestState::Running => Some(VmRef::new(GuestStateGuard::new(guest))),
+            _ => None,
+        }
+    }
+
+    /// Returns a reference to `self` as a VM in any state.
+    pub fn as_any_vm(&self) -> AnyVm<T> {
+        VmRef::new(GuestStateGuard::new(self.inner.read()))
     }
 
     /// Returns the `PageOwnerId` for the wrapped VM.
     pub fn page_owner_id(&self) -> PageOwnerId {
-        self.inner.read().page_owner_id()
+        self.inner.read().vm.page_owner_id()
+    }
+
+    /// Converts the guest from the initializing to the finalized state.
+    pub fn finalize(&self) -> Result<()> {
+        // Use try_write() here since there shouldn't be any outstanding references to a VM that
+        // we're attempting to finalize. This prevents us from blocking on a potentially
+        // long-running operation on a VM that isn't even in the proper state (e.g. a finalized
+        // VM that's running a vCPU).
+        let mut inner = self.inner.try_write().ok_or(Error::GuestInUse)?;
+        inner.finalize()
     }
 }
 
 /// Tracks the guest VMs for a host VM.
 pub struct Guests<T: GuestStagePagingMode> {
-    guests: Mutex<PageVec<GuestState<T>>>,
+    guests: Mutex<PageVec<GuestVm<T>>>,
 }
 
 impl<T: GuestStagePagingMode> Guests<T> {
@@ -171,7 +152,7 @@ impl<T: GuestStagePagingMode> Guests<T> {
     }
 
     /// Adds `guest` to this guest tracking table.
-    pub fn add(&self, guest: GuestState<T>) -> Result<()> {
+    pub fn add(&self, guest: GuestVm<T>) -> Result<()> {
         let mut guests = self.guests.lock();
         guests
             .try_reserve(1)
@@ -181,7 +162,7 @@ impl<T: GuestStagePagingMode> Guests<T> {
     }
 
     /// Returns the guest with the given ID.
-    pub fn get(&self, id: PageOwnerId) -> Option<GuestState<T>> {
+    pub fn get(&self, id: PageOwnerId) -> Option<GuestVm<T>> {
         let guests = self.guests.lock();
         guests.iter().find(|g| g.page_owner_id() == id).cloned()
     }
@@ -190,7 +171,7 @@ impl<T: GuestStagePagingMode> Guests<T> {
     pub fn remove(&self, id: PageOwnerId) -> Result<()> {
         // Pull the last reference to this guest out of the vector first so we don't do the final
         // drop under the lock.
-        let guest = {
+        let _guest = {
             let mut guests = self.guests.lock();
             let (index, guest) = guests
                 .iter()
@@ -206,26 +187,6 @@ impl<T: GuestStagePagingMode> Guests<T> {
             guests.remove(index);
             last
         };
-        guest.inner.write().destroy();
         Ok(())
-    }
-
-    /// Finalizes the guest with the given ID, converting the guest from the initializing to the
-    /// finalized state. The finalized guest is returned upon success.
-    pub fn finalize(&self, id: PageOwnerId) -> Result<GuestState<T>> {
-        let guests = self.guests.lock();
-        let guest = guests
-            .iter()
-            .find(|g| g.page_owner_id() == id)
-            .ok_or(Error::InvalidGuestId)?;
-        {
-            // Use try_write() here since there shouldn't be any outstanding references to a VM that
-            // we're attempting to finalize. This prevents us from blocking a potentially
-            // long-running operation on a VM that isn't even in the proper state (e.g. a finalized
-            // VM that's running a vCPU).
-            let mut state = guest.inner.try_write().ok_or(Error::GuestInUse)?;
-            state.finalize()?;
-        }
-        Ok(guest.clone())
     }
 }

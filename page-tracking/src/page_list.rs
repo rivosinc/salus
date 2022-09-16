@@ -94,6 +94,11 @@ impl<P: PhysPage> PageList<P> {
         self.len
     }
 
+    /// Returns the address of the page at the head of the list.
+    pub fn peek(&self) -> Option<SupervisorPageAddr> {
+        self.head
+    }
+
     /// Returns if the list of pages is contiguous.
     pub fn is_contiguous(&self) -> bool {
         if self.head.is_none() {

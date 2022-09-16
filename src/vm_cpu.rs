@@ -3,14 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::global_asm;
-use core::{mem::size_of, ops::Deref, ops::DerefMut};
+use core::{mem::size_of, ops::Deref, ops::DerefMut, ptr::NonNull};
 use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, CpuId, CpuInfo};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
 use page_tracking::{PageTracker, TlbVersion};
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{
-    GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, RawAddr, SequentialPages,
+    GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, PageSize, RawAddr, SequentialPages,
 };
 use riscv_regs::VectorRegisters;
 use riscv_regs::{hstatus, scounteren, sstatus};
@@ -19,12 +19,12 @@ use riscv_regs::{
     PrivilegeLevel, Readable, Trap, Writeable, CSR,
 };
 use sbi::{self, SbiMessage, SbiReturnType, TvmMmioOpCode};
-use spin::{Mutex, RwLock, RwLockReadGuard};
+use spin::{Mutex, Once, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
 use crate::vm::MmioOperation;
 use crate::vm_id::VmId;
-use crate::vm_pages::{ActiveVmPages, FinalizedVmPages};
+use crate::vm_pages::{ActiveVmPages, FinalizedVmPages, PinnedPages};
 use crate::vm_pmu::VmPmuState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,6 +37,8 @@ pub enum Error {
     VmCpuAlreadyPowered,
     InsufficientVmCpuStorage,
     WrongAddressSpace,
+    InvalidSharedStatePtr,
+    InsufficientSharedStatePages,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -313,6 +315,46 @@ pub const VM_CPU_SHARED_LAYOUT: &[sbi::RegisterSetLocation] = &[
         offset: offset_of!(VmCpuSharedState, hs_csrs) as u32,
     },
 ];
+
+/// The number of pages required for `VmCpuSharedState`.
+pub const VM_CPU_SHARED_PAGES: u64 = PageSize::num_4k_pages(size_of::<VmCpuSharedState>() as u64);
+
+/// Wrapper for the shared-memory state area used to communicate vCPU state with the host.
+pub struct VmCpuSharedArea {
+    _ptr: NonNull<VmCpuSharedState>,
+    // Optional since we might be sharing with the hypervisor in the host VM case.
+    _pin: Option<PinnedPages>,
+}
+
+impl VmCpuSharedArea {
+    /// Creates a new `VmCpuSharedArea` using the `VmCpuSharedState` struct referred to by `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `ptr` is suitably aligned, points to an allocated block of
+    /// memory that is at least as large as `VmCpuSharedState`, and is valid for reads and writes
+    /// for the lifetime of this structure. The caller must only access the memory referred to
+    /// by `ptr` using volatile accessors.
+    pub unsafe fn new(ptr: *mut VmCpuSharedState) -> Result<Self> {
+        Ok(Self {
+            _ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
+            _pin: None,
+        })
+    }
+
+    /// Creates a new `VmCpuSharedArea` using the pinned pages referred to by `pages`.
+    pub fn from_pinned_pages(pages: PinnedPages) -> Result<Self> {
+        // Make sure the pin actually covers the size of the structure.
+        if pages.range().num_pages() < VM_CPU_SHARED_PAGES {
+            return Err(Error::InsufficientSharedStatePages);
+        }
+        let ptr = pages.range().base().bits() as *mut VmCpuSharedState;
+        Ok(Self {
+            _ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
+            _pin: Some(pages),
+        })
+    }
+}
 
 /// Identifies the exit cause for a vCPU.
 pub enum VmCpuExit {
@@ -766,6 +808,8 @@ struct VirtualRegisters {
 /// Represents a single virtual CPU of a VM.
 pub struct VmCpu {
     state: VmCpuState,
+    // Initialized in add_vcpu().
+    shared_area: Once<VmCpuSharedArea>,
     virt_regs: VirtualRegisters,
     imsic_location: Option<ImsicLocation>,
     pmu_state: VmPmuState,
@@ -807,6 +851,7 @@ impl VmCpu {
 
         Self {
             state,
+            shared_area: Once::new(),
             virt_regs: VirtualRegisters::default(),
             imsic_location: None,
             current_cpu: None,
@@ -1015,13 +1060,15 @@ impl VmCpus {
         self.inner.len()
     }
 
-    /// Adds the vCPU at `vcpu_id` as an available vCPU, returning a reference to it.
-    pub fn add_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
+    /// Adds the vCPU at `vcpu_id` as an available vCPU using `shared_area` as the vCPU's shared
+    /// state-memory state area, returning a reference to it.
+    pub fn add_vcpu(&self, vcpu_id: u64, shared_area: VmCpuSharedArea) -> Result<IdleVmCpu> {
         let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
         let mut status = entry.status.write();
         if *status != VmCpuStatus::NotPresent {
             return Err(Error::VmCpuExists);
         }
+        entry.vcpu.lock().shared_area.call_once(|| shared_area);
         *status = VmCpuStatus::PoweredOff;
         Ok(IdleVmCpu {
             _status: status.downgrade(),
@@ -1089,3 +1136,9 @@ impl VmCpus {
         Ok(*entry.status.read())
     }
 }
+
+// Safety: Each VmCpu is wrapped with a Mutex to provide safe concurrent access to VmCpu and its
+// composite structures from within the hypervisor, and the VmCpu API provides safe accessors to
+// the shared-memory vCPU state structure.
+unsafe impl Sync for VmCpus {}
+unsafe impl Send for VmCpus {}

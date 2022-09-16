@@ -6,7 +6,7 @@ use arrayvec::ArrayVec;
 
 use crate::{
     ecall_send, AttestationCapabilities, AttestationFunction, Error, EvidenceFormat, Result,
-    SbiMessage, EVIDENCE_DATA_BLOB_SIZE,
+    SbiMessage, EVIDENCE_DATA_BLOB_SIZE, MAX_HASH_SIZE,
 };
 
 /// Maximum supported size for the attestation evidence certificate.
@@ -93,4 +93,32 @@ pub fn extend_measurement(digest: &[u8], index: usize) -> Result<()> {
     unsafe { ecall_send(&msg) }?;
 
     Ok(())
+}
+
+/// Read a measurement register data.
+/// # Arguments
+///
+/// * `index` - The measurement register TCG PCR index.
+pub fn read_measurement(index: usize) -> Result<ArrayVec<u8, MAX_HASH_SIZE>> {
+    let mut msmt_bytes = ArrayVec::<u8, MAX_HASH_SIZE>::new();
+
+    let msg = SbiMessage::Attestation(AttestationFunction::ReadMeasurement {
+        measurement_data_addr_out: msmt_bytes.as_ptr() as u64,
+        measurement_data_size: MAX_HASH_SIZE as u64,
+        measurement_index: index as u64,
+    });
+
+    // Safety: ReadMeasurement writes into a single reference to `msmt_bytes`,
+    // which is defined in this scope.
+    let len = unsafe { ecall_send(&msg) }?;
+
+    // Safety: msmt_bytes is backed by a MAX_HASH_SIZE array.
+    unsafe {
+        if len as usize > MAX_HASH_SIZE {
+            return Err(Error::Failed);
+        }
+        msmt_bytes.set_len(len as usize);
+    };
+
+    Ok(msmt_bytes)
 }

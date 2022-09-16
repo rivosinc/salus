@@ -452,6 +452,21 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             .extend(bytes, address)
     }
 
+    /// Read a measurement register data.
+    pub fn read_msmt_register(
+        &self,
+        msmt_idx: TcgPcrIndex,
+    ) -> Result<GenericArray<u8, <D as OutputSizeUser>::OutputSize>> {
+        Ok(self
+            .measurements
+            .read()
+            .iter()
+            .find(|m| m.pcr_index == msmt_idx as u8)
+            .ok_or(Error::InvalidMeasurementRegisterIndex(msmt_idx as usize))?
+            .digest
+            .clone())
+    }
+
     /// Extend the TVM pages measurement.
     /// This is a extend_msmt_register wrapper, where the address is not
     /// optional, and the measurement register is fixed to TvmPage.

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use alloc::vec::Vec;
 use attestation::{
     certificate::Certificate, measurement::AttestationManager, request::CertReq,
     Error as AttestationError, MAX_CSR_LEN,
@@ -26,8 +27,8 @@ use sbi::{
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm_cpu::{
-    ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuStatus, VmCpus, VM_CPU_BYTES,
-    VM_CPU_SHARED_LAYOUT,
+    ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuSharedArea, VmCpuSharedState, VmCpuStatus,
+    VmCpus, VM_CPU_BYTES, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -441,11 +442,11 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
     }
 
     /// Adds a vCPU to this VM.
-    fn add_vcpu(&self, vcpu_id: u64) -> EcallResult<()> {
+    fn add_vcpu(&self, vcpu_id: u64, shared_area: VmCpuSharedArea) -> EcallResult<()> {
         let vcpu = self
             .vm()
             .vcpus
-            .add_vcpu(vcpu_id)
+            .add_vcpu(vcpu_id, shared_area)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         let mut vcpu = vcpu.lock();
         vcpu.set_gpr(GprIndex::A0, vcpu_id);
@@ -1058,8 +1059,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TvmCpuCreate {
                 guest_id,
                 vcpu_id,
-                shared_page_addr: _,
-            } => self.guest_add_vcpu(guest_id, vcpu_id).into(),
+                shared_page_addr,
+            } => self
+                .guest_add_vcpu(guest_id, vcpu_id, shared_page_addr)
+                .into(),
             TvmCpuSetRegister {
                 guest_id,
                 vcpu_id,
@@ -1365,13 +1368,28 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(required_len as u64)
     }
 
-    /// Adds a vCPU with `vcpu_id` to a guest VM.
-    fn guest_add_vcpu(&self, guest_id: u64, vcpu_id: u64) -> EcallResult<u64> {
+    // Adds a vCPU with `vcpu_id` to a guest VM with a shared-memory state area at
+    // `shared_page_addr`.
+    fn guest_add_vcpu(
+        &self,
+        guest_id: u64,
+        vcpu_id: u64,
+        shared_page_addr: u64,
+    ) -> EcallResult<u64> {
+        // Pin the pages that the VM wants to use for the shared state buffer.
+        let shared_page_addr = self.guest_addr_from_raw(shared_page_addr)?;
+        let pin = self
+            .vm_pages()
+            .pin_shared_pages(shared_page_addr, VM_CPU_SHARED_PAGES)
+            .map_err(EcallError::from)?;
+        let shared_area = VmCpuSharedArea::from_pinned_pages(pin)
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidAddress))?;
+
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
             .as_initializing_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        guest_vm.add_vcpu(vcpu_id)?;
+        guest_vm.add_vcpu(vcpu_id, shared_area)?;
         Ok(0)
     }
 
@@ -1837,6 +1855,7 @@ enum MmioEmulationError {
 /// Represents the special VM that serves as the host for the system.
 pub struct HostVm<T: GuestStagePagingMode> {
     inner: GuestVm<T>,
+    vcpu_shared: Vec<VmCpuSharedState>,
 }
 
 impl<T: GuestStagePagingMode> HostVm<T> {
@@ -1858,7 +1877,8 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         let region_vec_pages = hyp_mem.take_pages_for_host_state(TVM_REGION_LIST_PAGES as usize);
 
         // Pages for the array of vCPUs.
-        let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * MAX_CPUS as u64);
+        let num_cpus = CpuInfo::get().num_cpus();
+        let num_vcpu_pages = PageSize::num_4k_pages(VM_CPU_BYTES * num_cpus as u64);
         let vcpus_pages = hyp_mem.take_pages_for_host_state(num_vcpu_pages as usize);
 
         let imsic_geometry = Imsic::get().host_vm_geometry();
@@ -1892,16 +1912,21 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             Guests::new(guest_tracking_pages, page_tracker),
         )
         .unwrap();
-        let this = Self {
+        let mut this = Self {
             inner: GuestVm::new(vm, vm_state_page.into_iter().next().unwrap()),
+            vcpu_shared: Vec::with_capacity(num_cpus),
         };
 
         {
             let init_vm = this.inner.as_initializing_vm().unwrap();
-            let cpu_info = CpuInfo::get();
             let imsic = Imsic::get();
-            for i in 0..cpu_info.num_cpus() {
-                init_vm.add_vcpu(i as u64).unwrap();
+            for i in 0..num_cpus {
+                this.vcpu_shared.push(VmCpuSharedState::default());
+                // Safety: This slot in vcpu_shared points to a valid VmCpuSharedState struct
+                // that is guaranteed to live as long as the containing HostVm structure.
+                let shared_area =
+                    unsafe { VmCpuSharedArea::new(&mut this.vcpu_shared[i]) }.unwrap();
+                init_vm.add_vcpu(i as u64, shared_area).unwrap();
                 let imsic_loc = imsic.supervisor_file_location(CpuId::new(i)).unwrap();
                 init_vm
                     .set_vcpu_imsic_location(i as u64, imsic_loc)

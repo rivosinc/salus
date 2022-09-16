@@ -41,6 +41,7 @@ pub enum Error {
     InsufficientVmRegionSpace,
     InvalidMapRegion,
     SharedPageNotMapped,
+    EmptyPageRange,
     Measurement(attestation::Error),
     VmCreationFailed(crate::vm::Error),
     NoImsicVirtualization,
@@ -175,6 +176,48 @@ impl TlbTracker {
             prev.put()
         } else {
             Err(Error::InvalidTlbVersion)
+        }
+    }
+}
+
+/// A reference to a range of pages in a VM's address space that have been pinned in the shared
+/// state. The pin is released (shared reference count dropped) in drop(). Used for long-term
+/// sharing of memory between a VM and the hypervisor.
+pub struct PinnedPages {
+    range: SupervisorPageRange,
+    page_tracker: PageTracker,
+    owner: PageOwnerId,
+}
+
+impl PinnedPages {
+    // Safety: The caller must guarantee that the pages in the specified range are in the "Shared"
+    // state and are owned by `owner`.
+    unsafe fn new(
+        range: SupervisorPageRange,
+        page_tracker: PageTracker,
+        owner: PageOwnerId,
+    ) -> Self {
+        Self {
+            range,
+            page_tracker,
+            owner,
+        }
+    }
+
+    /// Returns the range of pages in the pinned region.
+    pub fn range(&self) -> SupervisorPageRange {
+        self.range
+    }
+}
+
+impl Drop for PinnedPages {
+    fn drop(&mut self) {
+        for addr in self.range {
+            // Unwrap ok: the caller guaranteed at construction that the range of pages is shared
+            // and owned by `self.owner`.
+            self.page_tracker
+                .release_page_by_addr(addr, self.owner)
+                .unwrap();
         }
     }
 }
@@ -1165,6 +1208,41 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             mapper.map_page(addr, mappable).unwrap();
         }
         Ok(())
+    }
+
+    /// Pins `count` pages starting at `addr` as shared pages, returning a `PinnedPages` structure
+    /// the will release the pin when dropped. Used to share memory between a VM on the hypervisor.
+    pub fn pin_shared_pages(&self, addr: GuestPageAddr, count: u64) -> Result<PinnedPages> {
+        if count == 0 {
+            return Err(Error::EmptyPageRange);
+        }
+        let shared_list = self
+            .inner
+            .root
+            .get_shareable_range::<Page<Shareable>>(addr, PageSize::Size4k, count)
+            .map_err(|_| Error::SharedPageNotMapped)?;
+        if !shared_list.is_contiguous() {
+            return Err(Error::NonContiguousPages);
+        }
+        // Unwrap ok: we know the list isn't empty.
+        let base_addr = shared_list.peek().unwrap();
+        for page in shared_list {
+            // Unwrap ok: we have exclusive ownership, and get_shareable_range() has ensured
+            // that these pages are eligible to be shared.
+            self.inner
+                .page_tracker
+                .share_page(page, self.inner.page_owner_id)
+                .unwrap();
+        }
+        // Safety: the range of pages is shared and owned by the current VM.
+        let pin = unsafe {
+            PinnedPages::new(
+                SupervisorPageRange::new(base_addr, count),
+                self.inner.page_tracker.clone(),
+                self.inner.page_owner_id,
+            )
+        };
+        Ok(pin)
     }
 
     /// Activates the address space represented by this `VmPages`. The reference to the address space

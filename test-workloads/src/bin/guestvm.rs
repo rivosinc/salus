@@ -199,6 +199,16 @@ fn test_attestation() {
     attestation::extend_measurement(&digest, RuntimePcr1 as usize)
         .expect("Failed to extend runtime PCR #1");
 
+    let pcr_read =
+        attestation::read_measurement(RuntimePcr1 as usize).expect("Failed to read runtime PCR #1");
+    println!("Runtime PCR #1 measurement: {:x?}", pcr_read.as_slice());
+
+    // SHA384 for (RuntimePCR1 || SHA384(b"helloworld"))
+    let expected_pcr = hex!("4d783cdfa8d6bc1293d0f1bfb58f9f0b05a8ef723cb8745d142d60ac3b9d213c51f06aa1e9b92ff09f64e4a2d0c8fe87");
+    if pcr_read.as_slice() != expected_pcr {
+        panic!("Wrong runtime PCR #1 measurement")
+    }
+
     if TEST_CSR.len() > MAX_CSR_LEN as usize {
         panic!("Test CSR is too large")
     }

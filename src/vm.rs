@@ -1050,6 +1050,19 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
                     active_pages,
                 )
                 .into(),
+
+            ReadMeasurement {
+                measurement_data_addr_out,
+                measurement_data_size,
+                measurement_index,
+            } => self
+                .guest_read_measurement(
+                    measurement_data_addr_out,
+                    measurement_data_size as usize,
+                    measurement_index as usize,
+                    active_pages,
+                )
+                .into(),
         }
     }
 
@@ -1548,6 +1561,37 @@ impl<T: GuestStagePagingMode> Vm<T, VmStateFinalized> {
             .map_err(EcallError::from)?;
 
         Ok(0)
+    }
+
+    fn guest_read_measurement(
+        &self,
+        msmt_addr: u64,
+        msmt_size: usize,
+        index: usize,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallResult<u64> {
+        let caps = self
+            .attestation_mgr
+            .capabilities()
+            .map_err(EcallError::from)?;
+
+        let measurement_data = self
+            .attestation_mgr
+            .read_msmt_register((index as u8).try_into().map_err(EcallError::from)?)
+            .map_err(EcallError::from)?;
+
+        // Check if the passed buffer size is large enough.
+        if msmt_size < caps.hash_algorithm.size() || msmt_size < measurement_data.len() {
+            return Err(EcallError::Sbi(SbiError::InsufficientBufferCapacity));
+        }
+
+        // Copy the measurement register data into the guest.
+        let measurement_data_gpa = RawAddr::guest(msmt_addr, self.vm_pages.page_owner_id());
+        active_pages
+            .copy_to_guest(measurement_data_gpa, measurement_data.as_slice())
+            .map_err(EcallError::from)?;
+
+        Ok(measurement_data.len() as u64)
     }
 
     fn guest_aia_init(

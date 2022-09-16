@@ -218,6 +218,31 @@ pub enum AttestationFunction {
         /// a2 = measurement register index
         measurement_index: u64,
     },
+
+    /// Read a measurement register data back.
+    /// The first parameter is the address of the measurement buffer allocated
+    /// by the caller, for the SBI implementation to write the measurement data
+    /// into.
+    /// The second argument is the length of the measurement buffer, which must
+    /// be at least as large as the hash algorithm size reported by
+    /// `GetCapabilities`.
+    /// The third parameter is the measurement register index, and it must be
+    /// one of the reported 'TCG_PCR_INDEX` from the runtime measurement
+    /// registers array.
+    /// The returned value is the length of the measurement data.
+    ///
+    /// a6 = 3
+    /// a0 = Measurement data buffer address
+    /// a1 = Measurement data buffer length
+    /// a2 = Measurement register index.
+    ReadMeasurement {
+        /// a0 = measurement data buffer address
+        measurement_data_addr_out: u64,
+        /// a1 = measurement data buffer length
+        measurement_data_size: u64,
+        /// a2 = measurement register index
+        measurement_index: u64,
+    },
 }
 
 impl AttestationFunction {
@@ -241,6 +266,12 @@ impl AttestationFunction {
 
             2 => Ok(ExtendMeasurement {
                 measurement_data_addr: args[0],
+                measurement_data_size: args[1],
+                measurement_index: args[2],
+            }),
+
+            3 => Ok(ReadMeasurement {
+                measurement_data_addr_out: args[0],
                 measurement_data_size: args[1],
                 measurement_index: args[2],
             }),
@@ -273,6 +304,12 @@ impl SbiFunction for AttestationFunction {
                 measurement_data_size: _,
                 measurement_index: _,
             } => 2,
+
+            ReadMeasurement {
+                measurement_data_addr_out: _,
+                measurement_data_size: _,
+                measurement_index: _,
+            } => 3,
         }
     }
 
@@ -339,6 +376,12 @@ impl SbiFunction for AttestationFunction {
                 measurement_index,
             } => *measurement_index,
 
+            ReadMeasurement {
+                measurement_data_addr_out: _,
+                measurement_data_size: _,
+                measurement_index,
+            } => *measurement_index,
+
             _ => 0,
         }
     }
@@ -362,6 +405,12 @@ impl SbiFunction for AttestationFunction {
 
             ExtendMeasurement {
                 measurement_data_addr: _,
+                measurement_data_size,
+                measurement_index: _,
+            } => *measurement_data_size,
+
+            ReadMeasurement {
+                measurement_data_addr_out: _,
                 measurement_data_size,
                 measurement_index: _,
             } => *measurement_data_size,
@@ -390,6 +439,12 @@ impl SbiFunction for AttestationFunction {
                 measurement_data_size: _,
                 measurement_index: _,
             } => *measurement_data_addr,
+
+            ReadMeasurement {
+                measurement_data_addr_out,
+                measurement_data_size: _,
+                measurement_index: _,
+            } => *measurement_data_addr_out,
         }
     }
 }

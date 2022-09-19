@@ -103,6 +103,17 @@ pub fn alloc_error(_layout: Layout) -> ! {
     abort()
 }
 
+// Powers off this machine.
+fn poweroff() -> ! {
+    println!("Shutting down");
+    // Safety: on this platform, a write of 0x5555 to 0x100000 will trigger the platform to
+    // poweroff, which is defined behavior.
+    unsafe {
+        core::ptr::write_volatile(0x10_0000 as *mut u32, 0x5555);
+    }
+    abort()
+}
+
 /// The host VM that all CPUs enter at boot.
 static HOST_VM: Once<HostVm<Sv48x4>> = Once::new();
 
@@ -579,6 +590,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     HOST_VM.call_once(|| host);
     let cpu_id = PerCpu::this_cpu().cpu_id();
     HOST_VM.get().unwrap().run(cpu_id.raw() as u64);
+    poweroff();
 }
 
 #[no_mangle]
@@ -598,4 +610,5 @@ extern "C" fn secondary_init(_hart_id: u64) {
     me.set_online();
 
     HOST_VM.wait().run(me.cpu_id().raw() as u64);
+    poweroff();
 }

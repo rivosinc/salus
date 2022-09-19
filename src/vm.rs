@@ -17,7 +17,6 @@ use page_tracking::{HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
-use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
 use sbi::*;
 use sbi::{
@@ -27,8 +26,9 @@ use sbi::{
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm_cpu::{
-    ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuSharedArea, VmCpuSharedState, VmCpuStatus,
-    VmCpus, VM_CPU_BYTES, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
+    ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuSharedArea, VmCpuSharedState,
+    VmCpuSharedStateRef, VmCpuStatus, VmCpus, VM_CPU_BYTES, VM_CPU_SHARED_LAYOUT,
+    VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -50,16 +50,6 @@ pub type Result<T> = core::result::Result<T, Error>;
 // What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
-
-/// Powers off this machine.
-pub fn poweroff() -> ! {
-    // Safety: on this platform, a write of 0x5555 to 0x100000 will trigger the platform to
-    // poweroff, which is defined behavior.
-    unsafe {
-        core::ptr::write_volatile(0x10_0000 as *mut u32, 0x5555);
-    }
-    abort()
-}
 
 /// A decoded MMIO operation.
 #[derive(Clone, Copy, Debug)]
@@ -1833,8 +1823,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 /// Errors encountered during MMIO emulation.
 #[derive(Clone, Copy, Debug)]
 enum MmioEmulationError {
-    AccessingVCpuReg,
-    InvalidOpCode(u64),
+    FailedDecode(u32),
+    InvalidInstruction(Instruction),
     InvalidAddress(u64),
 }
 
@@ -1923,13 +1913,19 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         (host_pages, this)
     }
 
+    // Returns a reference to the shared-state buffer for the given vCPU.
+    fn vcpu_state(&self, vcpu_id: u64) -> Option<VmCpuSharedStateRef> {
+        let ptr = self.vcpu_shared.get(vcpu_id as usize)? as *const _;
+        // Safety: ptr refers to a valid VmCpuSharedState struct with the same lifetime as `self`.
+        Some(unsafe { VmCpuSharedStateRef::new(ptr as *mut _) })
+    }
+
     /// Sets the launch arguments (entry point and FDT) for the host vCPU.
     pub fn set_launch_args(&self, entry_addr: GuestPhysAddr, fdt_addr: GuestPhysAddr) {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        vm.set_vcpu_reg(0, TvmCpuRegister::EntryPc, entry_addr.bits())
-            .unwrap();
-        vm.set_vcpu_reg(0, TvmCpuRegister::EntryArg, fdt_addr.bits())
-            .unwrap();
+        // Unwrap ok: there must be a CPU 0.
+        let vcpu = self.vcpu_state(0).unwrap();
+        vcpu.set_sepc(entry_addr.bits());
+        vcpu.set_gpr(GprIndex::A1, fdt_addr.bits());
     }
 
     /// Adds a region of confidential memory to the host VM.
@@ -2091,34 +2087,57 @@ impl<T: GuestStagePagingMode> HostVm<T> {
                 smp::wfi();
             }
 
+            // Unwrap ok: vcpu_id must exist if it's runnable.
+            let vcpu = self.vcpu_state(vcpu_id).unwrap();
             // Run until we shut down, or this vCPU stops.
             loop {
-                use TvmCpuExitCode::*;
-                match vm.run_vcpu(vcpu_id, None).unwrap() {
-                    SystemReset => {
-                        println!("Host VM requested shutdown");
-                        poweroff();
-                    }
-                    HartStart => {
-                        let id = vm
-                            .get_vcpu_reg(vcpu_id, TvmCpuRegister::ExitCause0)
-                            .unwrap();
-                        smp::send_ipi(CpuId::new(id as usize));
-                    }
-                    HartStop => {
-                        break;
-                    }
-                    MmioPageFault => {
-                        if let Err(e) = self.emulate_mmio(vcpu_id) {
-                            println!("Unhandled MMIO page fault: {:?}", e);
-                            poweroff();
+                vm.run_vcpu(vcpu_id, None).unwrap();
+                let scause = vcpu.scause();
+                if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
+                    use Exception::*;
+                    match e {
+                        VirtualSupervisorEnvCall => {
+                            // Read the ECALL arguments written to the A* regs in shared memory.
+                            let mut a_regs = [0u64; 8];
+                            for (i, reg) in a_regs.iter_mut().enumerate() {
+                                // Unwrap ok: A0-A7 are valid GPR indices.
+                                let index =
+                                    GprIndex::from_raw(GprIndex::A0 as u32 + i as u32).unwrap();
+                                *reg = vcpu.gpr(index);
+                            }
+                            use SbiMessage::*;
+                            match SbiMessage::from_regs(&a_regs) {
+                                Ok(Reset(_)) => {
+                                    println!("Host VM requested shutdown");
+                                    return;
+                                }
+                                Ok(HartState(StateFunction::HartStart { hart_id, .. })) => {
+                                    smp::send_ipi(CpuId::new(hart_id as usize));
+                                }
+                                Ok(HartState(StateFunction::HartStop)) => {
+                                    break;
+                                }
+                                _ => {
+                                    println!("Unhandled ECALL from host");
+                                    return;
+                                }
+                            }
+                        }
+                        GuestLoadPageFault | GuestStorePageFault => {
+                            if let Err(err) = self.handle_page_fault(vcpu_id) {
+                                println!("Unhandled page fault: {:?}", err);
+                                return;
+                            }
+                        }
+                        _ => {
+                            println!("Unhandled host VM exception {:?}", e);
+                            return;
                         }
                     }
-                    reason => {
-                        println!("Unhandled host VM exit {:?}; shutting down", reason);
-                        poweroff();
-                    }
-                };
+                } else {
+                    println!("Unexpected host VM trap (SCAUSE = 0x{:x})", scause);
+                    return;
+                }
             }
         }
     }
@@ -2130,45 +2149,49 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             .is_ok_and(|s| *s == HartState::Started as u64)
     }
 
-    /// Handle an MMIO emulation fault for `vcpu_id`.
-    fn emulate_mmio(&self, vcpu_id: u64) -> core::result::Result<(), MmioEmulationError> {
-        let vm = self.inner.as_finalized_vm().unwrap();
-        let addr = vm
-            .get_vcpu_reg(vcpu_id, TvmCpuRegister::ExitCause0)
-            .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
-        let raw_op = vm
-            .get_vcpu_reg(vcpu_id, TvmCpuRegister::ExitCause1)
-            .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
-        let op = TvmMmioOpCode::from_reg(raw_op)
-            .map_err(|_| MmioEmulationError::InvalidOpCode(raw_op))?;
-
-        // For now, the only thing we're emulating is PCI config space.
+    // Handle a page fault for `vcpu_id`.
+    fn handle_page_fault(&self, vcpu_id: u64) -> core::result::Result<(), MmioEmulationError> {
+        // For now, the only thing we're expecting is MMIO emulation faults in PCI config space.
+        let vcpu = self.vcpu_state(vcpu_id).unwrap();
+        let addr = (vcpu.htval() << 2) | (vcpu.stval() & 0x3);
         let pci = PcieRoot::get();
+        if addr < pci.config_space().base().bits() {
+            return Err(MmioEmulationError::InvalidAddress(addr));
+        }
         let offset = addr - pci.config_space().base().bits();
         if offset > pci.config_space().length_bytes() {
             return Err(MmioEmulationError::InvalidAddress(addr));
         }
-        use TvmMmioOpCode::*;
-        let width = match op {
-            Load8 | Load8U | Store8 => 1,
-            Load16 | Load16U | Store16 => 2,
-            Load32 | Load32U | Store32 => 4,
-            Load64 | Store64 => 8,
+
+        // Figure out from HTINST what the MMIO operation was. We know the source/destination is
+        // always A0.
+        let raw_inst = vcpu.htinst() as u32;
+        let inst = DecodedInstruction::from_raw(raw_inst)
+            .map_err(|_| MmioEmulationError::FailedDecode(raw_inst))?;
+        use Instruction::*;
+        let (write, width) = match inst.instruction() {
+            Lb(_) | Lbu(_) => (false, 1),
+            Lh(_) | Lhu(_) => (false, 2),
+            Lw(_) | Lwu(_) => (false, 4),
+            Ld(_) => (false, 8),
+            Sb(_) => (true, 1),
+            Sh(_) => (true, 2),
+            Sw(_) => (true, 4),
+            Sd(_) => (true, 8),
+            i => {
+                return Err(MmioEmulationError::InvalidInstruction(i));
+            }
         };
+
+        let vm = self.inner.as_finalized_vm().unwrap();
         let page_tracker = vm.page_tracker();
         let guest_id = vm.page_owner_id();
-        match op {
-            Load8 | Load8U | Load16 | Load16U | Load32 | Load32U | Load64 => {
-                let val = pci.emulate_config_read(offset, width, page_tracker, guest_id);
-                vm.set_vcpu_reg(vcpu_id, TvmCpuRegister::MmioLoadValue, val)
-                    .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
-            }
-            Store8 | Store16 | Store32 | Store64 => {
-                let val = vm
-                    .get_vcpu_reg(vcpu_id, TvmCpuRegister::MmioStoreValue)
-                    .map_err(|_| MmioEmulationError::AccessingVCpuReg)?;
-                pci.emulate_config_write(offset, val, width, page_tracker, guest_id);
-            }
+        if write {
+            let val = vcpu.gpr(GprIndex::A0);
+            pci.emulate_config_write(offset, val, width, page_tracker, guest_id);
+        } else {
+            let val = pci.emulate_config_read(offset, width, page_tracker, guest_id);
+            vcpu.set_gpr(GprIndex::A0, val);
         }
 
         Ok(())

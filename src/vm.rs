@@ -42,6 +42,7 @@ pub enum Error {
     AttestationManagerFinalizeFailed(attestation::Error),
     MissingImsicAddress,
     AliasedImsicAddresses,
+    MissingBootCpu,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -316,6 +317,20 @@ impl<T: GuestStagePagingMode> Vm<T> {
     /// Completes intialization of the `Vm`. The caller must ensure that it is currently in the
     /// initializing state.
     pub fn finalize(&mut self) -> Result<()> {
+        // Enable the boot vCPU; we assume this is always vCPU 0.
+        //
+        // TODO: Should we allow a non-0 boot vCPU to be specified when creating the TVM?
+        self.vcpus
+            .power_on_vcpu(0)
+            .map_err(|_| Error::MissingBootCpu)?;
+        // Latch and measure the entry point of the boot vCPU.
+        let vcpu = self.vcpus.get_vcpu(0).map_err(|_| Error::MissingBootCpu)?;
+        {
+            let mut vcpu = vcpu.lock();
+            let (sepc, arg) = vcpu.latch_entry_args();
+            self.attestation_mgr.set_epc(sepc);
+            self.attestation_mgr.set_arg(arg);
+        }
         self.validate_imsic_addrs()?;
         self.attestation_mgr
             .finalize()
@@ -412,12 +427,10 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
         use TvmCpuRegister::*;
         match register {
             EntryPc => {
-                self.attestation_mgr().set_epc(value);
-                vcpu.set_sepc(value);
+                vcpu.set_entry_sepc(value);
             }
             EntryArg => {
-                self.attestation_mgr().set_arg(value);
-                vcpu.set_gpr(GprIndex::A1, value);
+                vcpu.set_entry_arg(value);
             }
             _ => {
                 return Err(EcallError::Sbi(SbiError::Denied));
@@ -433,11 +446,11 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
             .vcpus
             .get_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
+        let vcpu = vcpu.lock();
         use TvmCpuRegister::*;
         match register {
-            EntryPc => Ok(vcpu.get_sepc()),
-            EntryArg => Ok(vcpu.get_gpr(GprIndex::A1)),
+            EntryPc => Ok(vcpu.get_entry_sepc()),
+            EntryArg => Ok(vcpu.get_entry_arg()),
             _ => Err(EcallError::Sbi(SbiError::Denied)),
         }
     }
@@ -495,15 +508,6 @@ pub enum VmStateFinalized {}
 pub type FinalizedVm<'a, T> = VmRef<'a, T, VmStateFinalized>;
 
 impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
-    /// Makes the specified vCPU runnable.
-    fn power_on_vcpu(&self, vcpu_id: u64) -> EcallResult<()> {
-        self.vm()
-            .vcpus
-            .power_on_vcpu(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        Ok(())
-    }
-
     /// Sets the entry point of the specified vCPU and makes it runnable.
     fn start_vcpu(&self, vcpu_id: u64, start_addr: u64, opaque: u64) -> EcallResult<()> {
         let vcpu = self
@@ -1319,14 +1323,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         guest
             .finalize()
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        // Unwrap ok; we just finalized the VM.
-        let guest_vm = guest.as_finalized_vm().unwrap();
-
-        // Power on vCPU0 initially. Remaining vCPUs will get powered on by the VM itself via
-        // HSM SBI calls.
-        //
-        // TODO: Should the boot vCPU be specified explicilty?
-        guest_vm.power_on_vcpu(0)?;
         Ok(0)
     }
 
@@ -2089,11 +2085,6 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.
     pub fn run(&self, vcpu_id: u64) {
         let vm = self.inner.as_finalized_vm().unwrap();
-        // Always make vCPU0 the boot CPU.
-        if vcpu_id == 0 {
-            vm.power_on_vcpu(0).unwrap();
-        }
-
         loop {
             // Wait until this vCPU is ready to run.
             while !self.vcpu_is_runnable(vcpu_id) {

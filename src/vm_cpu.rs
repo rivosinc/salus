@@ -1049,11 +1049,6 @@ impl VmCpu {
         self.state.guest_regs.sepc = sepc;
     }
 
-    /// Gets the current `sepc` CSR value of the vCPU.
-    pub fn get_sepc(&mut self) -> u64 {
-        self.state.guest_regs.sepc
-    }
-
     /// Sets one of the vCPU's general-purpose registers.
     pub fn set_gpr(&mut self, gpr: GprIndex, value: u64) {
         self.state.guest_regs.gprs.set_reg(gpr, value);
@@ -1062,6 +1057,36 @@ impl VmCpu {
     /// Gets one of the vCPU's general purpose registers.
     pub fn get_gpr(&mut self, gpr: GprIndex) -> u64 {
         self.state.guest_regs.gprs.reg(gpr)
+    }
+
+    /// Sets the initial SEPC value in the vCPU's shared-state buffer.
+    pub fn set_entry_sepc(&mut self, sepc: u64) {
+        self.shared_area().as_ref().set_sepc(sepc);
+    }
+
+    /// Gets the initial SEPC value in the vCPU's shared-state buffer.
+    pub fn get_entry_sepc(&self) -> u64 {
+        self.shared_area().as_ref().sepc()
+    }
+
+    /// Sets the initial opaque boot argument (A1) in the vCPU's shared-state buffer.
+    pub fn set_entry_arg(&mut self, arg: u64) {
+        self.shared_area().as_ref().set_gpr(GprIndex::A1, arg);
+    }
+
+    /// Gets the initial opaque boot argument (A1) in the vCPU's shared-state buffer.
+    pub fn get_entry_arg(&self) -> u64 {
+        self.shared_area().as_ref().gpr(GprIndex::A1)
+    }
+
+    /// Latches the entry point of this vCPU from the shared-memory state buffer, returning the
+    /// (SEPC, A1) pair. Should only be called for the boot vCPU.
+    pub fn latch_entry_args(&mut self) -> (u64, u64) {
+        let sepc = self.get_entry_sepc();
+        let arg = self.get_entry_arg();
+        self.set_sepc(sepc);
+        self.set_gpr(GprIndex::A1, arg);
+        (sepc, arg)
     }
 
     /// Set one of the vCPU's virtual registers.

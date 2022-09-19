@@ -60,18 +60,6 @@ pub fn poweroff() -> ! {
     abort()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VmExitCause {
-    PowerOff(ResetType, ResetReason),
-    CpuStart(u64),
-    CpuStop,
-    ConfidentialPageFault(GuestPageAddr),
-    SharedPageFault(GuestPageAddr),
-    MmioPageFault(GuestPhysAddr, TvmMmioOpCode),
-    Wfi,
-    UnhandledTrap(u64),
-}
-
 /// A decoded MMIO operation.
 #[derive(Clone, Copy, Debug)]
 pub struct MmioOperation {
@@ -124,6 +112,19 @@ impl MmioOperation {
     }
 }
 
+/// Exit cause for a TVM from the TvmCpuRun ECALL.
+#[derive(Clone, Copy, Debug)]
+pub enum VmExitCause {
+    PowerOff(ResetType, ResetReason),
+    CpuStart(u64),
+    CpuStop,
+    ConfidentialPageFault(Exception, GuestPageAddr),
+    SharedPageFault(Exception, GuestPageAddr),
+    MmioPageFault(Exception, GuestPhysAddr, MmioOperation),
+    Wfi(DecodedInstruction),
+    UnhandledTrap(u64),
+}
+
 impl VmExitCause {
     fn code(&self) -> TvmCpuExitCode {
         use VmExitCause::*;
@@ -131,32 +132,32 @@ impl VmExitCause {
             PowerOff(_, _) => TvmCpuExitCode::SystemReset,
             CpuStart(_) => TvmCpuExitCode::HartStart,
             CpuStop => TvmCpuExitCode::HartStop,
-            ConfidentialPageFault(_) => TvmCpuExitCode::ConfidentialPageFault,
-            SharedPageFault(_) => TvmCpuExitCode::SharedPageFault,
-            MmioPageFault(_, _) => TvmCpuExitCode::MmioPageFault,
-            Wfi => TvmCpuExitCode::WaitForInterrupt,
+            ConfidentialPageFault(_, _) => TvmCpuExitCode::ConfidentialPageFault,
+            SharedPageFault(_, _) => TvmCpuExitCode::SharedPageFault,
+            MmioPageFault(_, _, _) => TvmCpuExitCode::MmioPageFault,
+            Wfi(_) => TvmCpuExitCode::WaitForInterrupt,
             UnhandledTrap(_) => TvmCpuExitCode::UnhandledException,
         }
     }
 
-    fn cause0(&self) -> Option<u64> {
+    pub fn cause0(&self) -> Option<u64> {
         use VmExitCause::*;
         match self {
             PowerOff(reset_type, _) => Some(*reset_type as u64),
             CpuStart(hart_id) => Some(*hart_id),
-            ConfidentialPageFault(addr) => Some(addr.bits()),
-            SharedPageFault(addr) => Some(addr.bits()),
-            MmioPageFault(addr, _) => Some(addr.bits()),
+            ConfidentialPageFault(_, addr) => Some(addr.bits()),
+            SharedPageFault(_, addr) => Some(addr.bits()),
+            MmioPageFault(_, addr, _) => Some(addr.bits()),
             UnhandledTrap(scause) => Some(*scause),
             _ => None,
         }
     }
 
-    fn cause1(&self) -> Option<u64> {
+    pub fn cause1(&self) -> Option<u64> {
         use VmExitCause::*;
         match self {
             PowerOff(_, reset_reason) => Some(*reset_reason as u64),
-            MmioPageFault(_, mmio_op) => Some(*mmio_op as u64),
+            MmioPageFault(_, _, mmio_op) => Some(mmio_op.opcode() as u64),
             _ => None,
         }
     }
@@ -200,7 +201,7 @@ impl From<SbiError> for EcallError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 enum EcallAction {
     LegacyOk,
     Unhandled,
@@ -221,8 +222,8 @@ impl From<EcallResult<u64>> for EcallAction {
                     // Unhandleable page faults or page faults in MMIO space just result in an error to
                     // the caller.
                     Unmapped(..) | Mmio(..) => Continue(SbiReturn::from(SbiError::InvalidAddress)),
-                    Confidential(addr) => Retry(VmExitCause::ConfidentialPageFault(addr)),
-                    Shared(addr) => Retry(VmExitCause::SharedPageFault(addr)),
+                    Confidential(e, addr) => Retry(VmExitCause::ConfidentialPageFault(e, addr)),
+                    Shared(e, addr) => Retry(VmExitCause::SharedPageFault(e, addr)),
                 }
             }
         }
@@ -589,7 +590,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 // may be resumed from WFI since, per the privileged spec, it's only
                 // a hint and it's perfectly valid for WFI to be a no-op.
                 active_vcpu.inc_sepc(inst.len() as u64);
-                ControlFlow::Break(VmExitCause::Wfi)
+                ControlFlow::Break(VmExitCause::Wfi(inst))
             }
             _ => {
                 active_vcpu.inject_exception(
@@ -663,13 +664,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                             .get_page_fault_cause(exception, fault_addr);
                         use PageFaultType::*;
                         match pf {
-                            Confidential(addr) => {
-                                break VmExitCause::ConfidentialPageFault(addr);
+                            Confidential(e, addr) => {
+                                break VmExitCause::ConfidentialPageFault(e, addr);
                             }
-                            Shared(addr) => {
-                                break VmExitCause::SharedPageFault(addr);
+                            Shared(e, addr) => {
+                                break VmExitCause::SharedPageFault(e, addr);
                             }
-                            Mmio(addr) => {
+                            Mmio(e, addr) => {
                                 // We need the faulting instruction for MMIO faults.
                                 use InstructionFetchError::*;
                                 let inst = match active_vcpu
@@ -706,11 +707,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                                     }
                                 };
 
-                                // Set up the vCPU to accept reads/writes to the virtual MMIO
-                                // registers by the host.
-                                active_vcpu.set_pending_mmio_op(mmio_op);
-
-                                break VmExitCause::MmioPageFault(addr, mmio_op.opcode());
+                                break VmExitCause::MmioPageFault(e, addr, mmio_op);
                             }
                             Unmapped(e) => {
                                 break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
@@ -754,14 +751,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 }
             };
 
-            // Populate the virtual trap cause registers so that the host can retrieve the detailed
-            // exit cause.
-            if let Some(cause0) = cause.cause0() {
-                active_vcpu.set_virt_reg(VirtualRegister::Cause0, cause0);
-            }
-            if let Some(cause1) = cause.cause1() {
-                active_vcpu.set_virt_reg(VirtualRegister::Cause1, cause1);
-            }
+            active_vcpu.set_exit_cause(cause);
             cause.code()
         };
 

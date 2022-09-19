@@ -473,12 +473,12 @@ impl<'a, T: GuestStagePagingMode> PciPagesMapper<'a, T> {
 pub enum PageFaultType {
     /// A page fault taken when accessing a confidential memory region. The host may handle these
     /// faults by inserting a confidential page into the guest's address space.
-    Confidential(GuestPageAddr),
+    Confidential(Exception, GuestPageAddr),
     /// A page fault taken when accessing a shared memory region. The host may handle these faults
     /// by inserting a page into the guest's address space.
-    Shared(GuestPageAddr),
+    Shared(Exception, GuestPageAddr),
     /// A page fault taken to an emulated MMIO page.
-    Mmio(GuestPhysAddr),
+    Mmio(Exception, GuestPhysAddr),
     /// A page fault taken when accessing memory outside of any valid region of guest physical address
     /// space. These faults are not resolvable.
     Unmapped(Exception),
@@ -661,14 +661,18 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         match self.vm_pages.inner.regions.find(fault_addr) {
             // Mask off the page offset for confidential and shared faults to avoid revealing more
             // information than necessary to the host.
-            Some(VmRegionType::Confidential) => {
-                Confidential(PageAddr::with_round_down(fault_addr, PageSize::Size4k))
-            }
-            Some(VmRegionType::Shared) => {
-                Shared(PageAddr::with_round_down(fault_addr, PageSize::Size4k))
-            }
+            Some(VmRegionType::Confidential) => Confidential(
+                exception,
+                PageAddr::with_round_down(fault_addr, PageSize::Size4k),
+            ),
+            Some(VmRegionType::Shared) => Shared(
+                exception,
+                PageAddr::with_round_down(fault_addr, PageSize::Size4k),
+            ),
             Some(VmRegionType::Mmio) => match exception {
-                Exception::GuestLoadPageFault | Exception::GuestStorePageFault => Mmio(fault_addr),
+                Exception::GuestLoadPageFault | Exception::GuestStorePageFault => {
+                    Mmio(exception, fault_addr)
+                }
                 _ => Unmapped(exception),
             },
             // TODO: Faults in an IMSIC region should report a separate fault type so that the host

@@ -18,8 +18,9 @@ extern crate test_workloads;
 
 #[cfg(target_feature = "v")]
 use core::arch::asm;
+use core::ptr;
 use device_tree::Fdt;
-use riscv_regs::{CSR, CSR_CYCLE};
+use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap, CSR, CSR_CYCLE};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
@@ -59,6 +60,98 @@ pub fn poweroff() -> ! {
 
 const PAGE_SIZE_4K: u64 = 4096;
 
+// Wrapper for a vCPU shared-memory state area with a layout provided by the TSM.
+//
+// TODO: Is there a way to unify this and VmCpuSharedStateRef?
+struct TvmCpuSharedMem<'a> {
+    addr: u64,
+    layout: &'a [sbi::RegisterSetLocation],
+}
+
+macro_rules! define_accessors {
+    ($regset:ident, $field:ident, $get:ident, $set:ident) => {
+        #[allow(dead_code)]
+        pub fn $get(&self) -> u64 {
+            // Safety: The caller guaranteed at construction that `self.adddr` points to a valid
+            // shared-memory state area for the layout provided by the TSM.
+            unsafe { ptr::addr_of!((*self.$regset()).$field).read_volatile() }
+        }
+
+        #[allow(dead_code)]
+        pub fn $set(&self, val: u64) {
+            // Safety: The caller guaranteed at construction that `self.adddr` points to a valid
+            // shared-memory state area for the layout provided by the TSM.
+            unsafe { ptr::addr_of_mut!((*self.$regset()).$field).write_volatile(val) };
+        }
+    };
+}
+
+impl<'a> TvmCpuSharedMem<'a> {
+    // Creates a new `TvmCpuSharedMem` starting at `addr` using the specified `layout`.
+    //
+    // Safety: `addr` must be aligned and point to a sufficiently large contiguous range of pages
+    // to hold the structure described by `layout`. This memory must remain valid and not be
+    // accessed for any other purpose for the lifetime of this structure.
+    unsafe fn new(addr: u64, layout: &'a [sbi::RegisterSetLocation]) -> Self {
+        Self { addr, layout }
+    }
+
+    // Returns the address of the given register set.
+    fn register_set_addr(&self, id: sbi::RegisterSetId) -> u64 {
+        let offset = self
+            .layout
+            .iter()
+            .find(|e| e.id == id as u16)
+            .map(|e| e.offset)
+            .expect("Failed to find register set");
+        self.addr + offset as u64
+    }
+
+    fn s_csrs(&self) -> *mut sbi::SupervisorCsrs {
+        self.register_set_addr(sbi::RegisterSetId::SupervisorCsrs) as *mut _
+    }
+
+    define_accessors! {s_csrs, sepc, sepc, set_sepc}
+    define_accessors! {s_csrs, scause, scause, set_scause}
+    define_accessors! {s_csrs, stval, stval, set_stval}
+
+    fn hs_csrs(&self) -> *mut sbi::HypervisorCsrs {
+        self.register_set_addr(sbi::RegisterSetId::HypervisorCsrs) as *mut _
+    }
+
+    define_accessors! {hs_csrs, htval, htval, set_htval}
+    define_accessors! {hs_csrs, htinst, htinst, set_htinst}
+
+    fn gprs(&self) -> *mut sbi::Gprs {
+        self.register_set_addr(sbi::RegisterSetId::Gprs) as *mut _
+    }
+
+    // Gets the general purpose register at `index`.
+    fn gpr(&self, index: GprIndex) -> u64 {
+        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
+        // construction that `self.addr` points to a valid shared-memory state area for the
+        // layout provided by the TSM.
+        unsafe { ptr::addr_of!((*self.gprs()).0[index as usize]).read_volatile() }
+    }
+
+    // Sets the general purpose register at `index`.
+    fn set_gpr(&self, index: GprIndex, val: u64) {
+        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
+        // construction that `self.addr` points to a valid shared-memory state area for the
+        // layout provided by the TSM.
+        unsafe { ptr::addr_of_mut!((*self.gprs()).0[index as usize]).write_volatile(val) };
+    }
+
+    // Returns the number of pages required for a shared-memory state area with the given layout.
+    fn required_pages(layout: &[sbi::RegisterSetLocation]) -> u64 {
+        let bytes = layout.iter().fold(0, |acc, e| {
+            let id = sbi::RegisterSetId::from_raw(e.id).expect("Invalid RegisterSetId");
+            acc + id.struct_size() as u64
+        });
+        (bytes + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K
+    }
+}
+
 // Safety: addr must point to `num_pages` of memory that isn't currently used by this program. This
 // memory will be overwritten and access will be removed.
 unsafe fn convert_pages(addr: u64, num_pages: u64) {
@@ -81,14 +174,6 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
             }
         }
     }
-}
-
-fn get_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister) -> u64 {
-    tsm::get_vcpu_reg(vmid, 0, register).expect("Tellus - TvmCpuGetRegister failed")
-}
-
-fn set_vcpu_reg(vmid: u64, register: sbi::TvmCpuRegister, value: u64) {
-    tsm::set_vcpu_reg(vmid, 0, register, value).expect("Tellus - TvmCpuGetRegister failed")
 }
 
 fn exercise_pmu_functionality() {
@@ -242,18 +327,54 @@ fn check_vectors() {
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
-    const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
-    const SHARED_PAGES_START_ADDRESS: u64 = 0x1_0000_0000;
-    // TODO: Get from device tree.
+    // The composite Tellus + Guest VM image has this layout in physical memory:
+    //
+    // +-------------------------+ 0x8020_0000
+    // | Tellus image            |
+    // +-------------------------+ +NUM_TELLUS_IMAGE_PAGES
+    // | Guest image             |
+    // +-------------------------+
+    //
+    // The guest VM's address space is constructed to look like this:
+    //
+    // +-------------------------+ 0x1000_0000
+    // | MMIO (4kB)              |
+    // |-------------------------|
+    // | <empty>                 |
+    // |-------------------------| 0x2800_0000
+    // | IMSIC (1MB)             |
+    // |-------------------------|
+    // | <empty>                 |
+    // |-------------------------| 0x8020_0000
+    // | Guest image             |
+    // |-------------------------| +NUM_GUEST_DATA_PAGES
+    // | Guest zero pages        |
+    // |-------------------------| +NUM_GUEST_ZERO_PAGES
+    // | <empty>                 |
+    // |-------------------------| 0x1_0000_0000
+    // | Shared pages            |
+    // +-------------------------+ +NUM_GUEST_SHARED_PAGES
+    //
+    // TODO: Some of these should be passed via device-tree, or should live in a common module
+    // somewhere.
+    const NUM_TELLUS_IMAGE_PAGES: u64 = 32;
+    const GUEST_MMIO_START_ADDRESS: u64 = 0x1000_8000;
+    const GUEST_MMIO_END_ADDRESS: u64 = GUEST_MMIO_START_ADDRESS + PAGE_SIZE_4K - 1;
     const IMSIC_START_ADDRESS: u64 = 0x2800_0000;
-    const NUM_VCPUS: u64 = 1;
-    const NUM_TEE_PTE_PAGES: u64 = 10;
+    const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
     const NUM_GUEST_DATA_PAGES: u64 = 160;
+    const GUEST_ZERO_PAGES_START_ADDRESS: u64 =
+        USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
     const NUM_GUEST_ZERO_PAGES: u64 = 10;
     const PRE_FAULTED_ZERO_PAGES: u64 = 2;
-    const NUM_GUEST_PAD_PAGES: u64 = 32;
+    const GUEST_ZERO_PAGES_END_ADDRESS: u64 =
+        GUEST_ZERO_PAGES_START_ADDRESS + NUM_GUEST_ZERO_PAGES * PAGE_SIZE_4K - 1;
+    const GUEST_SHARED_PAGES_START_ADDRESS: u64 = 0x1_0000_0000;
     const NUM_GUEST_SHARED_PAGES: u64 = 1;
-    const GUEST_MMIO_ADDRESS: u64 = 0x1000_8000;
+    const GUEST_SHARED_PAGES_END_ADDRESS: u64 =
+        GUEST_SHARED_PAGES_START_ADDRESS + NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K - 1;
+    const NUM_VCPUS: u64 = 1;
+    const NUM_TEE_PTE_PAGES: u64 = 10;
     // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
     const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
     const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
@@ -327,14 +448,21 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         .expect("Tellus - AddPageTablePages returned error");
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
+    // Get the layout of the shared-memory state area.
+    let mut vcpu_mem_layout = [sbi::RegisterSetLocation::default(); 4];
+    let entries = tsm::get_vcpu_mem_layout(vmid, &mut vcpu_mem_layout)
+        .expect("Tellus - TvmCpuGetMemLayout failed");
+    let num_vcpu_shared_pages = TvmCpuSharedMem::required_pages(&vcpu_mem_layout[..entries]);
+
     // Add vCPU0.
-    //
-    // TODO: Properly size and use vcpu_state once it's implemented on the TSM side.
     let vcpu_state_addr = next_page;
-    next_page += PAGE_SIZE_4K;
+    next_page += num_vcpu_shared_pages * PAGE_SIZE_4K;
     // Safety: We own `vcpu_state_addr` and will only access it through volatile reads/writes.
     unsafe { tsm::add_vcpu(vmid, 0, vcpu_state_addr) }
         .expect("Tellus - TvmCpuCreate returned error");
+    // Safety: `vcpu_state_addr` points to a sufficient number of pages to hold the requested layout
+    // and will not be used for any other purpose for the duration of `kernel_init()`.
+    let vcpu = unsafe { TvmCpuSharedMem::new(vcpu_state_addr, &vcpu_mem_layout[..entries]) };
 
     let has_aia = base::probe_sbi_extension(EXT_TEE_AIA).is_ok();
     // CPU0, guest interrupt file 0.
@@ -364,20 +492,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         println!("Platform doesn't support TEE AIA extension");
     }
 
-    /*
-        The Tellus composite image includes the guest image
-        |========== --------> 0x8020_0000 (Tellus _start)
-        | Tellus code and data
-        | ....
-        | .... (Zero padding)
-        | ....
-        |======== -------> 0x8020_0000 + 4096*NUM_GUEST_PAD_PAGES
-        | Guest code and data (Guest _start is mapped at GPA 0x8020_0000)
-        |
-        |=========================================
-    */
-
-    let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_GUEST_PAD_PAGES;
+    let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_TELLUS_IMAGE_PAGES;
     // Safety: Safe to make a slice out of the guest image as it is read-only and not used by this
     // program.
     let guest_image = unsafe {
@@ -424,7 +539,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         zero_pages_start,
         sbi::TsmPageType::Page4k,
         PRE_FAULTED_ZERO_PAGES,
-        USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K,
+        GUEST_ZERO_PAGES_START_ADDRESS,
     )
     .expect("Tellus - TvmAddZeroPages failed");
 
@@ -434,32 +549,24 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
     // Add a page of emualted MMIO.
-    tsm::add_emulated_mmio_region(vmid, GUEST_MMIO_ADDRESS, PAGE_SIZE_4K)
+    tsm::add_emulated_mmio_region(vmid, GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
         .expect("Tellus - TvmAddEmulatedMmioRegion failed");
 
     // Set the entry point.
-    tsm::set_vcpu_reg(vmid, 0, sbi::TvmCpuRegister::EntryPc, 0x8020_0000)
-        .expect("Tellus - TvmCpuSetRegister returned error");
-
+    vcpu.set_sepc(0x8020_0000);
     // Set the kernel_init() parameter.
-    tsm::set_vcpu_reg(
-        vmid,
-        0,
-        sbi::TvmCpuRegister::EntryArg,
-        SHARED_PAGES_START_ADDRESS,
-    )
-    .expect("Tellus - TvmCpuSetRegister returned error");
+    vcpu.set_gpr(GprIndex::A1, GUEST_SHARED_PAGES_START_ADDRESS);
 
     tsm::add_shared_memory_region(
         vmid,
-        SHARED_PAGES_START_ADDRESS,
+        GUEST_SHARED_PAGES_START_ADDRESS,
         NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
     )
     .expect("Tellus -- TvmAddSharedMemoryRegion returned error");
 
     tsm::add_shared_memory_region(
         vmid,
-        SHARED_PAGES_START_ADDRESS,
+        GUEST_SHARED_PAGES_START_ADDRESS,
         NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
     )
     .expect_err("Tellus -- TvmAddSharedMemoryRegion succeeded second time");
@@ -471,92 +578,122 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     store_into_vectors();
 
     loop {
-        // Safety: running a VM can't affect host memory as that memory isn't accessible to the VM.
-        match tsm::tvm_run(vmid, 0) {
-            Err(e) => {
-                println!("Tellus - Run returned error {:?}", e);
-                panic!("Could not run guest VM");
-            }
-            Ok(cause) => {
-                match cause {
-                    sbi::TvmCpuExitCode::ConfidentialPageFault => {
-                        let fault_addr = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
-                        // Fault in the page.
-                        if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
-                            panic!("Ran out of pages to fault in");
-                        }
-                        tsm::add_zero_pages(
-                            vmid,
-                            zero_pages_start + zero_pages_added * PAGE_SIZE_4K,
-                            sbi::TsmPageType::Page4k,
-                            1,
-                            fault_addr & !(PAGE_SIZE_4K - 1),
-                        )
-                        .expect("Tellus - TvmAddZeroPages failed");
-                        zero_pages_added += 1;
+        // Safety: running a VM will only write the `TvmCpuSharedState` struct that was registered
+        // with `add_vcpu()`.
+        tsm::tvm_run(vmid, 0).expect("Could not run guest VM");
+        let scause = vcpu.scause();
+        if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
+            use Exception::*;
+            match e {
+                VirtualSupervisorEnvCall => {
+                    // Read the ECALL arguments written to the A* regs in shared memory.
+                    let mut a_regs = [0u64; 8];
+                    for (i, reg) in a_regs.iter_mut().enumerate() {
+                        // Unwrap ok: A[0-7] are valid GPR indices.
+                        let index = GprIndex::from_raw(GprIndex::A0 as u32 + i as u32).unwrap();
+                        *reg = vcpu.gpr(index);
                     }
-                    sbi::TvmCpuExitCode::SharedPageFault => {
-                        // Figure out where the fault occurred.
-                        let fault_addr = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
-                        if fault_addr != SHARED_PAGES_START_ADDRESS {
-                            panic!("Unexpected shared page fault address at {fault_addr:x}");
+                    use SbiMessage::*;
+                    match SbiMessage::from_regs(&a_regs) {
+                        Ok(Reset(_)) => {
+                            println!("Guest VM requested shutdown");
+                            break;
                         }
-                        // Safety: shared_page_base points to pages that will only be accessed as
-                        // volatile from here on.
-                        unsafe {
-                            tsm::add_shared_pages(
-                                vmid,
-                                shared_page_base,
-                                sbi::TsmPageType::Page4k,
-                                NUM_GUEST_SHARED_PAGES,
-                                fault_addr,
-                            )
-                            .expect("Tellus -- TvmAddSharedPages failed");
+                        _ => {
+                            println!("Unexpected ECALL from guest");
+                            break;
                         }
-
-                        // Safety: We own the page, and are writing a value expected by the guest
-                        // Note that any access to shared pages must use volatile memory semantics
-                        // to guard against the compiler's no-aliasing assumptions.
-                        unsafe {
-                            core::ptr::write_volatile(
-                                shared_page_base as *mut u64,
-                                GUEST_SHARE_PING,
-                            );
-                        }
-                    }
-                    sbi::TvmCpuExitCode::MmioPageFault => {
-                        let fault_addr = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
-                        let op = sbi::TvmMmioOpCode::from_reg(get_vcpu_reg(
-                            vmid,
-                            sbi::TvmCpuRegister::ExitCause1,
-                        ))
-                        .unwrap();
-                        // Handle the load or store.
-                        use sbi::TvmMmioOpCode::*;
-                        match op {
-                            Load8 | Load8U | Load16 | Load16U | Load32 | Load32U | Load64 => {
-                                set_vcpu_reg(vmid, sbi::TvmCpuRegister::MmioLoadValue, 0x42);
-                            }
-                            Store8 | Store16 | Store32 | Store64 => {
-                                let val = get_vcpu_reg(vmid, sbi::TvmCpuRegister::MmioStoreValue);
-                                println!("Guest says: 0x{:x} at 0x{:x}", val, fault_addr);
-                            }
-                        }
-                    }
-                    sbi::TvmCpuExitCode::WaitForInterrupt => {
-                        continue;
-                    }
-                    sbi::TvmCpuExitCode::UnhandledException => {
-                        let cause0 = get_vcpu_reg(vmid, sbi::TvmCpuRegister::ExitCause0);
-                        println!("Tellus - Unhandled exception {:#x}", cause0);
-                        break;
-                    }
-                    _ => {
-                        println!("Tellus - Guest exited with status {:?}", cause);
-                        break;
                     }
                 }
+                GuestLoadPageFault | GuestStorePageFault => {
+                    let fault_addr = (vcpu.htval() << 2) | (vcpu.stval() & 0x3);
+                    match fault_addr {
+                        GUEST_ZERO_PAGES_START_ADDRESS..=GUEST_ZERO_PAGES_END_ADDRESS => {
+                            // Fault in the page.
+                            if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
+                                panic!("Ran out of pages to fault in");
+                            }
+                            tsm::add_zero_pages(
+                                vmid,
+                                zero_pages_start + zero_pages_added * PAGE_SIZE_4K,
+                                sbi::TsmPageType::Page4k,
+                                1,
+                                fault_addr & !(PAGE_SIZE_4K - 1),
+                            )
+                            .expect("Tellus - TvmAddZeroPages failed");
+                            zero_pages_added += 1;
+                        }
+                        GUEST_SHARED_PAGES_START_ADDRESS..=GUEST_SHARED_PAGES_END_ADDRESS => {
+                            // Safety: shared_page_base points to pages that will only be accessed
+                            // as volatile from here on.
+                            unsafe {
+                                tsm::add_shared_pages(
+                                    vmid,
+                                    shared_page_base,
+                                    sbi::TsmPageType::Page4k,
+                                    NUM_GUEST_SHARED_PAGES,
+                                    fault_addr & !(PAGE_SIZE_4K - 1),
+                                )
+                                .expect("Tellus -- TvmAddSharedPages failed");
+                            }
+
+                            // Safety: We own the page, and are writing a value expected by the
+                            // guest. Note that any access to shared pages must use volatile memory
+                            // semantics to guard against the compiler's no-aliasing assumptions.
+                            unsafe {
+                                core::ptr::write_volatile(
+                                    shared_page_base as *mut u64,
+                                    GUEST_SHARE_PING,
+                                );
+                            }
+                        }
+                        GUEST_MMIO_START_ADDRESS..=GUEST_MMIO_END_ADDRESS => {
+                            let inst = DecodedInstruction::from_raw(vcpu.htinst() as u32)
+                                .expect("Failed to decode faulting MMIO instruction")
+                                .instruction();
+                            // Handle the load or store; the source/dest register is always A0.
+                            use Instruction::*;
+                            match inst {
+                                Lb(_) | Lbu(_) | Lh(_) | Lhu(_) | Lw(_) | Lwu(_) | Ld(_) => {
+                                    vcpu.set_gpr(GprIndex::A0, 0x42);
+                                }
+                                Sb(_) | Sh(_) | Sw(_) | Sd(_) => {
+                                    let val = vcpu.gpr(GprIndex::A0);
+                                    println!("Guest says: 0x{:x} at 0x{:x}", val, fault_addr);
+                                }
+                                _ => {
+                                    println!("Unexpected guest MMIO instruction: {:?}", inst);
+                                    return;
+                                }
+                            }
+                        }
+                        _ => {
+                            println!("Unhandled guest page fault at 0x{:x}", fault_addr);
+                            break;
+                        }
+                    }
+                }
+                VirtualInstruction => {
+                    let inst = DecodedInstruction::from_raw(vcpu.stval() as u32)
+                        .expect("Failed to decode faulting virtual instruction")
+                        .instruction();
+                    use Instruction::*;
+                    match inst {
+                        Wfi => {
+                            continue;
+                        }
+                        _ => {
+                            println!("Unexpected guest virtual instruction: {:?}", inst);
+                        }
+                    }
+                }
+                _ => {
+                    println!("Guest VM terminated with exception {:?}", e);
+                    break;
+                }
             }
+        } else {
+            println!("Guest VM terminated with unexpected cause 0x{:x}", scause);
         }
     }
 

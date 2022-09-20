@@ -26,9 +26,8 @@ use sbi::{
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm_cpu::{
-    ActiveVmCpu, VirtualRegister, VmCpuExit, VmCpuSharedArea, VmCpuSharedState,
-    VmCpuSharedStateRef, VmCpuStatus, VmCpus, VM_CPU_BYTES, VM_CPU_SHARED_LAYOUT,
-    VM_CPU_SHARED_PAGES,
+    ActiveVmCpu, VmCpuExit, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpuStatus,
+    VmCpus, VM_CPU_BYTES, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -50,6 +49,22 @@ pub type Result<T> = core::result::Result<T, Error>;
 // What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
+
+/// Possible MMIO instructions.
+#[derive(Clone, Copy, Debug)]
+pub enum TvmMmioOpCode {
+    Load64,
+    Load32,
+    Load32U,
+    Load16,
+    Load16U,
+    Load8,
+    Load8U,
+    Store64,
+    Store32,
+    Store16,
+    Store8,
+}
 
 /// A decoded MMIO operation.
 #[derive(Clone, Copy, Debug)]
@@ -114,44 +129,6 @@ pub enum VmExitCause {
     MmioPageFault(Exception, GuestPhysAddr, MmioOperation),
     Wfi(DecodedInstruction),
     UnhandledTrap(u64),
-}
-
-impl VmExitCause {
-    fn code(&self) -> TvmCpuExitCode {
-        use VmExitCause::*;
-        match self {
-            PowerOff(_, _) => TvmCpuExitCode::SystemReset,
-            CpuStart(_) => TvmCpuExitCode::HartStart,
-            CpuStop => TvmCpuExitCode::HartStop,
-            ConfidentialPageFault(_, _) => TvmCpuExitCode::ConfidentialPageFault,
-            SharedPageFault(_, _) => TvmCpuExitCode::SharedPageFault,
-            MmioPageFault(_, _, _) => TvmCpuExitCode::MmioPageFault,
-            Wfi(_) => TvmCpuExitCode::WaitForInterrupt,
-            UnhandledTrap(_) => TvmCpuExitCode::UnhandledException,
-        }
-    }
-
-    pub fn cause0(&self) -> Option<u64> {
-        use VmExitCause::*;
-        match self {
-            PowerOff(reset_type, _) => Some(*reset_type as u64),
-            CpuStart(hart_id) => Some(*hart_id),
-            ConfidentialPageFault(_, addr) => Some(addr.bits()),
-            SharedPageFault(_, addr) => Some(addr.bits()),
-            MmioPageFault(_, addr, _) => Some(addr.bits()),
-            UnhandledTrap(scause) => Some(*scause),
-            _ => None,
-        }
-    }
-
-    pub fn cause1(&self) -> Option<u64> {
-        use VmExitCause::*;
-        match self {
-            PowerOff(_, reset_reason) => Some(*reset_reason as u64),
-            MmioPageFault(_, _, mmio_op) => Some(mmio_op.opcode() as u64),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -406,45 +383,6 @@ pub enum VmStateInitializing {}
 pub type InitializingVm<'a, T> = VmRef<'a, T, VmStateInitializing>;
 
 impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
-    /// Sets a vCPU register.
-    fn set_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister, value: u64) -> EcallResult<()> {
-        let vcpu = self
-            .vm()
-            .vcpus
-            .get_vcpu(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
-        use TvmCpuRegister::*;
-        match register {
-            EntryPc => {
-                vcpu.set_entry_sepc(value);
-            }
-            EntryArg => {
-                vcpu.set_entry_arg(value);
-            }
-            _ => {
-                return Err(EcallError::Sbi(SbiError::Denied));
-            }
-        };
-        Ok(())
-    }
-
-    /// Gets a vCPU register.
-    fn get_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister) -> EcallResult<u64> {
-        let vcpu = self
-            .vm()
-            .vcpus
-            .get_vcpu(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let vcpu = vcpu.lock();
-        use TvmCpuRegister::*;
-        match register {
-            EntryPc => Ok(vcpu.get_entry_sepc()),
-            EntryArg => Ok(vcpu.get_entry_arg()),
-            _ => Err(EcallError::Sbi(SbiError::Denied)),
-        }
-    }
-
     /// Adds a vCPU to this VM.
     fn add_vcpu(&self, vcpu_id: u64, shared_area: VmCpuSharedArea) -> EcallResult<()> {
         let vcpu = self
@@ -528,42 +466,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(status as u64)
     }
 
-    /// Sets a vCPU register.
-    fn set_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister, value: u64) -> EcallResult<()> {
-        let vcpu = self
-            .vm()
-            .vcpus
-            .get_vcpu(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
-        use TvmCpuRegister::*;
-        match register {
-            MmioLoadValue => vcpu.set_virt_reg(VirtualRegister::MmioLoad, value),
-            _ => {
-                return Err(EcallError::Sbi(SbiError::Denied));
-            }
-        };
-        Ok(())
-    }
-
-    /// Gets a vCPU register.
-    fn get_vcpu_reg(&self, vcpu_id: u64, register: TvmCpuRegister) -> EcallResult<u64> {
-        let vcpu = self
-            .vm()
-            .vcpus
-            .get_vcpu(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
-        use TvmCpuRegister::*;
-        match register {
-            ExitCause0 => Ok(vcpu.get_virt_reg(VirtualRegister::Cause0)),
-            ExitCause1 => Ok(vcpu.get_virt_reg(VirtualRegister::Cause1)),
-            MmioLoadValue => Ok(vcpu.get_virt_reg(VirtualRegister::MmioLoad)),
-            MmioStoreValue => Ok(vcpu.get_virt_reg(VirtualRegister::MmioStore)),
-            _ => Err(EcallError::Sbi(SbiError::Denied)),
-        }
-    }
-
     fn process_decoded_instruction(
         active_vcpu: &mut ActiveVmCpu<T>,
         inst: DecodedInstruction,
@@ -597,18 +499,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     }
 
     /// Run this guest until an unhandled exit is encountered.
-    fn run_vcpu(
-        &self,
-        vcpu_id: u64,
-        parent_vcpu: Option<&mut ActiveVmCpu<T>>,
-    ) -> EcallResult<TvmCpuExitCode> {
+    fn run_vcpu(&self, vcpu_id: u64, parent_vcpu: Option<&mut ActiveVmCpu<T>>) -> EcallResult<()> {
         // Take the vCPU out of self.vcpus, giving us exclusive ownership.
         let mut vcpu = self
             .vm()
             .vcpus
             .take_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let exit_code = {
+        let cause = {
             let mut locked_vcpu = vcpu.lock();
             // Activate this vCPU, saving the state of our parent vCPU.
             let mut active_vcpu = locked_vcpu
@@ -746,16 +644,16 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             };
 
             active_vcpu.set_exit_cause(cause);
-            cause.code()
+            cause
         };
 
         // Disable the vCPU if the exit cause indicates it is no longer runnable.
-        use TvmCpuExitCode::*;
-        if matches!(exit_code, SystemReset | HartStop | UnhandledException) {
+        use VmExitCause::*;
+        if matches!(cause, PowerOff(..) | CpuStop | UnhandledTrap(..)) {
             vcpu.power_off();
         }
 
-        Ok(exit_code)
+        Ok(())
     }
 
     /// Handles ecalls from the guest.
@@ -1047,19 +945,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self
                 .guest_add_vcpu(guest_id, vcpu_id, shared_page_addr)
                 .into(),
-            TvmCpuSetRegister {
-                guest_id,
-                vcpu_id,
-                register,
-                value,
-            } => self
-                .guest_set_vcpu_reg(guest_id, vcpu_id, register, value)
-                .into(),
-            TvmCpuGetRegister {
-                guest_id,
-                vcpu_id,
-                register,
-            } => self.guest_get_vcpu_reg(guest_id, vcpu_id, register).into(),
             TvmAddSharedMemoryRegion {
                 guest_id,
                 guest_addr,
@@ -1369,45 +1254,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    /// Sets a register in a guest VM's vCPU.
-    fn guest_set_vcpu_reg(
-        &self,
-        guest_id: u64,
-        vcpu_id: u64,
-        register: TvmCpuRegister,
-        value: u64,
-    ) -> EcallResult<u64> {
-        let guest = self.guest_by_id(guest_id)?;
-        if let Some(vm) = guest.as_initializing_vm() {
-            vm.set_vcpu_reg(vcpu_id, register, value)?;
-        } else if let Some(vm) = guest.as_finalized_vm() {
-            vm.set_vcpu_reg(vcpu_id, register, value)?;
-        } else {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
-        Ok(0)
-    }
-
-    /// Gets a register in a guest VM's vCPU.
-    fn guest_get_vcpu_reg(
-        &self,
-        guest_id: u64,
-        vcpu_id: u64,
-        register: TvmCpuRegister,
-    ) -> EcallResult<u64> {
-        let guest = self.guest_by_id(guest_id)?;
-        let value = {
-            if let Some(vm) = guest.as_initializing_vm() {
-                vm.get_vcpu_reg(vcpu_id, register)
-            } else if let Some(vm) = guest.as_finalized_vm() {
-                vm.get_vcpu_reg(vcpu_id, register)
-            } else {
-                Err(EcallError::Sbi(SbiError::InvalidParam))
-            }
-        }?;
-        Ok(value)
-    }
-
     /// Runs a guest VM's vCPU.
     fn guest_run_vcpu(
         &self,
@@ -1419,8 +1265,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let guest_vm = guest
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let exit_code = guest_vm.run_vcpu(vcpu_id, Some(active_vcpu))?;
-        Ok(exit_code as u64)
+        guest_vm.run_vcpu(vcpu_id, Some(active_vcpu))?;
+        Ok(0)
     }
 
     fn guest_add_page_table_pages(

@@ -4,9 +4,7 @@
 
 use crate::TeeFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};
-use crate::{
-    RegisterSetLocation, TsmInfo, TsmPageType, TvmCpuExitCode, TvmCpuRegister, TvmCreateParams,
-};
+use crate::{RegisterSetLocation, TsmInfo, TsmPageType, TvmCreateParams};
 
 /// Initiates a TSM fence on this CPU.
 pub fn initiate_fence() -> Result<()> {
@@ -121,13 +119,15 @@ pub fn tvm_destroy(vmid: u64) -> Result<()> {
 }
 
 /// Runs the given vcpu of the specified TVM.
-pub fn tvm_run(vmid: u64, vcpu_id: u64) -> Result<TvmCpuExitCode> {
+pub fn tvm_run(vmid: u64, vcpu_id: u64) -> Result<()> {
     let msg = SbiMessage::Tee(TvmCpuRun {
         guest_id: vmid,
         vcpu_id,
     });
-    // Safety: running a VM can't affect host memory as that memory isn't accessible to the VM.
-    unsafe { ecall_send(&msg).and_then(TvmCpuExitCode::from_reg) }
+    // Safety: running a VM will only write to the TvmCpuSharedState struct registered in
+    // add_vcpu().
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
 }
 
 /// Adds pages to be used for page table entries of the given vmid.
@@ -171,30 +171,6 @@ pub unsafe fn add_vcpu(vmid: u64, vcpu_id: u64, shared_page_addr: u64) -> Result
         shared_page_addr,
     });
     ecall_send(&msg)?;
-    Ok(())
-}
-
-/// Returns the value of the specified `register` for the given vcpu.
-pub fn get_vcpu_reg(vmid: u64, vcpu_id: u64, register: TvmCpuRegister) -> Result<u64> {
-    let msg = SbiMessage::Tee(TvmCpuGetRegister {
-        guest_id: vmid,
-        vcpu_id,
-        register,
-    });
-    // Safety: `TvmCpuGetRegister` doesn't access our memory.
-    unsafe { ecall_send(&msg) }
-}
-
-/// Sets the value of the specified `register` for the given vcpu.
-pub fn set_vcpu_reg(vmid: u64, vcpu_id: u64, register: TvmCpuRegister, value: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmCpuSetRegister {
-        guest_id: vmid,
-        vcpu_id,
-        register,
-        value,
-    });
-    // Safety: `TvmCpuSetRegister` doesn't access our memory.
-    unsafe { ecall_send(&msg) }?;
     Ok(())
 }
 

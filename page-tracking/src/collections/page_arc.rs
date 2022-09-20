@@ -71,7 +71,7 @@ impl<T> PageArc<T> {
         // Safety: PageArcInner is repr(C) with data as the first field, therefore a pointer to data
         // is a page-aligned and properly initialized pointer to T.
         let boxed =
-            unsafe { PageBox::from_raw(Self::as_ptr(&this) as *mut T, page_size, page_tracker) };
+            unsafe { PageBox::from_raw(Self::as_ptr(&this) as *mut T, page_size, 1, page_tracker) };
         core::mem::forget(this);
         Ok(boxed)
     }

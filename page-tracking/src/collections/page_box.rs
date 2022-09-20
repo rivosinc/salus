@@ -6,7 +6,9 @@ use core::fmt::{self, Display};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::{borrow, cmp};
-use riscv_pages::{InternalClean, InternalDirty, Page, PageAddr, PageSize, PhysPage, RawAddr};
+use riscv_pages::{
+    InternalClean, InternalDirty, Page, PageAddr, PageSize, PhysPage, RawAddr, SequentialPages,
+};
 
 use crate::PageTracker;
 
@@ -49,52 +51,58 @@ use crate::PageTracker;
 pub struct PageBox<T> {
     ptr: NonNull<T>,
     page_size: PageSize,
+    page_count: u64,
     page_tracker: PageTracker,
 }
 
 impl<T> PageBox<T> {
-    /// Creates a `PageBox` that wraps the given data using `page` to store it, returning it to its
+    /// Creates a `PageBox` that wraps the given data using `pages` to store it, returning it to its
     /// previous owner on `drop()` using `page_tracker`.
-    pub fn new_with(data: T, page: Page<InternalClean>, page_tracker: PageTracker) -> Self {
-        let ptr = page.addr().bits() as *mut T;
+    pub fn new_with(
+        data: T,
+        pages: SequentialPages<InternalClean>,
+        page_tracker: PageTracker,
+    ) -> Self {
+        let ptr = pages.base().bits() as *mut T;
         assert!(!ptr.is_null()); // Explicitly ban pages at zero address.
         unsafe {
             // Safe as the memory is totally owned and T fits in this page.
-            assert!(core::mem::size_of::<T>() <= page.size() as usize);
+            assert!(core::mem::size_of::<T>() <= pages.length_bytes() as usize);
             core::ptr::write(ptr, data);
         }
         Self {
             ptr: NonNull::new(ptr).unwrap(),
-            page_size: page.size(),
+            page_size: pages.page_size(),
+            page_count: pages.len(),
             page_tracker,
         }
     }
 
-    /// Consumes the `PageBox` and returns the page that was used to hold the data.
-    pub fn to_page(mut self) -> Page<InternalDirty> {
-        let page = unsafe {
+    /// Consumes the `PageBox` and returns the pages that were used to hold the data.
+    pub fn to_pages(mut self) -> SequentialPages<InternalDirty> {
+        let pages = unsafe {
             // Safe because self must have ownership of the page it was built with and the contained
             // data is aligned and owned so can be dropped.
             core::ptr::drop_in_place(self.ptr.as_ptr());
             // Safe because we're consuming this PageBox.
-            self.take_page()
+            self.take_pages()
         };
         core::mem::forget(self);
-        page
+        pages
     }
 
     /// Returns the contained data and the page that was used to hold it.
-    pub fn into_inner(mut self) -> (T, Page<InternalDirty>) {
-        let (data, page) = unsafe {
-            // Safe because self must have ownership of the page it was built with and the contained
+    pub fn into_inner(mut self) -> (T, SequentialPages<InternalDirty>) {
+        let (data, pages) = unsafe {
+            // Safe because self must have ownership of the pages it was built with and the contained
             // data is aligned and owned so can be read with ptr::read.
             let data = core::ptr::read(self.ptr.as_ptr());
             // Safe because we've extracted the contained data and we're consuming this PageBox.
-            let page = self.take_page();
-            (data, page)
+            let pages = self.take_pages();
+            (data, pages)
         };
         core::mem::forget(self);
-        (data, page)
+        (data, pages)
     }
 
     /// Leaks the backing page for the box and returns a static reference to the contained data.
@@ -111,17 +119,21 @@ impl<T> PageBox<T> {
     ///
     /// The caller must guarantee that `ptr`:
     ///  - points to a properly initialized `T`
-    ///  - points to a uniquely-owned page of size `page_size`
+    ///  - points to a uniquely-owned contiguous `page_count` pages of size `page_size`
     ///  - is aligned to `page_size`
+    ///  - the backing pages can contain `T`
     pub unsafe fn from_raw(
         ptr: *mut T,
         page_size: PageSize,
+        page_count: u64,
         page_tracker: PageTracker,
     ) -> PageBox<T> {
         assert!(page_size.is_aligned(ptr as u64));
+        assert!(core::mem::size_of::<T>() as u64 <= page_size as u64 * page_count);
         Self {
             ptr: NonNull::new(ptr).unwrap(),
             page_size,
+            page_count,
             page_tracker,
         }
     }
@@ -133,11 +145,14 @@ impl<T> PageBox<T> {
     /// This method semantically takes ownership of the backing storage of this container without
     /// preventing further usage. It is the caller's responsibility to ensure that this `PageBox`
     /// is never used again.
-    unsafe fn take_page(&mut self) -> Page<InternalDirty> {
-        Page::new_with_size(
+    unsafe fn take_pages(&mut self) -> SequentialPages<InternalDirty> {
+        // Unwrap ok, the backing pages must've been contiguous.
+        SequentialPages::from_mem_range(
             PageAddr::new(RawAddr::supervisor(self.ptr.as_ptr() as u64)).unwrap(),
             self.page_size,
+            self.page_count,
         )
+        .unwrap()
     }
 }
 
@@ -162,10 +177,11 @@ impl<T> Drop for PageBox<T> {
         }
 
         // Safe because we're in drop() and this PageBox can no longer be used.
-        let page = unsafe { self.take_page() };
-
-        // Unwrap ok: we have unique ownership of the page so we must be able to release it.
-        self.page_tracker.release_page(page).unwrap();
+        let pages = unsafe { self.take_pages() };
+        for p in pages.into_iter() {
+            // Unwrap ok: we have unique ownership of the page so we must be able to release it.
+            self.page_tracker.release_page(p).unwrap();
+        }
     }
 }
 
@@ -274,51 +290,76 @@ mod tests {
 
     #[test]
     fn to_inner() {
+        const TEST_PAGE_COUNT: usize = 3;
+        const TEST_BYTES: usize = TEST_PAGE_COUNT * PageSize::Size4k as usize;
         let (page_tracker, mut pages) = PageTracker::new_in_test();
-        let assigned_page = pages
-            .by_ref()
-            .take(1)
-            .map(|p| {
+        let assigned_pages =
+            SequentialPages::from_pages(pages.by_ref().take(TEST_PAGE_COUNT).map(|p| {
                 page_tracker
                     .assign_page_for_internal_state(p, PageOwnerId::host())
                     .unwrap()
-            })
-            .next()
+            }))
             .unwrap();
 
-        let pb = PageBox::new_with([5u8; 128], assigned_page, page_tracker.clone());
-        let (vals, dirty_page) = pb.into_inner();
-        assert_eq!(vals, [5u8; 128]);
+        let pb = PageBox::new_with([5u8; TEST_BYTES], assigned_pages, page_tracker.clone());
+        let (vals, dirty_pages) = pb.into_inner();
+        assert_eq!(vals, [5u8; TEST_BYTES]);
 
-        assert!(page_tracker.release_page(dirty_page).is_ok());
+        assert_eq!(dirty_pages.len(), TEST_PAGE_COUNT as u64);
+        for p in dirty_pages.into_iter() {
+            assert!(page_tracker.release_page(p).is_ok());
+        }
     }
 
     #[test]
     fn page_drop() {
+        const TEST_PAGE_COUNT: usize = 3;
+        const TEST_BYTES: usize = TEST_PAGE_COUNT * PageSize::Size4k as usize;
         let (page_tracker, mut pages) = PageTracker::new_in_test();
-        let assigned_page = pages
-            .by_ref()
-            .take(1)
-            .map(|p| {
+        let assigned_pages =
+            SequentialPages::from_pages(pages.by_ref().take(TEST_PAGE_COUNT).map(|p| {
                 page_tracker
                     .assign_page_for_internal_state(p, PageOwnerId::host())
                     .unwrap()
-            })
-            .next()
+            }))
             .unwrap();
-        let addr = assigned_page.addr();
+
+        let mut addr = assigned_pages.base();
+        let page_size = assigned_pages.page_size();
+        let page_count = assigned_pages.len();
+        assert_eq!(page_count, TEST_PAGE_COUNT as u64);
 
         {
-            let _pb = PageBox::new_with([5u8; 128], assigned_page, page_tracker.clone());
+            let _pb = PageBox::new_with([5u8; TEST_BYTES], assigned_pages, page_tracker.clone());
         }
 
-        // Should go back to hypervisor-owned after the PageBox was dropped.
-        assert!(page_tracker
-            .get_converted_page::<Page<ConvertedDirty>>(
-                addr,
-                PageOwnerId::hypervisor(),
-                TlbVersion::new()
-            )
-            .is_ok());
+        for _pi in 0..TEST_PAGE_COUNT {
+            // Should go back to hypervisor-owned after the PageBox was dropped.
+            assert!(page_tracker
+                .get_converted_page::<Page<ConvertedDirty>>(
+                    addr,
+                    PageOwnerId::hypervisor(),
+                    TlbVersion::new()
+                )
+                .is_ok());
+            addr = addr.checked_add_pages_with_size(1, page_size).unwrap();
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn not_enough_backing_pages_should_fail() {
+        const TEST_PAGE_COUNT: usize = 3;
+        const TEST_BYTES: usize = 1 + TEST_PAGE_COUNT * PageSize::Size4k as usize /* 1 byte bigger than backing pages */;
+        let (page_tracker, mut pages) = PageTracker::new_in_test();
+        let assigned_pages =
+            SequentialPages::from_pages(pages.by_ref().take(TEST_PAGE_COUNT).map(|p| {
+                page_tracker
+                    .assign_page_for_internal_state(p, PageOwnerId::host())
+                    .unwrap()
+            }))
+            .unwrap();
+
+        let _pb = PageBox::new_with([5u8; TEST_BYTES], assigned_pages, page_tracker.clone());
     }
 }

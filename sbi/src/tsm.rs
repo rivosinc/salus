@@ -5,172 +5,6 @@
 use crate::error::*;
 use crate::function::*;
 
-/// The exit cause for a TVM vCPU returned from TvmCpuRun. Certain exit causes may be accompanied
-/// by more detailed cause information (e.g. faulting address) in which case that information can
-/// be retrieved by accessing the virtual `ExitCause` registers of the vCPU.
-#[repr(u64)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TvmCpuExitCode {
-    /// The vCPU exited due to an interrupt directed at the host.
-    HostInterrupt = 0,
-
-    /// The vCPU made a sbi_system_reset() call. The reset type and cuase are stored in the
-    /// `ExitCause0` and `ExitCause1` registers, respectively. All vCPUs of the TVM are no longer
-    /// runnable.
-    SystemReset = 1,
-
-    /// The vCPU made a sbi_hart_start() call. The target hart ID is stored in `ExitCause0` and the
-    /// vCPU matching the hart ID is made runnable.
-    HartStart = 2,
-
-    /// The vCPU made a sbi_hart_stop() call. The vCPU is no longer runnable.
-    HartStop = 3,
-
-    /// The vCPU encountered a guest page fault in a confidential memory region. The faulting guest
-    /// physical address is stored in `ExitCause0`. The vCPU will resume at the faulting instruction
-    /// the next time it is run.
-    ///
-    /// TODO: Do we need to differentiate between the type (fetch/load/store) of page fault?
-    ConfidentialPageFault = 4,
-
-    /// The vCPU encountered a guest page fault in an emulated MMIO memory region. The faulting
-    /// guest physical address is stored in `ExitCause0` and the type of memory operation the vCPU
-    /// was attempting to execute is stored in `ExitCause1`. The `MmioLoadValue` and `MmioStoreValue`
-    /// registers are used to complete an emulated MMIO access; see `TvmMmioOpCode` for more details.
-    /// The vCPU resumes at the following instruction the next time it is run.
-    MmioPageFault = 5,
-
-    /// The vCPU executed a WFI instruction.
-    WaitForInterrupt = 6,
-
-    /// The vCPU encountered an exception that the TSM cannot handle internally and that cannot
-    /// be safely delegated to the host. The value of the SCAUSE register is stored in `ExitCause0`.
-    /// The vCPU is no longer runnable.
-    UnhandledException = 7,
-
-    /// The vCPU encountered a guest page fault in a shared memory region. The faulting guest
-    /// physical address is stored in `ExitCause0`. The vCPU will resume at the faulting instruction
-    /// the next time it is run.
-    ///
-    /// TODO: Do we need to differentiate between the type (fetch/load/store) of page fault?
-    SharedPageFault = 8,
-}
-
-impl TvmCpuExitCode {
-    /// Creates a `TvmCpuExitCode` from the raw value as returned in A1.
-    pub fn from_reg(a1: u64) -> Result<Self> {
-        use TvmCpuExitCode::*;
-        match a1 {
-            0 => Ok(HostInterrupt),
-            1 => Ok(SystemReset),
-            2 => Ok(HartStart),
-            3 => Ok(HartStop),
-            4 => Ok(ConfidentialPageFault),
-            5 => Ok(MmioPageFault),
-            6 => Ok(WaitForInterrupt),
-            7 => Ok(UnhandledException),
-            8 => Ok(SharedPageFault),
-            _ => Err(Error::InvalidParam),
-        }
-    }
-}
-
-/// List of possible operations a TVM's vCPU can make when accessing an emulated MMIO region.
-#[repr(u64)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TvmMmioOpCode {
-    /// Loads a 64-bit value. The result of the emulated MMIO load can be written to `MmioLoadValue`.
-    Load64 = 0,
-    /// Loads and sign-extends a 32-bit value.
-    Load32 = 1,
-    /// Loads and zero-extends a 32-bit value.
-    Load32U = 2,
-    /// Loads and sign-extends a 16-bit value.
-    Load16 = 3,
-    /// Loads and zero-extends a 16-bit value.
-    Load16U = 4,
-    /// Loads and sign-extends an 8-bit value.
-    Load8 = 5,
-    /// Loads and zero-extends an 8-bit value.
-    Load8U = 6,
-
-    /// Stores a 64-bit value. The value to be stored by the emulated MMIO store can be read from
-    /// `MmioStoreValue`.
-    Store64 = 7,
-    /// Stores a 32-bit value.
-    Store32 = 8,
-    /// Stores a 16-bit value.
-    Store16 = 9,
-    /// Stores an 8-bit value.
-    Store8 = 10,
-    // TODO: AMO instructions?
-}
-
-impl TvmMmioOpCode {
-    /// Returns the `TvmMmioOpCode` specified by the raw value.
-    pub fn from_reg(cause1: u64) -> Result<Self> {
-        use TvmMmioOpCode::*;
-        match cause1 {
-            0 => Ok(Load64),
-            1 => Ok(Load32),
-            2 => Ok(Load32U),
-            3 => Ok(Load16),
-            4 => Ok(Load16U),
-            5 => Ok(Load8),
-            6 => Ok(Load8U),
-            7 => Ok(Store64),
-            8 => Ok(Store32),
-            9 => Ok(Store16),
-            10 => Ok(Store8),
-            _ => Err(Error::InvalidParam),
-        }
-    }
-}
-
-/// List of registers that can be read or written for a TVM's vCPU.
-#[repr(u64)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TvmCpuRegister {
-    /// Entry point (initial SEPC) of the boot CPU of a TVM. Read-write prior to TVM finalization;
-    /// inaccessible after the TVM has started.
-    EntryPc = 0,
-
-    /// Boot argument (stored in A1, usually a pointer to a device-tree) of the boot CPU of a TVM.
-    /// Read-write prior to TVM finalization; inaccessible after the TVM has started.
-    EntryArg = 1,
-
-    /// Detailed TVM CPU exit cause register. Read-only, and only accessible after the TVM has
-    /// started.
-    ExitCause0 = 2,
-
-    /// An additional exit cause register with the same access properties as `ExitCause0`.
-    ExitCause1 = 3,
-
-    /// Value used to complete an emulated MMIO load by a TVM CPU. Read-write, and only accessible
-    /// after the TVM has started.
-    MmioLoadValue = 4,
-
-    /// Value stored by a TVM CPU to an emulated MMIO region. Read-only, and only accessible after
-    /// the TVM has started.
-    MmioStoreValue = 5,
-}
-
-impl TvmCpuRegister {
-    /// Returns the cpu register specified by the index or an error if the index is out of range.
-    pub fn from_reg(a2: u64) -> Result<Self> {
-        use TvmCpuRegister::*;
-        match a2 {
-            0 => Ok(EntryPc),
-            1 => Ok(EntryArg),
-            2 => Ok(ExitCause0),
-            3 => Ok(ExitCause1),
-            4 => Ok(MmioLoadValue),
-            5 => Ok(MmioStoreValue),
-            _ => Err(Error::InvalidParam),
-        }
-    }
-}
-
 /// Identifies a register set in the vCPU shared-memory state area layout.
 ///
 /// Register sets are roughly grouped by the specification or extension that defines them.
@@ -474,22 +308,6 @@ pub enum TeeFunction {
         /// a2 = page address of shared state structure
         shared_page_addr: u64,
     },
-    /// Sets the register identified by `register` to `value` in the vCPU with ID `vcpu_id`. See
-    /// the defintion of `TvmCpuRegister` for details on which registers are writeable and when.
-    ///
-    /// TODO: Remove once communication of vCPU state over shared memory is implemented.
-    ///
-    /// a6 = 9
-    TvmCpuSetRegister {
-        /// a0 = guest id
-        guest_id: u64,
-        /// a1 = vCPU id
-        vcpu_id: u64,
-        /// a2 = register id
-        register: TvmCpuRegister,
-        /// a3 = register value
-        value: u64,
-    },
     /// Writes up to `len` bytes of the `TsmInfo` structure to the non-confidential physical address
     /// `dest_addr`. Returns the number of bytes written.
     ///
@@ -560,21 +378,6 @@ pub enum TeeFunction {
     ///
     /// a6 = 15
     TsmLocalFence,
-    /// Gets the register identified by `register` in the vCPU with ID `vcpu_id`. See the definition
-    /// of `TvmCpuRegister` for details on which registers are readable and when. The contents of
-    /// the specified register are returned upon success.
-    ///
-    /// TODO: Remove once communication of vCPU state over shared memory is implemented.
-    ///
-    /// a6 = 16
-    TvmCpuGetRegister {
-        /// a0 = guest id
-        guest_id: u64,
-        /// a1 = vCPU id
-        vcpu_id: u64,
-        /// a2 = register id
-        register: TvmCpuRegister,
-    },
     /// Marks the specified range of guest physical address space as reserved for the mapping of
     /// confidential memory. The region is initially unpopulated. Pages of confidential memory may
     /// be inserted with `TvmAddZeroPages` and `TvmAddMeasuredPages`. Both `guest_addr` and `len`
@@ -669,12 +472,6 @@ impl TeeFunction {
                 vcpu_id: args[1],
                 shared_page_addr: args[2],
             }),
-            9 => Ok(TvmCpuSetRegister {
-                guest_id: args[0],
-                vcpu_id: args[1],
-                register: TvmCpuRegister::from_reg(args[2])?,
-                value: args[3],
-            }),
             10 => Ok(TsmGetInfo {
                 dest_addr: args[0],
                 len: args[1],
@@ -699,11 +496,6 @@ impl TeeFunction {
             }),
             14 => Ok(TsmInitiateFence),
             15 => Ok(TsmLocalFence),
-            16 => Ok(TvmCpuGetRegister {
-                guest_id: args[0],
-                vcpu_id: args[1],
-                register: TvmCpuRegister::from_reg(args[2])?,
-            }),
             17 => Ok(TvmAddConfidentialMemoryRegion {
                 guest_id: args[0],
                 guest_addr: args[1],
@@ -767,12 +559,6 @@ impl SbiFunction for TeeFunction {
                 vcpu_id: _,
                 shared_page_addr: _,
             } => 8,
-            TvmCpuSetRegister {
-                guest_id: _,
-                vcpu_id: _,
-                register: _,
-                value: _,
-            } => 9,
             TsmGetInfo {
                 dest_addr: _,
                 len: _,
@@ -797,11 +583,6 @@ impl SbiFunction for TeeFunction {
             } => 13,
             TsmInitiateFence => 14,
             TsmLocalFence => 15,
-            TvmCpuGetRegister {
-                guest_id: _,
-                vcpu_id: _,
-                register: _,
-            } => 16,
             TvmAddConfidentialMemoryRegion {
                 guest_id: _,
                 guest_addr: _,
@@ -862,12 +643,6 @@ impl SbiFunction for TeeFunction {
                 vcpu_id: _,
                 shared_page_addr: _,
             } => *guest_id,
-            TvmCpuSetRegister {
-                guest_id,
-                vcpu_id: _,
-                register: _,
-                value: _,
-            } => *guest_id,
             TsmGetInfo { dest_addr, len: _ } => *dest_addr,
             TvmAddMeasuredPages {
                 guest_id,
@@ -887,11 +662,6 @@ impl SbiFunction for TeeFunction {
                 page_type: _,
                 num_pages: _,
             } => *page_addr,
-            TvmCpuGetRegister {
-                guest_id,
-                vcpu_id: _,
-                register: _,
-            } => *guest_id,
             TvmAddConfidentialMemoryRegion {
                 guest_id,
                 guest_addr: _,
@@ -951,12 +721,6 @@ impl SbiFunction for TeeFunction {
                 vcpu_id,
                 shared_page_addr: _,
             } => *vcpu_id,
-            TvmCpuSetRegister {
-                guest_id: _,
-                vcpu_id,
-                register: _,
-                value: _,
-            } => *vcpu_id,
             TsmGetInfo { dest_addr: _, len } => *len,
             TvmAddMeasuredPages {
                 guest_id: _,
@@ -976,11 +740,6 @@ impl SbiFunction for TeeFunction {
                 page_type,
                 num_pages: _,
             } => *page_type as u64,
-            TvmCpuGetRegister {
-                guest_id: _,
-                vcpu_id,
-                register: _,
-            } => *vcpu_id,
             TvmAddConfidentialMemoryRegion {
                 guest_id: _,
                 guest_addr,
@@ -1032,12 +791,6 @@ impl SbiFunction for TeeFunction {
                 vcpu_id: _,
                 shared_page_addr,
             } => *shared_page_addr,
-            TvmCpuSetRegister {
-                guest_id: _,
-                vcpu_id: _,
-                register,
-                value: _,
-            } => *register as u64,
             TvmAddMeasuredPages {
                 guest_id: _,
                 src_addr: _,
@@ -1056,11 +809,6 @@ impl SbiFunction for TeeFunction {
                 page_type: _,
                 num_pages,
             } => *num_pages,
-            TvmCpuGetRegister {
-                guest_id: _,
-                vcpu_id: _,
-                register,
-            } => *register as u64,
             TvmAddConfidentialMemoryRegion {
                 guest_id: _,
                 guest_addr: _,
@@ -1102,12 +850,6 @@ impl SbiFunction for TeeFunction {
                 num_pages,
                 guest_addr: _,
             } => *num_pages,
-            TvmCpuSetRegister {
-                guest_id: _,
-                vcpu_id: _,
-                register: _,
-                value,
-            } => *value,
             TvmAddMeasuredPages {
                 guest_id: _,
                 src_addr: _,

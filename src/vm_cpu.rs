@@ -13,11 +13,11 @@ use riscv_pages::{
     GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, PageSize, RawAddr, SequentialPages,
 };
 use riscv_regs::*;
-use sbi::{self, SbiMessage, SbiReturnType, TvmMmioOpCode};
+use sbi::{self, SbiMessage, SbiReturnType};
 use spin::{Mutex, Once, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
-use crate::vm::{MmioOperation, VmExitCause};
+use crate::vm::{MmioOperation, TvmMmioOpCode, VmExitCause};
 use crate::vm_id::VmId;
 use crate::vm_pages::{ActiveVmPages, FinalizedVmPages, PinnedPages};
 use crate::vm_pmu::VmPmuState;
@@ -750,13 +750,6 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 self.shared_area().update_with_unhandled_exit(scause);
             }
         };
-
-        if let Some(val) = exit.cause0() {
-            self.set_virt_reg(VirtualRegister::Cause0, val);
-        }
-        if let Some(val) = exit.cause1() {
-            self.set_virt_reg(VirtualRegister::Cause1, val);
-        }
     }
 
     /// Delivers the given exception to the vCPU, setting up its register state to handle the trap
@@ -967,32 +960,11 @@ struct CurrentCpu {
     tlb_version: TlbVersion,
 }
 
-/// Virtual CPU registers that are used to store vCPU state accessible to the VM's host without
-/// giving the host access to internal register state.
-pub enum VirtualRegister {
-    /// 1st detailed exit cause register. Usage depends on the exit code.
-    Cause0,
-    /// 2nd detailed exit cause register. Usage depends on the exit code.
-    Cause1,
-    /// Result of an emulated MMIO load.
-    MmioLoad,
-    /// Source value of an emulated MMIO store.
-    MmioStore,
-}
-
-/// Virtual register state of a vCPU.
-#[derive(Default)]
-struct VirtualRegisters {
-    cause0: u64,
-    cause1: u64,
-}
-
 /// Represents a single virtual CPU of a VM.
 pub struct VmCpu {
     state: VmCpuState,
     // Initialized in add_vcpu().
     shared_area: Once<VmCpuSharedArea>,
-    virt_regs: VirtualRegisters,
     imsic_location: Option<ImsicLocation>,
     pmu_state: VmPmuState,
     current_cpu: Option<CurrentCpu>,
@@ -1034,7 +1006,6 @@ impl VmCpu {
         Self {
             state,
             shared_area: Once::new(),
-            virt_regs: VirtualRegisters::default(),
             imsic_location: None,
             current_cpu: None,
             pending_mmio_op: None,
@@ -1059,64 +1030,15 @@ impl VmCpu {
         self.state.guest_regs.gprs.reg(gpr)
     }
 
-    /// Sets the initial SEPC value in the vCPU's shared-state buffer.
-    pub fn set_entry_sepc(&mut self, sepc: u64) {
-        self.shared_area().as_ref().set_sepc(sepc);
-    }
-
-    /// Gets the initial SEPC value in the vCPU's shared-state buffer.
-    pub fn get_entry_sepc(&self) -> u64 {
-        self.shared_area().as_ref().sepc()
-    }
-
-    /// Sets the initial opaque boot argument (A1) in the vCPU's shared-state buffer.
-    pub fn set_entry_arg(&mut self, arg: u64) {
-        self.shared_area().as_ref().set_gpr(GprIndex::A1, arg);
-    }
-
-    /// Gets the initial opaque boot argument (A1) in the vCPU's shared-state buffer.
-    pub fn get_entry_arg(&self) -> u64 {
-        self.shared_area().as_ref().gpr(GprIndex::A1)
-    }
-
     /// Latches the entry point of this vCPU from the shared-memory state buffer, returning the
     /// (SEPC, A1) pair. Should only be called for the boot vCPU.
     pub fn latch_entry_args(&mut self) -> (u64, u64) {
-        let sepc = self.get_entry_sepc();
-        let arg = self.get_entry_arg();
+        let shared = self.shared_area().as_ref();
+        let sepc = shared.sepc();
+        let arg = shared.gpr(GprIndex::A1);
         self.set_sepc(sepc);
         self.set_gpr(GprIndex::A1, arg);
         (sepc, arg)
-    }
-
-    /// Set one of the vCPU's virtual registers.
-    pub fn set_virt_reg(&mut self, reg: VirtualRegister, value: u64) {
-        use VirtualRegister::*;
-        match reg {
-            Cause0 => {
-                self.virt_regs.cause0 = value;
-            }
-            Cause1 => {
-                self.virt_regs.cause1 = value;
-            }
-            MmioLoad | MmioStore => {
-                // MMIO loads/stores are always from A0 in the shared-state buffer.
-                self.shared_area().as_ref().set_gpr(GprIndex::A0, value);
-            }
-        }
-    }
-
-    /// Gets one of the vCPU's virtual registers.
-    pub fn get_virt_reg(&mut self, reg: VirtualRegister) -> u64 {
-        use VirtualRegister::*;
-        match reg {
-            Cause0 => self.virt_regs.cause0,
-            Cause1 => self.virt_regs.cause1,
-            MmioLoad | MmioStore => {
-                // MMIO loads/stores are always from A0 in the shared-state buffer.
-                self.shared_area().as_ref().gpr(GprIndex::A0)
-            }
-        }
     }
 
     /// Sets the location of this vCPU's virtualized IMSIC.

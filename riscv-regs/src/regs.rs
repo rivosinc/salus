@@ -17,8 +17,12 @@ pub struct GeneralPurposeRegisters([u64; 32]);
 pub enum GprIndex {
     Zero = 0,
     RA,
+    SP,
     GP,
     TP,
+    T0,
+    T1,
+    T2,
     S0,
     S1,
     A0,
@@ -39,14 +43,10 @@ pub enum GprIndex {
     S9,
     S10,
     S11,
-    T0,
-    T1,
-    T2,
     T3,
     T4,
     T5,
     T6,
-    SP,
 }
 
 impl GprIndex {

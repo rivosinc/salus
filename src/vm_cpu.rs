@@ -18,7 +18,7 @@ use riscv_regs::{
     Exception, FloatingPointRegisters, GeneralPurposeRegisters, GprIndex, LocalRegisterCopy,
     PrivilegeLevel, Readable, Trap, Writeable, CSR,
 };
-use sbi::{SbiMessage, SbiReturnType, TvmMmioOpCode};
+use sbi::{self, SbiMessage, SbiReturnType, TvmMmioOpCode};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
@@ -286,6 +286,33 @@ global_asm!(
     guest_vl =     const guest_csr_offset!(vl),
     sstatus_vs_enable = const sstatus::vs::Initial.value,
 );
+
+/// Defines the structure of the vCPU shared-memory state area.
+#[derive(Default)]
+pub struct VmCpuSharedState {
+    gprs: sbi::Gprs,
+    s_csrs: sbi::SupervisorCsrs,
+    hs_csrs: sbi::HypervisorCsrs,
+}
+
+/// Defines the layout of `VmCpuSharedState` in terms of `RegisterSetLocation`s.
+pub const VM_CPU_SHARED_LAYOUT: &[sbi::RegisterSetLocation] = &[
+    sbi::RegisterSetLocation {
+        id: sbi::RegisterSetId::Gprs as u16,
+        version: 0,
+        offset: offset_of!(VmCpuSharedState, gprs) as u32,
+    },
+    sbi::RegisterSetLocation {
+        id: sbi::RegisterSetId::SupervisorCsrs as u16,
+        version: 0,
+        offset: offset_of!(VmCpuSharedState, s_csrs) as u32,
+    },
+    sbi::RegisterSetLocation {
+        id: sbi::RegisterSetId::HypervisorCsrs as u16,
+        version: 0,
+        offset: offset_of!(VmCpuSharedState, hs_csrs) as u32,
+    },
+];
 
 /// Identifies the exit cause for a vCPU.
 pub enum VmCpuExit {

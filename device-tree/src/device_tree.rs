@@ -17,7 +17,7 @@ use crate::{DeviceTreeError, DeviceTreeResult, Fdt};
 fn copy_string_with_null_termination(dest: &mut Vec<u8>, src: &str) -> DeviceTreeResult<()> {
     let has_null = src.ends_with('\0');
     dest.truncate(0);
-    dest.try_reserve(src.len() + if has_null { 0 } else { 1 })?;
+    dest.try_reserve(src.len() + usize::from(!has_null))?;
     dest.splice(0.., src.bytes());
     if !has_null {
         dest.push(b'\0');

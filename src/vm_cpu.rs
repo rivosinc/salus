@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::global_asm;
-use core::{marker::PhantomData, mem::size_of, ops::Deref, ops::DerefMut, ptr, ptr::NonNull};
+use core::{marker::PhantomData, mem::size_of, ops::Deref, ptr, ptr::NonNull};
 use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, CpuId, CpuInfo};
 use memoffset::offset_of;
 use page_tracking::collections::PageVec;
@@ -576,60 +576,58 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         // TODO: Enforce that the vCPU has an assigned interrupt file before running.
 
         let has_vector = CpuInfo::get().has_vector();
-
+        let vcpu_state = &mut self.vcpu.state;
         if has_vector {
-            restore_vector(&mut self.state);
+            restore_vector(vcpu_state);
         }
 
         unsafe {
             // Safe since _restore_fp() only reads within the bounds of the floating point
             // register state in VmCpuState.
-            _restore_fp(&mut self.state);
+            _restore_fp(vcpu_state);
 
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table.
-            _run_guest(&mut self.state);
+            _run_guest(vcpu_state);
         }
 
         // Save off the trap information.
-        self.state.trap_csrs.scause = CSR.scause.get();
-        self.state.trap_csrs.stval = CSR.stval.get();
-        self.state.trap_csrs.htval = CSR.htval.get();
-        self.state.trap_csrs.htinst = CSR.htinst.get();
+        vcpu_state.trap_csrs.scause = CSR.scause.get();
+        vcpu_state.trap_csrs.stval = CSR.stval.get();
+        vcpu_state.trap_csrs.htval = CSR.htval.get();
+        vcpu_state.trap_csrs.htinst = CSR.htinst.get();
 
         // Check if FPU state needs to be saved.
-        let mut sstatus = LocalRegisterCopy::new(self.state.guest_regs.sstatus);
+        let mut sstatus = LocalRegisterCopy::new(vcpu_state.guest_regs.sstatus);
         if sstatus.matches_all(sstatus::fs::Dirty) {
             // Safe since _save_fp() only writes within the bounds of the floating point register
             // state in VmCpuState.
-            unsafe { _save_fp(&mut self.state) };
-
+            unsafe { _save_fp(vcpu_state) };
             sstatus.modify(sstatus::fs::Clean);
-            self.state.guest_regs.sstatus = sstatus.get();
         }
-
         // Check if vector state needs to be saved
         if has_vector && sstatus.matches_all(sstatus::vs::Dirty) {
-            save_vector(&mut self.state);
+            save_vector(vcpu_state);
             sstatus.modify(sstatus::vs::Clean)
         }
+        vcpu_state.guest_regs.sstatus = sstatus.get();
 
         // Determine the exit cause from the trap CSRs.
         use Exception::*;
-        match Trap::from_scause(self.state.trap_csrs.scause).unwrap() {
+        match Trap::from_scause(vcpu_state.trap_csrs.scause).unwrap() {
             Trap::Exception(VirtualSupervisorEnvCall) => {
-                let sbi_msg = SbiMessage::from_regs(self.state.guest_regs.gprs.a_regs()).ok();
+                let sbi_msg = SbiMessage::from_regs(vcpu_state.guest_regs.gprs.a_regs()).ok();
                 VmCpuExit::Ecall(sbi_msg)
             }
             Trap::Exception(GuestInstructionPageFault)
             | Trap::Exception(GuestLoadPageFault)
             | Trap::Exception(GuestStorePageFault) => {
                 let fault_addr = RawAddr::guest(
-                    self.state.trap_csrs.htval << 2 | self.state.trap_csrs.stval & 0x03,
-                    self.guest_id,
+                    vcpu_state.trap_csrs.htval << 2 | vcpu_state.trap_csrs.stval & 0x03,
+                    self.vcpu.guest_id,
                 );
                 VmCpuExit::PageFault {
-                    exception: Exception::from_scause_reason(self.state.trap_csrs.scause).unwrap(),
+                    exception: Exception::from_scause_reason(vcpu_state.trap_csrs.scause).unwrap(),
                     fault_addr,
                     // Note that this address is not necessarily guest virtual as the guest may or
                     // may not have 1st-stage translation enabled in VSATP. We still use GuestVirtAddr
@@ -637,15 +635,15 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     // TEECALL) which are exclusively guest-physical. Furthermore we only access guest
                     // instructions via the HLVX instruction, which will take the VSATP translation
                     // mode into account.
-                    fault_pc: RawAddr::guest_virt(self.state.guest_regs.sepc, self.guest_id),
-                    priv_level: PrivilegeLevel::from_hstatus(self.state.guest_regs.hstatus),
+                    fault_pc: RawAddr::guest_virt(vcpu_state.guest_regs.sepc, self.vcpu.guest_id),
+                    priv_level: PrivilegeLevel::from_hstatus(vcpu_state.guest_regs.hstatus),
                 }
             }
             Trap::Exception(VirtualInstruction) => {
                 VmCpuExit::VirtualInstruction {
                     // See above re: this address being guest virtual.
-                    fault_pc: RawAddr::guest_virt(self.state.guest_regs.sepc, self.guest_id),
-                    priv_level: PrivilegeLevel::from_hstatus(self.state.guest_regs.hstatus),
+                    fault_pc: RawAddr::guest_virt(vcpu_state.guest_regs.sepc, self.vcpu.guest_id),
+                    priv_level: PrivilegeLevel::from_hstatus(vcpu_state.guest_regs.hstatus),
                 }
             }
             Trap::Exception(e) => {
@@ -656,13 +654,13 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     // medeleg, in which case firmware may send it our way instead.
                     VmCpuExit::DelegatedException {
                         exception: e,
-                        stval: self.state.trap_csrs.stval,
+                        stval: vcpu_state.trap_csrs.stval,
                     }
                 } else {
-                    VmCpuExit::Other(self.state.trap_csrs.clone())
+                    VmCpuExit::Other(vcpu_state.trap_csrs.clone())
                 }
             }
-            _ => VmCpuExit::Other(self.state.trap_csrs.clone()),
+            _ => VmCpuExit::Other(vcpu_state.trap_csrs.clone()),
         }
     }
 
@@ -697,11 +695,12 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     /// Sets up this vCPU's shared-memory state and virtual registers for reporting `exit` back
     /// to this vCPU's host.
     pub fn set_exit_cause(&mut self, exit: VmExitCause) {
+        let shared = self.vcpu.shared_area();
         use VmExitCause::*;
         match exit {
             PowerOff(reset_type, reason) => {
                 let msg = SbiMessage::Reset(sbi::ResetFunction::Reset { reset_type, reason });
-                self.shared_area().update_with_ecall_exit(msg);
+                shared.update_with_ecall_exit(msg);
             }
             CpuStart(hart_id) => {
                 let msg = SbiMessage::HartState(sbi::StateFunction::HartStart {
@@ -709,22 +708,20 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     start_addr: 0,
                     opaque: 0,
                 });
-                self.shared_area().update_with_ecall_exit(msg);
+                shared.update_with_ecall_exit(msg);
             }
             CpuStop => {
                 let msg = SbiMessage::HartState(sbi::StateFunction::HartStop);
-                self.shared_area().update_with_ecall_exit(msg);
+                shared.update_with_ecall_exit(msg);
             }
             ConfidentialPageFault(exception, page_addr) => {
-                self.shared_area()
-                    .update_with_pf_exit(exception, page_addr.into());
+                shared.update_with_pf_exit(exception, page_addr.into());
             }
             SharedPageFault(exception, page_addr) => {
-                self.shared_area()
-                    .update_with_pf_exit(exception, page_addr.into());
+                shared.update_with_pf_exit(exception, page_addr.into());
             }
             MmioPageFault(exception, addr, mmio_op) => {
-                self.shared_area().update_with_pf_exit(exception, addr);
+                shared.update_with_pf_exit(exception, addr);
 
                 // The MMIO instruction is transformed as an ordinary load/store to/from A0, so
                 // update A0 with the value the vCPU wants to store.
@@ -736,18 +733,17 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     Store64 => self.get_gpr(mmio_op.register()),
                     _ => 0,
                 };
-                let shared = self.shared_area().as_ref();
-                shared.set_htinst(Self::mmio_op_to_htinst(mmio_op));
-                shared.set_gpr(GprIndex::A0, val);
+                shared.as_ref().set_htinst(Self::mmio_op_to_htinst(mmio_op));
+                shared.as_ref().set_gpr(GprIndex::A0, val);
 
                 // We'll complete a load instruction the next time this vCPU is run.
-                self.pending_mmio_op = Some(mmio_op);
+                self.vcpu.pending_mmio_op = Some(mmio_op);
             }
             Wfi(inst) => {
-                self.shared_area().update_with_vi_exit(inst.raw() as u64);
+                shared.update_with_vi_exit(inst.raw() as u64);
             }
             UnhandledTrap(scause) => {
-                self.shared_area().update_with_unhandled_exit(scause);
+                shared.update_with_unhandled_exit(scause);
             }
         };
     }
@@ -762,21 +758,31 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         }
         vsstatus.modify(sstatus::sie.val(0));
         let sstatus =
-            LocalRegisterCopy::<u64, sstatus::Register>::new(self.state.guest_regs.sstatus);
+            LocalRegisterCopy::<u64, sstatus::Register>::new(self.vcpu.state.guest_regs.sstatus);
         vsstatus.modify(sstatus::spp.val(sstatus.read(sstatus::spp)));
         CSR.vsstatus.set(vsstatus.get());
 
         CSR.vscause.set(Trap::Exception(exception).to_scause());
         CSR.vstval.set(stval);
-        CSR.vsepc.set(self.state.guest_regs.sepc);
+        CSR.vsepc.set(self.vcpu.state.guest_regs.sepc);
 
         // Redirect the vCPU to its STVEC on entry.
-        self.state.guest_regs.sepc = CSR.vstvec.get();
+        self.vcpu.state.guest_regs.sepc = CSR.vstvec.get();
+    }
+
+    /// Gets one of the vCPU's general purpose registers.
+    pub fn get_gpr(&self, gpr: GprIndex) -> u64 {
+        self.vcpu.state.guest_regs.gprs.reg(gpr)
+    }
+
+    /// Sets one of the vCPU's general-purpose registers.
+    pub fn set_gpr(&mut self, gpr: GprIndex, value: u64) {
+        self.vcpu.state.guest_regs.gprs.set_reg(gpr, value);
     }
 
     /// Increments the current `sepc` CSR value by `value`.
     pub fn inc_sepc(&mut self, value: u64) {
-        self.state.guest_regs.sepc += value;
+        self.vcpu.state.guest_regs.sepc += value;
     }
 
     /// Increments SEPC and Updates A0/A1 with the result of an SBI call.
@@ -809,12 +815,17 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         self.restore_vm_pages();
     }
 
+    /// Returns a mutable reference to this active vCPU's PMU state.
+    pub fn pmu(&mut self) -> &mut VmPmuState {
+        &mut self.vcpu.pmu_state
+    }
+
     // Completes any pending MMIO operation for this CPU.
     fn complete_pending_mmio_op(&mut self) {
         // Complete any pending load operations. The host is expected to have written the value
         // to complete the load to A0.
-        if let Some(mmio_op) = self.pending_mmio_op {
-            let val = self.shared_area().as_ref().gpr(GprIndex::A0);
+        if let Some(mmio_op) = self.vcpu.pending_mmio_op {
+            let val = self.vcpu.shared_area().as_ref().gpr(GprIndex::A0);
             use TvmMmioOpCode::*;
             // Write the value to the actual destination register.
             match mmio_op.opcode() {
@@ -842,8 +853,8 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 _ => (),
             };
 
-            self.pending_mmio_op = None;
-            self.shared_area().as_ref().set_gpr(GprIndex::A0, 0);
+            self.vcpu.pending_mmio_op = None;
+            self.vcpu.shared_area().as_ref().set_gpr(GprIndex::A0, 0);
 
             // Advance SEPC past the faulting instruction.
             self.inc_sepc(mmio_op.len() as u64);
@@ -852,34 +863,36 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     // Saves the VS-level CSRs.
     fn save_vcpu_csrs(&mut self) {
-        self.state.guest_vcpu_csrs.htimedelta = CSR.htimedelta.get();
-        self.state.guest_vcpu_csrs.vsstatus = CSR.vsstatus.get();
-        self.state.guest_vcpu_csrs.vsie = CSR.vsie.get();
-        self.state.guest_vcpu_csrs.vstvec = CSR.vstvec.get();
-        self.state.guest_vcpu_csrs.vsscratch = CSR.vsscratch.get();
-        self.state.guest_vcpu_csrs.vsepc = CSR.vsepc.get();
-        self.state.guest_vcpu_csrs.vscause = CSR.vscause.get();
-        self.state.guest_vcpu_csrs.vstval = CSR.vstval.get();
-        self.state.guest_vcpu_csrs.vsatp = CSR.vsatp.get();
+        let vcpu_csrs = &mut self.vcpu.state.guest_vcpu_csrs;
+        vcpu_csrs.htimedelta = CSR.htimedelta.get();
+        vcpu_csrs.vsstatus = CSR.vsstatus.get();
+        vcpu_csrs.vsie = CSR.vsie.get();
+        vcpu_csrs.vstvec = CSR.vstvec.get();
+        vcpu_csrs.vsscratch = CSR.vsscratch.get();
+        vcpu_csrs.vsepc = CSR.vsepc.get();
+        vcpu_csrs.vscause = CSR.vscause.get();
+        vcpu_csrs.vstval = CSR.vstval.get();
+        vcpu_csrs.vsatp = CSR.vsatp.get();
         if CpuInfo::get().has_sstc() {
-            self.state.guest_vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
+            vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
         }
     }
 
     // Restores the VS-level CSRs.
     fn restore_vcpu_csrs(&mut self) {
+        let vcpu_csrs = &self.vcpu.state.guest_vcpu_csrs;
         // Safe as these don't take effect until V=1.
-        CSR.htimedelta.set(self.state.guest_vcpu_csrs.htimedelta);
-        CSR.vsstatus.set(self.state.guest_vcpu_csrs.vsstatus);
-        CSR.vsie.set(self.state.guest_vcpu_csrs.vsie);
-        CSR.vstvec.set(self.state.guest_vcpu_csrs.vstvec);
-        CSR.vsscratch.set(self.state.guest_vcpu_csrs.vsscratch);
-        CSR.vsepc.set(self.state.guest_vcpu_csrs.vsepc);
-        CSR.vscause.set(self.state.guest_vcpu_csrs.vscause);
-        CSR.vstval.set(self.state.guest_vcpu_csrs.vstval);
-        CSR.vsatp.set(self.state.guest_vcpu_csrs.vsatp);
+        CSR.htimedelta.set(vcpu_csrs.htimedelta);
+        CSR.vsstatus.set(vcpu_csrs.vsstatus);
+        CSR.vsie.set(vcpu_csrs.vsie);
+        CSR.vstvec.set(vcpu_csrs.vstvec);
+        CSR.vsscratch.set(vcpu_csrs.vsscratch);
+        CSR.vsepc.set(vcpu_csrs.vsepc);
+        CSR.vscause.set(vcpu_csrs.vscause);
+        CSR.vstval.set(vcpu_csrs.vstval);
+        CSR.vsatp.set(vcpu_csrs.vsatp);
         if CpuInfo::get().has_sstc() {
-            CSR.vstimecmp.set(self.state.guest_vcpu_csrs.vstimecmp);
+            CSR.vstimecmp.set(vcpu_csrs.vstimecmp);
         }
     }
 
@@ -890,7 +903,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let mut vmid_tracker = this_cpu.vmid_tracker_mut();
         // If VMIDs rolled over next_vmid() will do the necessary flush and the previous TLB version
         // doesn't matter.
-        let (vmid, prev_tlb_version) = match self.current_cpu {
+        let (vmid, prev_tlb_version) = match self.vcpu.current_cpu {
             Some(ref c) if c.vmid.version() == vmid_tracker.current_version() => {
                 (c.vmid, Some(c.tlb_version))
             }
@@ -901,11 +914,11 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let active_pages = self.vm_pages.enter_with_vmid(vmid, prev_tlb_version);
 
         // Update our per-CPU state in case VMID or TLB version changed.
-        if let Some(ref mut c) = self.current_cpu {
+        if let Some(ref mut c) = self.vcpu.current_cpu {
             c.vmid = vmid;
             c.tlb_version = active_pages.tlb_version();
         } else {
-            self.current_cpu = Some(CurrentCpu {
+            self.vcpu.current_cpu = Some(CurrentCpu {
                 cpu: this_cpu.cpu_id(),
                 vmid,
                 tlb_version: active_pages.tlb_version(),
@@ -920,27 +933,13 @@ impl<T: GuestStagePagingMode> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
     fn save(&mut self) {
         self.active_pages = None;
         self.save_vcpu_csrs();
-        self.pmu_state.save_counters();
+        self.pmu().save_counters();
     }
 
     fn restore(&mut self) {
         self.restore_vcpu_csrs();
         self.restore_vm_pages();
-        self.pmu_state.restore_counters();
-    }
-}
-
-impl<T: GuestStagePagingMode> Deref for ActiveVmCpu<'_, '_, '_, T> {
-    type Target = VmCpu;
-
-    fn deref(&self) -> &VmCpu {
-        self.vcpu
-    }
-}
-
-impl<T: GuestStagePagingMode> DerefMut for ActiveVmCpu<'_, '_, '_, T> {
-    fn deref_mut(&mut self) -> &mut VmCpu {
-        self.vcpu
+        self.pmu().restore_counters();
     }
 }
 
@@ -976,9 +975,12 @@ pub struct VmCpu {
 }
 
 impl VmCpu {
-    /// Creates a new vCPU.
-    pub fn new(guest_id: PageOwnerId) -> Self {
+    // Creates a new vCPU.
+    fn new(vcpu_id: u64, guest_id: PageOwnerId) -> Self {
         let mut state = VmCpuState::default();
+
+        // A0 holds the hart ID on entry.
+        state.guest_regs.gprs.set_reg(GprIndex::A0, vcpu_id);
 
         let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(0);
         hstatus.modify(hstatus::spv.val(1));
@@ -1015,19 +1017,10 @@ impl VmCpu {
         }
     }
 
-    /// Sets the `sepc` CSR, or the PC value the vCPU will jump to when it is run.
-    pub fn set_sepc(&mut self, sepc: u64) {
+    /// Sets the entry point (SEPC, A1) for this vCPU.
+    pub fn set_entry_args(&mut self, sepc: u64, opaque: u64) {
         self.state.guest_regs.sepc = sepc;
-    }
-
-    /// Sets one of the vCPU's general-purpose registers.
-    pub fn set_gpr(&mut self, gpr: GprIndex, value: u64) {
-        self.state.guest_regs.gprs.set_reg(gpr, value);
-    }
-
-    /// Gets one of the vCPU's general purpose registers.
-    pub fn get_gpr(&mut self, gpr: GprIndex) -> u64 {
-        self.state.guest_regs.gprs.reg(gpr)
+        self.state.guest_regs.gprs.set_reg(GprIndex::A1, opaque);
     }
 
     /// Latches the entry point of this vCPU from the shared-memory state buffer, returning the
@@ -1036,8 +1029,7 @@ impl VmCpu {
         let shared = self.shared_area().as_ref();
         let sepc = shared.sepc();
         let arg = shared.gpr(GprIndex::A1);
-        self.set_sepc(sepc);
-        self.set_gpr(GprIndex::A1, arg);
+        self.set_entry_args(sepc, arg);
         (sepc, arg)
     }
 
@@ -1079,10 +1071,6 @@ impl VmCpu {
         }
 
         Ok(ActiveVmCpu::restore_from(self, vm_pages, parent_vcpu))
-    }
-
-    pub fn pmu(&mut self) -> &mut VmPmuState {
-        &mut self.pmu_state
     }
 
     // Returns a reference to the shared-memory state area for this vCPU.
@@ -1180,10 +1168,10 @@ impl VmCpus {
             return Err(Error::InsufficientVmCpuStorage);
         }
         let mut inner = PageVec::new(pages, page_tracker);
-        for _ in 0..num_vcpus {
+        for i in 0..num_vcpus {
             let entry = VmCpusInner {
                 status: RwLock::new(VmCpuStatus::NotPresent),
-                vcpu: Mutex::new(VmCpu::new(guest_id)),
+                vcpu: Mutex::new(VmCpu::new(i, guest_id)),
             };
             inner.push(entry);
         }
@@ -1196,8 +1184,8 @@ impl VmCpus {
     }
 
     /// Adds the vCPU at `vcpu_id` as an available vCPU using `shared_area` as the vCPU's shared
-    /// state-memory state area, returning a reference to it.
-    pub fn add_vcpu(&self, vcpu_id: u64, shared_area: VmCpuSharedArea) -> Result<IdleVmCpu> {
+    /// state-memory state area.
+    pub fn add_vcpu(&self, vcpu_id: u64, shared_area: VmCpuSharedArea) -> Result<()> {
         let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
         let mut status = entry.status.write();
         if *status != VmCpuStatus::NotPresent {
@@ -1205,10 +1193,7 @@ impl VmCpus {
         }
         entry.vcpu.lock().shared_area.call_once(|| shared_area);
         *status = VmCpuStatus::PoweredOff;
-        Ok(IdleVmCpu {
-            _status: status.downgrade(),
-            vcpu: &entry.vcpu,
-        })
+        Ok(())
     }
 
     /// Returns a reference to the vCPU with `vcpu_id` if it exists and is not currently running.

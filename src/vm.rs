@@ -385,14 +385,10 @@ pub type InitializingVm<'a, T> = VmRef<'a, T, VmStateInitializing>;
 impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
     /// Adds a vCPU to this VM.
     fn add_vcpu(&self, vcpu_id: u64, shared_area: VmCpuSharedArea) -> EcallResult<()> {
-        let vcpu = self
-            .vm()
+        self.vm()
             .vcpus
             .add_vcpu(vcpu_id, shared_area)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
-        vcpu.set_gpr(GprIndex::A0, vcpu_id);
-        Ok(())
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 
     /// Sets the location of the specified vCPU's virtualized IMSIC.
@@ -443,9 +439,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .vcpus
             .power_on_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
-        vcpu.set_sepc(start_addr);
-        vcpu.set_gpr(GprIndex::A1, opaque);
+        vcpu.lock().set_entry_args(start_addr, opaque);
         Ok(())
     }
 

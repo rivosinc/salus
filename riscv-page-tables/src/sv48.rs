@@ -56,6 +56,7 @@ impl PageTableLevel for Sv48Level {
 }
 
 /// The `Sv48` addressing mode for 1st-stage translation tables.
+#[derive(Debug)]
 pub enum Sv48 {}
 
 impl FirstStagePagingMode for Sv48 {

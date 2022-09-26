@@ -11,7 +11,7 @@ use riscv_pages::{
 
 /// The maximum number of regions in a `HwMemMap`. Statically sized since we don't have
 /// dynamic memory allocation at the point at which the memory map is constructed.
-const MAX_HW_MEM_REGIONS: usize = 32;
+const MAX_HW_MEM_REGIONS: usize = 64;
 
 type RegionVec = ArrayVec<HwMemRegion, MAX_HW_MEM_REGIONS>;
 
@@ -25,7 +25,7 @@ type RegionVec = ArrayVec<HwMemRegion, MAX_HW_MEM_REGIONS>;
 /// or devices are discovered.
 ///
 /// TODO: NUMA awareness.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct HwMemMap {
     // Maintained in sorted order.
     regions: RegionVec,
@@ -47,6 +47,7 @@ pub struct HwMemRegion {
     region_type: HwMemRegionType,
     base: SupervisorPageAddr,
     size: u64,
+    page_size: Option<PageSize>,
 }
 
 /// Describes the usage of a region in the hardware memory map.
@@ -146,6 +147,110 @@ impl HwMemRegion {
         let pages = self.size / PageSize::Size4k as u64;
         self.base.checked_add_pages(pages).unwrap()
     }
+
+    /// Returns the page size if this has been partitioned, or None if it hasn't
+    pub fn page_size(&self) -> Option<PageSize> {
+        self.page_size
+    }
+
+    /// Break a `HwMemRegion` into multiple `HwMemRegion`s that can all fit into vm pages of the same size
+    fn partition(&self, page_size: PageSize) -> RegionVec {
+        let mut array_vec = RegionVec::default();
+
+        // Degenerate case
+        if self.size == 0 {
+            return array_vec;
+        }
+
+        // Current size too small to hold a page, go to a smaller page
+        // unwrap() won't fail because memory regions should be 4k aligned
+        if self.size < page_size as u64 {
+            return self.partition(page_size.down_size().unwrap());
+        }
+
+        // We have at least one page. If this is aligned we are done.
+        if page_size.is_aligned(self.base.bits()) && page_size.is_aligned(self.size) {
+            let mut new_reg = *self;
+            new_reg.page_size = Some(page_size);
+            array_vec.push(new_reg);
+            return array_vec;
+        }
+
+        // If this isn't aligned and couldn't contain a page size (i.e it is less than 2 pages long)
+        // down_size the page and try again
+        // unwrap() won't fail because memory regions should be 4k aligned
+        if page_size.num_pages_contained_in(self.size) < 2
+            && !page_size.is_aligned(self.base.bits())
+        {
+            return self.partition(page_size.down_size().unwrap());
+        }
+
+        // Break into 3 parts;
+        // Bottom: base <-> 1st pagesize aligned address
+        // Middle: 1st pagesize aligned address <-> last pagesize aligned address
+        // Top: last pagesize aligned address <-> end
+        // First or last may be 0, handled recursively
+        //
+        //memory, from low to high addresses
+        //-----------  <== bottom_addr (start of bottom)
+        //-                 (bottom)
+        //-            <== middle_start_addr (end of bottom, start of middle)
+        //-                 (middle)
+        //-            <== middle_end_addr   (end of middle, start of top)
+        //-                 (top)
+        //-----------  <== top_end_addr (end of top)
+        //
+
+        let bottom_start_addr = self.base.bits();
+        let middle_start_addr = page_size.round_up(self.base().bits());
+        let middle_end_addr = page_size.round_down(self.end().bits());
+        let top_end_addr = self.base.bits() + self.size();
+
+        // Bottom
+        // unwrap() won't fail because memory regions should be 4k aligned
+        let bottom_len = middle_start_addr - bottom_start_addr;
+        HwMemRegion {
+            size: bottom_len,
+            page_size: page_size.down_size(),
+            ..*self
+        }
+        .partition(page_size.down_size().unwrap())
+        .into_iter()
+        .for_each(|m| array_vec.push(m));
+
+        // Middle (find offset to middle in 4k pages to work with checked_add_pages() )
+        // unwrap() won't fail because memory regions should be 4k aligned
+        let middle_start_pages = PageSize::num_4k_pages(bottom_len);
+        let middle_start = self.base.checked_add_pages(middle_start_pages).unwrap();
+
+        let middle_len = middle_end_addr - middle_start_addr;
+        HwMemRegion {
+            base: middle_start,
+            size: middle_len,
+            page_size: Some(page_size),
+            ..*self
+        }
+        .partition(page_size)
+        .into_iter()
+        .for_each(|m| array_vec.push(m));
+
+        // Top
+        // unwrap() won't fail because memory regions should be 4k aligned
+        let top_start_pages = PageSize::num_4k_pages(bottom_len + middle_len);
+        let top_start = self.base.checked_add_pages(top_start_pages).unwrap();
+
+        HwMemRegion {
+            base: top_start,
+            size: top_end_addr - middle_end_addr,
+            page_size: page_size.down_size(),
+            ..*self
+        }
+        .partition(page_size.down_size().unwrap())
+        .into_iter()
+        .for_each(|m| array_vec.push(m));
+
+        array_vec
+    }
 }
 
 impl HwMemMapBuilder {
@@ -179,6 +284,7 @@ impl HwMemMapBuilder {
             region_type: HwMemRegionType::Available,
             base,
             size,
+            page_size: None,
         };
         let mut index = 0;
         for other in &self.inner.regions {
@@ -229,6 +335,27 @@ impl HwMemMapBuilder {
         Ok(self)
     }
 
+    /// Go through all of the `HwMemRegion`s, and partition them into exactly pageable sizes
+    /// After running this function all `Available` memory will be split into regions
+    /// such that each region can be split exactly into pages and the `page_size` field
+    /// of the `HwMemRegion` will be set.
+    pub fn page_size_partition(mut self) -> Self {
+        let rv: RegionVec = self
+            .inner
+            .regions()
+            .flat_map(|f| {
+                if f.region_type() == HwMemRegionType::Available {
+                    f.partition(PageSize::Size512G)
+                } else {
+                    RegionVec::from_iter(Some(*f))
+                }
+            })
+            .collect();
+
+        self.inner.regions = rv;
+        self
+    }
+
     /// Returns the constructed HwMemMap.
     pub fn build(self) -> HwMemMap {
         self.inner
@@ -251,6 +378,7 @@ impl HwMemMap {
             region_type: HwMemRegionType::Reserved(resv_type),
             base,
             size,
+            page_size: None,
         };
         let mut index = self
             .regions
@@ -269,6 +397,7 @@ impl HwMemMap {
                 region_type: HwMemRegionType::Available,
                 base: other.base(),
                 size: region.base().bits() - other.base().bits(),
+                page_size: None,
             };
             self.regions
                 .try_insert(index, before)
@@ -283,6 +412,7 @@ impl HwMemMap {
                 region_type: HwMemRegionType::Available,
                 base: region.end(),
                 size: end.bits() - region.end().bits(),
+                page_size: None,
             };
             self.regions
                 .try_insert(index, after)
@@ -327,6 +457,7 @@ impl HwMemMap {
             region_type: HwMemRegionType::Mmio(dev_type),
             base,
             size,
+            page_size: None,
         };
         let mut index = 0;
         for other in &self.regions {
@@ -474,46 +605,55 @@ mod tests {
                 base: PageAddr::new(RawAddr::supervisor(0x4000_0000)).unwrap(),
                 size: 0x10_0000,
                 region_type: HwMemRegionType::Mmio(DeviceMemType::Imsic),
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x8000_0000)).unwrap(),
                 size: REGION_SIZE,
                 region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_0000_0000)).unwrap(),
                 size: 0x1000_0000,
                 region_type: HwMemRegionType::Available,
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_1000_0000)).unwrap(),
                 size: 0x1000_0000,
                 region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_2000_0000)).unwrap(),
                 size: 0x2000_0000,
                 region_type: HwMemRegionType::Available,
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_8000_0000)).unwrap(),
                 size: 0x1000_0000,
                 region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x1_9000_0000)).unwrap(),
                 size: 0x3000_0000,
                 region_type: HwMemRegionType::Available,
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x2_0000_0000)).unwrap(),
                 size: 0x3000_0000,
                 region_type: HwMemRegionType::Available,
+                page_size: None,
             },
             HwMemRegion {
                 base: PageAddr::new(RawAddr::supervisor(0x2_3000_0000)).unwrap(),
                 size: 0x1000_0000,
                 region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
             },
         ];
 
@@ -522,6 +662,212 @@ mod tests {
             assert_eq!(i.base(), j.base());
             assert_eq!(i.size(), j.size());
             assert_eq!(i.region_type(), j.region_type());
+        }
+    }
+
+    #[test]
+    fn test_builder_partitioning() {
+        const REGION_SIZE: u64 = 0x4000_0000;
+        const S4K: u64 = PageSize::Size4k as u64;
+        const S2M: u64 = PageSize::Size2M as u64;
+
+        let mut builder = unsafe {
+            // Not safe -- it's a test.
+            HwMemMapBuilder::new(PageSize::Size4k as u64)
+                // region 1) 0x8000_0000 <-> 0xC000_0000
+                .add_memory_region(RawAddr::supervisor(0x8000_0000), REGION_SIZE)
+                .unwrap()
+                // region 2) 0x1_0000_0000 <-> 0x1_4000_0000
+                .add_memory_region(RawAddr::supervisor(0x1_0000_0000), REGION_SIZE)
+                .unwrap()
+                // region 3) 0x4_0000_0000 <-> 0x4_4000_4000
+                .add_memory_region(RawAddr::supervisor(0x4_0000_0000), REGION_SIZE)
+                .unwrap()
+                // region 4) 0x5_0000_1000 <-> 0x 5_4000_1000
+                .add_memory_region(RawAddr::supervisor(0x5_0000_0000 + S4K), REGION_SIZE)
+                .unwrap()
+                // region 5) 0x5_FFE0_0000 <-> 0x6_3FE0_0000
+                .add_memory_region(RawAddr::supervisor(0x6_0000_0000 - S2M), REGION_SIZE)
+                .unwrap()
+                // region 6) 0x6_FFE0_0000 <-> 0x7_3FE0_0000
+                .add_memory_region(RawAddr::supervisor(0x7_0000_0000 - S2M), REGION_SIZE)
+                .unwrap()
+                // region 7) 0x7_FFC0_1000 <-> 0x8_7FC0_0FFC
+                .add_memory_region(
+                    RawAddr::supervisor(0x8_0000_0000 - S2M + S4K),
+                    REGION_SIZE * 2,
+                )
+                // region 8) 0x10_0000 <-> 0x20_0000
+                .unwrap()
+                .add_mmio_region(
+                    DeviceMemType::Imsic,
+                    RawAddr::supervisor(0x10_0000),
+                    0x10_0000,
+                )
+                .unwrap()
+        };
+
+        builder = builder
+            // reserve 1) 0x1_1000_0000 <-> 0x1_2000_0000
+            .reserve_region(
+                HwReservedMemType::FirmwareReserved,
+                RawAddr::supervisor(0x1_1000_0000),
+                0x1000_0000,
+            )
+            .unwrap()
+            // reserve 2) 0x8000_0000 <-> 0xC000_0000
+            .reserve_region(
+                HwReservedMemType::FirmwareReserved,
+                RawAddr::supervisor(0x8000_0000),
+                REGION_SIZE,
+            )
+            .unwrap()
+            // reserve 3) 0x1_0000_0000 <-> 0x1_1000_0000
+            .reserve_region(
+                HwReservedMemType::FirmwareReserved,
+                RawAddr::supervisor(0x1_0000_0000),
+                0x1000_0000,
+            )
+            .unwrap()
+            // reserve 4 0x7_0000_0000 <-> 0x7_1000_0000
+            .reserve_region(
+                HwReservedMemType::FirmwareReserved,
+                RawAddr::supervisor(0x7_0000_0000),
+                0x1000_0000,
+            )
+            .unwrap();
+
+        builder = builder.page_size_partition();
+        let mem_map = builder.build();
+
+        let expected = vec![
+            // region 8
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x10_0000)).unwrap(),
+                size: 0x10_0000,
+                region_type: HwMemRegionType::Mmio(DeviceMemType::Imsic),
+                page_size: None,
+            },
+            // region 1, reserve 2
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x8000_0000)).unwrap(),
+                size: REGION_SIZE,
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
+            },
+            // region 2, reserve 3
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x1_0000_0000)).unwrap(),
+                size: 0x1000_0000,
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
+            },
+            // region 2, reserve 1
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x1_1000_0000)).unwrap(),
+                size: 0x1000_0000,
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
+            },
+            // region 2
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x1_2000_0000)).unwrap(),
+                size: 0x2000_0000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size2M),
+            },
+            // region 3
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x4_0000_0000)).unwrap(),
+                size: 0x4000_0000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size1G),
+            },
+            // region 4a
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x5_0000_1000)).unwrap(),
+                size: 0x1f_f000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size4k),
+            },
+            // region 4b
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x5_0020_0000)).unwrap(),
+                size: 0x3fe0_0000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size2M),
+            },
+            // region 4c
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x5_4000_0000)).unwrap(),
+                size: 0x1000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size4k),
+            },
+            // region5
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x5_ffe0_0000)).unwrap(),
+                size: 0x4000_0000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size2M),
+            },
+            // region 6a
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x6_ffe0_0000)).unwrap(),
+                size: 0x20_0000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size2M),
+            },
+            // region 6, reserve 4
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x7_0000_0000)).unwrap(),
+                size: 0x1000_0000,
+                region_type: HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved),
+                page_size: None,
+            },
+            // region 6b
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x7_1000_0000)).unwrap(),
+                size: 0x2fe00000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size2M),
+            },
+            // region 7a
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x7_ffe0_1000)).unwrap(),
+                size: 0x1f_f000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size4k),
+            },
+            // region 7b
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x8_0000_0000)).unwrap(),
+                size: 0x4000_0000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size1G),
+            },
+            // region 7c
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x8_4000_0000)).unwrap(),
+                size: 0x3fe0_0000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size2M),
+            },
+            // region 7d
+            HwMemRegion {
+                base: PageAddr::new(RawAddr::supervisor(0x87fe00000)).unwrap(),
+                size: 0x1000,
+                region_type: HwMemRegionType::Available,
+                page_size: Some(PageSize::Size4k),
+            },
+        ];
+
+        let zipped = expected.iter().zip(mem_map.regions());
+        for (i, j) in zipped {
+            assert_eq!(i.base(), j.base());
+            assert_eq!(i.size(), j.size());
+            assert_eq!(i.region_type(), j.region_type());
+            assert_eq!(i.page_size(), j.page_size())
         }
     }
 }

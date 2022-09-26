@@ -189,16 +189,21 @@ fn build_memory_map<T: GuestStagePagingMode>(fdt: &Fdt) -> MemMapResult<HwMemMap
             r.size(),
         )?;
     }
+
+    // Split builder's mem regions up into page sized groups
+    builder = builder.page_size_partition();
     let mem_map = builder.build();
 
     println!("HW memory map:");
     for (i, r) in mem_map.regions().enumerate() {
         println!(
-            "[{}] region: 0x{:x} -> 0x{:x}, {}",
+            "[{}] region: 0x{:x} -> 0x{:x}\t{}\t{:?}\t{}",
             i,
             r.base().bits(),
             r.end().bits() - 1,
-            r.region_type()
+            r.region_type(),
+            r.page_size(),
+            r.size() / r.page_size().unwrap_or(PageSize::Size4k) as u64
         );
     }
 

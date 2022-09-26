@@ -420,6 +420,7 @@ impl PageTracker {
 /// startup for building the host VM and other local data. Once the hypervisor has taken the
 /// pages it needs, `HypPageAlloc` should be converted to the list of remaining free memory
 /// regions to be mapped into the host with `drain()`.
+#[derive(Debug)]
 pub struct HypPageAlloc {
     next_page: Option<SupervisorPageAddr>,
     pages: PageMap,

@@ -374,6 +374,7 @@ struct SparseMapEntry {
 }
 
 /// Keeps information for all physical pages in the system.
+#[derive(Debug)]
 pub struct PageMap {
     pages: RawPageVec<PageInfo>,
     sparse_map: ArrayVec<SparseMapEntry, MAX_SPARSE_MAP_ENTRIES>,

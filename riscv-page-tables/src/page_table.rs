@@ -8,6 +8,7 @@ use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
 use riscv_pages::*;
 use spin::Mutex;
 
+// 4096 bytes per page, each PTE(page table entry) is 8 bytes
 pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 
 /// Error in creating or modifying a page table.
@@ -473,6 +474,7 @@ pub trait GuestStagePagingMode: PagingMode<MappedAddressSpace = GuestPhys> {
 }
 
 /// The internal state of a paging hierarchy.
+#[derive(Debug)]
 struct PageTableInner<T: PagingMode> {
     root: SequentialPages<InternalClean>,
     table_type: PhantomData<T>,
@@ -616,6 +618,7 @@ impl<T: PagingMode> PageTableInner<T> {
 /// This is used for HS and HU paging modes such as Sv48.
 ///
 /// TODO: Support non-4k page sizes.
+#[derive(Debug)]
 pub struct FirstStagePageTable<T: FirstStagePagingMode> {
     inner: Mutex<PageTableInner<T>>,
 }

@@ -257,9 +257,7 @@ impl<T: GuestStagePagingMode> Vm<T> {
             for i in 0..self.vcpus.num_vcpus() {
                 // Check that this vCPU was assigned an IMSIC address.
                 let location = if let Ok(vcpu) = self.vcpus.get_vcpu(i as u64) {
-                    vcpu.lock()
-                        .get_imsic_location()
-                        .ok_or(Error::MissingImsicAddress)
+                    vcpu.get_imsic_location().ok_or(Error::MissingImsicAddress)
                 } else {
                     continue;
                 }?;
@@ -270,7 +268,7 @@ impl<T: GuestStagePagingMode> Vm<T> {
                         .vcpus
                         .get_vcpu(j as u64)
                         .ok()
-                        .and_then(|v| v.lock().get_imsic_location());
+                        .and_then(|v| v.get_imsic_location());
                     if other == Some(location) {
                         return Err(Error::AliasedImsicAddresses);
                     }
@@ -287,17 +285,16 @@ impl<T: GuestStagePagingMode> Vm<T> {
         // Enable the boot vCPU; we assume this is always vCPU 0.
         //
         // TODO: Should we allow a non-0 boot vCPU to be specified when creating the TVM?
-        self.vcpus
-            .power_on_vcpu(0)
-            .map_err(|_| Error::MissingBootCpu)?;
+        let (sepc, arg) = {
+            let mut vcpu = self
+                .vcpus
+                .power_on_vcpu(0)
+                .map_err(|_| Error::MissingBootCpu)?;
+            vcpu.latch_entry_args()
+        };
         // Latch and measure the entry point of the boot vCPU.
-        let vcpu = self.vcpus.get_vcpu(0).map_err(|_| Error::MissingBootCpu)?;
-        {
-            let mut vcpu = vcpu.lock();
-            let (sepc, arg) = vcpu.latch_entry_args();
-            self.attestation_mgr.set_epc(sepc);
-            self.attestation_mgr.set_arg(arg);
-        }
+        self.attestation_mgr.set_epc(sepc);
+        self.attestation_mgr.set_arg(arg);
         self.validate_imsic_addrs()?;
         self.attestation_mgr
             .finalize()
@@ -368,7 +365,6 @@ impl<'a, T: GuestStagePagingMode, S> VmRef<'a, T, S> {
             .vcpus
             .get_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let vcpu = vcpu.lock();
         vcpu.get_imsic_location()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))
     }
@@ -400,12 +396,11 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
         if !geometry.location_is_valid(location) {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
-        let vcpu = self
+        let mut vcpu = self
             .vm()
             .vcpus
             .get_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
         if vcpu.get_imsic_location().is_some() {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
@@ -415,12 +410,11 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
 
     /// Binds the specified vCPU to an IMSIC interrupt file.
     fn bind_vcpu(&self, vcpu_id: u64, interrupt_file: ImsicFileId) -> EcallResult<()> {
-        let vcpu = self
+        let mut vcpu = self
             .vm()
             .vcpus
             .get_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let mut vcpu = vcpu.lock();
         // TODO: Bind to this (physical) CPU as well.
         vcpu.set_interrupt_file(interrupt_file);
         Ok(())
@@ -434,12 +428,12 @@ pub type FinalizedVm<'a, T> = VmRef<'a, T, VmStateFinalized>;
 impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     /// Sets the entry point of the specified vCPU and makes it runnable.
     fn start_vcpu(&self, vcpu_id: u64, start_addr: u64, opaque: u64) -> EcallResult<()> {
-        let vcpu = self
+        let mut vcpu = self
             .vm()
             .vcpus
             .power_on_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        vcpu.lock().set_entry_args(start_addr, opaque);
+        vcpu.set_entry_args(start_addr, opaque);
         Ok(())
     }
 
@@ -495,157 +489,139 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     /// Run this guest until an unhandled exit is encountered.
     fn run_vcpu(&self, vcpu_id: u64, parent_vcpu: Option<&mut ActiveVmCpu<T>>) -> EcallResult<()> {
         // Take the vCPU out of self.vcpus, giving us exclusive ownership.
-        let mut vcpu = self
+        let mut active_vcpu = self
             .vm()
             .vcpus
-            .take_vcpu(vcpu_id)
+            .activate_vcpu(vcpu_id, self.vm_pages(), parent_vcpu)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let cause = {
-            let mut locked_vcpu = vcpu.lock();
-            // Activate this vCPU, saving the state of our parent vCPU.
-            let mut active_vcpu = locked_vcpu
-                .activate(self.vm_pages(), parent_vcpu)
-                .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-
-            // Run until there's an exit we can't handle.
-            let cause = loop {
-                let exit = active_vcpu.run_to_exit();
-                use SbiReturnType::*;
-                match exit {
-                    VmCpuExit::Ecall(Some(sbi_msg)) => {
-                        match self.handle_ecall(sbi_msg, &mut active_vcpu) {
-                            EcallAction::LegacyOk => {
-                                active_vcpu.set_ecall_result(Legacy(0));
-                            }
-                            EcallAction::Unhandled => {
-                                active_vcpu.set_ecall_result(Standard(SbiReturn::from(
-                                    SbiError::NotSupported,
-                                )));
-                            }
-                            EcallAction::Continue(sbi_ret) => {
-                                active_vcpu.set_ecall_result(Standard(sbi_ret));
-                            }
-                            EcallAction::Break(reason, sbi_ret) => {
-                                active_vcpu.set_ecall_result(Standard(sbi_ret));
-                                break reason;
-                            }
-                            EcallAction::Retry(reason) => {
-                                break reason;
-                            }
+        // Run until there's an exit we can't handle.
+        let cause = loop {
+            let exit = active_vcpu.run();
+            use SbiReturnType::*;
+            match exit {
+                VmCpuExit::Ecall(Some(sbi_msg)) => {
+                    match self.handle_ecall(sbi_msg, &mut active_vcpu) {
+                        EcallAction::LegacyOk => {
+                            active_vcpu.set_ecall_result(Legacy(0));
+                        }
+                        EcallAction::Unhandled => {
+                            active_vcpu.set_ecall_result(Standard(SbiReturn::from(
+                                SbiError::NotSupported,
+                            )));
+                        }
+                        EcallAction::Continue(sbi_ret) => {
+                            active_vcpu.set_ecall_result(Standard(sbi_ret));
+                        }
+                        EcallAction::Break(reason, sbi_ret) => {
+                            active_vcpu.set_ecall_result(Standard(sbi_ret));
+                            break reason;
+                        }
+                        EcallAction::Retry(reason) => {
+                            break reason;
                         }
                     }
-                    VmCpuExit::Ecall(None) => {
-                        // Unrecognized ECALL, return an error.
-                        active_vcpu
-                            .set_ecall_result(Standard(SbiReturn::from(SbiError::NotSupported)));
-                    }
-                    VmCpuExit::PageFault {
-                        exception,
-                        fault_addr,
-                        fault_pc,
-                        priv_level,
-                    } => {
-                        let pf = active_vcpu
-                            .active_pages()
-                            .get_page_fault_cause(exception, fault_addr);
-                        use PageFaultType::*;
-                        match pf {
-                            Confidential(e, addr) => {
-                                break VmExitCause::ConfidentialPageFault(e, addr);
-                            }
-                            Shared(e, addr) => {
-                                break VmExitCause::SharedPageFault(e, addr);
-                            }
-                            Mmio(e, addr) => {
-                                // We need the faulting instruction for MMIO faults.
-                                use InstructionFetchError::*;
-                                let inst = match active_vcpu
-                                    .active_pages()
-                                    .fetch_guest_instruction(fault_pc, priv_level)
-                                {
-                                    Ok(inst) => inst,
-                                    Err(FetchFault) => {
-                                        // If we took a fault while trying to fetch the instruction,
-                                        // then something must have happened in between the load/store
-                                        // page fault and now which caused the PC to become invalid.
-                                        // Let the VM retry the instruction so that we can take and
-                                        // handle the instruction fetch fault instead.
-                                        continue;
-                                    }
-                                    Err(FailedDecode(raw_inst)) => {
-                                        active_vcpu.inject_exception(
-                                            Exception::IllegalInstruction,
-                                            raw_inst as u64,
-                                        );
-                                        continue;
-                                    }
-                                };
-
-                                // Make sure that the instruction is actually valid for MMIO.
-                                let mmio_op = match MmioOperation::from_instruction(inst) {
-                                    Some(mmio_op) => mmio_op,
-                                    None => {
-                                        active_vcpu.inject_exception(
-                                            Exception::IllegalInstruction,
-                                            inst.raw() as u64,
-                                        );
-                                        continue;
-                                    }
-                                };
-
-                                break VmExitCause::MmioPageFault(e, addr, mmio_op);
-                            }
-                            Unmapped(e) => {
-                                break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
-                            }
-                        };
-                    }
-                    VmCpuExit::VirtualInstruction {
-                        fault_pc,
-                        priv_level,
-                    } => {
-                        use InstructionFetchError::*;
-                        let inst = match active_vcpu
-                            .active_pages()
-                            .fetch_guest_instruction(fault_pc, priv_level)
-                        {
-                            Ok(inst) => inst,
-                            Err(FetchFault) => {
-                                continue;
-                            }
-                            Err(FailedDecode(raw_inst)) => {
-                                active_vcpu.inject_exception(
-                                    Exception::IllegalInstruction,
-                                    raw_inst as u64,
-                                );
-                                continue;
-                            }
-                        };
-
-                        match Self::process_decoded_instruction(&mut active_vcpu, inst) {
-                            ControlFlow::Continue(_) => continue,
-                            ControlFlow::Break(reason) => break reason,
-                        };
-                    }
-                    VmCpuExit::DelegatedException { exception, stval } => {
-                        active_vcpu.inject_exception(exception, stval);
-                    }
-                    VmCpuExit::Other(ref trap_csrs) => {
-                        println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
-                        break VmExitCause::UnhandledTrap(trap_csrs.scause);
-                    }
                 }
-            };
+                VmCpuExit::Ecall(None) => {
+                    // Unrecognized ECALL, return an error.
+                    active_vcpu.set_ecall_result(Standard(SbiReturn::from(SbiError::NotSupported)));
+                }
+                VmCpuExit::PageFault {
+                    exception,
+                    fault_addr,
+                    fault_pc,
+                    priv_level,
+                } => {
+                    let pf = active_vcpu
+                        .active_pages()
+                        .get_page_fault_cause(exception, fault_addr);
+                    use PageFaultType::*;
+                    match pf {
+                        Confidential(e, addr) => {
+                            break VmExitCause::ConfidentialPageFault(e, addr);
+                        }
+                        Shared(e, addr) => {
+                            break VmExitCause::SharedPageFault(e, addr);
+                        }
+                        Mmio(e, addr) => {
+                            // We need the faulting instruction for MMIO faults.
+                            use InstructionFetchError::*;
+                            let inst = match active_vcpu
+                                .active_pages()
+                                .fetch_guest_instruction(fault_pc, priv_level)
+                            {
+                                Ok(inst) => inst,
+                                Err(FetchFault) => {
+                                    // If we took a fault while trying to fetch the instruction,
+                                    // then something must have happened in between the load/store
+                                    // page fault and now which caused the PC to become invalid.
+                                    // Let the VM retry the instruction so that we can take and
+                                    // handle the instruction fetch fault instead.
+                                    continue;
+                                }
+                                Err(FailedDecode(raw_inst)) => {
+                                    active_vcpu.inject_exception(
+                                        Exception::IllegalInstruction,
+                                        raw_inst as u64,
+                                    );
+                                    continue;
+                                }
+                            };
 
-            active_vcpu.set_exit_cause(cause);
-            cause
+                            // Make sure that the instruction is actually valid for MMIO.
+                            let mmio_op = match MmioOperation::from_instruction(inst) {
+                                Some(mmio_op) => mmio_op,
+                                None => {
+                                    active_vcpu.inject_exception(
+                                        Exception::IllegalInstruction,
+                                        inst.raw() as u64,
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            break VmExitCause::MmioPageFault(e, addr, mmio_op);
+                        }
+                        Unmapped(e) => {
+                            break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
+                        }
+                    };
+                }
+                VmCpuExit::VirtualInstruction {
+                    fault_pc,
+                    priv_level,
+                } => {
+                    use InstructionFetchError::*;
+                    let inst = match active_vcpu
+                        .active_pages()
+                        .fetch_guest_instruction(fault_pc, priv_level)
+                    {
+                        Ok(inst) => inst,
+                        Err(FetchFault) => {
+                            continue;
+                        }
+                        Err(FailedDecode(raw_inst)) => {
+                            active_vcpu
+                                .inject_exception(Exception::IllegalInstruction, raw_inst as u64);
+                            continue;
+                        }
+                    };
+
+                    match Self::process_decoded_instruction(&mut active_vcpu, inst) {
+                        ControlFlow::Continue(_) => continue,
+                        ControlFlow::Break(reason) => break reason,
+                    };
+                }
+                VmCpuExit::DelegatedException { exception, stval } => {
+                    active_vcpu.inject_exception(exception, stval);
+                }
+                VmCpuExit::Other(ref trap_csrs) => {
+                    println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
+                    break VmExitCause::UnhandledTrap(trap_csrs.scause);
+                }
+            }
         };
 
-        // Disable the vCPU if the exit cause indicates it is no longer runnable.
-        use VmExitCause::*;
-        if matches!(cause, PowerOff(..) | CpuStop | UnhandledTrap(..)) {
-            vcpu.power_off();
-        }
+        active_vcpu.exit(cause);
 
         Ok(())
     }

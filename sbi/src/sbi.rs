@@ -140,101 +140,123 @@ impl SbiMessage {
 
     /// Returns the register value for this `SbiMessage`.
     pub fn a7(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::Base(_) => EXT_BASE,
-            SbiMessage::PutChar(_) => EXT_PUT_CHAR,
-            SbiMessage::HartState(_) => EXT_HART_STATE,
-            SbiMessage::Reset(_) => EXT_RESET,
-            SbiMessage::TeeHost(_) => EXT_TEE_HOST,
-            SbiMessage::TeeInterrupt(_) => EXT_TEE_INTERRUPT,
-            SbiMessage::Attestation(_) => EXT_ATTESTATION,
-            SbiMessage::Pmu(_) => EXT_PMU,
+            PutChar(_) => EXT_PUT_CHAR,
+            Base(_) => EXT_BASE,
+            HartState(_) => EXT_HART_STATE,
+            Reset(_) => EXT_RESET,
+            TeeHost(_) => EXT_TEE_HOST,
+            TeeInterrupt(_) => EXT_TEE_INTERRUPT,
+            Attestation(_) => EXT_ATTESTATION,
+            Pmu(_) => EXT_PMU,
         }
     }
 
+    // TODO: Consider using enum_dispatch to avoid the repetition.
+
     /// Returns the register value for this `SbiMessage`.
     pub fn a6(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::Base(_) => 0, //TODO
-            SbiMessage::HartState(f) => f.a6(),
-            SbiMessage::PutChar(_) => 0,
-            SbiMessage::Reset(_) => 0,
-            SbiMessage::TeeHost(f) => f.a6(),
-            SbiMessage::TeeInterrupt(f) => f.a6(),
-            SbiMessage::Attestation(f) => f.a6(),
-            SbiMessage::Pmu(f) => f.a6(),
+            PutChar(_) => 0,
+            Base(f) => f.a6(),
+            HartState(f) => f.a6(),
+            Reset(f) => f.a6(),
+            TeeHost(f) => f.a6(),
+            TeeInterrupt(f) => f.a6(),
+            Attestation(f) => f.a6(),
+            Pmu(f) => f.a6(),
         }
     }
 
     /// Returns the register value for this `SbiMessage`.
     pub fn a5(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::TeeHost(f) => f.a5(),
-            SbiMessage::TeeInterrupt(f) => f.a5(),
-            SbiMessage::Attestation(f) => f.a5(),
-            SbiMessage::Pmu(f) => f.a5(),
-            _ => 0,
+            PutChar(_) => 0,
+            Base(f) => f.a5(),
+            HartState(f) => f.a5(),
+            Reset(f) => f.a5(),
+            TeeHost(f) => f.a5(),
+            TeeInterrupt(f) => f.a5(),
+            Attestation(f) => f.a5(),
+            Pmu(f) => f.a5(),
         }
     }
 
     /// Returns the register value for this `SbiMessage`.
     pub fn a4(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::TeeHost(f) => f.a4(),
-            SbiMessage::TeeInterrupt(f) => f.a4(),
-            SbiMessage::Attestation(f) => f.a4(),
-            SbiMessage::Pmu(f) => f.a4(),
-            _ => 0,
+            PutChar(_) => 0,
+            Base(f) => f.a4(),
+            HartState(f) => f.a4(),
+            Reset(f) => f.a4(),
+            TeeHost(f) => f.a4(),
+            TeeInterrupt(f) => f.a4(),
+            Attestation(f) => f.a4(),
+            Pmu(f) => f.a4(),
         }
     }
 
     /// Returns the register value for this `SbiMessage`.
     pub fn a3(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::TeeHost(f) => f.a3(),
-            SbiMessage::TeeInterrupt(f) => f.a3(),
-            SbiMessage::Attestation(f) => f.a3(),
-            SbiMessage::Pmu(f) => f.a3(),
-            _ => 0,
+            PutChar(_) => 0,
+            Base(f) => f.a3(),
+            HartState(f) => f.a3(),
+            Reset(f) => f.a3(),
+            TeeHost(f) => f.a3(),
+            TeeInterrupt(f) => f.a3(),
+            Attestation(f) => f.a3(),
+            Pmu(f) => f.a3(),
         }
     }
 
     /// Returns the register value for this `SbiMessage`.
     pub fn a2(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::HartState(f) => f.a2(),
-            SbiMessage::TeeHost(f) => f.a2(),
-            SbiMessage::TeeInterrupt(f) => f.a2(),
-            SbiMessage::Attestation(f) => f.a2(),
-            SbiMessage::Pmu(f) => f.a2(),
-            _ => 0,
+            PutChar(_) => 0,
+            Base(f) => f.a2(),
+            HartState(f) => f.a2(),
+            Reset(f) => f.a2(),
+            TeeHost(f) => f.a2(),
+            TeeInterrupt(f) => f.a2(),
+            Attestation(f) => f.a2(),
+            Pmu(f) => f.a2(),
         }
     }
 
     /// Returns the register value for this `SbiMessage`.
     pub fn a1(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::Reset(r) => r.a1(),
-            SbiMessage::HartState(f) => f.a1(),
-            SbiMessage::TeeHost(f) => f.a1(),
-            SbiMessage::TeeInterrupt(f) => f.a1(),
-            SbiMessage::Attestation(f) => f.a1(),
-            SbiMessage::Pmu(f) => f.a1(),
-            _ => 0,
+            PutChar(_) => 0,
+            Base(f) => f.a1(),
+            HartState(f) => f.a1(),
+            Reset(f) => f.a1(),
+            TeeHost(f) => f.a1(),
+            TeeInterrupt(f) => f.a1(),
+            Attestation(f) => f.a1(),
+            Pmu(f) => f.a1(),
         }
     }
 
     /// Returns the register value for this `SbiMessage`.
     pub fn a0(&self) -> u64 {
+        use SbiMessage::*;
         match self {
-            SbiMessage::Reset(r) => r.a0(),
-            SbiMessage::PutChar(c) => *c,
-            SbiMessage::HartState(f) => f.a0(),
-            SbiMessage::TeeHost(f) => f.a0(),
-            SbiMessage::TeeInterrupt(f) => f.a0(),
-            SbiMessage::Attestation(f) => f.a0(),
-            SbiMessage::Pmu(f) => f.a0(),
-            _ => 0,
+            PutChar(c) => *c,
+            Base(f) => f.a0(),
+            Reset(f) => f.a0(),
+            HartState(f) => f.a0(),
+            TeeHost(f) => f.a0(),
+            TeeInterrupt(f) => f.a0(),
+            Attestation(f) => f.a0(),
+            Pmu(f) => f.a0(),
         }
     }
 

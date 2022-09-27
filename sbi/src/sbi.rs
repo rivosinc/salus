@@ -25,12 +25,12 @@ pub use reset::*;
 // The State SBI extension
 mod state;
 pub use state::*;
-// The TSM SBI extension
-mod tsm;
-pub use tsm::*;
-// The TSM-AIA SBI extension.
-mod tsm_aia;
-pub use tsm_aia::*;
+// The TEE host SBI extension
+mod tee_host;
+pub use tee_host::*;
+// The TEE interrupt SBI extension
+mod tee_interrupt;
+pub use tee_interrupt::*;
 // The PMU SBI extension
 mod pmu;
 pub use pmu::*;
@@ -109,11 +109,11 @@ pub enum SbiMessage {
     /// Handles system reset.
     Reset(ResetFunction),
     /// Provides capabilities for starting confidential virtual machines.
-    Tee(TeeFunction),
+    TeeHost(TeeHostFunction),
+    /// Provides interrupt virtualization for confidential virtual machines.
+    TeeInterrupt(TeeInterruptFunction),
     /// The extension for getting attestation evidences and extending measurements.
     Attestation(AttestationFunction),
-    /// Provides interrupt virtualization for confidential virtual machines.
-    TeeAia(TeeAiaFunction),
     /// The extension for getting performance counter state.
     Pmu(PmuFunction),
 }
@@ -128,9 +128,11 @@ impl SbiMessage {
             EXT_BASE => BaseFunction::from_regs(args).map(SbiMessage::Base),
             EXT_HART_STATE => StateFunction::from_regs(args).map(SbiMessage::HartState),
             EXT_RESET => ResetFunction::from_regs(args).map(SbiMessage::Reset),
-            EXT_TEE_HOST => TeeFunction::from_regs(args).map(SbiMessage::Tee),
+            EXT_TEE_HOST => TeeHostFunction::from_regs(args).map(SbiMessage::TeeHost),
+            EXT_TEE_INTERRUPT => {
+                TeeInterruptFunction::from_regs(args).map(SbiMessage::TeeInterrupt)
+            }
             EXT_ATTESTATION => AttestationFunction::from_regs(args).map(SbiMessage::Attestation),
-            EXT_TEE_INTERRUPT => TeeAiaFunction::from_regs(args).map(SbiMessage::TeeAia),
             EXT_PMU => PmuFunction::from_regs(args).map(SbiMessage::Pmu),
             _ => Err(Error::NotSupported),
         }
@@ -143,9 +145,9 @@ impl SbiMessage {
             SbiMessage::PutChar(_) => EXT_PUT_CHAR,
             SbiMessage::HartState(_) => EXT_HART_STATE,
             SbiMessage::Reset(_) => EXT_RESET,
-            SbiMessage::Tee(_) => EXT_TEE_HOST,
+            SbiMessage::TeeHost(_) => EXT_TEE_HOST,
+            SbiMessage::TeeInterrupt(_) => EXT_TEE_INTERRUPT,
             SbiMessage::Attestation(_) => EXT_ATTESTATION,
-            SbiMessage::TeeAia(_) => EXT_TEE_INTERRUPT,
             SbiMessage::Pmu(_) => EXT_PMU,
         }
     }
@@ -157,9 +159,9 @@ impl SbiMessage {
             SbiMessage::HartState(f) => f.a6(),
             SbiMessage::PutChar(_) => 0,
             SbiMessage::Reset(_) => 0,
-            SbiMessage::Tee(f) => f.a6(),
+            SbiMessage::TeeHost(f) => f.a6(),
+            SbiMessage::TeeInterrupt(f) => f.a6(),
             SbiMessage::Attestation(f) => f.a6(),
-            SbiMessage::TeeAia(f) => f.a6(),
             SbiMessage::Pmu(f) => f.a6(),
         }
     }
@@ -167,10 +169,10 @@ impl SbiMessage {
     /// Returns the register value for this `SbiMessage`.
     pub fn a5(&self) -> u64 {
         match self {
-            SbiMessage::Tee(f) => f.a5(),
-            SbiMessage::TeeAia(f) => f.a5(),
-            SbiMessage::Pmu(f) => f.a5(),
+            SbiMessage::TeeHost(f) => f.a5(),
+            SbiMessage::TeeInterrupt(f) => f.a5(),
             SbiMessage::Attestation(f) => f.a5(),
+            SbiMessage::Pmu(f) => f.a5(),
             _ => 0,
         }
     }
@@ -178,10 +180,10 @@ impl SbiMessage {
     /// Returns the register value for this `SbiMessage`.
     pub fn a4(&self) -> u64 {
         match self {
-            SbiMessage::Tee(f) => f.a4(),
-            SbiMessage::TeeAia(f) => f.a4(),
-            SbiMessage::Pmu(f) => f.a4(),
+            SbiMessage::TeeHost(f) => f.a4(),
+            SbiMessage::TeeInterrupt(f) => f.a4(),
             SbiMessage::Attestation(f) => f.a4(),
+            SbiMessage::Pmu(f) => f.a4(),
             _ => 0,
         }
     }
@@ -189,10 +191,10 @@ impl SbiMessage {
     /// Returns the register value for this `SbiMessage`.
     pub fn a3(&self) -> u64 {
         match self {
-            SbiMessage::Tee(f) => f.a3(),
+            SbiMessage::TeeHost(f) => f.a3(),
+            SbiMessage::TeeInterrupt(f) => f.a3(),
             SbiMessage::Attestation(f) => f.a3(),
             SbiMessage::Pmu(f) => f.a3(),
-            SbiMessage::TeeAia(f) => f.a3(),
             _ => 0,
         }
     }
@@ -201,10 +203,10 @@ impl SbiMessage {
     pub fn a2(&self) -> u64 {
         match self {
             SbiMessage::HartState(f) => f.a2(),
-            SbiMessage::Tee(f) => f.a2(),
+            SbiMessage::TeeHost(f) => f.a2(),
+            SbiMessage::TeeInterrupt(f) => f.a2(),
             SbiMessage::Attestation(f) => f.a2(),
             SbiMessage::Pmu(f) => f.a2(),
-            SbiMessage::TeeAia(f) => f.a2(),
             _ => 0,
         }
     }
@@ -214,9 +216,9 @@ impl SbiMessage {
         match self {
             SbiMessage::Reset(r) => r.a1(),
             SbiMessage::HartState(f) => f.a1(),
-            SbiMessage::Tee(f) => f.a1(),
+            SbiMessage::TeeHost(f) => f.a1(),
+            SbiMessage::TeeInterrupt(f) => f.a1(),
             SbiMessage::Attestation(f) => f.a1(),
-            SbiMessage::TeeAia(f) => f.a1(),
             SbiMessage::Pmu(f) => f.a1(),
             _ => 0,
         }
@@ -228,9 +230,9 @@ impl SbiMessage {
             SbiMessage::Reset(r) => r.a0(),
             SbiMessage::PutChar(c) => *c,
             SbiMessage::HartState(f) => f.a0(),
-            SbiMessage::Tee(f) => f.a0(),
+            SbiMessage::TeeHost(f) => f.a0(),
+            SbiMessage::TeeInterrupt(f) => f.a0(),
             SbiMessage::Attestation(f) => f.a0(),
-            SbiMessage::TeeAia(f) => f.a0(),
             SbiMessage::Pmu(f) => f.a0(),
             _ => 0,
         }

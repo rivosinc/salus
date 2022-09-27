@@ -2,13 +2,13 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::TeeFunction::*;
+use crate::TeeHostFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};
 use crate::{RegisterSetLocation, TsmInfo, TsmPageType, TvmCreateParams};
 
 /// Initiates a TSM fence on this CPU.
 pub fn initiate_fence() -> Result<()> {
-    let msg = SbiMessage::Tee(TsmInitiateFence);
+    let msg = SbiMessage::TeeHost(TsmInitiateFence);
     // Safety: TsmInitiateFence doesn't read or write any memory we have access to.
     unsafe { ecall_send(&msg) }?;
     Ok(())
@@ -18,7 +18,7 @@ pub fn initiate_fence() -> Result<()> {
 pub fn get_info() -> Result<TsmInfo> {
     let mut tsm_info = TsmInfo::default();
     let tsm_info_size = core::mem::size_of::<TsmInfo>() as u64;
-    let msg = SbiMessage::Tee(TsmGetInfo {
+    let msg = SbiMessage::TeeHost(TsmGetInfo {
         dest_addr: &mut tsm_info as *mut _ as u64,
         len: tsm_info_size,
     });
@@ -40,7 +40,7 @@ pub fn get_info() -> Result<TsmInfo> {
 /// The address provided must point to memory that won't be accessed again by the calling program
 /// until it is reclaimed from confidential memory.
 pub unsafe fn convert_pages(addr: u64, num_pages: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TsmConvertPages {
+    let msg = SbiMessage::TeeHost(TsmConvertPages {
         page_addr: addr,
         page_type: TsmPageType::Page4k,
         num_pages,
@@ -53,7 +53,7 @@ pub unsafe fn convert_pages(addr: u64, num_pages: u64) -> Result<()> {
 
 /// Reclaims pages that were previously converted to confidential memory with `convert_pages`.
 pub fn reclaim_pages(addr: u64, num_pages: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TsmReclaimPages {
+    let msg = SbiMessage::TeeHost(TsmReclaimPages {
         page_addr: addr,
         page_type: TsmPageType::Page4k,
         num_pages,
@@ -92,7 +92,7 @@ pub fn tvm_create(
         tvm_num_vcpus,
         tvm_vcpu_addr,
     };
-    let msg = SbiMessage::Tee(TvmCreate {
+    let msg = SbiMessage::TeeHost(TvmCreate {
         params_addr: (&tvm_create_params as *const TvmCreateParams) as u64,
         len: core::mem::size_of::<TvmCreateParams>() as u64,
     });
@@ -104,7 +104,7 @@ pub fn tvm_create(
 
 /// Finalizes the given TVM
 pub fn tvm_finalize(vmid: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(Finalize { guest_id: vmid });
+    let msg = SbiMessage::TeeHost(Finalize { guest_id: vmid });
     // Safety: `Finalize` doesn't touch memory.
     unsafe { ecall_send(&msg) }?;
     Ok(())
@@ -112,7 +112,7 @@ pub fn tvm_finalize(vmid: u64) -> Result<()> {
 
 /// Destroys a TVM created with `tvm_create`.
 pub fn tvm_destroy(vmid: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmDestroy { guest_id: vmid });
+    let msg = SbiMessage::TeeHost(TvmDestroy { guest_id: vmid });
     // Safety: destroying a VM doesn't write to memory that's accessible from the host.
     unsafe { ecall_send(&msg) }?;
     Ok(())
@@ -120,7 +120,7 @@ pub fn tvm_destroy(vmid: u64) -> Result<()> {
 
 /// Runs the given vcpu of the specified TVM.
 pub fn tvm_run(vmid: u64, vcpu_id: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmCpuRun {
+    let msg = SbiMessage::TeeHost(TvmCpuRun {
         guest_id: vmid,
         vcpu_id,
     });
@@ -132,7 +132,7 @@ pub fn tvm_run(vmid: u64, vcpu_id: u64) -> Result<()> {
 
 /// Adds pages to be used for page table entries of the given vmid.
 pub fn add_page_table_pages(vmid: u64, page_addr: u64, num_pages: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(AddPageTablePages {
+    let msg = SbiMessage::TeeHost(AddPageTablePages {
         guest_id: vmid,
         page_addr,
         num_pages,
@@ -145,7 +145,7 @@ pub fn add_page_table_pages(vmid: u64, page_addr: u64, num_pages: u64) -> Result
 
 /// Returns the number of register sets in the vCPU shared-memory state area for vCPUs of `vmid`.
 pub fn num_vcpu_register_sets(vmid: u64) -> Result<u64> {
-    let msg = SbiMessage::Tee(TvmCpuNumRegisterSets { guest_id: vmid });
+    let msg = SbiMessage::TeeHost(TvmCpuNumRegisterSets { guest_id: vmid });
     // Safety: TvmCpuNumRegisterSets does not access host memory.
     unsafe { ecall_send(&msg) }
 }
@@ -153,7 +153,7 @@ pub fn num_vcpu_register_sets(vmid: u64) -> Result<u64> {
 /// Returns the location of the register set at `index` in the vCPU shared-memory state area for
 /// vCPUs of `vmid`.
 pub fn get_vcpu_register_set(vmid: u64, index: u64) -> Result<RegisterSetLocation> {
-    let msg = SbiMessage::Tee(TvmCpuGetRegisterSet {
+    let msg = SbiMessage::TeeHost(TvmCpuGetRegisterSet {
         guest_id: vmid,
         index,
     });
@@ -172,7 +172,7 @@ pub fn get_vcpu_register_set(vmid: u64, index: u64) -> Result<RegisterSetLocatio
 /// within the shared-memory state area may be read or written by the TSM at any time, the caller
 /// must treat the memory as volatile for the lifetime of the TVM.
 pub unsafe fn add_vcpu(vmid: u64, vcpu_id: u64, shared_page_addr: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmCpuCreate {
+    let msg = SbiMessage::TeeHost(TvmCpuCreate {
         guest_id: vmid,
         vcpu_id,
         shared_page_addr,
@@ -183,7 +183,7 @@ pub unsafe fn add_vcpu(vmid: u64, vcpu_id: u64, shared_page_addr: u64) -> Result
 
 /// Declares the confidential region of the guest's physical address space.
 pub fn add_confidential_memory_region(vmid: u64, guest_addr: u64, len: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmAddConfidentialMemoryRegion {
+    let msg = SbiMessage::TeeHost(TvmAddConfidentialMemoryRegion {
         guest_id: vmid,
         guest_addr,
         len,
@@ -195,7 +195,7 @@ pub fn add_confidential_memory_region(vmid: u64, guest_addr: u64, len: u64) -> R
 
 /// Declares an address range to be used for emulating MMIO accesses in the guest.
 pub fn add_emulated_mmio_region(vmid: u64, guest_addr: u64, len: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmAddEmulatedMmioRegion {
+    let msg = SbiMessage::TeeHost(TvmAddEmulatedMmioRegion {
         guest_id: vmid,
         guest_addr,
         len,
@@ -208,7 +208,7 @@ pub fn add_emulated_mmio_region(vmid: u64, guest_addr: u64, len: u64) -> Result<
 /// Declares a region that will can be filled with share pages for communication between a TVM and
 /// the host(e.g. virito).
 pub fn add_shared_memory_region(vmid: u64, guest_addr: u64, len: u64) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmAddSharedMemoryRegion {
+    let msg = SbiMessage::TeeHost(TvmAddSharedMemoryRegion {
         guest_id: vmid,
         guest_addr,
         len,
@@ -235,7 +235,7 @@ pub fn add_measured_pages(
         return Err(Error::InvalidParam);
     }
 
-    let msg = SbiMessage::Tee(TvmAddMeasuredPages {
+    let msg = SbiMessage::TeeHost(TvmAddMeasuredPages {
         guest_id: vmid,
         src_addr: src_data.as_ptr() as u64,
         dest_addr,
@@ -259,7 +259,7 @@ pub fn add_zero_pages(
     num_pages: u64,
     guest_addr: u64,
 ) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmAddZeroPages {
+    let msg = SbiMessage::TeeHost(TvmAddZeroPages {
         guest_id: vmid,
         page_addr,
         page_type,
@@ -284,7 +284,7 @@ pub unsafe fn add_shared_pages(
     num_pages: u64,
     guest_addr: u64,
 ) -> Result<()> {
-    let msg = SbiMessage::Tee(TvmAddSharedPages {
+    let msg = SbiMessage::TeeHost(TvmAddSharedPages {
         guest_id: vmid,
         page_addr,
         page_type,

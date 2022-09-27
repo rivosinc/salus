@@ -25,7 +25,7 @@ use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap, CSR
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::{base, pmu, reset, tsm, tsm_aia};
+use sbi::api::{base, pmu, reset, tee_host, tee_interrupt};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
     PmuHardware, SbiMessage, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
@@ -162,16 +162,16 @@ impl TvmCpuSharedMem {
 // Safety: addr must point to `num_pages` of memory that isn't currently used by this program. This
 // memory will be overwritten and access will be removed.
 unsafe fn convert_pages(addr: u64, num_pages: u64) {
-    tsm::convert_pages(addr, num_pages).expect("TsmConvertPages failed");
+    tee_host::convert_pages(addr, num_pages).expect("TsmConvertPages failed");
 
     // Fence the pages we just converted.
     //
     // TODO: Boot secondary CPUs and test the invalidation flow with multiple CPUs.
-    tsm::initiate_fence().expect("Tellus - TsmInitiateFence failed");
+    tee_host::initiate_fence().expect("Tellus - TsmInitiateFence failed");
 }
 
 fn reclaim_pages(addr: u64, num_pages: u64) {
-    tsm::reclaim_pages(addr, num_pages).expect("TsmReclaimPages failed");
+    tee_host::reclaim_pages(addr, num_pages).expect("TsmReclaimPages failed");
 
     for i in 0u64..((num_pages * PAGE_SIZE_4K) / 8) {
         let m = (addr + i) as *const u64;
@@ -408,14 +408,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     );
 
     base::probe_sbi_extension(EXT_TEE_HOST).expect("Platform doesn't support TEE extension");
-    let tsm_info = tsm::get_info().expect("Tellus - TsmGetInfo failed");
+    let tsm_info = tee_host::get_info().expect("Tellus - TsmGetInfo failed");
     let tvm_create_pages = 4
         + tsm_info.tvm_state_pages
         + ((NUM_VCPUS * tsm_info.tvm_bytes_per_vcpu) + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
     println!("Donating {} pages for TVM creation", tvm_create_pages);
 
     // Make sure TsmGetInfo fails if we pass it a bogus address.
-    let msg = SbiMessage::Tee(sbi::TeeFunction::TsmGetInfo {
+    let msg = SbiMessage::TeeHost(sbi::TeeHostFunction::TsmGetInfo {
         dest_addr: 0x1000,
         len: core::mem::size_of::<sbi::TsmInfo>() as u64,
     });
@@ -435,7 +435,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let tvm_page_directory_addr = state_pages_base;
     let tvm_state_addr = tvm_page_directory_addr + 4 * PAGE_SIZE_4K;
     let tvm_vcpu_addr = tvm_state_addr + tsm_info.tvm_state_pages * PAGE_SIZE_4K;
-    let vmid = tsm::tvm_create(
+    let vmid = tee_host::tvm_create(
         tvm_page_directory_addr,
         tvm_state_addr,
         NUM_VCPUS,
@@ -451,17 +451,18 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe {
         convert_pages(next_page, NUM_TEE_PTE_PAGES);
     }
-    tsm::add_page_table_pages(vmid, next_page, NUM_TEE_PTE_PAGES)
+    tee_host::add_page_table_pages(vmid, next_page, NUM_TEE_PTE_PAGES)
         .expect("Tellus - AddPageTablePages returned error");
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
     // Get the layout of the shared-memory state area.
     let mut vcpu_mem_layout = ArrayVec::new();
     let num_regsets =
-        tsm::num_vcpu_register_sets(vmid).expect("Tellus - TvmCpuNumRegisterSets failed");
+        tee_host::num_vcpu_register_sets(vmid).expect("Tellus - TvmCpuNumRegisterSets failed");
     assert!(num_regsets <= MAX_REGISTER_SETS as u64);
     for i in 0..num_regsets {
-        let regset = tsm::get_vcpu_register_set(vmid, i).expect("Tellus - TvmCpuGetRegisterSet");
+        let regset =
+            tee_host::get_vcpu_register_set(vmid, i).expect("Tellus - TvmCpuGetRegisterSet");
         vcpu_mem_layout.push(regset);
     }
     let num_vcpu_shared_pages = TvmCpuSharedMem::required_pages(&vcpu_mem_layout);
@@ -470,7 +471,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let vcpu_state_addr = next_page;
     next_page += num_vcpu_shared_pages * PAGE_SIZE_4K;
     // Safety: We own `vcpu_state_addr` and will only access it through volatile reads/writes.
-    unsafe { tsm::add_vcpu(vmid, 0, vcpu_state_addr) }
+    unsafe { tee_host::add_vcpu(vmid, 0, vcpu_state_addr) }
         .expect("Tellus - TvmCpuCreate returned error");
     // Safety: `vcpu_state_addr` points to a sufficient number of pages to hold the requested layout
     // and will not be used for any other purpose for the duration of `kernel_init()`.
@@ -489,17 +490,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             guest_index_bits: 0,
             guests_per_hart: 0,
         };
-        tsm_aia::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
-        tsm_aia::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000)
+        tee_interrupt::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
+        tee_interrupt::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000)
             .expect("Tellus - TvmCpuSetImsicAddr failed");
 
         // Try to convert a guest interfupt file.
         //
         // Safety: We trust that the IMSIC is actually at IMSIC_START_ADDRESS, and we aren't
         // touching this page at all in this program.
-        unsafe { tsm_aia::convert_imsic(imsic_file_addr) }
+        unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
-        tsm::initiate_fence().expect("Tellus - TsmInitiateFence failed");
+        tee_host::initiate_fence().expect("Tellus - TsmInitiateFence failed");
     } else {
         println!("Platform doesn't support TEE AIA extension");
     }
@@ -516,7 +517,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let donated_pages_base = next_page;
 
     // Declare the confidential region of the guest's physical address space.
-    tsm::add_confidential_memory_region(
+    tee_host::add_confidential_memory_region(
         vmid,
         USABLE_RAM_START_ADDRESS,
         (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K,
@@ -529,7 +530,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe {
         convert_pages(next_page, NUM_GUEST_DATA_PAGES);
     }
-    tsm::add_measured_pages(
+    tee_host::add_measured_pages(
         vmid,
         guest_image,
         next_page,
@@ -546,7 +547,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe {
         convert_pages(next_page, NUM_GUEST_ZERO_PAGES);
     }
-    tsm::add_zero_pages(
+    tee_host::add_zero_pages(
         vmid,
         zero_pages_start,
         sbi::TsmPageType::Page4k,
@@ -561,7 +562,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
     // Add a page of emualted MMIO.
-    tsm::add_emulated_mmio_region(vmid, GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
+    tee_host::add_emulated_mmio_region(vmid, GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
         .expect("Tellus - TvmAddEmulatedMmioRegion failed");
 
     // Set the entry point.
@@ -569,14 +570,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Set the kernel_init() parameter.
     vcpu.set_gpr(GprIndex::A1, GUEST_SHARED_PAGES_START_ADDRESS);
 
-    tsm::add_shared_memory_region(
+    tee_host::add_shared_memory_region(
         vmid,
         GUEST_SHARED_PAGES_START_ADDRESS,
         NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
     )
     .expect("Tellus -- TvmAddSharedMemoryRegion returned error");
 
-    tsm::add_shared_memory_region(
+    tee_host::add_shared_memory_region(
         vmid,
         GUEST_SHARED_PAGES_START_ADDRESS,
         NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
@@ -584,7 +585,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     .expect_err("Tellus -- TvmAddSharedMemoryRegion succeeded second time");
 
     // TODO test that access to pages crashes somehow
-    tsm::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
+    tee_host::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
 
     #[cfg(target_feature = "v")]
     store_into_vectors();
@@ -592,7 +593,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     loop {
         // Safety: running a VM will only write the `TvmCpuSharedState` struct that was registered
         // with `add_vcpu()`.
-        tsm::tvm_run(vmid, 0).expect("Could not run guest VM");
+        tee_host::tvm_run(vmid, 0).expect("Could not run guest VM");
         let scause = vcpu.scause();
         if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
             use Exception::*;
@@ -625,7 +626,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
                                 panic!("Ran out of pages to fault in");
                             }
-                            tsm::add_zero_pages(
+                            tee_host::add_zero_pages(
                                 vmid,
                                 zero_pages_start + zero_pages_added * PAGE_SIZE_4K,
                                 sbi::TsmPageType::Page4k,
@@ -639,7 +640,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             // Safety: shared_page_base points to pages that will only be accessed
                             // as volatile from here on.
                             unsafe {
-                                tsm::add_shared_pages(
+                                tee_host::add_shared_pages(
                                     vmid,
                                     shared_page_base,
                                     sbi::TsmPageType::Page4k,
@@ -712,7 +713,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     #[cfg(target_feature = "v")]
     check_vectors();
 
-    tsm::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
+    tee_host::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
 
     // Safety: We own the page.
     // Note that any access to shared pages must use volatile memory semantics
@@ -728,7 +729,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     );
     reclaim_pages(state_pages_base, tvm_create_pages);
     if has_aia {
-        tsm_aia::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
+        tee_interrupt::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
     }
     exercise_pmu_functionality();
     println!("Tellus - All OK");

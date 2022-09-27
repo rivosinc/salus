@@ -640,12 +640,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             ),
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
-            SbiMessage::Tee(tee_func) => self.handle_tee_msg(tee_func, active_vcpu),
+            SbiMessage::TeeHost(host_func) => self.handle_tee_host_msg(host_func, active_vcpu),
+            SbiMessage::TeeInterrupt(interrupt_func) => {
+                self.handle_tee_interrupt_msg(interrupt_func, active_vcpu.active_pages())
+            }
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
-            }
-            SbiMessage::TeeAia(aia_func) => {
-                self.handle_aia_msg(aia_func, active_vcpu.active_pages())
             }
             SbiMessage::Pmu(pmu_func) => self.handle_pmu_msg(pmu_func, active_vcpu).into(),
         }
@@ -820,13 +820,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
-    fn handle_tee_msg(
+    fn handle_tee_host_msg(
         &self,
-        tee_func: TeeFunction,
+        host_func: TeeHostFunction,
         active_vcpu: &mut ActiveVmCpu<T>,
     ) -> EcallAction {
-        use TeeFunction::*;
-        match tee_func {
+        use TeeHostFunction::*;
+        match host_func {
             TsmGetInfo { dest_addr, len } => self
                 .get_tsm_info(dest_addr, len, active_vcpu.active_pages())
                 .into(),
@@ -988,13 +988,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
-    fn handle_aia_msg(
+    fn handle_tee_interrupt_msg(
         &self,
-        aia_func: TeeAiaFunction,
+        interrupt_func: TeeInterruptFunction,
         active_pages: &ActiveVmPages<T>,
     ) -> EcallAction {
-        use TeeAiaFunction::*;
-        match aia_func {
+        use TeeInterruptFunction::*;
+        match interrupt_func {
             TvmAiaInit {
                 tvm_id,
                 params_addr,

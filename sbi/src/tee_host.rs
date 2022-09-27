@@ -221,9 +221,9 @@ impl TsmPageType {
     }
 }
 
-/// Functions provided by the TEE extension.
+/// Functions provided by the TEE Host extension.
 #[derive(Copy, Clone)]
-pub enum TeeFunction {
+pub enum TeeHostFunction {
     /// Creates a TVM from the parameters in the `TvmCreateParams` structure at the non-confidential
     /// physical address `params_addr`. Returns a guest ID that can be used to refer to the TVM in
     /// TVM management TEECALLs.
@@ -462,10 +462,10 @@ pub enum TeeFunction {
     },
 }
 
-impl TeeFunction {
+impl TeeHostFunction {
     /// Attempts to parse `Self` from the passed in `a0-a7`.
     pub(crate) fn from_regs(args: &[u64]) -> Result<Self> {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match args[6] {
             0 => Ok(TvmCreate {
                 params_addr: args[0],
@@ -550,9 +550,9 @@ impl TeeFunction {
     }
 }
 
-impl SbiFunction for TeeFunction {
+impl SbiFunction for TeeHostFunction {
     fn a6(&self) -> u64 {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match self {
             TvmCreate {
                 params_addr: _,
@@ -636,7 +636,7 @@ impl SbiFunction for TeeFunction {
     }
 
     fn a0(&self) -> u64 {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match self {
             TvmCreate {
                 params_addr,
@@ -713,7 +713,7 @@ impl SbiFunction for TeeFunction {
     }
 
     fn a1(&self) -> u64 {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match self {
             TvmCreate {
                 params_addr: _,
@@ -787,7 +787,7 @@ impl SbiFunction for TeeFunction {
     }
 
     fn a2(&self) -> u64 {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match self {
             AddPageTablePages {
                 guest_id: _,
@@ -851,7 +851,7 @@ impl SbiFunction for TeeFunction {
     }
 
     fn a3(&self) -> u64 {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match self {
             TvmAddZeroPages {
                 guest_id: _,
@@ -880,7 +880,7 @@ impl SbiFunction for TeeFunction {
     }
 
     fn a4(&self) -> u64 {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match self {
             TvmAddZeroPages {
                 guest_id: _,
@@ -909,7 +909,7 @@ impl SbiFunction for TeeFunction {
     }
 
     fn a5(&self) -> u64 {
-        use TeeFunction::*;
+        use TeeHostFunction::*;
         match self {
             TvmAddMeasuredPages {
                 guest_id: _,

@@ -9,10 +9,10 @@ pub mod reset;
 pub mod state;
 
 /// Host interfaces for confidential computing.
-pub mod tsm;
+pub mod tee_host;
 
 /// Host interfaces for confidential computing interrupt virtualization.
-pub mod tsm_aia;
+pub mod tee_interrupt;
 
 /// Host interfaces for PMU.
 pub mod pmu;

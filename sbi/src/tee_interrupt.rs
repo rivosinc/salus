@@ -39,9 +39,9 @@ pub struct TvmAiaParams {
     pub guests_per_hart: u32,
 }
 
-/// Functions provided by the TEE-AIA extension.
+/// Functions provided by the TEE Interrupt extension.
 #[derive(Copy, Clone)]
-pub enum TeeAiaFunction {
+pub enum TeeInterruptFunction {
     /// Configures AIA virtualization for the TVM identified by `tvm_id` from the parameters in
     /// the `TvmAiaParams` structure at the non-confidential physical address `params_addr`.
     ///
@@ -99,10 +99,10 @@ pub enum TeeAiaFunction {
     },
 }
 
-impl TeeAiaFunction {
+impl TeeInterruptFunction {
     /// Attempts to parse `Self` from the register values passed in `a0-a7`.
     pub(crate) fn from_regs(args: &[u64]) -> Result<Self> {
-        use TeeAiaFunction::*;
+        use TeeInterruptFunction::*;
         match args[6] {
             0 => Ok(TvmAiaInit {
                 tvm_id: args[0],
@@ -125,9 +125,9 @@ impl TeeAiaFunction {
     }
 }
 
-impl SbiFunction for TeeAiaFunction {
+impl SbiFunction for TeeInterruptFunction {
     fn a6(&self) -> u64 {
-        use TeeAiaFunction::*;
+        use TeeInterruptFunction::*;
         match self {
             TvmAiaInit { .. } => 0,
             TvmCpuSetImsicAddr { .. } => 1,
@@ -137,7 +137,7 @@ impl SbiFunction for TeeAiaFunction {
     }
 
     fn a0(&self) -> u64 {
-        use TeeAiaFunction::*;
+        use TeeInterruptFunction::*;
         match self {
             TvmAiaInit {
                 tvm_id,
@@ -155,7 +155,7 @@ impl SbiFunction for TeeAiaFunction {
     }
 
     fn a1(&self) -> u64 {
-        use TeeAiaFunction::*;
+        use TeeInterruptFunction::*;
         match self {
             TvmAiaInit {
                 tvm_id: _,
@@ -172,7 +172,7 @@ impl SbiFunction for TeeAiaFunction {
     }
 
     fn a2(&self) -> u64 {
-        use TeeAiaFunction::*;
+        use TeeInterruptFunction::*;
         match self {
             TvmAiaInit {
                 tvm_id: _,

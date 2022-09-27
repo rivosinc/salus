@@ -128,9 +128,9 @@ impl SbiMessage {
             EXT_BASE => BaseFunction::from_regs(args).map(SbiMessage::Base),
             EXT_HART_STATE => StateFunction::from_regs(args).map(SbiMessage::HartState),
             EXT_RESET => ResetFunction::from_regs(args).map(SbiMessage::Reset),
-            EXT_TEE => TeeFunction::from_regs(args).map(SbiMessage::Tee),
+            EXT_TEE_HOST => TeeFunction::from_regs(args).map(SbiMessage::Tee),
             EXT_ATTESTATION => AttestationFunction::from_regs(args).map(SbiMessage::Attestation),
-            EXT_TEE_AIA => TeeAiaFunction::from_regs(args).map(SbiMessage::TeeAia),
+            EXT_TEE_INTERRUPT => TeeAiaFunction::from_regs(args).map(SbiMessage::TeeAia),
             EXT_PMU => PmuFunction::from_regs(args).map(SbiMessage::Pmu),
             _ => Err(Error::NotSupported),
         }
@@ -143,9 +143,9 @@ impl SbiMessage {
             SbiMessage::PutChar(_) => EXT_PUT_CHAR,
             SbiMessage::HartState(_) => EXT_HART_STATE,
             SbiMessage::Reset(_) => EXT_RESET,
-            SbiMessage::Tee(_) => EXT_TEE,
+            SbiMessage::Tee(_) => EXT_TEE_HOST,
             SbiMessage::Attestation(_) => EXT_ATTESTATION,
-            SbiMessage::TeeAia(_) => EXT_TEE_AIA,
+            SbiMessage::TeeAia(_) => EXT_TEE_INTERRUPT,
             SbiMessage::Pmu(_) => EXT_PMU,
         }
     }

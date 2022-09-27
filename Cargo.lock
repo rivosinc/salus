@@ -684,6 +684,7 @@ dependencies = [
 name = "test_workloads"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "attestation",
  "der",
  "device_tree",

@@ -317,18 +317,15 @@ pub struct VmCpuSharedState {
 pub const VM_CPU_SHARED_LAYOUT: &[sbi::RegisterSetLocation] = &[
     sbi::RegisterSetLocation {
         id: sbi::RegisterSetId::Gprs as u16,
-        version: 0,
-        offset: offset_of!(VmCpuSharedState, gprs) as u32,
+        offset: offset_of!(VmCpuSharedState, gprs) as u16,
     },
     sbi::RegisterSetLocation {
         id: sbi::RegisterSetId::SupervisorCsrs as u16,
-        version: 0,
-        offset: offset_of!(VmCpuSharedState, s_csrs) as u32,
+        offset: offset_of!(VmCpuSharedState, s_csrs) as u16,
     },
     sbi::RegisterSetLocation {
         id: sbi::RegisterSetId::HypervisorCsrs as u16,
-        version: 0,
-        offset: offset_of!(VmCpuSharedState, hs_csrs) as u32,
+        offset: offset_of!(VmCpuSharedState, hs_csrs) as u16,
     },
 ];
 

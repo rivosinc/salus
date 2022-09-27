@@ -143,16 +143,23 @@ pub fn add_page_table_pages(vmid: u64, page_addr: u64, num_pages: u64) -> Result
     Ok(())
 }
 
-/// Writes the layout used for the vCPU shared-memory state area for vCPUs of `vmid` to `layout`.
-/// Returns the number of entries written to `layout`.
-pub fn get_vcpu_mem_layout(vmid: u64, layout: &mut [RegisterSetLocation]) -> Result<usize> {
-    let msg = SbiMessage::Tee(TvmCpuGetMemLayout {
+/// Returns the number of register sets in the vCPU shared-memory state area for vCPUs of `vmid`.
+pub fn num_vcpu_register_sets(vmid: u64) -> Result<u64> {
+    let msg = SbiMessage::Tee(TvmCpuNumRegisterSets { guest_id: vmid });
+    // Safety: TvmCpuNumRegisterSets does not access host memory.
+    unsafe { ecall_send(&msg) }
+}
+
+/// Returns the location of the register set at `index` in the vCPU shared-memory state area for
+/// vCPUs of `vmid`.
+pub fn get_vcpu_register_set(vmid: u64, index: u64) -> Result<RegisterSetLocation> {
+    let msg = SbiMessage::Tee(TvmCpuGetRegisterSet {
         guest_id: vmid,
-        layout_addr: layout.as_mut_ptr() as u64,
-        layout_len: (layout.len() * core::mem::size_of::<RegisterSetLocation>()) as u64,
+        index,
     });
-    let written = unsafe { ecall_send(&msg) }?;
-    Ok((written as usize) / core::mem::size_of::<RegisterSetLocation>())
+    // Safety: TvmCpuGetRegisterSet does not access host memory.
+    let raw = unsafe { ecall_send(&msg) }?;
+    Ok(RegisterSetLocation::from(raw as u32))
 }
 
 /// Adds a vCPU with ID `vcpu_id` to the guest `vmid`, registering `shared_page_addr` as the

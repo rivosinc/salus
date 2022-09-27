@@ -28,7 +28,7 @@ use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::{base, pmu, reset, tsm, tsm_aia};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
-    PmuHardware, SbiMessage, EXT_PMU, EXT_TEE, EXT_TEE_AIA,
+    PmuHardware, SbiMessage, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
 };
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -407,7 +407,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         mem_range.size()
     );
 
-    base::probe_sbi_extension(EXT_TEE).expect("Platform doesn't support TEE extension");
+    base::probe_sbi_extension(EXT_TEE_HOST).expect("Platform doesn't support TEE extension");
     let tsm_info = tsm::get_info().expect("Tellus - TsmGetInfo failed");
     let tvm_create_pages = 4
         + tsm_info.tvm_state_pages
@@ -476,7 +476,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // and will not be used for any other purpose for the duration of `kernel_init()`.
     let vcpu = unsafe { TvmCpuSharedMem::new(vcpu_state_addr, vcpu_mem_layout) };
 
-    let has_aia = base::probe_sbi_extension(EXT_TEE_AIA).is_ok();
+    let has_aia = base::probe_sbi_extension(EXT_TEE_INTERRUPT).is_ok();
     // CPU0, guest interrupt file 0.
     let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K;
     if has_aia {

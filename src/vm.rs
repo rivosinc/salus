@@ -790,9 +790,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 | sbi::EXT_BASE
                 | sbi::EXT_HART_STATE
                 | sbi::EXT_RESET
-                | sbi::EXT_TEE
-                | sbi::EXT_ATTESTATION
-                | sbi::EXT_TEE_AIA => 1,
+                | sbi::EXT_TEE_HOST
+                | sbi::EXT_TEE_INTERRUPT
+                | sbi::EXT_ATTESTATION => 1,
                 sbi::EXT_PMU if PmuInfo::get().is_ok() => 1,
                 _ => 0,
             },

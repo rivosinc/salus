@@ -896,18 +896,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TvmCpuRun { guest_id, vcpu_id } => {
                 self.guest_run_vcpu(guest_id, vcpu_id, active_vcpu).into()
             }
-            TvmCpuGetMemLayout {
-                guest_id,
-                layout_addr,
-                layout_len,
-            } => self
-                .guest_get_vcpu_mem_layout(
-                    guest_id,
-                    layout_addr,
-                    layout_len,
-                    active_vcpu.active_pages(),
-                )
-                .into(),
+            TvmCpuNumRegisterSets { guest_id } => {
+                self.guest_num_vcpu_register_sets(guest_id).into()
+            }
+            TvmCpuGetRegisterSet { guest_id, index } => {
+                self.guest_get_vcpu_register_set(guest_id, index).into()
+            }
             TvmCpuCreate {
                 guest_id,
                 vcpu_id,
@@ -1171,32 +1165,23 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    // Writes the vCPU shared-memory state area layout to `layout_addr`.
-    fn guest_get_vcpu_mem_layout(
-        &self,
-        guest_id: u64,
-        layout_addr: u64,
-        layout_len: u64,
-        active_pages: &ActiveVmPages<T>,
-    ) -> EcallResult<u64> {
+    // Returns the number of register sets in the vCPU shared-memory state area for `guest_id`.
+    fn guest_num_vcpu_register_sets(&self, guest_id: u64) -> EcallResult<u64> {
         // All guests have the same layout since we don't support customization of virtualized
         // features currently, but make sure that the specified guest_id is at least valid.
         self.guest_by_id(guest_id)?;
+        Ok(VM_CPU_SHARED_LAYOUT.len() as u64)
+    }
 
-        let required_len = VM_CPU_SHARED_LAYOUT.len() * mem::size_of::<sbi::RegisterSetLocation>();
-        if (layout_len as usize) < required_len {
-            return Err(EcallError::Sbi(SbiError::InsufficientBufferCapacity));
-        }
-        // Safety: VM_CPU_SHARED_LAYOUT is valid, properly initialized for `required_len` bytes,
-        // and is not mutated.
-        let layout_bytes = unsafe {
-            core::slice::from_raw_parts(VM_CPU_SHARED_LAYOUT.as_ptr().cast(), required_len)
-        };
-        let layout_addr = RawAddr::guest(layout_addr, self.page_owner_id());
-        active_pages
-            .copy_to_guest(layout_addr, layout_bytes)
-            .map_err(EcallError::from)?;
-        Ok(required_len as u64)
+    // Get the location of the register set at `index` in the vCPU shared-memory state area for
+    // `guest_id`.
+    fn guest_get_vcpu_register_set(&self, guest_id: u64, index: u64) -> EcallResult<u64> {
+        // As above, make sure the `guest_id` is valid even though the layout is uniform (for now).
+        self.guest_by_id(guest_id)?;
+        let regset = VM_CPU_SHARED_LAYOUT
+            .get(index as usize)
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        Ok(u32::from(*regset) as u64)
     }
 
     // Adds a vCPU with `vcpu_id` to a guest VM with a shared-memory state area at

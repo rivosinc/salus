@@ -16,6 +16,7 @@ use core::alloc::{GlobalAlloc, Layout};
 extern crate alloc;
 extern crate test_workloads;
 
+use arrayvec::ArrayVec;
 #[cfg(target_feature = "v")]
 use core::arch::asm;
 use core::ptr;
@@ -60,12 +61,15 @@ pub fn poweroff() -> ! {
 
 const PAGE_SIZE_4K: u64 = 4096;
 
+// Maximum number of register sets we support in the shared-memory area.
+const MAX_REGISTER_SETS: usize = 8;
+
 // Wrapper for a vCPU shared-memory state area with a layout provided by the TSM.
 //
 // TODO: Is there a way to unify this and VmCpuSharedStateRef?
-struct TvmCpuSharedMem<'a> {
+struct TvmCpuSharedMem {
     addr: u64,
-    layout: &'a [sbi::RegisterSetLocation],
+    layout: ArrayVec<sbi::RegisterSetLocation, MAX_REGISTER_SETS>,
 }
 
 macro_rules! define_accessors {
@@ -86,13 +90,16 @@ macro_rules! define_accessors {
     };
 }
 
-impl<'a> TvmCpuSharedMem<'a> {
+impl TvmCpuSharedMem {
     // Creates a new `TvmCpuSharedMem` starting at `addr` using the specified `layout`.
     //
     // Safety: `addr` must be aligned and point to a sufficiently large contiguous range of pages
     // to hold the structure described by `layout`. This memory must remain valid and not be
     // accessed for any other purpose for the lifetime of this structure.
-    unsafe fn new(addr: u64, layout: &'a [sbi::RegisterSetLocation]) -> Self {
+    unsafe fn new(
+        addr: u64,
+        layout: ArrayVec<sbi::RegisterSetLocation, MAX_REGISTER_SETS>,
+    ) -> Self {
         Self { addr, layout }
     }
 
@@ -449,10 +456,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
     // Get the layout of the shared-memory state area.
-    let mut vcpu_mem_layout = [sbi::RegisterSetLocation::default(); 4];
-    let entries = tsm::get_vcpu_mem_layout(vmid, &mut vcpu_mem_layout)
-        .expect("Tellus - TvmCpuGetMemLayout failed");
-    let num_vcpu_shared_pages = TvmCpuSharedMem::required_pages(&vcpu_mem_layout[..entries]);
+    let mut vcpu_mem_layout = ArrayVec::new();
+    let num_regsets =
+        tsm::num_vcpu_register_sets(vmid).expect("Tellus - TvmCpuNumRegisterSets failed");
+    assert!(num_regsets <= MAX_REGISTER_SETS as u64);
+    for i in 0..num_regsets {
+        let regset = tsm::get_vcpu_register_set(vmid, i).expect("Tellus - TvmCpuGetRegisterSet");
+        vcpu_mem_layout.push(regset);
+    }
+    let num_vcpu_shared_pages = TvmCpuSharedMem::required_pages(&vcpu_mem_layout);
 
     // Add vCPU0.
     let vcpu_state_addr = next_page;
@@ -462,7 +474,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         .expect("Tellus - TvmCpuCreate returned error");
     // Safety: `vcpu_state_addr` points to a sufficient number of pages to hold the requested layout
     // and will not be used for any other purpose for the duration of `kernel_init()`.
-    let vcpu = unsafe { TvmCpuSharedMem::new(vcpu_state_addr, &vcpu_mem_layout[..entries]) };
+    let vcpu = unsafe { TvmCpuSharedMem::new(vcpu_state_addr, vcpu_mem_layout) };
 
     let has_aia = base::probe_sbi_extension(EXT_TEE_AIA).is_ok();
     // CPU0, guest interrupt file 0.

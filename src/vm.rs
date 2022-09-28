@@ -63,6 +63,17 @@ pub enum MmioOpcode {
     Store8,
 }
 
+impl MmioOpcode {
+    /// Returns if the MMIO operation is a load.
+    pub fn is_load(&self) -> bool {
+        use MmioOpcode::*;
+        matches!(
+            self,
+            Load8 | Load8U | Load16 | Load16U | Load32 | Load32U | Load64
+        )
+    }
+}
+
 /// A decoded MMIO operation.
 #[derive(Clone, Copy, Debug)]
 pub struct MmioOperation {
@@ -121,7 +132,7 @@ pub enum VmExitCause {
     FatalEcall(SbiMessage),
     ResumableEcall(SbiMessage),
     PageFault(Exception, GuestPageAddr),
-    MmioFault(Exception, GuestPhysAddr, MmioOperation),
+    MmioFault(MmioOperation, GuestPhysAddr),
     Wfi(DecodedInstruction),
     UnhandledTrap(u64),
 }
@@ -576,7 +587,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                                 }
                             };
 
-                            break VmExitCause::MmioFault(exception, fault_addr, mmio_op);
+                            break VmExitCause::MmioFault(mmio_op, fault_addr);
                         }
                         Unmapped => {
                             break VmExitCause::UnhandledTrap(

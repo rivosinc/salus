@@ -751,11 +751,10 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             Load64 => MATCH_LD,
         };
         // Set rd (for loads) or rs2 (for stores) to A0.
-        let htinst = match mmio_op.opcode() {
-            Store8 | Store16 | Store32 | Store64 => htinst_base | ((GprIndex::A0 as u32) << 7),
-            Load8 | Load16 | Load32 | Load8U | Load16U | Load32U | Load64 => {
-                htinst_base | ((GprIndex::A0 as u32) << 20)
-            }
+        let htinst = if mmio_op.opcode().is_load() {
+            htinst_base | ((GprIndex::A0 as u32) << 20)
+        } else {
+            htinst_base | ((GprIndex::A0 as u32) << 7)
         };
         htinst as u64
     }
@@ -777,7 +776,12 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             PageFault(exception, page_addr) => {
                 shared.update_with_pf_exit(exception, page_addr.into());
             }
-            MmioFault(exception, addr, mmio_op) => {
+            MmioFault(mmio_op, addr) => {
+                let exception = if mmio_op.opcode().is_load() {
+                    Exception::GuestLoadPageFault
+                } else {
+                    Exception::GuestStorePageFault
+                };
                 shared.update_with_pf_exit(exception, addr);
 
                 // The MMIO instruction is transformed as an ordinary load/store to/from A0, so

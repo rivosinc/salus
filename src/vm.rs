@@ -18,10 +18,7 @@ use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::print::*;
-use sbi::*;
-use sbi::{
-    api::attestation as SbiAttestation, api::pmu, AttestationCapabilities, Error as SbiError,
-};
+use sbi::{Error as SbiError, *};
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
@@ -678,8 +675,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             let counter_mask = active_vcpu
                 .pmu()
                 .get_startable_counter_range(counter_index, counter_mask)?;
-            let result =
-                pmu::start_counters(counter_index, counter_mask, start_flags, initial_value);
+            let result = sbi::api::pmu::start_counters(
+                counter_index,
+                counter_mask,
+                start_flags,
+                initial_value,
+            );
             // Special case "already started" to handle counters that are autostarted following configuration.
             // Examples of such counters include the legacy timer and insret.
             if result.is_ok() || matches!(result, Err(SbiError::AlreadyStarted)) {
@@ -699,7 +700,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             let counter_mask = active_vcpu
                 .pmu()
                 .get_stoppable_counter_range(counter_index, counter_mask)?;
-            let result = pmu::stop_counters(counter_index, counter_mask, stop_flags);
+            let result = sbi::api::pmu::stop_counters(counter_index, counter_mask, stop_flags);
             // Special case "already stopped" to handle counters that can be reset following a stop
             if result.is_ok()
                 || (matches!(result, Err(SbiError::AlreadyStopped)) && stop_flags.is_reset_flag())
@@ -725,7 +726,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 counter_mask,
                 config_flags,
             )?;
-            let platform_counter_index = pmu::configure_matching_counters(
+            let platform_counter_index = sbi::api::pmu::configure_matching_counters(
                 counter_index,
                 counter_mask,
                 config_flags,
@@ -1404,7 +1405,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
 
         let cert_gpa = RawAddr::guest(cert_addr_out, self.page_owner_id());
-        let mut cert_bytes_buffer = [0u8; SbiAttestation::MAX_CERT_SIZE];
+        let mut cert_bytes_buffer = [0u8; sbi::api::attestation::MAX_CERT_SIZE];
         let cert_bytes =
             Certificate::from_csr(&csr, self.attestation_mgr(), &mut cert_bytes_buffer)
                 .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;

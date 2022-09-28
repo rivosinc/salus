@@ -766,12 +766,8 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let shared = self.vcpu.shared_area();
         use VmExitCause::*;
         match cause {
-            ResumableEcall(msg) => {
+            ResumableEcall(msg) | FatalEcall(msg) => {
                 shared.update_with_ecall_exit(msg);
-            }
-            FatalEcall(msg) => {
-                shared.update_with_ecall_exit(msg);
-                self.power_off = true;
             }
             PageFault(exception, page_addr) => {
                 shared.update_with_pf_exit(exception, page_addr.into());
@@ -805,9 +801,10 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
             UnhandledTrap(scause) => {
                 shared.update_with_unhandled_exit(scause);
-                self.power_off = true;
             }
         };
+
+        self.power_off = cause.is_fatal();
     }
 
     /// Delivers the given exception to the vCPU, setting up its register state to handle the trap

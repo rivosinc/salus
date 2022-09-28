@@ -785,13 +785,10 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 shared.update_with_ecall_exit(msg);
                 self.power_off = true;
             }
-            ConfidentialPageFault(exception, page_addr) => {
+            PageFault(exception, page_addr) => {
                 shared.update_with_pf_exit(exception, page_addr.into());
             }
-            SharedPageFault(exception, page_addr) => {
-                shared.update_with_pf_exit(exception, page_addr.into());
-            }
-            MmioPageFault(exception, addr, mmio_op) => {
+            MmioFault(exception, addr, mmio_op) => {
                 shared.update_with_pf_exit(exception, addr);
 
                 // The MMIO instruction is transformed as an ordinary load/store to/from A0, so

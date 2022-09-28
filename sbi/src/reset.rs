@@ -6,7 +6,7 @@ use crate::error::*;
 use crate::function::*;
 
 /// Functions for the Reset extension
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ResetFunction {
     /// Performs a system reset.
     Reset {

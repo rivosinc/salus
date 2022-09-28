@@ -6,7 +6,7 @@ use crate::error::*;
 use crate::function::*;
 
 /// Functions defined for the State extension
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum StateFunction {
     /// Starts the given hart.
     HartStart {

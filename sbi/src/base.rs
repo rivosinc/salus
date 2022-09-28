@@ -6,7 +6,7 @@ use crate::error::*;
 use crate::function::*;
 
 /// Functions defined for the Base extension
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum BaseFunction {
     /// Returns the implemented version of the SBI standard.
     GetSpecificationVersion,

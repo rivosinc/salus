@@ -40,7 +40,7 @@ pub struct TvmAiaParams {
 }
 
 /// Functions provided by the TEE Interrupt extension.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum TeeInterruptFunction {
     /// Configures AIA virtualization for the TVM identified by `tvm_id` from the parameters in
     /// the `TvmAiaParams` structure at the non-confidential physical address `params_addr`.

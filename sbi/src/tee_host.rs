@@ -183,7 +183,7 @@ pub struct TvmCreateParams {
 
 /// Types of pages allowed to used for creating or managing confidential VMs.
 #[repr(u64)]
-#[derive(Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
 pub enum TsmPageType {
     #[default]
     /// Standard 4k pages.
@@ -222,7 +222,7 @@ impl TsmPageType {
 }
 
 /// Functions provided by the TEE Host extension.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum TeeHostFunction {
     /// Creates a TVM from the parameters in the `TvmCreateParams` structure at the non-confidential
     /// physical address `params_addr`. Returns a guest ID that can be used to refer to the TVM in

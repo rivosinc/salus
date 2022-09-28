@@ -143,7 +143,7 @@ impl MeasurementRegisterDescriptor {
 }
 
 /// Functions provided by the attestation extension.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum AttestationFunction {
     /// Get the SBI implementation attestation capabilities.
     /// The attestation capabilities let the SBI implementations expose which

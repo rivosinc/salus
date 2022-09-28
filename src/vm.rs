@@ -661,6 +661,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             SbiMessage::TeeInterrupt(interrupt_func) => {
                 self.handle_tee_interrupt_msg(interrupt_func, active_vcpu.active_pages())
             }
+            SbiMessage::TeeGuest(_) => todo!(),
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }

@@ -31,6 +31,9 @@ pub use tee_host::*;
 // The TEE interrupt SBI extension
 mod tee_interrupt;
 pub use tee_interrupt::*;
+// The TEE guest SBI extension
+mod tee_guest;
+pub use tee_guest::*;
 // The PMU SBI extension
 mod pmu;
 pub use pmu::*;
@@ -112,6 +115,8 @@ pub enum SbiMessage {
     TeeHost(TeeHostFunction),
     /// Provides interrupt virtualization for confidential virtual machines.
     TeeInterrupt(TeeInterruptFunction),
+    /// Provides capabilities for enlightened confidential virtual machines.
+    TeeGuest(TeeGuestFunction),
     /// The extension for getting attestation evidences and extending measurements.
     Attestation(AttestationFunction),
     /// The extension for getting performance counter state.
@@ -132,6 +137,7 @@ impl SbiMessage {
             EXT_TEE_INTERRUPT => {
                 TeeInterruptFunction::from_regs(args).map(SbiMessage::TeeInterrupt)
             }
+            EXT_TEE_GUEST => TeeGuestFunction::from_regs(args).map(SbiMessage::TeeGuest),
             EXT_ATTESTATION => AttestationFunction::from_regs(args).map(SbiMessage::Attestation),
             EXT_PMU => PmuFunction::from_regs(args).map(SbiMessage::Pmu),
             _ => Err(Error::NotSupported),
@@ -148,6 +154,7 @@ impl SbiMessage {
             Reset(_) => EXT_RESET,
             TeeHost(_) => EXT_TEE_HOST,
             TeeInterrupt(_) => EXT_TEE_INTERRUPT,
+            TeeGuest(_) => EXT_TEE_GUEST,
             Attestation(_) => EXT_ATTESTATION,
             Pmu(_) => EXT_PMU,
         }
@@ -165,6 +172,7 @@ impl SbiMessage {
             Reset(f) => f.a6(),
             TeeHost(f) => f.a6(),
             TeeInterrupt(f) => f.a6(),
+            TeeGuest(f) => f.a6(),
             Attestation(f) => f.a6(),
             Pmu(f) => f.a6(),
         }
@@ -180,6 +188,7 @@ impl SbiMessage {
             Reset(f) => f.a5(),
             TeeHost(f) => f.a5(),
             TeeInterrupt(f) => f.a5(),
+            TeeGuest(f) => f.a5(),
             Attestation(f) => f.a5(),
             Pmu(f) => f.a5(),
         }
@@ -195,6 +204,7 @@ impl SbiMessage {
             Reset(f) => f.a4(),
             TeeHost(f) => f.a4(),
             TeeInterrupt(f) => f.a4(),
+            TeeGuest(f) => f.a4(),
             Attestation(f) => f.a4(),
             Pmu(f) => f.a4(),
         }
@@ -210,6 +220,7 @@ impl SbiMessage {
             Reset(f) => f.a3(),
             TeeHost(f) => f.a3(),
             TeeInterrupt(f) => f.a3(),
+            TeeGuest(f) => f.a3(),
             Attestation(f) => f.a3(),
             Pmu(f) => f.a3(),
         }
@@ -225,6 +236,7 @@ impl SbiMessage {
             Reset(f) => f.a2(),
             TeeHost(f) => f.a2(),
             TeeInterrupt(f) => f.a2(),
+            TeeGuest(f) => f.a2(),
             Attestation(f) => f.a2(),
             Pmu(f) => f.a2(),
         }
@@ -240,6 +252,7 @@ impl SbiMessage {
             Reset(f) => f.a1(),
             TeeHost(f) => f.a1(),
             TeeInterrupt(f) => f.a1(),
+            TeeGuest(f) => f.a1(),
             Attestation(f) => f.a1(),
             Pmu(f) => f.a1(),
         }
@@ -255,6 +268,7 @@ impl SbiMessage {
             HartState(f) => f.a0(),
             TeeHost(f) => f.a0(),
             TeeInterrupt(f) => f.a0(),
+            TeeGuest(f) => f.a0(),
             Attestation(f) => f.a0(),
             Pmu(f) => f.a0(),
         }

@@ -13,5 +13,6 @@ pub const EXT_RESET: u64 = 0x53525354;
 pub const EXT_ATTESTATION: u64 = 0x41545354; // ATST
 pub const EXT_TEE_HOST: u64 = 0x54454548; // TEEH
 pub const EXT_TEE_INTERRUPT: u64 = 0x54414949; // TEEI
+pub const EXT_TEE_GUEST: u64 = 0x54454547; // TEEG
 
 pub const SBI_SUCCESS: i64 = 0;

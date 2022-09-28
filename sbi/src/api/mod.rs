@@ -14,6 +14,9 @@ pub mod tee_host;
 /// Host interfaces for confidential computing interrupt virtualization.
 pub mod tee_interrupt;
 
+/// Guest interfaces for confidential computing.
+pub mod tee_guest;
+
 /// Host interfaces for PMU.
 pub mod pmu;
 

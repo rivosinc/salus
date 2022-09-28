@@ -137,6 +137,14 @@ pub enum VmExitCause {
     UnhandledTrap(u64),
 }
 
+impl VmExitCause {
+    /// Returns if the exit cause is fatal.
+    pub fn is_fatal(&self) -> bool {
+        use VmExitCause::*;
+        matches!(self, FatalEcall(_) | UnhandledTrap(_))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum EcallError {
     Sbi(SbiError),
@@ -495,7 +503,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     }
 
     /// Run this guest until an unhandled exit is encountered.
-    fn run_vcpu(&self, vcpu_id: u64, parent_vcpu: Option<&mut ActiveVmCpu<T>>) -> EcallResult<()> {
+    fn run_vcpu(&self, vcpu_id: u64, parent_vcpu: Option<&mut ActiveVmCpu<T>>) -> EcallResult<u64> {
         // Take the vCPU out of self.vcpus, giving us exclusive ownership.
         let mut active_vcpu = self
             .vm()
@@ -633,7 +641,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
         active_vcpu.exit(cause);
 
-        Ok(())
+        Ok(cause.is_fatal().into())
     }
 
     /// Handles ecalls from the guest.
@@ -1244,8 +1252,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let guest_vm = guest
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        guest_vm.run_vcpu(vcpu_id, Some(active_vcpu))?;
-        Ok(0)
+        guest_vm.run_vcpu(vcpu_id, Some(active_vcpu))
     }
 
     fn guest_add_page_table_pages(

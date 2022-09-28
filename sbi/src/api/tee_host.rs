@@ -119,15 +119,13 @@ pub fn tvm_destroy(vmid: u64) -> Result<()> {
 }
 
 /// Runs the given vcpu of the specified TVM.
-pub fn tvm_run(vmid: u64, vcpu_id: u64) -> Result<()> {
+pub fn tvm_run(vmid: u64, vcpu_id: u64) -> Result<u64> {
     let msg = SbiMessage::TeeHost(TvmCpuRun {
         guest_id: vmid,
         vcpu_id,
     });
-    // Safety: running a VM will only write to the TvmCpuSharedState struct registered in
-    // add_vcpu().
-    unsafe { ecall_send(&msg) }?;
-    Ok(())
+    // Safety: running a VM will only write to the shared-memory area registered in add_vcpu().
+    unsafe { ecall_send(&msg) }
 }
 
 /// Adds pages to be used for page table entries of the given vmid.

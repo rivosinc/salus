@@ -281,6 +281,12 @@ pub enum TeeHostFunction {
     },
     /// Runs the given vCPU in the TVM
     ///
+    /// Returns 0 if the vCPU can be resumed via a subsequent call to `TvmCpuRun`, or a value other
+    /// than 0 if the vCPU was terminated and is no longer runnable.
+    ///
+    /// Returns an error if the specified TVM or vCPU does not exist, or if the vCPU exists but
+    /// is not currently runnable.
+    ///
     /// a6 = 5
     TvmCpuRun {
         /// a0 = guest id

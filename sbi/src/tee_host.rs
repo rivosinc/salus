@@ -221,6 +221,38 @@ impl TsmPageType {
     }
 }
 
+/// Types of memory regions that can be created in a TVM.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TeeMemoryRegion {
+    /// A region of memory where a TVM's host may insert pages of confidential memory. The region
+    /// is initially unpopulated. Accesses by the TVM to unmapped pages in the regino will cause
+    /// a guest page fault exit with the faulting page address reported to the TVM's host.
+    Confidential = 0,
+    /// A region of memory where a TVM's host may insert pages of shared, non-confidential memory.
+    /// The region is initially unpopulated. Accesses by the TVM to unmapped pages in the region
+    /// will cause a guest page fault exit with the faulting page address reported to the TVM's
+    /// host.
+    Shared = 1,
+    /// An unpopulated region of memory where accesses by the TVM will cause guest page fault
+    /// exit with the faulting address and a transformed version of the faulting instruction
+    /// reported to the TVM's host, allowing the host to emulate the faulting memory access.
+    EmulatedMmio = 2,
+}
+
+impl TeeMemoryRegion {
+    /// Returns the `TeeMemoryRegion` corresponding to the value.
+    pub fn from_reg(reg: u64) -> Result<Self> {
+        use TeeMemoryRegion::*;
+        match reg {
+            0 => Ok(Confidential),
+            1 => Ok(Shared),
+            2 => Ok(EmulatedMmio),
+            _ => Err(Error::InvalidParam),
+        }
+    }
+}
+
 /// Functions provided by the TEE Host extension.
 #[derive(Copy, Clone, Debug)]
 pub enum TeeHostFunction {

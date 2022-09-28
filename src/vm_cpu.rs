@@ -770,6 +770,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             PowerOff(reset_type, reason) => {
                 let msg = SbiMessage::Reset(sbi::ResetFunction::Reset { reset_type, reason });
                 shared.update_with_ecall_exit(msg);
+                self.power_off = true;
             }
             CpuStart(hart_id) => {
                 let msg = SbiMessage::HartState(sbi::StateFunction::HartStart {
@@ -782,6 +783,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             CpuStop => {
                 let msg = SbiMessage::HartState(sbi::StateFunction::HartStop);
                 shared.update_with_ecall_exit(msg);
+                self.power_off = true;
             }
             ConfidentialPageFault(exception, page_addr) => {
                 shared.update_with_pf_exit(exception, page_addr.into());
@@ -813,6 +815,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
             UnhandledTrap(scause) => {
                 shared.update_with_unhandled_exit(scause);
+                self.power_off = true;
             }
         };
     }

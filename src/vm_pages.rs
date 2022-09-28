@@ -28,7 +28,7 @@ use crate::vm_id::VmId;
 pub enum Error {
     GuestId(PageTrackingError),
     Paging(PageTableError),
-    PageFault(PageFaultType),
+    PageFault(PageFaultType, Exception, GuestPhysAddr),
     NestingTooDeep,
     UnalignedAddress,
     UnsupportedPageSize(PageSize),
@@ -473,15 +473,15 @@ impl<'a, T: GuestStagePagingMode> PciPagesMapper<'a, T> {
 pub enum PageFaultType {
     /// A page fault taken when accessing a confidential memory region. The host may handle these
     /// faults by inserting a confidential page into the guest's address space.
-    Confidential(Exception, GuestPageAddr),
+    Confidential,
     /// A page fault taken when accessing a shared memory region. The host may handle these faults
     /// by inserting a page into the guest's address space.
-    Shared(Exception, GuestPageAddr),
+    Shared,
     /// A page fault taken to an emulated MMIO page.
-    Mmio(Exception, GuestPhysAddr),
-    /// A page fault taken when accessing memory outside of any valid region of guest physical address
-    /// space. These faults are not resolvable.
-    Unmapped(Exception),
+    Mmio,
+    /// A page fault taken when accessing memory outside of any valid region of guest physical
+    /// address space. These faults are not resolvable.
+    Unmapped,
 }
 
 /// Represents the active VM address space. Holds a reference to the TLB version of the address space
@@ -555,10 +555,12 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
             let fault_addr = dest
                 .checked_increment(bytes as u64)
                 .ok_or(Error::AddressOverflow)?;
-            Err(Error::PageFault(self.get_page_fault_cause(
+            let fault_type = self.get_page_fault_cause(Exception::GuestStorePageFault, fault_addr);
+            Err(Error::PageFault(
+                fault_type,
                 Exception::GuestStorePageFault,
                 fault_addr,
-            )))
+            ))
         }
     }
 
@@ -577,10 +579,12 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
             let fault_addr = src
                 .checked_increment(bytes as u64)
                 .ok_or(Error::AddressOverflow)?;
-            Err(Error::PageFault(self.get_page_fault_cause(
+            let fault_type = self.get_page_fault_cause(Exception::GuestLoadPageFault, fault_addr);
+            Err(Error::PageFault(
+                fault_type,
                 Exception::GuestLoadPageFault,
                 fault_addr,
-            )))
+            ))
         }
     }
 
@@ -659,26 +663,16 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
     ) -> PageFaultType {
         use PageFaultType::*;
         match self.vm_pages.inner.regions.find(fault_addr) {
-            // Mask off the page offset for confidential and shared faults to avoid revealing more
-            // information than necessary to the host.
-            Some(VmRegionType::Confidential) => Confidential(
-                exception,
-                PageAddr::with_round_down(fault_addr, PageSize::Size4k),
-            ),
-            Some(VmRegionType::Shared) => Shared(
-                exception,
-                PageAddr::with_round_down(fault_addr, PageSize::Size4k),
-            ),
+            Some(VmRegionType::Confidential) => Confidential,
+            Some(VmRegionType::Shared) => Shared,
             Some(VmRegionType::Mmio) => match exception {
-                Exception::GuestLoadPageFault | Exception::GuestStorePageFault => {
-                    Mmio(exception, fault_addr)
-                }
-                _ => Unmapped(exception),
+                Exception::GuestLoadPageFault | Exception::GuestStorePageFault => Mmio,
+                _ => Unmapped,
             },
             // TODO: Faults in an IMSIC region should report a separate fault type so that the host
             // can "swap in" a vCPU currently using an MRIF.
-            Some(VmRegionType::Imsic) => Unmapped(exception),
-            _ => Unmapped(exception),
+            Some(VmRegionType::Imsic) => Unmapped,
+            _ => Unmapped,
         }
     }
 }

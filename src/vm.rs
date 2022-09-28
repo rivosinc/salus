@@ -131,7 +131,7 @@ pub enum VmExitCause {
 #[derive(Clone, Copy, Debug)]
 enum EcallError {
     Sbi(SbiError),
-    PageFault(PageFaultType),
+    PageFault(PageFaultType, Exception, GuestPhysAddr),
 }
 
 type EcallResult<T> = core::result::Result<T, EcallError>;
@@ -139,7 +139,7 @@ type EcallResult<T> = core::result::Result<T, EcallError>;
 impl From<VmPagesError> for EcallError {
     fn from(error: VmPagesError) -> EcallError {
         match error {
-            VmPagesError::PageFault(pf) => EcallError::PageFault(pf),
+            VmPagesError::PageFault(pf, e, addr) => EcallError::PageFault(pf, e, addr),
             // TODO: Map individual error types. InvalidAddress is likely not the right value for
             // each error.
             _ => EcallError::Sbi(SbiError::InvalidAddress),
@@ -181,14 +181,15 @@ impl From<EcallResult<u64>> for EcallAction {
         match result {
             Ok(val) => Continue(SbiReturn::success(val)),
             Err(EcallError::Sbi(e)) => Continue(e.into()),
-            Err(EcallError::PageFault(pf)) => {
+            Err(EcallError::PageFault(pf, e, addr)) => {
+                let addr = PageAddr::with_round_down(addr, PageSize::Size4k);
                 use PageFaultType::*;
                 match pf {
-                    // Unhandleable page faults or page faults in MMIO space just result in an error to
-                    // the caller.
-                    Unmapped(..) | Mmio(..) => Continue(SbiReturn::from(SbiError::InvalidAddress)),
-                    Confidential(e, addr) => Retry(VmExitCause::ConfidentialPageFault(e, addr)),
-                    Shared(e, addr) => Retry(VmExitCause::SharedPageFault(e, addr)),
+                    // Unhandleable page faults or page faults in MMIO space just result in an
+                    // error to the caller.
+                    Unmapped | Mmio => Continue(SbiReturn::from(SbiError::InvalidAddress)),
+                    Confidential => Retry(VmExitCause::ConfidentialPageFault(e, addr)),
+                    Shared => Retry(VmExitCause::SharedPageFault(e, addr)),
                 }
             }
         }
@@ -533,13 +534,19 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                         .get_page_fault_cause(exception, fault_addr);
                     use PageFaultType::*;
                     match pf {
-                        Confidential(e, addr) => {
-                            break VmExitCause::ConfidentialPageFault(e, addr);
+                        Confidential => {
+                            break VmExitCause::ConfidentialPageFault(
+                                exception,
+                                PageAddr::with_round_down(fault_addr, PageSize::Size4k),
+                            );
                         }
-                        Shared(e, addr) => {
-                            break VmExitCause::SharedPageFault(e, addr);
+                        Shared => {
+                            break VmExitCause::SharedPageFault(
+                                exception,
+                                PageAddr::with_round_down(fault_addr, PageSize::Size4k),
+                            );
                         }
-                        Mmio(e, addr) => {
+                        Mmio => {
                             // We need the faulting instruction for MMIO faults.
                             use InstructionFetchError::*;
                             let inst = match active_vcpu
@@ -576,10 +583,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                                 }
                             };
 
-                            break VmExitCause::MmioPageFault(e, addr, mmio_op);
+                            break VmExitCause::MmioPageFault(exception, fault_addr, mmio_op);
                         }
-                        Unmapped(e) => {
-                            break VmExitCause::UnhandledTrap(Trap::Exception(e).to_scause());
+                        Unmapped => {
+                            break VmExitCause::UnhandledTrap(
+                                Trap::Exception(exception).to_scause(),
+                            );
                         }
                     };
                 }

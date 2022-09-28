@@ -23,7 +23,7 @@ use sbi::{Error as SbiError, *};
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm_cpu::{
-    ActiveVmCpu, VmCpuExit, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpuStatus,
+    ActiveVmCpu, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpuStatus, VmCpuTrap,
     VmCpus, VM_CPU_BYTES, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
@@ -49,7 +49,7 @@ const SBI_IMPL_ID_SALUS: u64 = 7;
 
 /// Possible MMIO instructions.
 #[derive(Clone, Copy, Debug)]
-pub enum TvmMmioOpCode {
+pub enum MmioOpcode {
     Load64,
     Load32,
     Load32U,
@@ -66,7 +66,7 @@ pub enum TvmMmioOpCode {
 /// A decoded MMIO operation.
 #[derive(Clone, Copy, Debug)]
 pub struct MmioOperation {
-    opcode: TvmMmioOpCode,
+    opcode: MmioOpcode,
     register: GprIndex,
     len: usize,
 }
@@ -76,17 +76,17 @@ impl MmioOperation {
     fn from_instruction(instruction: DecodedInstruction) -> Option<Self> {
         use Instruction::*;
         let (opcode, reg_index) = match instruction.instruction() {
-            Lb(i) => (TvmMmioOpCode::Load8, i.rd()),
-            Lh(i) => (TvmMmioOpCode::Load16, i.rd()),
-            Lw(i) => (TvmMmioOpCode::Load32, i.rd()),
-            Lbu(i) => (TvmMmioOpCode::Load8U, i.rd()),
-            Lhu(i) => (TvmMmioOpCode::Load16U, i.rd()),
-            Lwu(i) => (TvmMmioOpCode::Load32U, i.rd()),
-            Ld(i) => (TvmMmioOpCode::Load64, i.rd()),
-            Sb(s) => (TvmMmioOpCode::Store8, s.rs2()),
-            Sh(s) => (TvmMmioOpCode::Store16, s.rs2()),
-            Sw(s) => (TvmMmioOpCode::Store32, s.rs2()),
-            Sd(s) => (TvmMmioOpCode::Store64, s.rs2()),
+            Lb(i) => (MmioOpcode::Load8, i.rd()),
+            Lh(i) => (MmioOpcode::Load16, i.rd()),
+            Lw(i) => (MmioOpcode::Load32, i.rd()),
+            Lbu(i) => (MmioOpcode::Load8U, i.rd()),
+            Lhu(i) => (MmioOpcode::Load16U, i.rd()),
+            Lwu(i) => (MmioOpcode::Load32U, i.rd()),
+            Ld(i) => (MmioOpcode::Load64, i.rd()),
+            Sb(s) => (MmioOpcode::Store8, s.rs2()),
+            Sh(s) => (MmioOpcode::Store16, s.rs2()),
+            Sw(s) => (MmioOpcode::Store32, s.rs2()),
+            Sd(s) => (MmioOpcode::Store64, s.rs2()),
             _ => {
                 return None;
             }
@@ -98,8 +98,8 @@ impl MmioOperation {
         })
     }
 
-    /// Returns the operation as a `TvmMmioOpCode`.
-    pub fn opcode(&self) -> TvmMmioOpCode {
+    /// Returns the operation as a `MmioOpcode`.
+    pub fn opcode(&self) -> MmioOpcode {
         self.opcode
     }
 
@@ -496,7 +496,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             let exit = active_vcpu.run();
             use SbiReturnType::*;
             match exit {
-                VmCpuExit::Ecall(Some(sbi_msg)) => {
+                VmCpuTrap::Ecall(Some(sbi_msg)) => {
                     match self.handle_ecall(sbi_msg, &mut active_vcpu) {
                         EcallAction::LegacyOk => {
                             active_vcpu.set_ecall_result(Legacy(0));
@@ -518,11 +518,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                         }
                     }
                 }
-                VmCpuExit::Ecall(None) => {
+                VmCpuTrap::Ecall(None) => {
                     // Unrecognized ECALL, return an error.
                     active_vcpu.set_ecall_result(Standard(SbiReturn::from(SbiError::NotSupported)));
                 }
-                VmCpuExit::PageFault {
+                VmCpuTrap::PageFault {
                     exception,
                     fault_addr,
                     fault_pc,
@@ -585,7 +585,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                         }
                     };
                 }
-                VmCpuExit::VirtualInstruction {
+                VmCpuTrap::VirtualInstruction {
                     fault_pc,
                     priv_level,
                 } => {
@@ -610,10 +610,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                         ControlFlow::Break(reason) => break reason,
                     };
                 }
-                VmCpuExit::DelegatedException { exception, stval } => {
+                VmCpuTrap::DelegatedException { exception, stval } => {
                     active_vcpu.inject_exception(exception, stval);
                 }
-                VmCpuExit::Other(ref trap_csrs) => {
+                VmCpuTrap::Other(ref trap_csrs) => {
                     println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
                     break VmExitCause::UnhandledTrap(trap_csrs.scause);
                 }

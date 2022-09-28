@@ -8,7 +8,7 @@ use ConfigFlagsValues::*;
 
 /// Functions for the Performance Monitoring Unit (PMU) extension
 /// Specific details can be found in the SBI documentation for the PMU extension.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum PmuFunction {
     /// Returns the total number of performance counters (hardware and firmware).
     GetNumCounters,
@@ -56,7 +56,7 @@ pub enum PmuFunction {
 
 /// This encapsulates the bit-fields for PMU config_flags parameter as described in the SBI documentation
 /// for sbi_pmu_counter_config_matching
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug)]
 pub struct PmuCounterConfigFlags(u64);
 
 #[derive(Copy, Clone)]

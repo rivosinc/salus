@@ -98,7 +98,7 @@ pub enum SbiReturnType {
 }
 
 /// SBI Message used to invoke the specified SBI extension in the firmware.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SbiMessage {
     /// The base SBI extension functions.
     Base(BaseFunction),

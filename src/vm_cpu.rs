@@ -17,7 +17,7 @@ use sbi::{self, SbiMessage, SbiReturnType};
 use spin::{Mutex, MutexGuard, Once, RwLock, RwLockReadGuard};
 
 use crate::smp::PerCpu;
-use crate::vm::{MmioOperation, TvmMmioOpCode, VmExitCause};
+use crate::vm::{MmioOpcode, MmioOperation, VmExitCause};
 use crate::vm_id::VmId;
 use crate::vm_pages::{ActiveVmPages, FinalizedVmPages, PinnedPages};
 use crate::vm_pmu::VmPmuState;
@@ -485,8 +485,8 @@ impl VmCpuSharedArea {
     }
 }
 
-/// Identifies the exit cause for a vCPU.
-pub enum VmCpuExit {
+/// Identifies the reason for a trap taken from a vCPU.
+pub enum VmCpuTrap {
     /// ECALLs from VS mode.
     Ecall(Option<SbiMessage>),
     /// G-stage page faults.
@@ -629,7 +629,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     }
 
     /// Runs this vCPU until it traps.
-    pub fn run(&mut self) -> VmCpuExit {
+    pub fn run(&mut self) -> VmCpuTrap {
         self.complete_pending_mmio_op();
 
         // TODO, HGEIE programinng:
@@ -685,7 +685,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         match Trap::from_scause(vcpu_state.trap_csrs.scause).unwrap() {
             Trap::Exception(VirtualSupervisorEnvCall) => {
                 let sbi_msg = SbiMessage::from_regs(vcpu_state.guest_regs.gprs.a_regs()).ok();
-                VmCpuExit::Ecall(sbi_msg)
+                VmCpuTrap::Ecall(sbi_msg)
             }
             Trap::Exception(GuestInstructionPageFault)
             | Trap::Exception(GuestLoadPageFault)
@@ -694,7 +694,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     vcpu_state.trap_csrs.htval << 2 | vcpu_state.trap_csrs.stval & 0x03,
                     guest_id,
                 );
-                VmCpuExit::PageFault {
+                VmCpuTrap::PageFault {
                     exception: Exception::from_scause_reason(vcpu_state.trap_csrs.scause).unwrap(),
                     fault_addr,
                     // Note that this address is not necessarily guest virtual as the guest may or
@@ -708,7 +708,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 }
             }
             Trap::Exception(VirtualInstruction) => {
-                VmCpuExit::VirtualInstruction {
+                VmCpuTrap::VirtualInstruction {
                     // See above re: this address being guest virtual.
                     fault_pc: RawAddr::guest_virt(vcpu_state.guest_regs.sepc, guest_id),
                     priv_level: PrivilegeLevel::from_hstatus(vcpu_state.guest_regs.hstatus),
@@ -720,22 +720,22 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 {
                     // Even if we intended to delegate this exception it might not be set in
                     // medeleg, in which case firmware may send it our way instead.
-                    VmCpuExit::DelegatedException {
+                    VmCpuTrap::DelegatedException {
                         exception: e,
                         stval: vcpu_state.trap_csrs.stval,
                     }
                 } else {
-                    VmCpuExit::Other(vcpu_state.trap_csrs.clone())
+                    VmCpuTrap::Other(vcpu_state.trap_csrs.clone())
                 }
             }
-            _ => VmCpuExit::Other(vcpu_state.trap_csrs.clone()),
+            _ => VmCpuTrap::Other(vcpu_state.trap_csrs.clone()),
         }
     }
 
     // Rewrites `mmio_op` as a transformed load or store instruction to/from A0 as would be written
     // to the HTINST CSR.
     fn mmio_op_to_htinst(mmio_op: MmioOperation) -> u64 {
-        use TvmMmioOpCode::*;
+        use MmioOpcode::*;
         // Get the base instruction for the operation.
         let htinst_base = match mmio_op.opcode() {
             Store8 => MATCH_SB,
@@ -782,7 +782,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
                 // The MMIO instruction is transformed as an ordinary load/store to/from A0, so
                 // update A0 with the value the vCPU wants to store.
-                use TvmMmioOpCode::*;
+                use MmioOpcode::*;
                 let val = match mmio_op.opcode() {
                     Store8 => self.get_gpr(mmio_op.register()) as u8 as u64,
                     Store16 => self.get_gpr(mmio_op.register()) as u16 as u64,
@@ -884,7 +884,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         // to complete the load to A0.
         if let Some(mmio_op) = self.vcpu.pending_mmio_op {
             let val = self.vcpu.shared_area().as_ref().gpr(GprIndex::A0);
-            use TvmMmioOpCode::*;
+            use MmioOpcode::*;
             // Write the value to the actual destination register.
             match mmio_op.opcode() {
                 Load8 => {

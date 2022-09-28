@@ -767,21 +767,10 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let shared = self.vcpu.shared_area();
         use VmExitCause::*;
         match cause {
-            PowerOff(reset_type, reason) => {
-                let msg = SbiMessage::Reset(sbi::ResetFunction::Reset { reset_type, reason });
-                shared.update_with_ecall_exit(msg);
-                self.power_off = true;
-            }
-            CpuStart(hart_id) => {
-                let msg = SbiMessage::HartState(sbi::StateFunction::HartStart {
-                    hart_id,
-                    start_addr: 0,
-                    opaque: 0,
-                });
+            ResumableEcall(msg) => {
                 shared.update_with_ecall_exit(msg);
             }
-            CpuStop => {
-                let msg = SbiMessage::HartState(sbi::StateFunction::HartStop);
+            FatalEcall(msg) => {
                 shared.update_with_ecall_exit(msg);
                 self.power_off = true;
             }

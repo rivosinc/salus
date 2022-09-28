@@ -118,9 +118,8 @@ impl MmioOperation {
 /// Exit cause for a TVM from the TvmCpuRun ECALL.
 #[derive(Clone, Copy, Debug)]
 pub enum VmExitCause {
-    PowerOff(ResetType, ResetReason),
-    CpuStart(u64),
-    CpuStop,
+    FatalEcall(SbiMessage),
+    ResumableEcall(SbiMessage),
     PageFault(Exception, GuestPageAddr),
     MmioFault(Exception, GuestPhysAddr, MmioOperation),
     Wfi(DecodedInstruction),
@@ -634,10 +633,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 print!("{}", c as u8 as char);
                 EcallAction::LegacyOk
             }
-            SbiMessage::Reset(ResetFunction::Reset { reset_type, reason }) => EcallAction::Break(
-                VmExitCause::PowerOff(reset_type, reason),
-                SbiReturn::success(0),
-            ),
+            SbiMessage::Reset(ResetFunction::Reset { .. }) => {
+                EcallAction::Break(VmExitCause::FatalEcall(msg), SbiReturn::success(0))
+            }
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
             SbiMessage::TeeHost(host_func) => self.handle_tee_host_msg(host_func, active_vcpu),
@@ -815,10 +813,21 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 start_addr,
                 opaque,
             } => match self.start_vcpu(hart_id, start_addr, opaque) {
-                Ok(()) => EcallAction::Break(VmExitCause::CpuStart(hart_id), SbiReturn::success(0)),
+                Ok(()) => {
+                    // Forward the ECALL along, but mask the initial PC/A1 values.
+                    let msg = SbiMessage::HartState(StateFunction::HartStart {
+                        hart_id,
+                        start_addr: 0,
+                        opaque: 0,
+                    });
+                    EcallAction::Break(VmExitCause::ResumableEcall(msg), SbiReturn::success(0))
+                }
                 result @ Err(_) => result.map(|_| 0).into(),
             },
-            HartStop => EcallAction::Break(VmExitCause::CpuStop, SbiReturn::success(0)),
+            HartStop => EcallAction::Break(
+                VmExitCause::FatalEcall(SbiMessage::HartState(hsm_func)),
+                SbiReturn::success(0),
+            ),
             HartStatus { hart_id } => self.get_vcpu_status(hart_id).into(),
             _ => EcallAction::Unhandled,
         }

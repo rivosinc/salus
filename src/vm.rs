@@ -894,11 +894,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self
                 .guest_add_confidential_memory_region(guest_id, guest_addr, len)
                 .into(),
-            TvmAddEmulatedMmioRegion {
-                guest_id,
-                guest_addr,
-                len,
-            } => self.guest_add_mmio_region(guest_id, guest_addr, len).into(),
             TvmAddZeroPages {
                 guest_id,
                 page_addr,
@@ -942,13 +937,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 shared_page_addr,
             } => self
                 .guest_add_vcpu(guest_id, vcpu_id, shared_page_addr)
-                .into(),
-            TvmAddSharedMemoryRegion {
-                guest_id,
-                guest_addr,
-                len,
-            } => self
-                .guest_add_shared_memory_region(guest_id, guest_addr, len)
                 .into(),
             TvmAddSharedPages {
                 guest_id,
@@ -1291,20 +1279,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    /// Adds an emulated MMIO region to the specified guest.
-    fn guest_add_mmio_region(&self, guest_id: u64, guest_addr: u64, len: u64) -> EcallResult<u64> {
-        let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest
-            .as_initializing_vm()
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        guest_vm
-            .vm_pages()
-            .add_mmio_region(page_addr, len)
-            .map_err(EcallError::from)?;
-        Ok(0)
-    }
-
     fn guest_add_zero_pages(
         &self,
         guest_id: u64,
@@ -1611,24 +1585,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .reclaim_imsic(imsic_addr)
             .map_err(EcallError::from)?;
         Ok(0)
-    }
-
-    fn guest_add_shared_memory_region(
-        &self,
-        guest_id: u64,
-        guest_addr: u64,
-        len: u64,
-    ) -> EcallResult<u64> {
-        let page_addr = self.guest_addr_from_raw(guest_addr)?;
-        let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest
-            .as_initializing_vm()
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        guest_vm
-            .vm_pages()
-            .add_shared_memory_region(page_addr, len)
-            .map_err(EcallError::from)?;
-        Ok(len)
     }
 
     fn guest_add_shared_pages(

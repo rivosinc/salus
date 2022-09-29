@@ -191,31 +191,6 @@ pub fn add_confidential_memory_region(vmid: u64, guest_addr: u64, len: u64) -> R
     Ok(())
 }
 
-/// Declares an address range to be used for emulating MMIO accesses in the guest.
-pub fn add_emulated_mmio_region(vmid: u64, guest_addr: u64, len: u64) -> Result<()> {
-    let msg = SbiMessage::TeeHost(TvmAddEmulatedMmioRegion {
-        guest_id: vmid,
-        guest_addr,
-        len,
-    });
-    // Safety: Doesn't touch this host's memory.
-    unsafe { ecall_send(&msg) }?;
-    Ok(())
-}
-
-/// Declares a region that will can be filled with share pages for communication between a TVM and
-/// the host(e.g. virito).
-pub fn add_shared_memory_region(vmid: u64, guest_addr: u64, len: u64) -> Result<()> {
-    let msg = SbiMessage::TeeHost(TvmAddSharedMemoryRegion {
-        guest_id: vmid,
-        guest_addr,
-        len,
-    });
-    // Safety: `TvmAddSharedMemoryRegion` doesn't affect host memory
-    unsafe { ecall_send(&msg) }?;
-    Ok(())
-}
-
 /// Copies the data from the pages backing `src_data` to the guest and records their measurement for
 /// attestation.  src_data must be aligned to the given page size.
 pub fn add_measured_pages(

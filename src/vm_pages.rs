@@ -881,15 +881,6 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         self.do_map_pages(page_addr, count, VmRegionType::Confidential)
     }
 
-    /// Same as `map_zero_pages()`, but for pages in shared (non-confidential) regions.
-    pub fn map_shared_pages(
-        &self,
-        page_addr: GuestPageAddr,
-        count: u64,
-    ) -> Result<SharedPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, VmRegionType::Shared)
-    }
-
     /// Same as `map_zero_pages()`, but for IMSIC guest interrupt file pages.
     pub fn map_imsic_pages(
         &self,
@@ -950,6 +941,15 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     /// space.
     pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
         self.do_add_region(page_addr, len, VmRegionType::Mmio)
+    }
+
+    /// Same as `map_zero_pages()`, but for pages in shared (non-confidential) regions.
+    pub fn map_shared_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<SharedPagesMapper<'a, T>> {
+        self.do_map_pages(page_addr, count, VmRegionType::Shared)
     }
 
     // Returns a list of converted and locked pages created from `num_pages` starting at
@@ -1217,7 +1217,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         &self,
         from_addr: GuestPageAddr,
         count: u64,
-        to: AnyVmPages<T>,
+        to: FinalizedVmPages<T>,
         to_addr: GuestPageAddr,
     ) -> Result<()> {
         let shared_list = self

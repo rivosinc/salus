@@ -1600,7 +1600,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
         let page_addr = self.guest_addr_from_raw(page_addr)?;
         let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest.as_any_vm();
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         self.vm_pages()
             .add_shared_pages_to(page_addr, num_pages, guest_vm.vm_pages(), guest_addr)

@@ -288,8 +288,7 @@ pub enum TeeHostFunction {
     },
     /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
     /// specified guest's address space at `guest_addr`. The mapping must lie within a region of
-    /// confidential memory created with `TvmAddConfidentialMemoryRegion`. Zero pages may be added
-    /// at any time.
+    /// confidential memory created with `TvmAddMemoryRegion`. Zero pages may be added at any time.
     ///
     /// a6 = 3
     TvmAddZeroPages {
@@ -381,8 +380,8 @@ pub enum TeeHostFunction {
     /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
     /// memory at `dest_addr`, then measures and maps the pages at `dest_addr` into the specified
     /// guest's address space at `guest_addr`. The mapping must lie within a region of confidential
-    /// memory created with `TvmAddConfidentialMemoryRegion`. Measured pages may only be added prior
-    /// to TVM finalization.
+    /// memory created with `TvmAddMemoryRegion`. Measured pages may only be added prior to TVM
+    /// finalization.
     ///
     /// a6 = 11
     TvmAddMeasuredPages {
@@ -438,19 +437,22 @@ pub enum TeeHostFunction {
     ///
     /// a6 = 15
     TsmLocalFence,
-    /// Marks the specified range of guest physical address space as reserved for the mapping of
-    /// confidential memory. The region is initially unpopulated. Pages of confidential memory may
-    /// be inserted with `TvmAddZeroPages` and `TvmAddMeasuredPages`. Both `guest_addr` and `len`
-    /// must be 4kB-aligned. Confidential memory regions may only be added to TVMs prior to
-    /// finalization.
+    /// Adds a memory region to the TVM identified by `guest_id` at the specified range of guest
+    /// physical address space. Both `addr` and `len` must be 4kB-aligned and must not overlap with
+    /// any previously-added regions.
+    ///
+    /// Only `Confidential` regions may be added by the host, and they may only be added prior to
+    /// TVM finalization.
     ///
     /// a6 = 17
-    TvmAddConfidentialMemoryRegion {
-        /// a0 = guest_id
+    TvmAddMemoryRegion {
+        /// a0 = guest id
         guest_id: u64,
-        /// a1 = start of the confidential memory region
+        /// a1 = type of memory region
+        region_type: TeeMemoryRegion,
+        /// a2 = start of the region
         guest_addr: u64,
-        /// a2 = length of the confidential memory region
+        /// a3 = length of the region
         len: u64,
     },
     /// Maps non-confidential shared pages in a region of shared memory previously registered by
@@ -527,10 +529,11 @@ impl TeeHostFunction {
             }),
             14 => Ok(TsmInitiateFence),
             15 => Ok(TsmLocalFence),
-            17 => Ok(TvmAddConfidentialMemoryRegion {
+            17 => Ok(TvmAddMemoryRegion {
                 guest_id: args[0],
-                guest_addr: args[1],
-                len: args[2],
+                region_type: TeeMemoryRegion::from_reg(args[1])?,
+                guest_addr: args[2],
+                len: args[3],
             }),
             20 => Ok(TvmAddSharedPages {
                 guest_id: args[0],
@@ -604,8 +607,9 @@ impl SbiFunction for TeeHostFunction {
             } => 13,
             TsmInitiateFence => 14,
             TsmLocalFence => 15,
-            TvmAddConfidentialMemoryRegion {
+            TvmAddMemoryRegion {
                 guest_id: _,
+                region_type: _,
                 guest_addr: _,
                 len: _,
             } => 17,
@@ -673,8 +677,9 @@ impl SbiFunction for TeeHostFunction {
                 page_type: _,
                 num_pages: _,
             } => *page_addr,
-            TvmAddConfidentialMemoryRegion {
+            TvmAddMemoryRegion {
                 guest_id,
+                region_type: _,
                 guest_addr: _,
                 len: _,
             } => *guest_id,
@@ -738,11 +743,12 @@ impl SbiFunction for TeeHostFunction {
                 page_type,
                 num_pages: _,
             } => *page_type as u64,
-            TvmAddConfidentialMemoryRegion {
+            TvmAddMemoryRegion {
                 guest_id: _,
-                guest_addr,
+                region_type,
+                guest_addr: _,
                 len: _,
-            } => *guest_addr,
+            } => *region_type as u64,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr,
@@ -793,11 +799,12 @@ impl SbiFunction for TeeHostFunction {
                 page_type: _,
                 num_pages,
             } => *num_pages,
-            TvmAddConfidentialMemoryRegion {
+            TvmAddMemoryRegion {
                 guest_id: _,
-                guest_addr: _,
-                len,
-            } => *len,
+                region_type: _,
+                guest_addr,
+                len: _,
+            } => *guest_addr,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr: _,
@@ -827,6 +834,12 @@ impl SbiFunction for TeeHostFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_type as u64,
+            TvmAddMemoryRegion {
+                guest_id: _,
+                region_type: _,
+                guest_addr: _,
+                len,
+            } => *len,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr: _,

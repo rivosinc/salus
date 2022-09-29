@@ -907,6 +907,34 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
     ) -> Result<PciPagesMapper<'a, T>> {
         self.do_map_pages(page_addr, count, VmRegionType::Pci)
     }
+
+    // Adds a region of type `region_type`.
+    fn do_add_region(
+        &self,
+        page_addr: GuestPageAddr,
+        len: u64,
+        region_type: VmRegionType,
+    ) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+        self.inner.regions.add(page_addr, end, region_type)
+    }
+
+    /// Adds a shared memory region of `len` bytes starting at `page_addr` to this VM's address
+    /// space.
+    pub fn add_shared_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_add_region(page_addr, len, VmRegionType::Shared)
+    }
+
+    /// Adds an emulated MMIO region of `len` bytes starting at `page_addr` to this VM's address
+    /// space.
+    pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_add_region(page_addr, len, VmRegionType::Mmio)
+    }
 }
 
 impl<'a, T: GuestStagePagingMode, S> Clone for VmPagesRef<'a, T, S> {
@@ -1326,38 +1354,10 @@ impl<'a, T: GuestStagePagingMode> InitializingVmPages<'a, T> {
         Ok(())
     }
 
-    // Adds a region of type `region_type`.
-    fn do_add_region(
-        &self,
-        page_addr: GuestPageAddr,
-        len: u64,
-        region_type: VmRegionType,
-    ) -> Result<()> {
-        let end = PageAddr::new(
-            RawAddr::from(page_addr)
-                .checked_increment(len)
-                .ok_or(Error::AddressOverflow)?,
-        )
-        .ok_or(Error::UnalignedAddress)?;
-        self.inner.regions.add(page_addr, end, region_type)
-    }
-
     /// Adds a confidential memory region of `len` bytes starting at `page_addr` to this VM's
     /// address space.
     pub fn add_confidential_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
         self.do_add_region(page_addr, len, VmRegionType::Confidential)
-    }
-
-    /// Adds a shared memory region of `len` bytes starting at `page_addr` to this VM's address
-    /// space.
-    pub fn add_shared_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        self.do_add_region(page_addr, len, VmRegionType::Shared)
-    }
-
-    /// Adds an emulated MMIO region of `len` bytes starting at `page_addr` to this VM's address
-    /// space.
-    pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        self.do_add_region(page_addr, len, VmRegionType::Mmio)
     }
 
     /// Adds a PCI BAR memory region of `len` bytes starting at `page_addr` to this VM's address

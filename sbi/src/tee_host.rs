@@ -453,37 +453,8 @@ pub enum TeeHostFunction {
         /// a2 = length of the confidential memory region
         len: u64,
     },
-    /// Marks the specified range of guest physical address space as used for emulated MMIO.
-    /// The region is unpopulated; attempts by a TVM vCPU to access this region will cause a
-    /// `MmioPageFault` exit from `TvmCpuRun`. Both `guest_addr` and `len` must be 4kB-aligned.
-    /// Emulated MMIO regions may only be added to TVMs prior to finalization.
-    ///
-    /// a6 = 18
-    TvmAddEmulatedMmioRegion {
-        /// a0 = guest_id
-        guest_id: u64,
-        /// a1 = start of the emulated MMIO region
-        guest_addr: u64,
-        /// a2 = length of the emulated MMIO region
-        len: u64,
-    },
-    /// Marks the specified range of guest physical address space as reserved for the mapping of
-    /// shared memory. The region is initially unpopulated. Pages of shared memory may be inserted with
-    /// `TvmAddSharedPages`. Attempts by a TVM vCPU to access an unpopulated region will cause a `SharedPageFault`
-    /// exit from `TvmCpuRun` Both `guest_addr` and `len` must be 4kB-aligned.
-    /// Shared memory regions may only be added to TVMs prior to finalization.
-    ///
-    /// a6 = 19
-    TvmAddSharedMemoryRegion {
-        /// a0 = guest id
-        guest_id: u64,
-        /// a1 = start of the shared memory region
-        guest_addr: u64,
-        /// a2 = length of the shared memory region
-        len: u64,
-    },
-    /// Maps non-confidential shared pages in a range previously defined by `TvmAddSharedMemoryRegion`.
-    /// The call may be made before or after TVM finalization, and shared pages can be mapped-in on demand.
+    /// Maps non-confidential shared pages in a region of shared memory previously registered by
+    /// the guest via `AddMemoryRegion` in the TEE-Guest API.
     ///
     /// a6 = 20
     TvmAddSharedPages {
@@ -557,16 +528,6 @@ impl TeeHostFunction {
             14 => Ok(TsmInitiateFence),
             15 => Ok(TsmLocalFence),
             17 => Ok(TvmAddConfidentialMemoryRegion {
-                guest_id: args[0],
-                guest_addr: args[1],
-                len: args[2],
-            }),
-            18 => Ok(TvmAddEmulatedMmioRegion {
-                guest_id: args[0],
-                guest_addr: args[1],
-                len: args[2],
-            }),
-            19 => Ok(TvmAddSharedMemoryRegion {
                 guest_id: args[0],
                 guest_addr: args[1],
                 len: args[2],
@@ -648,16 +609,6 @@ impl SbiFunction for TeeHostFunction {
                 guest_addr: _,
                 len: _,
             } => 17,
-            TvmAddEmulatedMmioRegion {
-                guest_id: _,
-                guest_addr: _,
-                len: _,
-            } => 18,
-            TvmAddSharedMemoryRegion {
-                guest_id: _,
-                guest_addr: _,
-                len: _,
-            } => 19,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr: _,
@@ -727,16 +678,6 @@ impl SbiFunction for TeeHostFunction {
                 guest_addr: _,
                 len: _,
             } => *guest_id,
-            TvmAddEmulatedMmioRegion {
-                guest_id,
-                guest_addr: _,
-                len: _,
-            } => *guest_id,
-            TvmAddSharedMemoryRegion {
-                guest_id,
-                guest_addr: _,
-                len: _,
-            } => *guest_id,
             TvmAddSharedPages {
                 guest_id,
                 page_addr: _,
@@ -802,16 +743,6 @@ impl SbiFunction for TeeHostFunction {
                 guest_addr,
                 len: _,
             } => *guest_addr,
-            TvmAddEmulatedMmioRegion {
-                guest_id: _,
-                guest_addr,
-                len: _,
-            } => *guest_addr,
-            TvmAddSharedMemoryRegion {
-                guest_id: _,
-                guest_addr,
-                len: _,
-            } => *guest_addr,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr,
@@ -863,16 +794,6 @@ impl SbiFunction for TeeHostFunction {
                 num_pages,
             } => *num_pages,
             TvmAddConfidentialMemoryRegion {
-                guest_id: _,
-                guest_addr: _,
-                len,
-            } => *len,
-            TvmAddEmulatedMmioRegion {
-                guest_id: _,
-                guest_addr: _,
-                len,
-            } => *len,
-            TvmAddSharedMemoryRegion {
                 guest_id: _,
                 guest_addr: _,
                 len,

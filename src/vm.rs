@@ -887,12 +887,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self
                 .guest_add_page_table_pages(guest_id, page_addr, num_pages)
                 .into(),
-            TvmAddConfidentialMemoryRegion {
+            TvmAddMemoryRegion {
                 guest_id,
+                region_type,
                 guest_addr,
                 len,
             } => self
-                .guest_add_confidential_memory_region(guest_id, guest_addr, len)
+                .guest_add_memory_region(guest_id, region_type, guest_addr, len)
                 .into(),
             TvmAddZeroPages {
                 guest_id,
@@ -1260,10 +1261,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    /// Adds a region of confidential memory to the specified guest.
-    fn guest_add_confidential_memory_region(
+    fn guest_add_memory_region(
         &self,
         guest_id: u64,
+        region_type: TeeMemoryRegion,
         guest_addr: u64,
         len: u64,
     ) -> EcallResult<u64> {
@@ -1271,11 +1272,15 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let guest_vm = guest
             .as_initializing_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        guest_vm
-            .vm_pages()
-            .add_confidential_memory_region(page_addr, len)
-            .map_err(EcallError::from)?;
+        let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        use TeeMemoryRegion::*;
+        match region_type {
+            Confidential => guest_vm
+                .vm_pages()
+                .add_confidential_memory_region(guest_addr, len)
+                .map_err(EcallError::from),
+            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
+        }?;
         Ok(0)
     }
 

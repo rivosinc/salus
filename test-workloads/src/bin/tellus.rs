@@ -16,10 +16,13 @@ use core::alloc::{GlobalAlloc, Layout};
 extern crate alloc;
 extern crate test_workloads;
 
+mod consts;
+
 use arrayvec::ArrayVec;
+use consts::*;
 #[cfg(target_feature = "v")]
 use core::arch::asm;
-use core::ptr;
+use core::{ops::Range, ptr};
 use device_tree::Fdt;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap, CSR, CSR_CYCLE};
 use s_mode_utils::abort::abort;
@@ -28,7 +31,7 @@ use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::{base, pmu, reset, tee_host, tee_interrupt};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
-    PmuHardware, SbiMessage, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
+    PmuHardware, SbiMessage, TeeMemoryRegion, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
 };
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -58,8 +61,6 @@ pub fn poweroff() -> ! {
 
     abort()
 }
-
-const PAGE_SIZE_4K: u64 = 4096;
 
 // Maximum number of register sets we support in the shared-memory area.
 const MAX_REGISTER_SETS: usize = 8;
@@ -334,57 +335,8 @@ fn check_vectors() {
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
-    // The composite Tellus + Guest VM image has this layout in physical memory:
-    //
-    // +-------------------------+ 0x8020_0000
-    // | Tellus image            |
-    // +-------------------------+ +NUM_TELLUS_IMAGE_PAGES
-    // | Guest image             |
-    // +-------------------------+
-    //
-    // The guest VM's address space is constructed to look like this:
-    //
-    // +-------------------------+ 0x1000_0000
-    // | MMIO (4kB)              |
-    // |-------------------------|
-    // | <empty>                 |
-    // |-------------------------| 0x2800_0000
-    // | IMSIC (1MB)             |
-    // |-------------------------|
-    // | <empty>                 |
-    // |-------------------------| 0x8020_0000
-    // | Guest image             |
-    // |-------------------------| +NUM_GUEST_DATA_PAGES
-    // | Guest zero pages        |
-    // |-------------------------| +NUM_GUEST_ZERO_PAGES
-    // | <empty>                 |
-    // |-------------------------| 0x1_0000_0000
-    // | Shared pages            |
-    // +-------------------------+ +NUM_GUEST_SHARED_PAGES
-    //
-    // TODO: Some of these should be passed via device-tree, or should live in a common module
-    // somewhere.
-    const NUM_TELLUS_IMAGE_PAGES: u64 = 32;
-    const GUEST_MMIO_START_ADDRESS: u64 = 0x1000_8000;
-    const GUEST_MMIO_END_ADDRESS: u64 = GUEST_MMIO_START_ADDRESS + PAGE_SIZE_4K - 1;
-    const IMSIC_START_ADDRESS: u64 = 0x2800_0000;
-    const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
-    const NUM_GUEST_DATA_PAGES: u64 = 160;
-    const GUEST_ZERO_PAGES_START_ADDRESS: u64 =
-        USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
-    const NUM_GUEST_ZERO_PAGES: u64 = 10;
-    const PRE_FAULTED_ZERO_PAGES: u64 = 2;
-    const GUEST_ZERO_PAGES_END_ADDRESS: u64 =
-        GUEST_ZERO_PAGES_START_ADDRESS + NUM_GUEST_ZERO_PAGES * PAGE_SIZE_4K - 1;
-    const GUEST_SHARED_PAGES_START_ADDRESS: u64 = 0x1_0000_0000;
-    const NUM_GUEST_SHARED_PAGES: u64 = 1;
-    const GUEST_SHARED_PAGES_END_ADDRESS: u64 =
-        GUEST_SHARED_PAGES_START_ADDRESS + NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K - 1;
     const NUM_VCPUS: u64 = 1;
     const NUM_TEE_PTE_PAGES: u64 = 10;
-    // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
-    const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
-    const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
 
     if hart_id != 0 {
         // TODO handle more than 1 cpu
@@ -561,28 +513,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
-    // Add a page of emualted MMIO.
-    tee_host::add_emulated_mmio_region(vmid, GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
-        .expect("Tellus - TvmAddEmulatedMmioRegion failed");
-
     // Set the entry point.
     vcpu.set_sepc(0x8020_0000);
     // Set the kernel_init() parameter.
     vcpu.set_gpr(GprIndex::A1, GUEST_SHARED_PAGES_START_ADDRESS);
-
-    tee_host::add_shared_memory_region(
-        vmid,
-        GUEST_SHARED_PAGES_START_ADDRESS,
-        NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
-    )
-    .expect("Tellus -- TvmAddSharedMemoryRegion returned error");
-
-    tee_host::add_shared_memory_region(
-        vmid,
-        GUEST_SHARED_PAGES_START_ADDRESS,
-        NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
-    )
-    .expect_err("Tellus -- TvmAddSharedMemoryRegion succeeded second time");
 
     // TODO test that access to pages crashes somehow
     tee_host::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
@@ -590,6 +524,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     #[cfg(target_feature = "v")]
     store_into_vectors();
 
+    let mut shared_mem_region: Option<Range<u64>> = None;
+    let mut mmio_region: Option<Range<u64>> = None;
     loop {
         // Safety: running a VM will only write the `TvmCpuSharedState` struct that was registered
         // with `add_vcpu()`.
@@ -611,6 +547,39 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         Ok(Reset(_)) => {
                             println!("Guest VM requested shutdown");
                             break;
+                        }
+                        Ok(TeeGuest(guest_func)) => {
+                            use sbi::TeeGuestFunction::*;
+                            match guest_func {
+                                AddMemoryRegion {
+                                    region_type,
+                                    addr,
+                                    len,
+                                } => {
+                                    use TeeMemoryRegion::*;
+                                    match region_type {
+                                        Shared => {
+                                            shared_mem_region = Some(Range {
+                                                start: addr,
+                                                end: addr + len,
+                                            });
+                                        }
+                                        EmulatedMmio => {
+                                            mmio_region = Some(Range {
+                                                start: addr,
+                                                end: addr + len,
+                                            });
+                                        }
+                                        _ => {
+                                            println!(
+                                                "Unexpected memory region {:?} from guest",
+                                                region_type
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         _ => {
                             println!("Unexpected ECALL from guest");
@@ -636,7 +605,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             .expect("Tellus - TvmAddZeroPages failed");
                             zero_pages_added += 1;
                         }
-                        GUEST_SHARED_PAGES_START_ADDRESS..=GUEST_SHARED_PAGES_END_ADDRESS => {
+                        addr if shared_mem_region
+                            .as_ref()
+                            .filter(|r| r.contains(&addr))
+                            .is_some() =>
+                        {
                             // Safety: shared_page_base points to pages that will only be accessed
                             // as volatile from here on.
                             unsafe {
@@ -645,7 +618,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     shared_page_base,
                                     sbi::TsmPageType::Page4k,
                                     NUM_GUEST_SHARED_PAGES,
-                                    fault_addr & !(PAGE_SIZE_4K - 1),
+                                    addr & !(PAGE_SIZE_4K - 1),
                                 )
                                 .expect("Tellus -- TvmAddSharedPages failed");
                             }
@@ -660,7 +633,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 );
                             }
                         }
-                        GUEST_MMIO_START_ADDRESS..=GUEST_MMIO_END_ADDRESS => {
+                        addr if mmio_region.as_ref().filter(|r| r.contains(&addr)).is_some() => {
                             let inst = DecodedInstruction::from_raw(vcpu.htinst() as u32)
                                 .expect("Failed to decode faulting MMIO instruction")
                                 .instruction();

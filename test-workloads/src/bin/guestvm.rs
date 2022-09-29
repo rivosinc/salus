@@ -14,15 +14,18 @@ use hex_literal::hex;
 extern crate alloc;
 extern crate test_workloads;
 
+mod consts;
+
 use ::attestation::{
     certificate::Certificate,
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
     measurement::TcgPcrIndex::{RuntimePcr1, TvmPage},
     MAX_CSR_LEN,
 };
+use consts::*;
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::{attestation, base, reset};
+use sbi::api::{attestation, base, reset, tee_guest};
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -269,19 +272,12 @@ fn test_attestation() {
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
-    const USABLE_RAM_START_ADDRESS: u64 = 0x8020_0000;
-    const NUM_GUEST_DATA_PAGES: u64 = 160;
-    const NUM_GUEST_ZERO_PAGES: u64 = 10;
-    const PAGE_SIZE_4K: u64 = 4096;
-    const GUEST_MMIO_ADDRESS: u64 = 0x1000_8000;
-    // TODO: Consider moving to a common module to ensure that the host and guest are in lockstep
-    const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
-    const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;
-
     SbiConsole::set_as_console();
 
     println!("*****************************************");
     println!("Hello world from Tellus guest            ");
+
+    base::probe_sbi_extension(sbi::EXT_TEE_GUEST).expect("TEE-Guest extension not present");
 
     let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
     test_attestation();
@@ -299,6 +295,11 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
         next_page += PAGE_SIZE_4K;
     }
 
+    tee_guest::add_shared_memory_region(
+        GUEST_SHARED_PAGES_START_ADDRESS,
+        NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+    )
+    .expect("GuestVm -- AddSharedMemoryRegion failed");
     println!("Accessing shared page at 0x{shared_page_addr:x}     ");
     // Safety: We are assuming that the shared_page_addr is valid, and will be mapped in on a fault
     unsafe {
@@ -311,13 +312,15 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
     #[cfg(target_feature = "v")]
     test_vector();
 
+    tee_guest::add_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
+        .expect("GuestVm - AddEmulatedMmioRegion failed");
     // Try reading and writing MMIO.
-    let write_ptr = GUEST_MMIO_ADDRESS as *mut u32;
+    let write_ptr = GUEST_MMIO_START_ADDRESS as *mut u32;
     // Safety: write_ptr is properly aligned and a writable part of our address space.
     unsafe {
         core::ptr::write_volatile(write_ptr, 0xaabbccdd);
     }
-    let read_ptr = (GUEST_MMIO_ADDRESS + 0x20) as *const u8;
+    let read_ptr = (GUEST_MMIO_START_ADDRESS + 0x20) as *const u8;
     // Safety: read_ptr is properly aligned and a readable part of our address space.
     let val = unsafe { core::ptr::read_volatile(read_ptr) };
     println!("Host says: 0x{:x}", val);

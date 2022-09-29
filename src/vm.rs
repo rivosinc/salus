@@ -661,7 +661,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             SbiMessage::TeeInterrupt(interrupt_func) => {
                 self.handle_tee_interrupt_msg(interrupt_func, active_vcpu.active_pages())
             }
-            SbiMessage::TeeGuest(_) => todo!(),
+            SbiMessage::TeeGuest(guest_func) => self.handle_tee_guest_msg(guest_func),
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
@@ -814,6 +814,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 | sbi::EXT_RESET
                 | sbi::EXT_TEE_HOST
                 | sbi::EXT_TEE_INTERRUPT
+                | sbi::EXT_TEE_GUEST
                 | sbi::EXT_ATTESTATION => 1,
                 sbi::EXT_PMU if PmuInfo::get().is_ok() => 1,
                 _ => 0,
@@ -1650,6 +1651,49 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(EcallError::from)?;
 
         Ok(num_pages)
+    }
+
+    fn handle_tee_guest_msg(&self, guest_func: TeeGuestFunction) -> EcallAction {
+        use TeeGuestFunction::*;
+        match guest_func {
+            AddMemoryRegion {
+                region_type,
+                addr,
+                len,
+            } => {
+                let result = self.add_memory_region(region_type, addr, len);
+                // Notify the host if the call succeeded.
+                match result {
+                    Ok(r) => EcallAction::Break(
+                        VmExitCause::ResumableEcall(SbiMessage::TeeGuest(guest_func)),
+                        SbiReturn::success(r),
+                    ),
+                    Err(_) => result.into(),
+                }
+            }
+        }
+    }
+
+    fn add_memory_region(
+        &self,
+        region_type: TeeMemoryRegion,
+        addr: u64,
+        len: u64,
+    ) -> EcallResult<u64> {
+        let addr = self.guest_addr_from_raw(addr)?;
+        use TeeMemoryRegion::*;
+        match region_type {
+            Shared => self
+                .vm_pages()
+                .add_shared_memory_region(addr, len)
+                .map_err(EcallError::from),
+            EmulatedMmio => self
+                .vm_pages()
+                .add_mmio_region(addr, len)
+                .map_err(EcallError::from),
+            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
+        }?;
+        Ok(0)
     }
 }
 

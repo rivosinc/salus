@@ -280,16 +280,6 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             }
         }
 
-        // Set up MMIO emulation for the PCIe config space.
-        let config_mem = pci.config_space();
-        let config_gpa = PageAddr::new(RawAddr::guest(
-            config_mem.base().bits(),
-            PageOwnerId::host(),
-        ))
-        .unwrap();
-        self.vm
-            .add_mmio_region(config_gpa, config_mem.length_bytes());
-
         // Host guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned block,
         // and because we built the HwMemMap with a minimum region alignment of T::TOP_LEVEL_ALIGN
         // any discontiguous ranges are also guaranteed to be aligned.
@@ -361,6 +351,17 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
         );
         self.vm.finalize().unwrap();
+
+        // Set up MMIO emulation for the PCIe config space.
+        let config_mem = pci.config_space();
+        let config_gpa = PageAddr::new(RawAddr::guest(
+            config_mem.base().bits(),
+            PageOwnerId::host(),
+        ))
+        .unwrap();
+        self.vm
+            .add_mmio_region(config_gpa, config_mem.length_bytes());
+
         self.vm
     }
 }

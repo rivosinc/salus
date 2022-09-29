@@ -1813,12 +1813,6 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             .unwrap();
     }
 
-    /// Adds an emulated MMIO region to the host VM.
-    pub fn add_mmio_region(&mut self, addr: GuestPageAddr, len: u64) {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        vm.vm_pages().add_mmio_region(addr, len).unwrap();
-    }
-
     /// Adds a PCI BAR memory region to the host VM.
     pub fn add_pci_region(&mut self, addr: GuestPageAddr, len: u64) {
         let vm = self.inner.as_initializing_vm().unwrap();
@@ -1953,6 +1947,12 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     /// Completes intialization of the host VM, making it runnable.
     pub fn finalize(&self) -> GuestTrackingResult<()> {
         self.inner.finalize()
+    }
+
+    /// Adds an emulated MMIO region to the host VM.
+    pub fn add_mmio_region(&mut self, addr: GuestPageAddr, len: u64) {
+        let vm = self.inner.as_finalized_vm().unwrap();
+        vm.vm_pages().add_mmio_region(addr, len).unwrap();
     }
 
     /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.

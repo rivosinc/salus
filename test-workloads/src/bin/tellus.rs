@@ -492,26 +492,16 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     .expect("Tellus - TvmAddMeasuredPages returned error");
     next_page += PAGE_SIZE_4K * NUM_GUEST_DATA_PAGES;
 
-    // Convert the zero pages and map a few of them up front. We'll fault the rest in as necessary.
-    let zero_pages_start = next_page;
+    // Convert the zero pages.
+    let zero_pages_base = next_page;
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
     // reclaimed.
     unsafe {
         convert_pages(next_page, NUM_GUEST_ZERO_PAGES);
     }
-    tee_host::add_zero_pages(
-        vmid,
-        zero_pages_start,
-        sbi::TsmPageType::Page4k,
-        PRE_FAULTED_ZERO_PAGES,
-        GUEST_ZERO_PAGES_START_ADDRESS,
-    )
-    .expect("Tellus - TvmAddZeroPages failed");
 
     next_page += NUM_GUEST_ZERO_PAGES * PAGE_SIZE_4K;
     let shared_page_base = next_page;
-
-    let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
     // Set the entry point.
     vcpu.set_sepc(0x8020_0000);
@@ -520,6 +510,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // TODO test that access to pages crashes somehow
     tee_host::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
+
+    // Map a few zero pages up front. We'll fault the rest in as necessary.
+    tee_host::add_zero_pages(
+        vmid,
+        zero_pages_base,
+        sbi::TsmPageType::Page4k,
+        PRE_FAULTED_ZERO_PAGES,
+        GUEST_ZERO_PAGES_START_ADDRESS,
+    )
+    .expect("Tellus - TvmAddZeroPages failed");
+    let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
     #[cfg(target_feature = "v")]
     store_into_vectors();
@@ -597,7 +598,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             }
                             tee_host::add_zero_pages(
                                 vmid,
-                                zero_pages_start + zero_pages_added * PAGE_SIZE_4K,
+                                zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
                                 sbi::TsmPageType::Page4k,
                                 1,
                                 fault_addr & !(PAGE_SIZE_4K - 1),

@@ -1300,17 +1300,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
         let from_page_addr = self.guest_addr_from_raw(page_addr)?;
         let guest = self.guest_by_id(guest_id)?;
-        let to_page_addr = PageAddr::new(RawAddr::guest(guest_addr, guest.page_owner_id()))
+        let guest_vm = guest
+            .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-
-        // Zero pages may be added to either running or initialized VMs.
+        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         self.vm_pages()
-            .add_zero_pages_to(
-                from_page_addr,
-                num_pages,
-                guest.as_any_vm().vm_pages(),
-                to_page_addr,
-            )
+            .add_zero_pages_to(from_page_addr, num_pages, guest_vm.vm_pages(), to_page_addr)
             .map_err(EcallError::from)?;
 
         Ok(num_pages)

@@ -288,7 +288,8 @@ pub enum TeeHostFunction {
     },
     /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
     /// specified guest's address space at `guest_addr`. The mapping must lie within a region of
-    /// confidential memory created with `TvmAddMemoryRegion`. Zero pages may be added at any time.
+    /// confidential memory created with `TvmAddMemoryRegion`. Zero pages may only be added after
+    /// the TVM has been finalized.
     ///
     /// a6 = 3
     TvmAddZeroPages {

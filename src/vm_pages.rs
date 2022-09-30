@@ -870,17 +870,6 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         VmPagesMapper::new_in_region(self.inner, page_addr, count, region_type)
     }
 
-    /// Locks `count` 4kB pages starting at `page_addr` for mapping of zero-filled pages in a
-    /// region of confidential memory, returning a `VmPagesMapper` that can be used to insert
-    /// the pages.
-    pub fn map_zero_pages(
-        &self,
-        page_addr: GuestPageAddr,
-        count: u64,
-    ) -> Result<ZeroPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, VmRegionType::Confidential)
-    }
-
     /// Same as `map_zero_pages()`, but for IMSIC guest interrupt file pages.
     pub fn map_imsic_pages(
         &self,
@@ -941,6 +930,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     /// space.
     pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
         self.do_add_region(page_addr, len, VmRegionType::Mmio)
+    }
+
+    /// Locks `count` 4kB pages starting at `page_addr` for mapping of zero-filled pages in a
+    /// region of confidential memory, returning a `VmPagesMapper` that can be used to insert
+    /// the pages.
+    pub fn map_zero_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<ZeroPagesMapper<'a, T>> {
+        self.do_map_pages(page_addr, count, VmRegionType::Confidential)
     }
 
     /// Same as `map_zero_pages()`, but for pages in shared (non-confidential) regions.
@@ -1192,7 +1192,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         &self,
         from_addr: GuestPageAddr,
         count: u64,
-        to: AnyVmPages<T>,
+        to: FinalizedVmPages<T>,
         to_addr: GuestPageAddr,
     ) -> Result<u64> {
         let converted_pages = self.get_converted_pages(from_addr, count)?;

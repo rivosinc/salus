@@ -160,9 +160,37 @@ impl<S: State> SequentialPages<S> {
         })
     }
 
+    /// Remove the first `n` pages from this `SequentialPages`, and
+    /// returns them into a new `SequentialPages`. If less than `n`
+    /// pages are present, returns all the remaining pages. Returns
+    /// `none` if there are no pages left.
+    pub fn take(&mut self, n: u64) -> Option<SequentialPages<S>> {
+        if self.count == 0 {
+            return None;
+        }
+        let addr = self.addr;
+        let page_size = self.page_size;
+        let count = if self.count > n { n } else { self.count };
+        self.addr = self
+            .addr
+            .checked_add_pages_with_size(count, page_size)
+            .unwrap();
+        self.count -= count;
+        // Safe because `pages` owns the memory, and we're adding to
+        // this sequence pages that have been removed from `self`.
+        unsafe { Some(SequentialPages::from_mem_range(addr, page_size, count).unwrap()) }
+    }
+
     /// Returns an iterator across the addresses of all pages in `self`.
     pub fn page_addrs(&self) -> impl Iterator<Item = SupervisorPageAddr> {
         self.addr.iter_from().take(self.count as usize)
+    }
+
+    /// Return an iterator whose elements are `SequentialPages` of `n`
+    /// pages. The last entry might contain fewer pages. This consumes
+    /// `self`.
+    pub fn into_chunks_iter(self, n: u64) -> SeqPageChunkIter<S> {
+        SeqPageChunkIter { pages: self, n }
     }
 }
 
@@ -235,6 +263,43 @@ impl<S: State, I: Iterator<Item = Page<S>>> fmt::Debug for Error<S, I> {
         }
     }
 }
+
+pub struct SeqPageChunkIter<S: State> {
+    pages: SequentialPages<S>,
+    n: u64,
+}
+
+impl<S: State> Iterator for SeqPageChunkIter<S> {
+    type Item = SequentialPages<S>;
+
+    fn next(&mut self) -> Option<SequentialPages<S>> {
+        if self.pages.count == 0 {
+            return None;
+        }
+        let addr = self.pages.addr;
+        let page_size = self.pages.page_size;
+        let count = if self.pages.count > self.n {
+            self.n
+        } else {
+            self.pages.count
+        };
+        self.pages.addr = self
+            .pages
+            .addr
+            .checked_add_pages_with_size(count, page_size)
+            .unwrap();
+        self.pages.count -= count;
+        // Safe because `pages` owns the memory, and we're adding to this sequence pages that have been removed.
+        unsafe { Some(SequentialPages::from_mem_range(addr, page_size, count).unwrap()) }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let count = self.pages.count as usize;
+        (count, Some(count))
+    }
+}
+
+impl<S: State> ExactSizeIterator for SeqPageChunkIter<S> {}
 
 #[cfg(test)]
 mod tests {

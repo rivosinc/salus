@@ -1812,32 +1812,6 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         }
     }
 
-    /// Add zero pages to the host page tables. Requires that the GPA map the SPA in
-    /// T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
-    pub fn add_zero_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
-    where
-        I: ExactSizeIterator<Item = Page<ConvertedClean>>,
-    {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        let page_tracker = vm.page_tracker();
-        // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
-        let mapper = vm
-            .vm_pages()
-            .map_zero_pages(to_addr, pages.len() as u64)
-            .unwrap();
-        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(page.size(), PageSize::Size4k);
-            assert_eq!(
-                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
-            );
-            let mappable = page_tracker
-                .assign_page_for_mapping(page, vm.page_owner_id())
-                .unwrap();
-            mapper.map_page(vm_addr, mappable).unwrap();
-        }
-    }
-
     /// Adds the IMSIC pages for `cpu` to the host. The first page in `pages` is set as the
     /// host's interrupt file for `cpu` while the remaining pages are added as guest interrupt
     /// files for the host to assign.
@@ -1910,6 +1884,32 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     /// Completes intialization of the host VM, making it runnable.
     pub fn finalize(&self) -> GuestTrackingResult<()> {
         self.inner.finalize()
+    }
+
+    /// Add zero pages to the host page tables. Requires that the GPA map the SPA in
+    /// T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
+    pub fn add_zero_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
+    where
+        I: ExactSizeIterator<Item = Page<ConvertedClean>>,
+    {
+        let vm = self.inner.as_finalized_vm().unwrap();
+        let page_tracker = vm.page_tracker();
+        // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
+        let mapper = vm
+            .vm_pages()
+            .map_zero_pages(to_addr, pages.len() as u64)
+            .unwrap();
+        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
+            assert_eq!(page.size(), PageSize::Size4k);
+            assert_eq!(
+                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
+                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+            );
+            let mappable = page_tracker
+                .assign_page_for_mapping(page, vm.page_owner_id())
+                .unwrap();
+            mapper.map_page(vm_addr, mappable).unwrap();
+        }
     }
 
     /// Adds an emulated MMIO region to the host VM.

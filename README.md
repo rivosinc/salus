@@ -92,7 +92,10 @@ testing the guest side of the TSM API.
 
 A makefile shortcut is provided:
 
-`make run_tellus`
+```
+make run_tellus \
+    QEMU=<path-to-qemu-tree>
+```
 
 This will build salus, tellus, and the guestvm then boot them with the
 system-installed qemu.

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use arrayvec::ArrayString;
+use arrayvec::{ArrayString, ArrayVec};
 use core::{fmt, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
 use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, CpuId, CpuInfo};
@@ -289,11 +289,9 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         self.vm
             .add_confidential_memory_region(current_gpa, self.ram_size);
 
+        let mut zero_ranges = ArrayVec::<_, 3>::new();
         let num_pages = KERNEL_OFFSET / PageSize::Size4k as u64;
-        self.vm.add_zero_pages(
-            current_gpa,
-            self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
-        );
+        zero_ranges.push(PageAddrRange::new(current_gpa, num_pages));
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
         let num_kernel_pages = self.kernel.size() / PageSize::Size4k as u64;
@@ -309,10 +307,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         if let Some(r) = self.initramfs {
             let num_pages =
                 (INITRAMFS_OFFSET - (KERNEL_OFFSET + self.kernel.size())) / PageSize::Size4k as u64;
-            self.vm.add_zero_pages(
-                current_gpa,
-                self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
-            );
+            zero_ranges.push(PageAddrRange::new(current_gpa, num_pages));
             current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
             let num_initramfs_pages = r.size() / PageSize::Size4k as u64;
@@ -328,10 +323,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
 
         let num_pages = (FDT_OFFSET - (current_gpa.bits() - self.guest_ram_base.bits()))
             / PageSize::Size4k as u64;
-        self.vm.add_zero_pages(
-            current_gpa,
-            self.zero_pages.by_ref().take(num_pages.try_into().unwrap()),
-        );
+        zero_ranges.push(PageAddrRange::new(current_gpa, num_pages));
         current_gpa = current_gpa.checked_add_pages(num_pages).unwrap();
 
         let fdt_pages = match self.fdt_pages {
@@ -343,7 +335,6 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             .add_measured_pages(current_gpa, fdt_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
-        self.vm.add_zero_pages(current_gpa, self.zero_pages);
         self.vm.set_launch_args(
             self.guest_ram_base
                 .checked_increment(KERNEL_OFFSET)
@@ -351,6 +342,15 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
         );
         self.vm.finalize().unwrap();
+
+        // Fill in the zero pages.
+        for r in zero_ranges.iter() {
+            self.vm.add_zero_pages(
+                r.base(),
+                self.zero_pages.by_ref().take(r.num_pages() as usize),
+            );
+        }
+        self.vm.add_zero_pages(current_gpa, self.zero_pages);
 
         // Set up MMIO emulation for the PCIe config space.
         let config_mem = pci.config_space();

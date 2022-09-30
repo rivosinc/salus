@@ -256,28 +256,102 @@ impl TeeMemoryRegion {
 /// Functions provided by the TEE Host extension.
 #[derive(Copy, Clone, Debug)]
 pub enum TeeHostFunction {
+    /// Writes up to `len` bytes of the `TsmInfo` structure to the non-confidential physical address
+    /// `dest_addr`. Returns the number of bytes written.
+    ///
+    /// a6 = 0
+    TsmGetInfo {
+        /// a0 = destination address of the `TsmInfo` structure
+        dest_addr: u64,
+        /// a1 = maximum number of bytes to be written
+        len: u64,
+    },
+    /// Converts `num_pages` of non-confidential memory starting at `page_addr`. The converted pages
+    /// remain non-confidential, and thus may not be assigned for use by a child TVM, until the
+    /// fence procedure, described below, has been completed.
+    ///
+    /// a6 = 1
+    TsmConvertPages {
+        /// a0 = base address of pages to convert
+        page_addr: u64,
+        /// a1 = page size
+        page_type: TsmPageType,
+        /// a2 = number of pages
+        num_pages: u64,
+    },
+    /// Reclaims `num_pages` of confidential memory starting at `page_addr`. The pages must not
+    /// be currently assigned to an active TVM.
+    ///
+    /// a6 = 2
+    TsmReclaimPages {
+        /// a0 = base address of pages to reclaim
+        page_addr: u64,
+        /// a1 = page size
+        page_type: TsmPageType,
+        /// a2 = number of pages
+        num_pages: u64,
+    },
+    /// Initiates a TLB invalidation sequence for all pages marked for conversion via calls to
+    /// `TsmConvertPages` between the previous `TsmInitiateFence` and now. The TLB invalidation
+    /// sequence is completed when `TsmLocalFence` has been invoked on all other CPUs, after which
+    /// the pages covered by the invalidation sequence are considered to be fully converted &
+    /// confidential, and may be assigned for use by child TVMs. An error is returned if a TLB
+    /// invalidation sequence is already in progress.
+    ///
+    /// a6 = 3
+    TsmInitiateFence,
+    /// Invalidates TLB entries for all pages pending conversion by an in-progress TLB invalidation
+    /// operation on the local CPU.
+    ///
+    /// a6 = 4
+    TsmLocalFence,
     /// Creates a TVM from the parameters in the `TvmCreateParams` structure at the non-confidential
     /// physical address `params_addr`. Returns a guest ID that can be used to refer to the TVM in
     /// TVM management TEECALLs.
     ///
-    /// a6 = 0
+    /// a6 = 5
     TvmCreate {
         /// a0 = base physical address of the `TvmCreateParams` structure
         params_addr: u64,
         /// a1 = length of the `TvmCreateParams` structure in bytes
         len: u64,
     },
+    /// Moves a VM from the initializing state to the Runnable state
+    ///
+    /// a6 = 6
+    Finalize {
+        /// a0 = guest id
+        guest_id: u64,
+    },
     /// Message to destroy a TVM created with `TvmCreate`.
     ///
-    /// a6 = 1
+    /// a6 = 7
     TvmDestroy {
         /// a0 = guest id returned from `TvmCreate`.
         guest_id: u64,
     },
+    /// Adds a memory region to the TVM identified by `guest_id` at the specified range of guest
+    /// physical address space. Both `addr` and `len` must be 4kB-aligned and must not overlap with
+    /// any previously-added regions.
+    ///
+    /// Only `Confidential` regions may be added by the host, and they may only be added prior to
+    /// TVM finalization.
+    ///
+    /// a6 = 8
+    TvmAddMemoryRegion {
+        /// a0 = guest id
+        guest_id: u64,
+        /// a1 = type of memory region
+        region_type: TeeMemoryRegion,
+        /// a2 = start of the region
+        guest_addr: u64,
+        /// a3 = length of the region
+        len: u64,
+    },
     /// Adds `num_pages` 4kB pages of confidential memory starting at `page_addr` to the page-table
     /// page pool for the specified guest.
     ///
-    /// a6 = 2
+    /// a6 = 9
     AddPageTablePages {
         /// a0 = guest_id
         guest_id: u64,
@@ -286,12 +360,33 @@ pub enum TeeHostFunction {
         /// a2 = number of pages
         num_pages: u64,
     },
+    /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
+    /// memory at `dest_addr`, then measures and maps the pages at `dest_addr` into the specified
+    /// guest's address space at `guest_addr`. The mapping must lie within a region of confidential
+    /// memory created with `TvmAddMemoryRegion`. Measured pages may only be added prior to TVM
+    /// finalization.
+    ///
+    /// a6 = 10
+    TvmAddMeasuredPages {
+        /// a0 = guest_id
+        guest_id: u64,
+        /// a1 = physical address of the pages to copy from
+        src_addr: u64,
+        /// a2 = physical address of the pages to insert
+        dest_addr: u64,
+        /// a3 = page size
+        page_type: TsmPageType,
+        /// a4 = number of pages
+        num_pages: u64,
+        /// a5 = guest physical address
+        guest_addr: u64,
+    },
     /// Maps `num_pages` zero-filled pages of confidential memory starting at `page_addr` into the
     /// specified guest's address space at `guest_addr`. The mapping must lie within a region of
     /// confidential memory created with `TvmAddMemoryRegion`. Zero pages may only be added after
     /// the TVM has been finalized.
     ///
-    /// a6 = 3
+    /// a6 = 11
     TvmAddZeroPages {
         /// a0 = guest_id
         guest_id: u64,
@@ -304,32 +399,26 @@ pub enum TeeHostFunction {
         /// a4 = guest physical address
         guest_addr: u64,
     },
-    /// Moves a VM from the initializing state to the Runnable state
+    /// Maps non-confidential shared pages in a region of shared memory previously registered by
+    /// the guest via `AddMemoryRegion` in the TEE-Guest API.
     ///
-    /// a6 = 4
-    Finalize {
+    /// a6 = 12
+    TvmAddSharedPages {
         /// a0 = guest id
         guest_id: u64,
-    },
-    /// Runs the given vCPU in the TVM
-    ///
-    /// Returns 0 if the vCPU can be resumed via a subsequent call to `TvmCpuRun`, or a value other
-    /// than 0 if the vCPU was terminated and is no longer runnable.
-    ///
-    /// Returns an error if the specified TVM or vCPU does not exist, or if the vCPU exists but
-    /// is not currently runnable.
-    ///
-    /// a6 = 5
-    TvmCpuRun {
-        /// a0 = guest id
-        guest_id: u64,
-        /// a1 = vCPU id
-        vcpu_id: u64,
+        /// a1 = start of the shared memory region
+        page_addr: u64,
+        /// a2 = page size (must be Page4k for now)
+        page_type: TsmPageType,
+        /// a3 = number of pages
+        num_pages: u64,
+        /// a4 = guest physical address
+        guest_addr: u64,
     },
     /// Returns the number of register sets in the vCPU shared-memory state area for vCPUs of
     /// `guest_id`.
     ///
-    /// a6 = 21
+    /// a6 = 13
     TvmCpuNumRegisterSets {
         /// a0 = guest id
         guest_id: u64,
@@ -342,7 +431,7 @@ pub enum TeeHostFunction {
     /// area. From this enumeration process the caller discovers the size and layout of the
     /// structure that will be used to communicate vCPU state in shared-memory.
     ///
-    /// a6 = 22
+    /// a6 = 14
     TvmCpuGetRegisterSet {
         /// a0 = guest id
         guest_id: u64,
@@ -359,7 +448,7 @@ pub enum TeeHostFunction {
     ///
     /// vCPUs may not be added after the TVM is finalized.
     ///
-    /// a6 = 8
+    /// a6 = 15
     TvmCpuCreate {
         /// a0 = guest id
         guest_id: u64,
@@ -368,109 +457,20 @@ pub enum TeeHostFunction {
         /// a2 = page address of shared state structure
         shared_page_addr: u64,
     },
-    /// Writes up to `len` bytes of the `TsmInfo` structure to the non-confidential physical address
-    /// `dest_addr`. Returns the number of bytes written.
+    /// Runs the given vCPU in the TVM
     ///
-    /// a6 = 10
-    TsmGetInfo {
-        /// a0 = destination address of the `TsmInfo` structure
-        dest_addr: u64,
-        /// a1 = maximum number of bytes to be written
-        len: u64,
-    },
-    /// Copies `num_pages` pages from non-confidential memory at `src_addr` to confidential
-    /// memory at `dest_addr`, then measures and maps the pages at `dest_addr` into the specified
-    /// guest's address space at `guest_addr`. The mapping must lie within a region of confidential
-    /// memory created with `TvmAddMemoryRegion`. Measured pages may only be added prior to TVM
-    /// finalization.
+    /// Returns 0 if the vCPU can be resumed via a subsequent call to `TvmCpuRun`, or a value other
+    /// than 0 if the vCPU was terminated and is no longer runnable.
     ///
-    /// a6 = 11
-    TvmAddMeasuredPages {
-        /// a0 = guest_id
-        guest_id: u64,
-        /// a1 = physical address of the pages to copy from
-        src_addr: u64,
-        /// a2 = physical address of the pages to insert
-        dest_addr: u64,
-        /// a3 = page size
-        page_type: TsmPageType,
-        /// a4 = number of pages
-        num_pages: u64,
-        /// a5 = guest physical address
-        guest_addr: u64,
-    },
-    /// Converts `num_pages` of non-confidential memory starting at `page_addr`. The converted pages
-    /// remain non-confidential, and thus may not be assigned for use by a child TVM, until the
-    /// fence procedure, described below, has been completed.
+    /// Returns an error if the specified TVM or vCPU does not exist, or if the vCPU exists but
+    /// is not currently runnable.
     ///
-    /// a6 = 12
-    TsmConvertPages {
-        /// a0 = base address of pages to convert
-        page_addr: u64,
-        /// a1 = page size
-        page_type: TsmPageType,
-        /// a2 = number of pages
-        num_pages: u64,
-    },
-    /// Reclaims `num_pages` of confidential memory starting at `page_addr`. The pages must not
-    /// be currently assigned to an active TVM.
-    ///
-    /// a6 = 13
-    TsmReclaimPages {
-        /// a0 = base address of pages to reclaim
-        page_addr: u64,
-        /// a1 = page size
-        page_type: TsmPageType,
-        /// a2 = number of pages
-        num_pages: u64,
-    },
-    /// Initiates a TLB invalidation sequence for all pages marked for conversion via calls to
-    /// `TsmConvertPages` between the previous `TsmInitiateFence` and now. The TLB invalidation
-    /// sequence is completed when `TsmLocalFence` has been invoked on all other CPUs, after which
-    /// the pages covered by the invalidation sequence are considered to be fully converted &
-    /// confidential, and may be assigned for use by child TVMs. An error is returned if a TLB
-    /// invalidation sequence is already in progress.
-    ///
-    /// a6 = 14
-    TsmInitiateFence,
-    /// Invalidates TLB entries for all pages pending conversion by an in-progress TLB invalidation
-    /// operation on the local CPU.
-    ///
-    /// a6 = 15
-    TsmLocalFence,
-    /// Adds a memory region to the TVM identified by `guest_id` at the specified range of guest
-    /// physical address space. Both `addr` and `len` must be 4kB-aligned and must not overlap with
-    /// any previously-added regions.
-    ///
-    /// Only `Confidential` regions may be added by the host, and they may only be added prior to
-    /// TVM finalization.
-    ///
-    /// a6 = 17
-    TvmAddMemoryRegion {
+    /// a6 = 16
+    TvmCpuRun {
         /// a0 = guest id
         guest_id: u64,
-        /// a1 = type of memory region
-        region_type: TeeMemoryRegion,
-        /// a2 = start of the region
-        guest_addr: u64,
-        /// a3 = length of the region
-        len: u64,
-    },
-    /// Maps non-confidential shared pages in a region of shared memory previously registered by
-    /// the guest via `AddMemoryRegion` in the TEE-Guest API.
-    ///
-    /// a6 = 20
-    TvmAddSharedPages {
-        /// a0 = guest id
-        guest_id: u64,
-        /// a1 = start of the shared memory region
-        page_addr: u64,
-        /// a2 = page size (must be Page4k for now)
-        page_type: TsmPageType,
-        /// a3 = number of pages
-        num_pages: u64,
-        /// a4 = guest physical address
-        guest_addr: u64,
+        /// a1 = vCPU id
+        vcpu_id: u64,
     },
 }
 
@@ -479,38 +479,40 @@ impl TeeHostFunction {
     pub(crate) fn from_regs(args: &[u64]) -> Result<Self> {
         use TeeHostFunction::*;
         match args[6] {
-            0 => Ok(TvmCreate {
+            0 => Ok(TsmGetInfo {
+                dest_addr: args[0],
+                len: args[1],
+            }),
+            1 => Ok(TsmConvertPages {
+                page_addr: args[0],
+                page_type: TsmPageType::from_reg(args[1])?,
+                num_pages: args[2],
+            }),
+            2 => Ok(TsmReclaimPages {
+                page_addr: args[0],
+                page_type: TsmPageType::from_reg(args[1])?,
+                num_pages: args[2],
+            }),
+            3 => Ok(TsmInitiateFence),
+            4 => Ok(TsmLocalFence),
+            5 => Ok(TvmCreate {
                 params_addr: args[0],
                 len: args[1],
             }),
-            1 => Ok(TvmDestroy { guest_id: args[0] }),
-            2 => Ok(AddPageTablePages {
+            6 => Ok(Finalize { guest_id: args[0] }),
+            7 => Ok(TvmDestroy { guest_id: args[0] }),
+            8 => Ok(TvmAddMemoryRegion {
+                guest_id: args[0],
+                region_type: TeeMemoryRegion::from_reg(args[1])?,
+                guest_addr: args[2],
+                len: args[3],
+            }),
+            9 => Ok(AddPageTablePages {
                 guest_id: args[0],
                 page_addr: args[1],
                 num_pages: args[2],
             }),
-            3 => Ok(TvmAddZeroPages {
-                guest_id: args[0],
-                page_addr: args[1],
-                page_type: TsmPageType::from_reg(args[2])?,
-                num_pages: args[3],
-                guest_addr: args[4],
-            }),
-            4 => Ok(Finalize { guest_id: args[0] }),
-            5 => Ok(TvmCpuRun {
-                guest_id: args[0],
-                vcpu_id: args[1],
-            }),
-            8 => Ok(TvmCpuCreate {
-                guest_id: args[0],
-                vcpu_id: args[1],
-                shared_page_addr: args[2],
-            }),
-            10 => Ok(TsmGetInfo {
-                dest_addr: args[0],
-                len: args[1],
-            }),
-            11 => Ok(TvmAddMeasuredPages {
+            10 => Ok(TvmAddMeasuredPages {
                 guest_id: args[0],
                 src_addr: args[1],
                 dest_addr: args[2],
@@ -518,35 +520,33 @@ impl TeeHostFunction {
                 num_pages: args[4],
                 guest_addr: args[5],
             }),
-            12 => Ok(TsmConvertPages {
-                page_addr: args[0],
-                page_type: TsmPageType::from_reg(args[1])?,
-                num_pages: args[2],
-            }),
-            13 => Ok(TsmReclaimPages {
-                page_addr: args[0],
-                page_type: TsmPageType::from_reg(args[1])?,
-                num_pages: args[2],
-            }),
-            14 => Ok(TsmInitiateFence),
-            15 => Ok(TsmLocalFence),
-            17 => Ok(TvmAddMemoryRegion {
-                guest_id: args[0],
-                region_type: TeeMemoryRegion::from_reg(args[1])?,
-                guest_addr: args[2],
-                len: args[3],
-            }),
-            20 => Ok(TvmAddSharedPages {
+            11 => Ok(TvmAddZeroPages {
                 guest_id: args[0],
                 page_addr: args[1],
                 page_type: TsmPageType::from_reg(args[2])?,
                 num_pages: args[3],
                 guest_addr: args[4],
             }),
-            21 => Ok(TvmCpuNumRegisterSets { guest_id: args[0] }),
-            22 => Ok(TvmCpuGetRegisterSet {
+            12 => Ok(TvmAddSharedPages {
+                guest_id: args[0],
+                page_addr: args[1],
+                page_type: TsmPageType::from_reg(args[2])?,
+                num_pages: args[3],
+                guest_addr: args[4],
+            }),
+            13 => Ok(TvmCpuNumRegisterSets { guest_id: args[0] }),
+            14 => Ok(TvmCpuGetRegisterSet {
                 guest_id: args[0],
                 index: args[1],
+            }),
+            15 => Ok(TvmCpuCreate {
+                guest_id: args[0],
+                vcpu_id: args[1],
+                shared_page_addr: args[2],
+            }),
+            16 => Ok(TvmCpuRun {
+                guest_id: args[0],
+                vcpu_id: args[1],
             }),
             _ => Err(Error::NotSupported),
         }
@@ -557,37 +557,39 @@ impl SbiFunction for TeeHostFunction {
     fn a6(&self) -> u64 {
         use TeeHostFunction::*;
         match self {
+            TsmGetInfo {
+                dest_addr: _,
+                len: _,
+            } => 0,
+            TsmConvertPages {
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
+            } => 1,
+            TsmReclaimPages {
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
+            } => 2,
+            TsmInitiateFence => 3,
+            TsmLocalFence => 4,
             TvmCreate {
                 params_addr: _,
                 len: _,
-            } => 0,
-            TvmDestroy { guest_id: _ } => 1,
+            } => 5,
+            Finalize { guest_id: _ } => 6,
+            TvmDestroy { guest_id: _ } => 7,
+            TvmAddMemoryRegion {
+                guest_id: _,
+                region_type: _,
+                guest_addr: _,
+                len: _,
+            } => 8,
             AddPageTablePages {
                 guest_id: _,
                 page_addr: _,
                 num_pages: _,
-            } => 2,
-            TvmAddZeroPages {
-                guest_id: _,
-                page_addr: _,
-                page_type: _,
-                num_pages: _,
-                guest_addr: _,
-            } => 3,
-            Finalize { guest_id: _ } => 4,
-            TvmCpuRun {
-                guest_id: _,
-                vcpu_id: _,
-            } => 5,
-            TvmCpuCreate {
-                guest_id: _,
-                vcpu_id: _,
-                shared_page_addr: _,
-            } => 8,
-            TsmGetInfo {
-                dest_addr: _,
-                len: _,
-            } => 10,
+            } => 9,
             TvmAddMeasuredPages {
                 guest_id: _,
                 src_addr: _,
@@ -595,37 +597,35 @@ impl SbiFunction for TeeHostFunction {
                 page_type: _,
                 num_pages: _,
                 guest_addr: _,
-            } => 11,
-            TsmConvertPages {
-                page_addr: _,
-                page_type: _,
-                num_pages: _,
-            } => 12,
-            TsmReclaimPages {
-                page_addr: _,
-                page_type: _,
-                num_pages: _,
-            } => 13,
-            TsmInitiateFence => 14,
-            TsmLocalFence => 15,
-            TvmAddMemoryRegion {
+            } => 10,
+            TvmAddZeroPages {
                 guest_id: _,
-                region_type: _,
+                page_addr: _,
+                page_type: _,
+                num_pages: _,
                 guest_addr: _,
-                len: _,
-            } => 17,
+            } => 11,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr: _,
                 page_type: _,
                 num_pages: _,
                 guest_addr: _,
-            } => 20,
-            TvmCpuNumRegisterSets { guest_id: _ } => 21,
+            } => 12,
+            TvmCpuNumRegisterSets { guest_id: _ } => 13,
             TvmCpuGetRegisterSet {
                 guest_id: _,
                 index: _,
-            } => 22,
+            } => 14,
+            TvmCpuCreate {
+                guest_id: _,
+                vcpu_id: _,
+                shared_page_addr: _,
+            } => 15,
+            TvmCpuRun {
+                guest_id: _,
+                vcpu_id: _,
+            } => 16,
         }
     }
 

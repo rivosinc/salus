@@ -56,8 +56,22 @@ pub struct PageBox<T> {
 }
 
 impl<T> PageBox<T> {
-    /// Creates a `PageBox` that wraps the given data using `pages` to store it, returning it to its
-    /// previous owner on `drop()` using `page_tracker`.
+    /// Try to create a `PageBox` that wraps the given data using `pages` to store it, returning it to its
+    /// previous owner on `drop()` using `page_tracker`. Returns `None` if not enough pages are supplied.
+    pub fn try_new(
+        data: T,
+        pages: SequentialPages<InternalClean>,
+        page_tracker: PageTracker,
+    ) -> Option<Self> {
+        if core::mem::size_of::<T>() <= pages.length_bytes() as usize {
+            Some(Self::new_with(data, pages, page_tracker))
+        } else {
+            None
+        }
+    }
+
+    /// Create a `PageBox` that wraps the given data using `pages` to store it, returning it to its
+    /// previous owner on `drop()` using `page_tracker`. Caller must ensure enough pages are supplied.
     pub fn new_with(
         data: T,
         pages: SequentialPages<InternalClean>,
@@ -138,7 +152,7 @@ impl<T> PageBox<T> {
         }
     }
 
-    /// Returns the `Page` backing this `PageBox`.
+    /// Returns the `SequentialPages` backing this `PageBox`.
     ///
     /// # Safety
     ///
@@ -348,7 +362,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn not_enough_backing_pages_should_fail() {
+    fn new_with_not_enough_backing_pages_should_panic() {
         const TEST_PAGE_COUNT: usize = 3;
         const TEST_BYTES: usize = 1 + TEST_PAGE_COUNT * PageSize::Size4k as usize /* 1 byte bigger than backing pages */;
         let (page_tracker, mut pages) = PageTracker::new_in_test();
@@ -361,5 +375,22 @@ mod tests {
             .unwrap();
 
         let _pb = PageBox::new_with([5u8; TEST_BYTES], assigned_pages, page_tracker.clone());
+    }
+
+    #[test]
+    fn try_new_not_enough_backing_pages_should_fail() {
+        const TEST_PAGE_COUNT: usize = 3;
+        const TEST_BYTES: usize = 1 + TEST_PAGE_COUNT * PageSize::Size4k as usize /* 1 byte bigger than backing pages */;
+        let (page_tracker, mut pages) = PageTracker::new_in_test();
+        let assigned_pages =
+            SequentialPages::from_pages(pages.by_ref().take(TEST_PAGE_COUNT).map(|p| {
+                page_tracker
+                    .assign_page_for_internal_state(p, PageOwnerId::host())
+                    .unwrap()
+            }))
+            .unwrap();
+
+        let pb = PageBox::try_new([5u8; TEST_BYTES], assigned_pages, page_tracker.clone());
+        assert!(pb.is_none());
     }
 }

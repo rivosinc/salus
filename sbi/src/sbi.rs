@@ -281,6 +281,7 @@ impl SbiMessage {
     /// # Example
     ///
     /// ```rust
+    /// #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     /// pub fn ecall_send(msg: &SbiMessage) -> Result<u64> {
     ///     let mut a0 = msg.a0(); // error code
     ///     let mut a1 = msg.a1(); // return value

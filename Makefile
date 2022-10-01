@@ -67,6 +67,11 @@ check:
 		--workspace \
 		--exclude test_workloads \
 		--lib
+	cargo test \
+		--target $(HOST_TRIPLET) \
+		--workspace \
+		--exclude test_workloads \
+		--doc
 
 CARGO_FLAGS :=
 ifneq ($(VECTORS),)

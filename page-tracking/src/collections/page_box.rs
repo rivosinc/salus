@@ -43,7 +43,7 @@ use crate::PageTracker;
 ///     backing_page: Page<InternalClean>,
 ///     page_tracker: PageTracker,
 /// ) -> u64 {
-///     let boxxed_data = PageBox::new_with(TestData { a, b }, backing_page, page_tracker);
+///     let boxxed_data = PageBox::new_with(TestData { a, b }, backing_page.into(), page_tracker);
 ///     let sum = boxxed_data.a + boxxed_data.b;
 ///     sum
 /// }

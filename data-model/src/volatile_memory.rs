@@ -187,8 +187,8 @@ impl<'a> VolatileSlice<'a> {
     /// # Examples
     ///
     /// ```
-    /// # use data_model::VolatileSlice;
-    /// # fn test_write_45() -> VolatileMemoryResult<(), ()> {
+    /// # use data_model::{VolatileSlice, VolatileMemoryResult};
+    /// # fn test_write_45() -> VolatileMemoryResult<()> {
     /// let mut mem = [0u8; 32];
     /// let vslice = VolatileSlice::new(&mut mem[..]);
     /// vslice.write_bytes(45);
@@ -214,8 +214,8 @@ impl<'a> VolatileSlice<'a> {
     /// ```
     /// # use std::fs::File;
     /// # use std::path::Path;
-    /// # use data_model::VolatileSlice;
-    /// # fn test_write_null() -> VolatileMemoryResult<(), ()> {
+    /// # use data_model::{VolatileSlice, VolatileMemoryResult};
+    /// # fn test_write_null() -> VolatileMemoryResult<()> {
     /// let mut mem = [0u8; 32];
     /// let vslice = VolatileSlice::new(&mut mem[..]);
     /// let mut buf = [5u8; 16];
@@ -248,11 +248,11 @@ impl<'a> VolatileSlice<'a> {
     /// # Examples
     ///
     /// ```
-    /// # use data_model::{VolatileMemory, VolatileSlice};
-    /// # fn test_write_null() -> VolatileMemoryResult<(), ()> {
+    /// # use data_model::{VolatileMemory, VolatileSlice, VolatileMemoryResult};
+    /// # fn test_write_null() -> VolatileMemoryResult<()> {
     /// let mut mem = [0u8; 32];
     /// let vslice = VolatileSlice::new(&mut mem[..]);
-    /// vslice.copy_to_volatile_slice(vslice.get_slice(16, 16).map_err(|_| ())?);
+    /// vslice.copy_to_volatile_slice(vslice.get_slice(16, 16)?);
     /// # Ok(())
     /// # }
     /// ```
@@ -278,17 +278,14 @@ impl<'a> VolatileSlice<'a> {
     /// ```
     /// # use std::fs::File;
     /// # use std::path::Path;
-    /// # use data_model::{VolatileMemory, VolatileSlice};
-    /// # fn test_write_null() -> VolatileMemoryResult<(), ()> {
+    /// # use data_model::{VolatileMemory, VolatileSlice, VolatileMemoryResult};
+    /// # fn test_write_null() -> VolatileMemoryResult<()> {
     /// let mut mem = [0u8; 32];
     /// let vslice = VolatileSlice::new(&mut mem[..]);
     /// let buf = [5u8; 64];
     /// vslice.copy_from(&buf[..]);
     /// for i in 0..4 {
-    ///     assert_eq!(
-    ///         vslice.get_ref::<u32>(i * 4).map_err(|_| ())?.load(),
-    ///         0x05050505
-    ///     );
+    ///     assert_eq!(vslice.get_ref::<u32>(i * 4)?.load(), 0x05050505);
     /// }
     /// # Ok(())
     /// # }

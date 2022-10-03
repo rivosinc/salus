@@ -167,7 +167,7 @@ unsafe fn convert_pages(addr: u64, num_pages: u64) {
     // Fence the pages we just converted.
     //
     // TODO: Boot secondary CPUs and test the invalidation flow with multiple CPUs.
-    tee_host::initiate_fence().expect("Tellus - TsmInitiateFence failed");
+    tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
 }
 
 fn reclaim_pages(addr: u64, num_pages: u64) {
@@ -463,7 +463,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // touching this page at all in this program.
         unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
-        tee_host::initiate_fence().expect("Tellus - TsmInitiateFence failed");
+        tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
     } else {
         println!("Platform doesn't support TEE AIA extension");
     }

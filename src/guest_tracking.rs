@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use page_tracking::collections::{PageArc, PageVec};
 use page_tracking::PageTracker;
 use riscv_page_tables::GuestStagePagingMode;
-use riscv_pages::{InternalClean, Page, PageOwnerId, SequentialPages};
+use riscv_pages::{InternalClean, PageOwnerId, SequentialPages};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::vm::{AnyVm, FinalizedVm, InitializingVm, Vm, VmRef};
@@ -14,6 +14,7 @@ use crate::vm::{AnyVm, FinalizedVm, InitializingVm, Vm, VmRef};
 /// Guest tracking-related errors.
 #[derive(Debug)]
 pub enum Error {
+    NotEnoughMemory,
     InsufficientGuestStorage,
     InvalidGuestId,
     GuestInUse,
@@ -92,11 +93,11 @@ impl<T: GuestStagePagingMode> Clone for GuestVm<T> {
 
 impl<T: GuestStagePagingMode> GuestVm<T> {
     /// Creates a new initializing `GuestVm` from `vm`, using `page` as storage.
-    pub fn new(vm: Vm<T>, page: Page<InternalClean>) -> Self {
+    pub fn new(vm: Vm<T>, pages: SequentialPages<InternalClean>) -> Result<Self> {
         let page_tracker = vm.page_tracker();
-        Self {
-            inner: PageArc::new_with(RwLock::new(GuestVmInner::new(vm)), page, page_tracker),
-        }
+        let inner = PageArc::try_new(RwLock::new(GuestVmInner::new(vm)), pages, page_tracker)
+            .ok_or(Error::NotEnoughMemory)?;
+        Ok(Self { inner })
     }
 
     /// Returns a reference to `self` as an initializing VM.

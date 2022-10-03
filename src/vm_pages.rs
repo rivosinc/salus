@@ -6,7 +6,7 @@ use attestation::measurement::AttestationManager;
 use core::arch::global_asm;
 use core::marker::PhantomData;
 use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
-use page_tracking::collections::PageVec;
+use page_tracking::collections::{PageBox, PageVec};
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
 };
@@ -21,7 +21,7 @@ use riscv_regs::{
 use spin::{Mutex, Once};
 
 use crate::vm::{Vm, VmStateAny, VmStateFinalized, VmStateInitializing};
-use crate::vm_cpu::VmCpus;
+use crate::vm_cpu::{VmCpu, VmCpuSharedArea, VmCpus, VM_CPU_STATE_PAGES};
 use crate::vm_id::VmId;
 
 #[derive(Debug)]
@@ -33,6 +33,7 @@ pub enum Error {
     UnalignedAddress,
     UnsupportedPageSize(PageSize),
     NonContiguousPages,
+    NotEnoughMemory,
     AddressOverflow,
     TlbCountUnderflow,
     InvalidTlbVersion,
@@ -68,9 +69,11 @@ pub type InstructionFetchResult = core::result::Result<DecodedInstruction, Instr
 /// The number of pages for the `VmRegionList` vector.
 pub const TVM_REGION_LIST_PAGES: u64 = 1;
 
-/// The base number of state pages required to be donated for creating a new VM. For now, we just need
-/// one page to hold the VM state itself and whatever is required to hold the `VmRegionList`.
-pub const TVM_STATE_PAGES: u64 = 1 + TVM_REGION_LIST_PAGES;
+/// The number of pages to hold `Vm` state.
+pub const TVM_VM_STATE_PAGES: u64 = 3;
+
+/// The base number of state pages required to be donated for creating a new VM.
+pub const TVM_STATE_PAGES: u64 = TVM_VM_STATE_PAGES + TVM_REGION_LIST_PAGES;
 
 global_asm!(include_str!("guest_mem.S"));
 
@@ -1115,9 +1118,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         &self,
         page_root_addr: GuestPageAddr,
         state_addr: GuestPageAddr,
-        vcpus_addr: GuestPageAddr,
-        num_vcpu_pages: u64,
-    ) -> Result<(Vm<T>, Page<InternalClean>)> {
+    ) -> Result<(Vm<T>, SequentialPages<InternalClean>)> {
         if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedAddress);
         }
@@ -1131,38 +1132,57 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         if !state_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }
-        let vcpu_pages = self.get_converted_pages(vcpus_addr, num_vcpu_pages)?;
-        if !vcpu_pages.is_contiguous() {
-            return Err(Error::NonContiguousPages);
-        }
         let id = self
             .inner
             .page_tracker
             .add_active_guest()
             .map_err(Error::GuestId)?;
-
         let guest_root_pages =
             SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
         let guest_root =
             GuestStagePageTable::new(guest_root_pages, id, self.inner.page_tracker.clone())
                 .unwrap();
 
-        let mut state_pages = self.assign_state_pages_for(state_pages, id);
-        let box_page = state_pages.next().unwrap();
-        let region_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
+        let mut state_pages =
+            SequentialPages::from_pages(self.assign_state_pages_for(state_pages, id)).unwrap();
+        let vm_state_pages = state_pages
+            .take(TVM_VM_STATE_PAGES)
+            .ok_or(Error::NotEnoughMemory)?;
+        let region_vec_pages = state_pages;
         let region_vec = VmRegionList::new(region_vec_pages, self.inner.page_tracker.clone());
 
-        let vcpu_pages =
-            SequentialPages::from_pages(self.assign_state_pages_for(vcpu_pages, id)).unwrap();
+        let vm = Vm::new(
+            VmPages::new(guest_root, region_vec, self.inner.nesting + 1),
+            VmCpus::new(),
+        )
+        .map_err(Error::VmCreationFailed)?;
 
-        Ok((
-            Vm::new(
-                VmPages::new(guest_root, region_vec, self.inner.nesting + 1),
-                VmCpus::new(id, vcpu_pages, self.inner.page_tracker.clone()).unwrap(),
-            )
-            .map_err(Error::VmCreationFailed)?,
-            box_page,
-        ))
+        Ok((vm, vm_state_pages))
+    }
+
+    pub fn alloc_vcpu(
+        &self,
+        vcpu_id: u64,
+        shared_area: VmCpuSharedArea,
+        state_addr: GuestPageAddr,
+        to: InitializingVmPages<T>,
+    ) -> Result<PageBox<Mutex<VmCpu>>> {
+        let converted_pages = self.get_converted_pages(state_addr, VM_CPU_STATE_PAGES)?;
+        if !converted_pages.is_contiguous() {
+            return Err(Error::NonContiguousPages);
+        }
+
+        let new_owner = to.page_owner_id();
+        let vcpu_pages =
+            SequentialPages::from_pages(self.assign_state_pages_for(converted_pages, new_owner))
+                .unwrap();
+
+        PageBox::try_new(
+            Mutex::new(VmCpu::new(vcpu_id, new_owner, shared_area)),
+            vcpu_pages,
+            self.inner.page_tracker.clone(),
+        )
+        .ok_or(Error::NotEnoughMemory)
     }
 
     /// Adds pages to be used for building page table entries to a guest of this VM.

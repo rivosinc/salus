@@ -1669,6 +1669,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 .into(),
             TsmConvertImsic { imsic_addr } => self.convert_imsic(imsic_addr).into(),
             TsmReclaimImsic { imsic_addr } => self.reclaim_imsic(imsic_addr).into(),
+            _ => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
         }
     }
 

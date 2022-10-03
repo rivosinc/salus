@@ -97,6 +97,55 @@ pub enum TeeInterruptFunction {
         /// a0 = physical address of interrupt file to be reclaimed
         imsic_addr: u64,
     },
+    /// Binds a TVM vCPU to the current physical CPU using the confidential guest interrupt files
+    /// specified in `imsic_mask`, restoring interrupt state from the vCPU's software interrupt
+    /// file if necessary. Note that `imsic_mask` is in the same format as the `hgeie` and `hgeip`
+    /// CSRs, that is bit N corresponds to guest interrupt file N-1 and bit 0 is always 0. The
+    /// number of bits set in `imsic_mask` must be equal to the number of interrupt files in the
+    /// vCPU's virtualized IMSIC (i.e. 1 + `guests_per_hart`). The vCPU must currently be unbound.
+    /// Upon completion,  the vCPU is eligible to be run on this CPU with `TvmCpuRun`.
+    ///
+    /// Returns 0 on succees.
+    ///
+    /// a6 = 4
+    TvmCpuBindImsic {
+        /// a0 = TVM ID
+        tvm_id: u64,
+        /// a1 = vCPU ID
+        vcpu_id: u64,
+        /// a2 = bit mask of interrupt files to be bound
+        imsic_mask: u64,
+    },
+    /// Begins the unbind process for the specified vCPU from its guest interrupt files. The
+    /// translations for the vCPU's virtualized IMSIC are invalidated, and a TLB flush sequence
+    /// for the TVM must be completed before calling `TvmCpuUnbindImsicEnd` to complete the unbind
+    /// process. Must be called on the physical CPU to which the vCPU is bound.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 5
+    TvmCpuUnbindImsicBegin {
+        /// a0 = TVM ID
+        tvm_id: u64,
+        /// a1 = vCPU ID
+        vcpu_id: u64,
+    },
+    /// Completes the unbind process for the specified vCPU from its guest interrupt files after
+    /// a TLB flush sequence for the TVM has been completed. Interrupt state is saved to the vCPU's
+    /// software interrupt file and the guest interrupt files are free to be reclaimed via
+    /// `TsmReclaimImsic` or bound to another vCPU via `TvmCpuBindImsic`. Must be called on
+    /// the physical CPU to which the vCPU is bound. Upon success, the vCPU is free to be bound
+    /// to another physical CPU.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 6
+    TvmCpuUnbindImsicEnd {
+        /// a0 = TVM ID
+        tvm_id: u64,
+        /// a1 = vCPU ID
+        vcpu_id: u64,
+    },
 }
 
 impl TeeInterruptFunction {
@@ -120,6 +169,19 @@ impl TeeInterruptFunction {
             3 => Ok(TsmReclaimImsic {
                 imsic_addr: args[0],
             }),
+            4 => Ok(TvmCpuBindImsic {
+                tvm_id: args[0],
+                vcpu_id: args[1],
+                imsic_mask: args[2],
+            }),
+            5 => Ok(TvmCpuUnbindImsicBegin {
+                tvm_id: args[0],
+                vcpu_id: args[1],
+            }),
+            6 => Ok(TvmCpuUnbindImsicEnd {
+                tvm_id: args[0],
+                vcpu_id: args[1],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -133,6 +195,9 @@ impl SbiFunction for TeeInterruptFunction {
             TvmCpuSetImsicAddr { .. } => 1,
             TsmConvertImsic { .. } => 2,
             TsmReclaimImsic { .. } => 3,
+            TvmCpuBindImsic { .. } => 4,
+            TvmCpuUnbindImsicBegin { .. } => 5,
+            TvmCpuUnbindImsicEnd { .. } => 6,
         }
     }
 
@@ -151,6 +216,13 @@ impl SbiFunction for TeeInterruptFunction {
             } => *tvm_id,
             TsmConvertImsic { imsic_addr } => *imsic_addr,
             TsmReclaimImsic { imsic_addr } => *imsic_addr,
+            TvmCpuBindImsic {
+                tvm_id,
+                vcpu_id: _,
+                imsic_mask: _,
+            } => *tvm_id,
+            TvmCpuUnbindImsicBegin { tvm_id, vcpu_id: _ } => *tvm_id,
+            TvmCpuUnbindImsicEnd { tvm_id, vcpu_id: _ } => *tvm_id,
         }
     }
 
@@ -167,6 +239,13 @@ impl SbiFunction for TeeInterruptFunction {
                 vcpu_id,
                 imsic_addr: _,
             } => *vcpu_id,
+            TvmCpuBindImsic {
+                tvm_id: _,
+                vcpu_id,
+                imsic_mask: _,
+            } => *vcpu_id,
+            TvmCpuUnbindImsicBegin { tvm_id: _, vcpu_id } => *vcpu_id,
+            TvmCpuUnbindImsicEnd { tvm_id: _, vcpu_id } => *vcpu_id,
             _ => 0,
         }
     }
@@ -184,6 +263,11 @@ impl SbiFunction for TeeInterruptFunction {
                 vcpu_id: _,
                 imsic_addr,
             } => *imsic_addr,
+            TvmCpuBindImsic {
+                tvm_id: _,
+                vcpu_id: _,
+                imsic_mask,
+            } => *imsic_mask,
             _ => 0,
         }
     }

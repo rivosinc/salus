@@ -456,8 +456,11 @@ pub enum TeeHostFunction {
     /// Returns 0 if the vCPU can be resumed via a subsequent call to `TvmCpuRun`, or a value other
     /// than 0 if the vCPU was terminated and is no longer runnable.
     ///
-    /// Returns an error if the specified TVM or vCPU does not exist, or if the vCPU exists but
-    /// is not currently runnable.
+    /// Returns an error if:
+    ///   - the specified TVM or vCPU does not exist
+    ///   - the vCPU exists but is not currently runnable
+    ///   - if hardware AIA virtualization is enabled for the TVM and the vCPU is not bound to
+    ///     this physical CPU
     ///
     /// a6 = 16
     TvmCpuRun {

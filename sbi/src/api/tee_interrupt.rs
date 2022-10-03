@@ -52,3 +52,36 @@ pub fn reclaim_imsic(imsic_addr: u64) -> Result<()> {
     unsafe { ecall_send(&msg) }?;
     Ok(())
 }
+
+/// Binds a vCPU to this physical CPU and the specified set of confidential guest interrupt
+/// files.
+pub fn bind_vcpu_imsic(tvm_id: u64, vcpu_id: u64, imsic_mask: u64) -> Result<()> {
+    let msg = SbiMessage::TeeInterrupt(TvmCpuBindImsic {
+        tvm_id,
+        vcpu_id,
+        imsic_mask,
+    });
+    // Safety: The specified guest interrupt files must have already been inaccessible.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}
+
+/// Begins the unbind process for the specified vCPU from this physical CPU and its guest
+/// interrupt files. The host must complete a TLB invalidation sequence for the TVM before
+/// completing the unbind with `unbind_vcpu_imsic_end()`.
+pub fn unbind_vcpu_imsic_begin(tvm_id: u64, vcpu_id: u64) -> Result<()> {
+    let msg = SbiMessage::TeeInterrupt(TvmCpuUnbindImsicBegin { tvm_id, vcpu_id });
+    // Safety: Does not access host memory.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}
+
+/// Completes the unbind process for the specified vCPU from this physical CPU and its guest
+/// interrupt files. The interrupt files are free to be reclaimed or bound to another vCPU,
+/// and the vCPU can now be bound to another physical CPU.
+pub fn unbind_vcpu_imsic_end(tvm_id: u64, vcpu_id: u64) -> Result<()> {
+    let msg = SbiMessage::TeeInterrupt(TvmCpuUnbindImsicEnd { tvm_id, vcpu_id });
+    // Safety: Does not access host memory.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}

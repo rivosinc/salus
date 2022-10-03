@@ -7,9 +7,17 @@ use crate::{ecall_send, Error, Result, SbiMessage};
 use crate::{RegisterSetLocation, TeeMemoryRegion, TsmInfo, TsmPageType, TvmCreateParams};
 
 /// Initiates a TSM fence on this CPU.
-pub fn initiate_fence() -> Result<()> {
+pub fn tsm_initiate_fence() -> Result<()> {
     let msg = SbiMessage::TeeHost(TsmInitiateFence);
     // Safety: TsmInitiateFence doesn't read or write any memory we have access to.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}
+
+/// Initiates a fence for the given TVM.
+pub fn tvm_initiate_fence(vmid: u64) -> Result<()> {
+    let msg = SbiMessage::TeeHost(TvmInitiateFence { guest_id: vmid });
+    // Safety: TvmInitiateFence doesn't read or write any memory we have access to.
     unsafe { ecall_send(&msg) }?;
     Ok(())
 }

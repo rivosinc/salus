@@ -945,6 +945,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self
                 .guest_add_shared_pages(guest_id, page_addr, page_type, num_pages, guest_addr)
                 .into(),
+            TvmInitiateFence { .. } => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
         }
     }
 

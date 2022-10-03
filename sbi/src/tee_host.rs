@@ -466,6 +466,18 @@ pub enum TeeHostFunction {
         /// a1 = vCPU id
         vcpu_id: u64,
     },
+    /// Initiates a TLB invalidation sequence for all pages that have been invalidated in the
+    /// given TVM's address space since the previous call to `TvmInitiateFence`. The TLB
+    /// invalidation sequence is completed when all vCPUs in the TVM that were running prior to
+    /// to the call to `TvmInitiateFence` have taken a trap into the TSM, which the host can
+    /// cause by IPI'ing the physical CPUs on which the TVM's vCPUs are running. An error is
+    /// returned if a TLB invalidation sequence is already in progress for the TVM.
+    ///
+    /// a6 = 17
+    TvmInitiateFence {
+        /// a0 = guest id
+        guest_id: u64,
+    },
 }
 
 impl TeeHostFunction {
@@ -541,6 +553,7 @@ impl TeeHostFunction {
                 guest_id: args[0],
                 vcpu_id: args[1],
             }),
+            17 => Ok(TvmInitiateFence { guest_id: args[0] }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -618,6 +631,7 @@ impl SbiFunction for TeeHostFunction {
                 guest_id: _,
                 vcpu_id: _,
             } => 16,
+            TvmInitiateFence { guest_id: _ } => 17,
         }
     }
 
@@ -684,6 +698,7 @@ impl SbiFunction for TeeHostFunction {
             } => *guest_id,
             TvmCpuNumRegisterSets { guest_id } => *guest_id,
             TvmCpuGetRegisterSet { guest_id, index: _ } => *guest_id,
+            TvmInitiateFence { guest_id } => *guest_id,
             _ => 0,
         }
     }

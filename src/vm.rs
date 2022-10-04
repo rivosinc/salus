@@ -1981,7 +1981,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     fn vcpu_is_runnable(&self, vcpu_id: u64) -> bool {
         let vm = self.inner.as_finalized_vm().unwrap();
         vm.get_vcpu_status(vcpu_id)
-            .is_ok_and(|s| *s == HartState::Started as u64)
+            .is_ok_and(|s| s == HartState::Started as u64)
     }
 
     // Handle a page fault for `vcpu_id`.

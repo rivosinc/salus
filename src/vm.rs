@@ -4,8 +4,8 @@
 
 use alloc::vec::Vec;
 use attestation::{
-    certificate::Certificate, measurement::AttestationManager, request::CertReq,
-    Error as AttestationError, MAX_CSR_LEN,
+    certificate::Certificate, request::CertReq, AttestationManager, Error as AttestationError,
+    MAX_CSR_LEN,
 };
 use core::{mem, ops::ControlFlow, slice};
 use der::Decode;

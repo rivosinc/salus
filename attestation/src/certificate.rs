@@ -18,7 +18,7 @@ use crate::{
         pkix::keyusage::{KeyUsage, KeyUsageFlags, KEY_VALUE_EXTENSION_LEN},
         Extension, Extensions,
     },
-    measurement::{AttestationManager, CDI_ID_LEN, MAX_TCB_INFO_EXTN_LEN},
+    manager::{AttestationManager, CDI_ID_LEN, MAX_TCB_INFO_EXTN_LEN},
     name::{Name, RdnSequence, RelativeDistinguishedName},
     request::CertReq,
     time::{Time, Validity},

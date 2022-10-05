@@ -88,6 +88,52 @@ pub enum Error {
 /// Custom attestation result.
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// Our TCG PCR indexes mapping.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TcgPcrIndex {
+    /// Platform code Measurement (PCR0)
+    PlatformCode = 0,
+
+    /// Platform configuration measurement (PCR1)
+    PlatformConfiguration = 1,
+
+    /// TVM pages (PCR2)
+    TvmPage = 2,
+
+    /// TVM configuration and data (PCR3)
+    TvmConfiguration = 3,
+
+    /// Runtime measurement (PCR17)
+    RuntimePcr0 = 17,
+
+    /// Runtime measurement (PCR18)
+    RuntimePcr1 = 18,
+
+    /// Runtime measurement (PCR19)
+    RuntimePcr2 = 19,
+
+    /// Runtime measurement (PCR20)
+    RuntimePcr3 = 20,
+}
+
+impl TryFrom<u8> for TcgPcrIndex {
+    type Error = crate::Error;
+    fn try_from(item: u8) -> Result<Self> {
+        match item {
+            0 => Ok(TcgPcrIndex::PlatformCode),
+            1 => Ok(TcgPcrIndex::PlatformConfiguration),
+            2 => Ok(TcgPcrIndex::TvmPage),
+            3 => Ok(TcgPcrIndex::TvmConfiguration),
+            17 => Ok(TcgPcrIndex::RuntimePcr0),
+            18 => Ok(TcgPcrIndex::RuntimePcr1),
+            19 => Ok(TcgPcrIndex::RuntimePcr2),
+            20 => Ok(TcgPcrIndex::RuntimePcr3),
+            _ => Err(Error::InvalidMeasurementRegisterIndex(item as usize)),
+        }
+    }
+}
+
 /// Implements the following traits for a newtype of a `der` decodable/encodable type:
 ///
 /// - `From` conversions to/from the inner type
@@ -167,10 +213,15 @@ pub mod certificate;
 pub mod extensions;
 /// Key Derivation Function module
 mod kdf;
+/// The attesation manager
+pub mod manager;
 /// TCB layer measurement module
-pub mod measurement;
+mod measurement;
 mod name;
 /// Certificate Signing Resquest module
 pub mod request;
 mod time;
 mod verify;
+
+// Alias and be less mouthful.
+pub use manager::AttestationManager;

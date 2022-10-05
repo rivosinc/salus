@@ -19,7 +19,7 @@ mod consts;
 use ::attestation::{
     certificate::Certificate,
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
-    measurement::TcgPcrIndex::{RuntimePcr1, TvmPage},
+    TcgPcrIndex::{RuntimePcr1, TvmPage},
     MAX_CSR_LEN,
 };
 use consts::*;

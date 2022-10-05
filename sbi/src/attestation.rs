@@ -162,7 +162,7 @@ pub enum AttestationFunction {
     },
 
     /// Get an attestion evidence from a Certificate Signing Request (CSR)
-    /// (https://datatracker.ietf.org/doc/html/rfc2986).
+    /// <https://datatracker.ietf.org/doc/html/rfc2986>.
     /// The caller passes the CSR and its length through the first 2 arguments.
     /// The third argument is the address where the caller places a data blob
     /// that will be included in the generated certificate. Typically, this is a

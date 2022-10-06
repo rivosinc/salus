@@ -547,7 +547,6 @@ dependencies = [
  "sbi",
  "sha2 0.10.2",
  "spin",
- "test_workloads",
 ]
 
 [[package]]

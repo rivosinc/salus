@@ -6,83 +6,35 @@
 //! Pure Rust, heapless attestation crate.
 #![no_std]
 
-/// Maximum supported length for a CSR
-pub const MAX_CSR_LEN: usize = 4096;
-
-/// Maximum number of FW ID entries in the `TcbInfo` FWID array
-pub const MAX_TCBINFO_FWID: usize = 32;
-
-pub(crate) const MAX_CSR_ATV: usize = 8;
-pub(crate) const MAX_CSR_ATV_VALUE: usize = 8;
-pub(crate) const MAX_CSR_ATV_VALUE_LEN: usize = 64;
-pub(crate) const MAX_CSR_ATV_TYPE_LEN: usize = 64;
-pub(crate) const MAX_CSR_ATV_LEN: usize =
-    MAX_CSR_ATV_TYPE_LEN + (MAX_CSR_ATV_VALUE * MAX_CSR_ATV_VALUE_LEN);
-
-pub(crate) const MAX_CSR_RDN: usize = 8;
-pub(crate) const MAX_CSR_RDN_LEN: usize = MAX_CSR_ATV * MAX_CSR_ATV_LEN;
-pub(crate) const MAX_CSR_RDN_SEQUENCE_LEN: usize = MAX_CSR_RDN * MAX_CSR_RDN_LEN;
-
-pub(crate) const MAX_CERT_EXTENSIONS: usize = 8;
-pub(crate) const MAX_CERT_ATV: usize = MAX_CSR_ATV;
-pub(crate) const MAX_CERT_RDN: usize = MAX_CSR_RDN;
-
 /// Attestation errors
 #[derive(Debug)]
 pub enum Error {
-    /// Invalid CSR
-    InvalidCertReq(der::Error),
+    /// The DICE engine failed to extract a CDI.
+    DiceCdiExtraction(rice::Error),
 
-    /// Invalid DER payload
-    InvalidDer(der::Error),
+    /// The DICE engine Failed to generate a certificate from a CSR.
+    DiceCsrCertificate(rice::Error),
 
-    /// Invalid X.509 extension DER
-    InvalidExtensionDer(der::Error),
+    /// The DICE engine failed to build a new layer.
+    DiceLayerBuild(rice::Error),
 
-    /// Invalid public key bytes
-    InvalidPublicKey,
+    /// The DICE engine failed to build the next layer CDI and certificates.
+    DiceRoll(rice::Error),
 
-    /// Invalid public key DER
-    InvalidPublicKeyDer(spki::Error),
-
-    /// Invalid digital signature
-    InvalidSignature,
-
-    /// Invalid X.509 TCB info extension DER
-    InvalidTcbInfoExtensionDer(der::Error),
-
-    /// Invalid Key bytes
-    InvalidKey(ed25519_dalek::SignatureError),
-
-    /// Unsupported signing algorithm
-    UnsupportedAlgorithm(const_oid::ObjectIdentifier),
-
-    /// Measurement register is locked
-    LockedMeasurementRegister(u8),
-
-    /// Invalid measurement register index
-    InvalidMeasurementRegisterIndex(usize),
+    /// The DICE engine failed to generate a TCB DICE extension.
+    DiceTcbInfo(rice::Error),
 
     /// Invalid measurement register descriptor index
     InvalidMeasurementRegisterDescIndex(usize),
 
-    /// Invalid data digest
-    InvalidDigest(der::Error),
+    /// Invalid measurement register index
+    InvalidMeasurementRegisterIndex(usize),
 
-    /// Failed to expand the CDI
-    InvalidCdiExpansion(hkdf::InvalidLength),
-
-    /// Invalid CDI ID
-    InvalidCdiId(hex::FromHexError),
+    /// Measurement register is locked
+    LockedMeasurementRegister(u8),
 
     /// Derived Key is too short
     DerivedKeyTooShort,
-
-    /// Missing CDI
-    MissingCdi,
-
-    /// Next layer CDI is already built
-    NextCDIAlreadyExists,
 }
 
 /// Custom attestation result.
@@ -206,22 +158,10 @@ macro_rules! impl_newtype {
     };
 }
 
-mod attr;
-/// x.509 certificate module
-pub mod certificate;
-/// x.509 certificate extensions
-pub mod extensions;
-/// Key Derivation Function module
-mod kdf;
 /// The attesation manager
 pub mod manager;
-/// TCB layer measurement module
+// TCB layer measurement module
 mod measurement;
-mod name;
-/// Certificate Signing Resquest module
-pub mod request;
-mod time;
-mod verify;
 
 // Alias and be less mouthful.
 pub use manager::AttestationManager;

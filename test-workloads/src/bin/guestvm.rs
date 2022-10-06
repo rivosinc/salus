@@ -16,13 +16,13 @@ extern crate test_workloads;
 
 mod consts;
 
-use ::attestation::{
+use ::attestation::TcgPcrIndex::{RuntimePcr1, TvmPage};
+use consts::*;
+use rice::x509::{
     certificate::Certificate,
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
-    TcgPcrIndex::{RuntimePcr1, TvmPage},
     MAX_CSR_LEN,
 };
-use consts::*;
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::{attestation, base, reset, tee_guest};

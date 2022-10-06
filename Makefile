@@ -149,5 +149,10 @@ lint:
 format:
 	cargo fmt -- --check --config format_code_in_doc_comments=true
 
+# Currently (Nightly 1.65) the test_workloads crate causes rustdoc to panic, so exclude it.
+.PHONY: doc
+doc:
+	cargo doc --workspace --exclude test_workloads
+
 .PHONY: ci
-ci: salus guestvm tellus lint format check
+ci: salus guestvm tellus lint format check doc

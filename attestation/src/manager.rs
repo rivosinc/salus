@@ -5,20 +5,20 @@
 use arrayvec::ArrayVec;
 use const_oid::ObjectIdentifier;
 use core::marker::PhantomData;
-use der::Encode;
 use digest::{Digest, OutputSizeUser};
-use ed25519_dalek::{Keypair, SecretKey, SECRET_KEY_LENGTH};
+use ed25519_dalek::SECRET_KEY_LENGTH;
 use generic_array::GenericArray;
 use hkdf::HmacImpl;
+use rice::{
+    cdi::CdiType,
+    layer::Layer,
+    x509::{certificate::MAX_CERT_SIZE, extensions::dice::tcbinfo::DiceTcbInfo, request::CertReq},
+};
 use sbi::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
 use spin::RwLock;
+use typenum::{Unsigned, U32};
 
 use crate::{
-    extensions::{
-        dice::tcbinfo::{DiceTcbInfo, MAX_FWID_LEN, MAX_TCB_INFO_HEADER_LEN, TCG_DICE_TCB_INFO},
-        Extension,
-    },
-    kdf::{derive_attestation_cdi, derive_sealing_cdi, derive_secret_key, extract_cdi},
     measurement::{
         MeasurementRegister, DYNAMIC_MSMT_REGISTERS, MSMT_REGISTERS, STATIC_MSMT_REGISTERS,
         TVM_MSMT_REGISTERS,
@@ -29,127 +29,7 @@ use crate::{
 // TODO Get the SVN from the RoT
 const TCB_SVN: u64 = 0xdeadbeef;
 
-/// Largest possible DiceTcbInfo extension length
-pub const MAX_TCB_INFO_EXTN_LEN: usize = (MSMT_REGISTERS * MAX_FWID_LEN) + MAX_TCB_INFO_HEADER_LEN;
-
-const CDI_LEN: usize = 32;
-
-/// The TVM CDI ID length
-/// The TVM CDI ID is derived from the TSM CDI.
-pub const CDI_ID_LEN: usize = 20;
-
-#[derive(Clone, Debug)]
-enum AttestationCdi {}
-#[derive(Clone, Debug)]
-enum CsrCdi {}
-#[derive(Clone, Debug)]
-enum SealingCdi {}
-
-// A CDI builder
-trait CdiBuilder<'a> {
-    // Build the next layer CDI from the current one.
-    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
-        &mut self,
-        tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
-        tci_info: &[u8],
-    ) -> Result<()>;
-}
-
-#[derive(Debug)]
-struct Cdi<T> {
-    // Current layer Compound Device Identifier (CDI)
-    current_cdi: [u8; CDI_LEN],
-
-    // Next layer Compound Device Identifier (CDI)
-    next_cdi: Option<[u8; CDI_LEN]>,
-
-    _pd_t: PhantomData<T>,
-}
-
-impl<'a, T> Cdi<T> {
-    fn new<D: Digest, H: HmacImpl<D>>(cdi: &'a [u8]) -> Result<Self> {
-        // Extract the current CDI from the passed CDI slice.
-        let mut current_cdi = [0u8; CDI_LEN];
-        extract_cdi::<D, H>(cdi, &mut current_cdi)?;
-        Ok(Cdi {
-            current_cdi,
-            next_cdi: None,
-            _pd_t: PhantomData,
-        })
-    }
-
-    fn next_cdi(&'a self) -> Result<&'a [u8]> {
-        if let Some(next_cdi) = &self.next_cdi {
-            return Ok(next_cdi);
-        }
-
-        Err(Error::MissingCdi)
-    }
-}
-
-impl<'a> CdiBuilder<'a> for Cdi<AttestationCdi> {
-    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
-        &mut self,
-        tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
-        tci_info: &[u8],
-    ) -> Result<()> {
-        // We must not build the CDI multiple times.
-        if self.next_cdi.is_some() {
-            return Err(Error::NextCDIAlreadyExists);
-        }
-
-        let mut cdi_attest = [0u8; CDI_LEN];
-        derive_attestation_cdi::<D, H>(
-            &self.current_cdi,
-            Some(tci_info),
-            Some(tci_digest.as_slice()),
-            &mut cdi_attest,
-        )?;
-        self.next_cdi = Some(cdi_attest);
-
-        Ok(())
-    }
-}
-
-impl<'a> CdiBuilder<'a> for Cdi<CsrCdi> {
-    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
-        &mut self,
-        _tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
-        tci_info: &[u8],
-    ) -> Result<()> {
-        // We must not build the CDI multiple times.
-        if self.next_cdi.is_some() {
-            return Err(Error::NextCDIAlreadyExists);
-        }
-
-        let mut cdi_csr = [0u8; CDI_LEN];
-        derive_attestation_cdi::<D, H>(&self.current_cdi, Some(tci_info), None, &mut cdi_csr)?;
-        self.next_cdi = Some(cdi_csr);
-
-        Ok(())
-    }
-}
-
-impl<'a> CdiBuilder<'a> for Cdi<SealingCdi> {
-    fn build_next_cdi<D: Digest, H: HmacImpl<D>>(
-        &mut self,
-        tci_digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
-        tci_info: &[u8],
-    ) -> Result<()> {
-        // The sealing CDI can be generated even after the next layer
-        // is finalized.
-        let mut cdi_sealing = [0u8; CDI_LEN];
-        derive_sealing_cdi::<D, H>(
-            &self.current_cdi,
-            Some(tci_info),
-            Some(tci_digest.as_slice()),
-            &mut cdi_sealing,
-        )?;
-        self.next_cdi = Some(cdi_sealing);
-
-        Ok(())
-    }
-}
+type CdiLen = U32;
 
 /// The TVM configuration data.
 /// This structure extends PCR3 when the TVM finalizes.
@@ -173,21 +53,15 @@ impl TvmConfiguration {
 }
 
 /// The attestation manager.
-#[derive(Debug)]
 pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
     // Measurement registers
     measurements: RwLock<ArrayVec<MeasurementRegister<D>, MSMT_REGISTERS>>,
 
-    // Attestation Compound Device Identifier (CDI)
-    attestation_cdi: RwLock<Cdi<AttestationCdi>>,
+    // The attestation DICE layer (Built from the attestation TCI)
+    attestation_layer: Layer<CdiLen, D, H>,
 
-    // Compound Device Identifier (CDI) used for servicing the certificate
-    // signing requests (CSR).
-    // This is a CDI derived from the current CDI and the VM identifier.
-    csr_cdi: RwLock<Cdi<CsrCdi>>,
-
-    // Sealing Compound Device Identifier (CDI)
-    sealing_cdi: RwLock<Cdi<SealingCdi>>,
+    // The sealing DICE layer (Built from the sealing TCI)
+    sealing_layer: Layer<CdiLen, D, H>,
 
     // TVM identifier
     vm_id: u64,
@@ -220,11 +94,32 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             measurements.insert(idx, msmt.build(hash_algorithm));
         }
 
+        // The CDIs must have the same length as CdiLen, so we extract them if
+        // that's not the case.
+        let mut tmp_a_cdi = [0u8; CdiLen::USIZE];
+        let extracted_attestation_cdi = if attestation_cdi.len() != CdiLen::USIZE {
+            rice::kdf::extract_cdi::<D, H>(attestation_cdi, &mut tmp_a_cdi)
+                .map_err(Error::DiceCdiExtraction)?;
+            &tmp_a_cdi
+        } else {
+            attestation_cdi
+        };
+
+        let mut tmp_s_cdi = [0u8; CdiLen::USIZE];
+        let extracted_sealing_cdi = if sealing_cdi.len() != CdiLen::USIZE {
+            rice::kdf::extract_cdi::<D, H>(sealing_cdi, &mut tmp_s_cdi)
+                .map_err(Error::DiceCdiExtraction)?;
+            &tmp_s_cdi
+        } else {
+            sealing_cdi
+        };
+
         Ok(AttestationManager {
             measurements: RwLock::new(measurements),
-            attestation_cdi: RwLock::new(Cdi::new::<D, H>(attestation_cdi)?),
-            csr_cdi: RwLock::new(Cdi::new::<D, H>(attestation_cdi)?),
-            sealing_cdi: RwLock::new(Cdi::new::<D, H>(sealing_cdi)?),
+            attestation_layer: Layer::new(extracted_attestation_cdi, CdiType::Attestation)
+                .map_err(Error::DiceLayerBuild)?,
+            sealing_layer: Layer::new(extracted_sealing_cdi, CdiType::Sealing)
+                .map_err(Error::DiceLayerBuild)?,
             vm_id,
             tvm_config: RwLock::new(Default::default()),
             _pd: PhantomData,
@@ -317,65 +212,45 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     pub fn finalize(&self) -> Result<()> {
         // Extend the TVM configuration PCR.
         self.extend_tvm_configuration()?;
-
         for m in self.measurements.write().iter_mut() {
             m.finalize()
         }
 
-        // Build the attestation CDI.
-        self.attestation_cdi
-            .write()
-            .build_next_cdi::<D, H>(self.attestation_tci(), &self.vm_id.to_le_bytes())?;
+        // Build the next attestation DICE layer.
+        self.attestation_layer
+            .roll(
+                Some(&self.vm_id.to_le_bytes()),
+                Some(&self.attestation_tci()),
+            )
+            .map_err(Error::DiceRoll)?;
 
-        // Build the CSR CDI.
-        // The TCI is empty, we only rely on the TSM one.
-        self.csr_cdi
-            .write()
-            .build_next_cdi::<D, H>(D::new().finalize(), &self.vm_id.to_le_bytes())?;
+        // Build the next sealing DICE layer.
+        self.sealing_layer
+            .roll(Some(&self.vm_id.to_le_bytes()), Some(&self.sealing_tci()))
+            .map_err(Error::DiceRoll)?;
 
-        // Build the sealing CDI.
-        self.sealing_cdi
-            .write()
-            .build_next_cdi::<D, H>(self.sealing_tci(), &self.vm_id.to_le_bytes())
+        Ok(())
     }
 
-    /// Encode the measured TCB into a DiceTcbInfo extension blob.
-    pub fn encode_to_tcb_info_extension(&self, extn_buf: &'a mut [u8]) -> Result<&'a [u8]> {
-        let mut tcb_info_bytes = [0u8; MAX_TCB_INFO_EXTN_LEN];
+    /// Build a DER-formatted x.509 certificate from a CSR.
+    /// The built certificate is signed by the TSM, and contains the provided
+    /// subject and subject PKI.
+    pub fn csr_certificate(&self, csr: &CertReq) -> Result<ArrayVec<u8, MAX_CERT_SIZE>> {
+        let mut tcb_info_bytes = [0u8; 4096];
         let mut tcb_info = DiceTcbInfo::new();
         let measurements = self.measurements.read();
 
         for m in measurements.iter() {
-            tcb_info.add_fwid::<D>(m.hash_algorithm, &m.digest)?;
+            tcb_info
+                .add_fwid::<D>(m.hash_algorithm, &m.digest)
+                .map_err(Error::DiceTcbInfo)?;
         }
 
-        let extn_value = tcb_info
-            .encode_to_slice(&mut tcb_info_bytes)
-            .map_err(Error::InvalidTcbInfoExtensionDer)?;
-
-        let extn = Extension {
-            extn_id: TCG_DICE_TCB_INFO,
-            critical: true,
-            extn_value,
-        };
-
-        extn.encode_to_slice(extn_buf)
-            .map_err(Error::InvalidExtensionDer)
-    }
-
-    /// Generate an asymetric key pair from the CSR CDI.
-    /// This key pair will be used for signing certificates requests coming from TVMs.
-    #[allow(clippy::needless_borrow)]
-    pub fn csr_key_pair(&self) -> Result<Keypair> {
-        let mut secret_bytes = [0u8; SECRET_KEY_LENGTH];
-        derive_secret_key::<D, H>(&self.attestation_cdi.read().next_cdi()?, &mut secret_bytes)?;
-        let secret = SecretKey::from_bytes(&secret_bytes).map_err(Error::InvalidKey)?;
-
-        // The public key is then derived from the secret one.
-        Ok(Keypair {
-            public: (&secret).into(),
-            secret,
-        })
+        let tcb_info_extn = tcb_info.to_extension(&mut tcb_info_bytes).unwrap();
+        let extensions: [&[u8]; 1] = [tcb_info_extn];
+        self.attestation_layer
+            .csr_certificate(csr, Some(&extensions))
+            .map_err(Error::DiceCsrCertificate)
     }
 
     /// Set the TVM initial PC.

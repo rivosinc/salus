@@ -3,10 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::vec::Vec;
-use attestation::{
-    certificate::Certificate, request::CertReq, AttestationManager, Error as AttestationError,
-    MAX_CSR_LEN,
-};
+use attestation::{AttestationManager, Error as AttestationError};
 use core::{mem, ops::ControlFlow, slice};
 use der::Decode;
 use drivers::{
@@ -14,6 +11,7 @@ use drivers::{
     CpuInfo, MAX_CPUS,
 };
 use page_tracking::{HypPageAlloc, PageList, PageTracker};
+use rice::x509::{request::CertReq, MAX_CSR_LEN};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
@@ -1411,22 +1409,23 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
 
         let cert_gpa = RawAddr::guest(cert_addr_out, self.page_owner_id());
-        let mut cert_bytes_buffer = [0u8; sbi::api::attestation::MAX_CERT_SIZE];
-        let cert_bytes =
-            Certificate::from_csr(&csr, self.attestation_mgr(), &mut cert_bytes_buffer)
-                .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let cert_bytes_len = cert_bytes.len();
+        let cert_der_array = self
+            .attestation_mgr()
+            .csr_certificate(&csr)
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        let cert_der = cert_der_array.as_slice();
+        let cert_der_len = cert_der.len();
 
         // Check that the guest gave us enough space
-        if cert_size < cert_bytes_len {
+        if cert_size < cert_der_len {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
         active_pages
-            .copy_to_guest(cert_gpa, cert_bytes)
+            .copy_to_guest(cert_gpa, cert_der)
             .map_err(EcallError::from)?;
 
-        Ok(cert_bytes_len as u64)
+        Ok(cert_der_len as u64)
     }
 
     fn guest_extend_measurement(

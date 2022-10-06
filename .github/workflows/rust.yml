@@ -34,3 +34,5 @@ jobs:
       run: make format
     - name: Run tests
       run: make check
+    - name: Generate Docs
+      run: make doc

@@ -723,7 +723,7 @@ fn _assert_register_layout() {
 /// This is as hairy as it is because of the limitations of match arm range patterns and constant
 /// expressions in Rust. Ideally we would be able to reuse `memoffset::span_of()!` to implmenet this,
 /// however it's currently not possible to use `span_of!()`/`offset_of!()` in const expressions, see
-/// https://github.com/Gilnaa/memoffset/issues/4#issuecomment-1069658383.
+/// <https://github.com/Gilnaa/memoffset/issues/4#issuecomment-1069658383>.
 ///
 /// TODO: Replace this with `span_of!()` when it's possible to use it in const expressions.
 #[macro_export]

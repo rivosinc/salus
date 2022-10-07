@@ -41,6 +41,8 @@ pub enum Error {
     InvalidCpu(CpuId),
     /// Guest files for this CPU have already been taken.
     GuestFilesTaken(CpuId),
+    /// The provided IMSIC file ID was not a valid guest interrupt file.
+    InvalidGuestFile,
 }
 
 /// Holds the result of IMSIC operations.

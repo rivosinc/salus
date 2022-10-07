@@ -7,13 +7,14 @@ use core::{fmt, marker::PhantomData};
 use device_tree::{DeviceTree, DeviceTreeResult};
 use page_tracking::HwMemMap;
 use riscv_pages::*;
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
-use riscv_regs::Readable;
-use riscv_regs::{sie, stopei, RiscvCsrInterface, Writeable, CSR};
+use riscv_regs::{
+    hstatus, sie, stopei, ReadWriteable, Readable, RiscvCsrInterface, Writeable, CSR,
+};
 use spin::{Mutex, Once};
 
 use super::error::{Error, Result};
 use super::geometry::*;
+use super::sw_file::SwFile;
 use crate::{CpuId, CpuInfo, MAX_CPUS};
 
 const MAX_GUEST_FILES: usize = 7;
@@ -24,7 +25,8 @@ const MAX_MMIO_REGIONS: usize = 8;
 enum ImsicRegister {
     Eidelivery,
     Eithreshold,
-    Eie(u64),
+    Eip(usize),
+    Eie(usize),
 }
 
 impl ImsicRegister {
@@ -33,7 +35,8 @@ impl ImsicRegister {
         match self {
             ImsicRegister::Eidelivery => 0x70,
             ImsicRegister::Eithreshold => 0x72,
-            ImsicRegister::Eie(i) => 0xc0 + i / 64,
+            ImsicRegister::Eip(i) => (0x80 + i * 2) as u64,
+            ImsicRegister::Eie(i) => (0xc0 + i * 2) as u64,
         }
     }
 }
@@ -58,7 +61,7 @@ impl ImsicInterruptId {
 
     /// Returns the indirect EIE register used to enable this interrupt.
     fn eie_register(&self) -> ImsicRegister {
-        ImsicRegister::Eie(*self as u64 / 64)
+        ImsicRegister::Eie(*self as usize / 64)
     }
 
     /// Returns the bit position of this interrupt in its indirect EIE register.
@@ -195,18 +198,6 @@ impl ImsicCpuState {
     }
 }
 
-/// System-wide IMSIC state. Used to discover the IMSIC topology from the device-tree and to
-/// manage the allocation of guest interrupt files.
-pub struct Imsic {
-    per_cpu: Mutex<ImsicCpuState>,
-    mmio_regions: ArrayVec<SupervisorPageRange, MAX_MMIO_REGIONS>,
-    geometry: ImsicGeometry<SupervisorPhys>,
-    interrupt_ids: u32,
-    phandle: u32,
-}
-
-static IMSIC: Once<Imsic> = Once::new();
-
 // Determine how many guests are actually supported when running on an actual RISC-V CPU by probing
 // HGEIE.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
@@ -234,6 +225,51 @@ fn indirect_csr_set_bits(reg: ImsicRegister, mask: u64) {
     CSR.siselect.set(reg.to_raw());
     CSR.sireg.read_and_set_bits(mask);
 }
+
+// Helper struct to provide scoped access to particular guest interrupt file's CSRs.
+struct ImsicGuestCsrAccess {
+    old_vgein: u64,
+}
+
+impl ImsicGuestCsrAccess {
+    fn read(&self, reg: ImsicRegister) -> u64 {
+        CSR.vsiselect.set(reg.to_raw());
+        CSR.vsireg.get()
+    }
+
+    fn write(&self, reg: ImsicRegister, val: u64) {
+        CSR.vsiselect.set(reg.to_raw());
+        CSR.vsireg.set(val);
+    }
+
+    fn swap(&self, reg: ImsicRegister, val: u64) -> u64 {
+        CSR.vsiselect.set(reg.to_raw());
+        CSR.vsireg.atomic_replace(val)
+    }
+
+    fn set_bits(&self, reg: ImsicRegister, mask: u64) {
+        CSR.vsiselect.set(reg.to_raw());
+        CSR.vsireg.read_and_set_bits(mask);
+    }
+}
+
+impl Drop for ImsicGuestCsrAccess {
+    fn drop(&mut self) {
+        CSR.hstatus.modify(hstatus::vgein.val(self.old_vgein));
+    }
+}
+
+/// System-wide IMSIC state. Used to discover the IMSIC topology from the device-tree and to
+/// manage the allocation of guest interrupt files.
+pub struct Imsic {
+    per_cpu: Mutex<ImsicCpuState>,
+    mmio_regions: ArrayVec<SupervisorPageRange, MAX_MMIO_REGIONS>,
+    geometry: ImsicGeometry<SupervisorPhys>,
+    interrupt_ids: u32,
+    phandle: u32,
+}
+
+static IMSIC: Once<Imsic> = Once::new();
 
 impl Imsic {
     /// Discovers the IMSIC topology from a device-tree and updates `mem_map` with the IMSIC's
@@ -539,6 +575,92 @@ impl Imsic {
     pub fn next_pending_interrupt() -> Option<ImsicInterruptId> {
         let raw_id = CSR.stopei.atomic_replace(0) >> stopei::interrupt_id.shift;
         ImsicInterruptId::from_raw(raw_id)
+    }
+
+    // Returns the number EIE/EIP registers used by the IMSIC.
+    fn num_ei_regs(&self) -> usize {
+        (self.interrupt_ids as usize + 63) / 64
+    }
+
+    // Returns an ImsicGuestCsrAccess struct providing scoped access to guest_file's CSRs.
+    fn get_guest_csrs(&self, guest_file: ImsicFileId) -> Result<ImsicGuestCsrAccess> {
+        let vgein = match guest_file {
+            ImsicFileId::Guest(g) if (g as usize) < self.geometry.guests_per_hart() => {
+                guest_file.bits()
+            }
+            _ => {
+                return Err(Error::InvalidGuestFile);
+            }
+        };
+        let old_vgein = CSR.hstatus.read(hstatus::vgein);
+        CSR.hstatus.modify(hstatus::vgein.val(vgein as u64));
+        Ok(ImsicGuestCsrAccess { old_vgein })
+    }
+
+    /// Prepares `sw_file` for saving the state of `guest_file`. Interrupt delivery from `guest_file`
+    /// is disabled upon return.
+    pub fn save_guest_file_prepare(
+        &self,
+        guest_file: ImsicFileId,
+        sw_file: &mut SwFile,
+    ) -> Result<()> {
+        let csrs = self.get_guest_csrs(guest_file)?;
+        for i in 0..self.num_ei_regs() {
+            sw_file.set_eip(i, 0);
+            sw_file.set_eie(i, csrs.read(ImsicRegister::Eie(i)));
+        }
+        sw_file.set_eithreshold(csrs.read(ImsicRegister::Eithreshold));
+        sw_file.set_eidelivery(csrs.swap(ImsicRegister::Eidelivery, 0));
+        Ok(())
+    }
+
+    /// Completes saving of `guest_file` to `sw_file`. The caller must ensure that any translations
+    /// in the CPU or MSI page table referencing `guest_file` have been flushed. Upon return
+    /// `guest_file` is available for reuse.
+    pub fn save_guest_file_finish(
+        &self,
+        guest_file: ImsicFileId,
+        sw_file: &mut SwFile,
+    ) -> Result<()> {
+        let csrs = self.get_guest_csrs(guest_file)?;
+        for i in 0..self.num_ei_regs() {
+            // TODO: This needs to be done using an atomic-OR with an actual MRIF.
+            let eip = csrs.read(ImsicRegister::Eip(i)) | sw_file.eip(i);
+            sw_file.set_eip(i, eip);
+        }
+        Ok(())
+    }
+
+    /// Prepares `guest_file` for being restored from `sw_file`.
+    pub fn restore_guest_file_prepare(
+        &self,
+        guest_file: ImsicFileId,
+        sw_file: &mut SwFile,
+    ) -> Result<()> {
+        let csrs = self.get_guest_csrs(guest_file)?;
+        csrs.write(ImsicRegister::Eidelivery, 0);
+        for i in 0..self.num_ei_regs() {
+            csrs.write(ImsicRegister::Eip(i), 0);
+            csrs.write(ImsicRegister::Eie(i), sw_file.eie(i));
+        }
+        Ok(())
+    }
+
+    /// Completes restoring of `guest_file` from `sw_file`. If `sw_file` is an MRIF mapped into an
+    /// MSI page table then the caller must ensure that any translations for `sw_file` have been
+    /// flushed. Interrupt delivery from `guest_file` is enabled upon return.
+    pub fn restore_guest_file_finish(
+        &self,
+        guest_file: ImsicFileId,
+        sw_file: &mut SwFile,
+    ) -> Result<()> {
+        let csrs = self.get_guest_csrs(guest_file)?;
+        for i in 0..self.num_ei_regs() {
+            csrs.set_bits(ImsicRegister::Eip(i), sw_file.eip(i));
+        }
+        csrs.write(ImsicRegister::Eithreshold, sw_file.eithreshold());
+        csrs.write(ImsicRegister::Eidelivery, sw_file.eidelivery());
+        Ok(())
     }
 
     /// Adds an IMSIC node to the host device-tree using the layout specified in

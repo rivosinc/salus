@@ -98,12 +98,17 @@ guestvm:
 tellus: guestvm
 	cargo build $(CARGO_FLAGS) --package test_workloads --bin tellus --release
 
+.PHONY: salus_tsm
+salus_tsm:
+	cargo build $(CARGO_FLAGS) --release --bin salus-tsm --features="salustsm"
+
 # Runnable targets:
 #
 #  run_tellus_gdb: Run Tellus as the host VM with GDB debugging enabled.
 #  run_tellus: Run Tellus as the host VM.
 #  run_linux: Run a bare Linux kernel as the host VM.
 #  run_debian: Run a Linux kernel as the host VM with a Debian rootfs.
+#  run_salus_tsm: Runs the Salus-TSM binary (currently a stub).
 
 run_tellus_gdb: tellus_bin salus_debug
 	$(QEMU_BIN) \
@@ -139,6 +144,12 @@ run_debian: salus
 		-device nvme,serial=deadbeef,drive=hd \
 		-netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7722-0.0.0.0:22 \
 		-device e1000e,netdev=usernet \
+		$(EXTRA_QEMU_ARGS)
+
+run_salus_tsm: salus_tsm
+	$(QEMU_BIN) \
+		$(MACH_ARGS) \
+		-kernel $(RELEASE_BINS)salus-tsm \
 		$(EXTRA_QEMU_ARGS)
 
 .PHONY: lint

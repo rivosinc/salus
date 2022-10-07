@@ -945,7 +945,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self
                 .guest_add_shared_pages(guest_id, page_addr, page_type, num_pages, guest_addr)
                 .into(),
-            TvmInitiateFence { .. } => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
+            TvmInitiateFence { guest_id } => self.guest_initiate_fence(guest_id).into(),
         }
     }
 
@@ -1431,6 +1431,23 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
 
         Ok(num_pages)
+    }
+
+    fn guest_initiate_fence(&self, guest_id: u64) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        // TODO: This uses the same TLB version as the guest itself would use if it needed to
+        // do a TLB shootdown, for example if it were to convert pages for a nested TVM. We
+        // would need a separate "self" TLB version and "parent" TLB version if we wanted to
+        // support concurrent invalidations by the TVM and the TVM's parent. Since we don't
+        // support nesting at the moment, just use the same TLB version.
+        guest_vm
+            .vm_pages()
+            .initiate_fence()
+            .map_err(EcallError::from)?;
+        Ok(0)
     }
 
     fn handle_attestation_msg(

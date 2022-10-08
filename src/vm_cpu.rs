@@ -853,7 +853,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
             SbiReturnType::Standard(ret) => {
                 self.set_gpr(GprIndex::A0, ret.error_code as u64);
-                self.set_gpr(GprIndex::A1, ret.return_value as u64);
+                self.set_gpr(GprIndex::A1, ret.return_value);
             }
         }
     }

@@ -295,7 +295,7 @@ impl Imsic {
         // The actual number of guest files may be less than 2^(guest_index_bits) - 1; we need to
         // interrogate HGEIE.
         let guests_per_hart = get_guests_per_hart(guest_index_bits);
-        if guests_per_hart == 0 || (guests_per_hart as usize) > MAX_GUEST_FILES {
+        if guests_per_hart == 0 || guests_per_hart > MAX_GUEST_FILES {
             return Err(Error::InvalidGuestsPerHart(guests_per_hart));
         }
 

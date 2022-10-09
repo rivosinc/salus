@@ -56,8 +56,13 @@ pub struct PageBox<T> {
 }
 
 impl<T> PageBox<T> {
+    /// Return the number of pages that must be supplied to create a `PageBox` for type `T`.
+    pub const fn required_pages() -> u64 {
+        PageSize::num_4k_pages(core::mem::size_of::<T>() as u64)
+    }
+
     /// Creates a `PageBox` that wraps the given data using `pages` to store it, returning it to its
-    /// previous owner on `drop()` using `page_tracker`.
+    /// previous owner on `drop()` using `page_tracker`. Caller must ensure enough pages are supplied.
     pub fn new_with(
         data: T,
         pages: SequentialPages<InternalClean>,
@@ -138,7 +143,7 @@ impl<T> PageBox<T> {
         }
     }
 
-    /// Returns the `Page` backing this `PageBox`.
+    /// Returns the `SequentialPages` backing this `PageBox`.
     ///
     /// # Safety
     ///

@@ -4,14 +4,12 @@
 
 use core::arch::global_asm;
 use core::{marker::PhantomData, mem::size_of, ptr, ptr::NonNull};
-use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, CpuId, CpuInfo};
+use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, CpuId, CpuInfo, MAX_CPUS};
 use memoffset::offset_of;
-use page_tracking::collections::PageVec;
-use page_tracking::{PageTracker, TlbVersion};
+use page_tracking::collections::PageBox;
+use page_tracking::TlbVersion;
 use riscv_page_tables::GuestStagePagingMode;
-use riscv_pages::{
-    GuestPhysAddr, GuestVirtAddr, InternalClean, PageOwnerId, PageSize, RawAddr, SequentialPages,
-};
+use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, PageSize, RawAddr};
 use riscv_regs::*;
 use sbi::{self, SbiMessage, SbiReturnType};
 use spin::{Mutex, MutexGuard, Once, RwLock, RwLockReadGuard};
@@ -24,13 +22,11 @@ use crate::vm_pmu::VmPmuState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {
-    BadCpuId,
     VmCpuExists,
     VmCpuNotFound,
     VmCpuRunning,
     VmCpuOff,
     VmCpuAlreadyPowered,
-    InsufficientVmCpuStorage,
     WrongAddressSpace,
     InvalidSharedStatePtr,
     InsufficientSharedStatePages,
@@ -38,9 +34,8 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// The number of bytes required to hold the state of a single vCPU. We include the overhead for the
-/// `PageVec<>` itself to ensure enough bytes are donated for it as well.
-pub const VM_CPU_BYTES: u64 = (size_of::<VmCpusInner>() + size_of::<PageVec<VmCpusInner>>()) as u64;
+/// The maximum number of vCPUs supported by a VM.
+pub const VM_CPUS_MAX: usize = MAX_CPUS;
 
 /// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
@@ -508,8 +503,7 @@ struct CurrentCpu {
 /// Represents a single virtual CPU of a VM.
 pub struct VmCpu {
     state: VmCpuState,
-    // Initialized in add_vcpu().
-    shared_area: Once<VmCpuSharedArea>,
+    shared_area: VmCpuSharedArea,
     imsic_location: Option<ImsicLocation>,
     pmu_state: VmPmuState,
     current_cpu: Option<CurrentCpu>,
@@ -523,7 +517,7 @@ pub struct VmCpu {
 
 impl VmCpu {
     // Creates a new vCPU.
-    fn new(vcpu_id: u64, guest_id: PageOwnerId) -> Self {
+    pub fn new(vcpu_id: u64, guest_id: PageOwnerId, shared_area: VmCpuSharedArea) -> Self {
         let mut state = VmCpuState::default();
 
         // A0 holds the hart ID on entry.
@@ -555,7 +549,7 @@ impl VmCpu {
 
         Self {
             state,
-            shared_area: Once::new(),
+            shared_area,
             imsic_location: None,
             pmu_state: VmPmuState::default(),
             current_cpu: None,
@@ -568,8 +562,7 @@ impl VmCpu {
 
     // Returns a reference to the shared-memory state area for this vCPU.
     fn shared_area(&self) -> &VmCpuSharedArea {
-        // Unwrap ok: shared_area must've been initialized for this vCPU to have been activated.
-        self.shared_area.get().unwrap()
+        &self.shared_area
     }
 }
 
@@ -1011,12 +1004,13 @@ impl<T: GuestStagePagingMode> Drop for ActiveVmCpu<'_, '_, '_, T> {
             p.restore();
         }
 
-        // Return this vCPU to the `VmCpus` container.
-        let entry = self
+        // Unwrap safe because vcpu is locked and running, so vcpu must be at `vcpu_id`.
+        let once_entry = self
             .container
             .inner
             .get(self.vcpu.vcpu_id as usize)
             .unwrap();
+        let entry = once_entry.get().unwrap();
         let mut status = entry.status.write();
         assert_eq!(*status, VmCpuStatus::Running);
         *status = if self.power_off {
@@ -1080,9 +1074,7 @@ impl<'vcpu> IdleVmCpu<'vcpu> {
 /// Represents the state of a vCPU in a VM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmCpuStatus {
-    /// There is no vCPU with this ID in the VM.
-    NotPresent,
-    /// The vCPU is present, but not powered on.
+    /// The vCPU is not powered on.
     PoweredOff,
     /// The vCPU is available to be run.
     Runnable,
@@ -1090,61 +1082,72 @@ pub enum VmCpuStatus {
     Running,
 }
 
-struct VmCpusInner {
+pub struct VmCpusEntry {
     // Locking: status must be locked before vcpu.
     status: RwLock<VmCpuStatus>,
     vcpu: Mutex<VmCpu>,
 }
 
+impl VmCpusEntry {
+    pub fn new(vcpu_id: u64, guest_id: PageOwnerId, shared_area: VmCpuSharedArea) -> VmCpusEntry {
+        let status = VmCpuStatus::PoweredOff;
+        let vcpu = VmCpu::new(vcpu_id, guest_id, shared_area);
+
+        VmCpusEntry {
+            status: RwLock::new(status),
+            vcpu: Mutex::new(vcpu),
+        }
+    }
+}
+
 /// The set of vCPUs in a VM.
 pub struct VmCpus {
-    inner: PageVec<VmCpusInner>,
+    inner: [Once<PageBox<VmCpusEntry>>; VM_CPUS_MAX],
 }
 
 impl VmCpus {
-    /// Creates a new vCPU tracking structure backed by `pages`.
-    pub fn new(
-        guest_id: PageOwnerId,
-        pages: SequentialPages<InternalClean>,
-        page_tracker: PageTracker,
-    ) -> Result<Self> {
-        let num_vcpus = pages.length_bytes() / VM_CPU_BYTES;
-        if num_vcpus == 0 {
-            return Err(Error::InsufficientVmCpuStorage);
+    /// Creates a new vCPU tracking structure.
+    pub fn new() -> Self {
+        Self {
+            inner: [(); VM_CPUS_MAX].map(|_| Once::new()),
         }
-        let mut inner = PageVec::new(pages, page_tracker);
-        for i in 0..num_vcpus {
-            let entry = VmCpusInner {
-                status: RwLock::new(VmCpuStatus::NotPresent),
-                vcpu: Mutex::new(VmCpu::new(i, guest_id)),
-            };
-            inner.push(entry);
-        }
-        Ok(Self { inner })
-    }
-
-    /// Returns the number of vCPUs in this `VmCpus`.
-    pub fn num_vcpus(&self) -> usize {
-        self.inner.len()
     }
 
     /// Adds the vCPU at `vcpu_id` as an available vCPU using `shared_area` as the vCPU's shared
     /// state-memory state area.
-    pub fn add_vcpu(&self, vcpu_id: u64, shared_area: VmCpuSharedArea) -> Result<()> {
-        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
-        let mut status = entry.status.write();
-        if *status != VmCpuStatus::NotPresent {
-            return Err(Error::VmCpuExists);
+    pub fn add_vcpu(&self, vcpu_entry: PageBox<VmCpusEntry>) -> Result<()> {
+        // Locking before status is safe here. This vcpu_entry is not in VmCpus yet.
+        let vcpu_id = vcpu_entry.vcpu.lock().vcpu_id;
+        let once_entry = self
+            .inner
+            .get(vcpu_id as usize)
+            .ok_or(Error::VmCpuNotFound)?;
+
+        // CAVEAT: following code is tricky.
+        //
+        // What we need is a OnceLock or a way to check that we have
+        // indeed set the value we passed. Since we don't have this
+        // (for now), we determine if the `vcpu_entry` has been set by
+        // checking the underlying pointer of the `PageBox`.
+        let ptr: *const VmCpusEntry = &*vcpu_entry;
+        let once_val = once_entry.call_once(|| vcpu_entry);
+        let once_ptr: *const VmCpusEntry = &**once_val;
+
+        if once_ptr != ptr {
+            Err(Error::VmCpuExists)
+        } else {
+            Ok(())
         }
-        entry.vcpu.lock().shared_area.call_once(|| shared_area);
-        *status = VmCpuStatus::PoweredOff;
-        Ok(())
     }
 
     /// Returns a reference to the vCPU with `vcpu_id` if it exists and is not currently running.
     /// The returned `IdleVmCpu` is guaranteed not to change state until it is dropped.
     pub fn get_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
-        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let entry = self
+            .inner
+            .get(vcpu_id as usize)
+            .and_then(|once| once.get())
+            .ok_or(Error::VmCpuNotFound)?;
         let status = entry.status.read();
         match *status {
             VmCpuStatus::PoweredOff | VmCpuStatus::Runnable => Ok(IdleVmCpu {
@@ -1152,14 +1155,17 @@ impl VmCpus {
                 vcpu: entry.vcpu.lock(),
             }),
             VmCpuStatus::Running => Err(Error::VmCpuRunning),
-            VmCpuStatus::NotPresent => Err(Error::VmCpuNotFound),
         }
     }
 
     /// Marks the vCPU with `vcpu_id` as powered on and runnable and returns a reference to it.
     /// The returned `IdleVmCpu` is guaranteed not to change state until it is dropped.
     pub fn power_on_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
-        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let entry = self
+            .inner
+            .get(vcpu_id as usize)
+            .and_then(|once| once.get())
+            .ok_or(Error::VmCpuNotFound)?;
         let mut status = entry.status.write();
         match *status {
             VmCpuStatus::PoweredOff => {
@@ -1170,7 +1176,6 @@ impl VmCpus {
                 })
             }
             VmCpuStatus::Running | VmCpuStatus::Runnable => Err(Error::VmCpuAlreadyPowered),
-            VmCpuStatus::NotPresent => Err(Error::VmCpuNotFound),
         }
     }
 
@@ -1183,7 +1188,11 @@ impl VmCpus {
         vm_pages: FinalizedVmPages<'pages, T>,
         mut parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
     ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'prev, T>> {
-        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let entry = self
+            .inner
+            .get(vcpu_id as usize)
+            .and_then(|once| once.get())
+            .ok_or(Error::VmCpuNotFound)?;
         let mut status = entry.status.write();
         match *status {
             VmCpuStatus::Runnable => {
@@ -1201,14 +1210,22 @@ impl VmCpus {
             }
             VmCpuStatus::Running => Err(Error::VmCpuRunning),
             VmCpuStatus::PoweredOff => Err(Error::VmCpuOff),
-            VmCpuStatus::NotPresent => Err(Error::VmCpuNotFound),
         }
     }
 
     /// Returns the status of the specified vCPU.
     pub fn get_vcpu_status(&self, vcpu_id: u64) -> Result<VmCpuStatus> {
-        let entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadCpuId)?;
+        let entry = self
+            .inner
+            .get(vcpu_id as usize)
+            .and_then(|once| once.get())
+            .ok_or(Error::VmCpuNotFound)?;
         Ok(*entry.status.read())
+    }
+
+    /// Returns the number of pages that must be donated to create a vCPU.
+    pub const fn required_state_pages_per_vcpu() -> u64 {
+        PageBox::<VmCpusEntry>::required_pages()
     }
 }
 

@@ -159,8 +159,8 @@ pub struct TsmInfo {
     pub tvm_state_pages: u64,
     /// The maximum number of vCPUs a TVM can support.
     pub tvm_max_vcpus: u64,
-    /// The number of bytes per vCPU which must be donated to the TSM when creating a new TVM.
-    pub tvm_bytes_per_vcpu: u64,
+    /// The number of 4kB pages which must be donated to the TSM when creating a new VCPU.
+    pub tvm_vcpu_state_pages: u64,
 }
 
 /// Parameters used for creating a new confidential VM.
@@ -172,13 +172,6 @@ pub struct TvmCreateParams {
     /// The base physical address of the confidential memory region to be used to hold the TVM's
     /// global state. Must be page-aligned and `TsmInfo::tvm_state_pages` pages in length.
     pub tvm_state_addr: u64,
-    /// The maximum number of vCPUs that will be created for this TVM. Must be less than or equal
-    /// to `TsmInfo::tvm_max_vcpus`.
-    pub tvm_num_vcpus: u64,
-    /// The base physical address of the confidential memory region to be used to hold the TVM's
-    /// vCPU state. Must be page-aligned and `TsmInfo::tvm_bytes_per_vcpu` * `tvm_num_vcpus` bytes
-    /// in length, rounded up to the nearest multiple of 4kB.
-    pub tvm_vcpu_addr: u64,
 }
 
 /// Types of pages allowed to used for creating or managing confidential VMs.
@@ -441,6 +434,9 @@ pub enum TeeHostFunction {
     /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`, registering `shared_page_addr` as
     /// the location of the shared-memory state area for this vCPU.
     ///
+    /// `state_page_addr` must be page-aligned and point to a confidential memory region used to hold
+    /// the TVM's vCPU state. Must be `TsmInfo::tvm_vcpu_state_pages` pages in length.
+    ///
     /// `shared_page_addr` must be page-aligned and point to a sufficient number of non-confidential
     /// pages to hold a structure with the layout specified by the register set enumeration process
     /// described above. These pages are "pinned" in the non-confidential state (i.e. cannot be
@@ -454,7 +450,9 @@ pub enum TeeHostFunction {
         guest_id: u64,
         /// a1 = vCPU id
         vcpu_id: u64,
-        /// a2 = page address of shared state structure
+        /// a2 = address of the first page donated for the vCPU state
+        state_page_addr: u64,
+        /// a3 = page address of shared state structure
         shared_page_addr: u64,
     },
     /// Runs the given vCPU in the TVM
@@ -542,7 +540,8 @@ impl TeeHostFunction {
             15 => Ok(TvmCpuCreate {
                 guest_id: args[0],
                 vcpu_id: args[1],
-                shared_page_addr: args[2],
+                state_page_addr: args[2],
+                shared_page_addr: args[3],
             }),
             16 => Ok(TvmCpuRun {
                 guest_id: args[0],
@@ -620,6 +619,7 @@ impl SbiFunction for TeeHostFunction {
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id: _,
+                state_page_addr: _,
                 shared_page_addr: _,
             } => 15,
             TvmCpuRun {
@@ -657,6 +657,7 @@ impl SbiFunction for TeeHostFunction {
             TvmCpuCreate {
                 guest_id,
                 vcpu_id: _,
+                state_page_addr: _,
                 shared_page_addr: _,
             } => *guest_id,
             TsmGetInfo { dest_addr, len: _ } => *dest_addr,
@@ -723,6 +724,7 @@ impl SbiFunction for TeeHostFunction {
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id,
+                state_page_addr: _,
                 shared_page_addr: _,
             } => *vcpu_id,
             TsmGetInfo { dest_addr: _, len } => *len,
@@ -780,8 +782,9 @@ impl SbiFunction for TeeHostFunction {
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id: _,
-                shared_page_addr,
-            } => *shared_page_addr,
+                state_page_addr,
+                shared_page_addr: _,
+            } => *state_page_addr,
             TvmAddMeasuredPages {
                 guest_id: _,
                 src_addr: _,
@@ -827,6 +830,12 @@ impl SbiFunction for TeeHostFunction {
                 num_pages,
                 guest_addr: _,
             } => *num_pages,
+            TvmCpuCreate {
+                guest_id: _,
+                vcpu_id: _,
+                state_page_addr: _,
+                shared_page_addr,
+            } => *shared_page_addr,
             TvmAddMeasuredPages {
                 guest_id: _,
                 src_addr: _,

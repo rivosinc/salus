@@ -6,7 +6,7 @@ use attestation::AttestationManager;
 use core::arch::global_asm;
 use core::marker::PhantomData;
 use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
-use page_tracking::collections::PageVec;
+use page_tracking::collections::{PageBox, PageVec};
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
 };
@@ -23,7 +23,7 @@ use spin::{Mutex, Once};
 use crate::guest_tracking::GuestVm;
 
 use crate::vm::{Vm, VmStateAny, VmStateFinalized, VmStateInitializing};
-use crate::vm_cpu::VmCpus;
+use crate::vm_cpu::{VmCpuSharedArea, VmCpus, VmCpusEntry};
 use crate::vm_id::VmId;
 
 #[derive(Debug)]
@@ -1112,15 +1112,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         assigned_pages
     }
 
-    /// Creates a new `Vm` using pages donated by `self`. The returned `Vm` is in the initializing
+    /// Creates a new `GuestVm` using pages donated by `self`. The returned `GuestVm` is in the initializing
     /// state, ready for its address space to be constructed.
     pub fn create_guest_vm(
         &self,
         page_root_addr: GuestPageAddr,
         state_addr: GuestPageAddr,
-        vcpus_addr: GuestPageAddr,
-        num_vcpu_pages: u64,
-    ) -> Result<(Vm<T>, Page<InternalClean>)> {
+    ) -> Result<GuestVm<T>> {
         if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
             return Err(Error::UnalignedAddress);
         }
@@ -1130,43 +1128,81 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         if !guest_root_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }
-        let state_pages =
-            self.get_converted_pages(state_addr, VmPages::<T>::required_state_pages())?;
-        if !state_pages.is_contiguous() {
+
+        // Take memory from `state_addr`. The total number of pages we require is
+        // `VmPages::<T>::required_state_pages()`.
+        //
+        // Use the first `GuestVm::<T>::required_pages()` of the state_addr region for the `GuestVm`.
+        let guest_vm_required_pages = GuestVm::<T>::required_pages();
+        let guest_vm_pages = self.get_converted_pages(state_addr, guest_vm_required_pages)?;
+        if !guest_vm_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }
-        let vcpu_pages = self.get_converted_pages(vcpus_addr, num_vcpu_pages)?;
-        if !vcpu_pages.is_contiguous() {
+        // Take `TVM_REGION_LIST_PAGES` from the `state_addr` region for the region list vector.
+        let region_vec_addr = state_addr
+            .checked_add_pages(guest_vm_required_pages)
+            .ok_or(Error::AddressOverflow)?;
+        let region_vec_pages = self.get_converted_pages(region_vec_addr, TVM_REGION_LIST_PAGES)?;
+        if !region_vec_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }
+
         let id = self
             .inner
             .page_tracker
             .add_active_guest()
             .map_err(Error::GuestId)?;
 
+        // Assert safe here. We checked above that `guest_root_pages` is contiguous.
         let guest_root_pages =
             SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
         let guest_root =
             GuestStagePageTable::new(guest_root_pages, id, self.inner.page_tracker.clone())
                 .unwrap();
 
-        let mut state_pages = self.assign_state_pages_for(state_pages, id);
-        let box_page = state_pages.next().unwrap();
-        let region_vec_pages = SequentialPages::from_pages(state_pages).unwrap();
+        // Assert safe here. We checked above that `region_vec_pages` is contiguous.
+        let region_vec_pages =
+            SequentialPages::from_pages(self.assign_state_pages_for(region_vec_pages, id)).unwrap();
         let region_vec = VmRegionList::new(region_vec_pages, self.inner.page_tracker.clone());
 
-        let vcpu_pages =
-            SequentialPages::from_pages(self.assign_state_pages_for(vcpu_pages, id)).unwrap();
+        let vm = Vm::new(
+            VmPages::new(guest_root, region_vec, self.inner.nesting + 1),
+            VmCpus::new(),
+        )
+        .map_err(Error::VmCreationFailed)?;
 
-        Ok((
-            Vm::new(
-                VmPages::new(guest_root, region_vec, self.inner.nesting + 1),
-                VmCpus::new(id, vcpu_pages, self.inner.page_tracker.clone()).unwrap(),
-            )
-            .map_err(Error::VmCreationFailed)?,
-            box_page,
-        ))
+        // Assert safe here. We checked above that `guest_vm_pages` is contiguous.
+        let guest_vm_pages =
+            SequentialPages::from_pages(self.assign_state_pages_for(guest_vm_pages, id)).unwrap();
+        // Unwrap safe. We allocated `GustVm::<T>::required_pages()` above.
+        let guest_vm = GuestVm::new(vm, guest_vm_pages).unwrap();
+        Ok(guest_vm)
+    }
+
+    /// Create a new `VmCpusEntry` using pages donated by `self`. The returned `VmCpusEntry` is ready to be
+    /// added to the VmCpus array of the initializing VM.
+    pub fn create_guest_vcpu(
+        &self,
+        vcpu_id: u64,
+        shared_area: VmCpuSharedArea,
+        state_addr: GuestPageAddr,
+        to: InitializingVmPages<T>,
+    ) -> Result<PageBox<VmCpusEntry>> {
+        let converted_pages =
+            self.get_converted_pages(state_addr, VmCpus::required_state_pages_per_vcpu())?;
+        if !converted_pages.is_contiguous() {
+            return Err(Error::NonContiguousPages);
+        }
+
+        let guest_id = to.page_owner_id();
+        let vcpu_entry = VmCpusEntry::new(vcpu_id, guest_id, shared_area);
+
+        // Assert safe here. We checked above that `converted_pages` is contiguous.
+        let vcpu_pages =
+            SequentialPages::from_pages(self.assign_state_pages_for(converted_pages, guest_id))
+                .unwrap();
+        let pagebox = PageBox::new_with(vcpu_entry, vcpu_pages, self.inner.page_tracker.clone());
+        Ok(pagebox)
     }
 
     /// Adds pages to be used for building page table entries to a guest of this VM.

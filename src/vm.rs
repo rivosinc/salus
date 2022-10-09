@@ -27,7 +27,7 @@ use crate::vm_cpu::{
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
     ActiveVmPages, AnyVmPages, InstructionFetchError, PageFaultType, VmPages, VmPagesRef,
-    VmRegionList, TVM_REGION_LIST_PAGES, TVM_STATE_PAGES,
+    VmRegionList, TVM_REGION_LIST_PAGES,
 };
 
 #[derive(Debug)]
@@ -44,6 +44,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 // What we report ourselves as in sbi_get_sbi_impl_id(). Just pick something unclaimed so no one
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
+
+// Pages used by the `PageVec` for the Host VM guest tracking.
+const HOSTVM_GUEST_TRACKING_PAGES: usize = 2;
 
 /// Possible MMIO instructions.
 #[derive(Clone, Copy, Debug)]
@@ -1050,7 +1053,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let tsm_info = sbi::TsmInfo {
             tsm_state: sbi::TsmState::TsmReady,
             tsm_version: 0,
-            tvm_state_pages: TVM_STATE_PAGES,
+            tvm_state_pages: VmPages::<T>::required_state_pages(),
             tvm_max_vcpus: MAX_CPUS as u64,
             tvm_bytes_per_vcpu: VM_CPU_BYTES,
         };
@@ -1682,8 +1685,9 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         let pte_pages = hyp_mem
             .take_pages_for_host_state(num_pte_pages as usize)
             .into_iter();
-        let vm_state_page = hyp_mem.take_pages_for_host_state(1);
-        let guest_tracking_pages = hyp_mem.take_pages_for_host_state(2);
+        let vm_state_page =
+            hyp_mem.take_pages_for_host_state(GuestVm::<T>::required_pages() as usize);
+        let guest_tracking_pages = hyp_mem.take_pages_for_host_state(HOSTVM_GUEST_TRACKING_PAGES);
         let region_vec_pages = hyp_mem.take_pages_for_host_state(TVM_REGION_LIST_PAGES as usize);
 
         // Pages for the array of vCPUs.

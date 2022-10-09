@@ -91,8 +91,15 @@ impl<T: GuestStagePagingMode> Clone for GuestVm<T> {
 }
 
 impl<T: GuestStagePagingMode> GuestVm<T> {
+    /// Return required pages necessary to create a GuestVM.
+    pub const fn required_pages() -> u64 {
+        PageArc::<RwLock<GuestVmInner<T>>>::required_pages()
+    }
+
     /// Creates a new initializing `GuestVm` from `vm`, using `page` as storage.
     pub fn new(vm: Vm<T>, page: Page<InternalClean>) -> Self {
+        // assert it fits in a single page for now.
+        assert!(Self::required_pages() == 1);
         let page_tracker = vm.page_tracker();
         Self {
             inner: PageArc::new_with(

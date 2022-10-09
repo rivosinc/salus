@@ -95,7 +95,11 @@ impl<T: GuestStagePagingMode> GuestVm<T> {
     pub fn new(vm: Vm<T>, page: Page<InternalClean>) -> Self {
         let page_tracker = vm.page_tracker();
         Self {
-            inner: PageArc::new_with(RwLock::new(GuestVmInner::new(vm)), page, page_tracker),
+            inner: PageArc::new_with(
+                RwLock::new(GuestVmInner::new(vm)),
+                page.into(),
+                page_tracker,
+            ),
         }
     }
 

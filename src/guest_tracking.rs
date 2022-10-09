@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use page_tracking::collections::{PageArc, PageVec};
 use page_tracking::PageTracker;
 use riscv_page_tables::GuestStagePagingMode;
-use riscv_pages::{InternalClean, Page, PageOwnerId, SequentialPages};
+use riscv_pages::{InternalClean, PageOwnerId, SequentialPages};
 use spin::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::vm::{AnyVm, FinalizedVm, InitializingVm, Vm, VmRef};
@@ -14,6 +14,7 @@ use crate::vm::{AnyVm, FinalizedVm, InitializingVm, Vm, VmRef};
 /// Guest tracking-related errors.
 #[derive(Debug)]
 pub enum Error {
+    InsufficientPages(SequentialPages<InternalClean>),
     InsufficientGuestStorage,
     InvalidGuestId,
     GuestInUse,
@@ -96,18 +97,16 @@ impl<T: GuestStagePagingMode> GuestVm<T> {
         PageArc::<RwLock<GuestVmInner<T>>>::required_pages()
     }
 
-    /// Creates a new initializing `GuestVm` from `vm`, using `page` as storage.
-    pub fn new(vm: Vm<T>, page: Page<InternalClean>) -> Self {
-        // assert it fits in a single page for now.
-        assert!(Self::required_pages() == 1);
-        let page_tracker = vm.page_tracker();
-        Self {
-            inner: PageArc::new_with(
-                RwLock::new(GuestVmInner::new(vm)),
-                page.into(),
-                page_tracker,
-            ),
+    /// Creates a new initializing `GuestVm` from `vm`, using `pages` as storage.
+    pub fn new(vm: Vm<T>, pages: SequentialPages<InternalClean>) -> Result<Self> {
+        if pages.len() < Self::required_pages() {
+            return Err(Error::InsufficientPages(pages));
         }
+
+        let page_tracker = vm.page_tracker();
+        let inner = PageArc::new_with(RwLock::new(GuestVmInner::new(vm)), pages, page_tracker);
+
+        Ok(Self { inner })
     }
 
     /// Returns a reference to `self` as an initializing VM.

@@ -332,7 +332,6 @@ fn check_vectors() {
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
-    const NUM_VCPUS: u64 = 1;
     const NUM_TEE_PTE_PAGES: u64 = 10;
 
     if hart_id != 0 {
@@ -371,9 +370,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     base::probe_sbi_extension(EXT_TEE_HOST).expect("Platform doesn't support TEE extension");
     let tsm_info = tee_host::get_info().expect("Tellus - TsmGetInfo failed");
-    let tvm_create_pages = 4
-        + tsm_info.tvm_state_pages
-        + ((NUM_VCPUS * tsm_info.tvm_bytes_per_vcpu) + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    let tvm_create_pages = 4 + tsm_info.tvm_state_pages;
     println!("Donating {} pages for TVM creation", tvm_create_pages);
 
     // Make sure TsmGetInfo fails if we pass it a bogus address.
@@ -396,14 +393,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let state_pages_base = next_page;
     let tvm_page_directory_addr = state_pages_base;
     let tvm_state_addr = tvm_page_directory_addr + 4 * PAGE_SIZE_4K;
-    let tvm_vcpu_addr = tvm_state_addr + tsm_info.tvm_state_pages * PAGE_SIZE_4K;
-    let vmid = tee_host::tvm_create(
-        tvm_page_directory_addr,
-        tvm_state_addr,
-        NUM_VCPUS,
-        tvm_vcpu_addr,
-    )
-    .expect("Tellus - TvmCreate returned error");
+
+    let vmid = tee_host::tvm_create(tvm_page_directory_addr, tvm_state_addr)
+        .expect("Tellus - TvmCreate returned error");
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");
     next_page += PAGE_SIZE_4K * tvm_create_pages;
 
@@ -430,10 +422,19 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let num_vcpu_shared_pages = TvmCpuSharedMem::required_pages(&vcpu_mem_layout);
 
     // Add vCPU0.
+
+    // Safety: The passed-in pages are unmapped and we do not access them again until they're
+    // reclaimed.
+    let vcpu_pages_base = next_page;
+    unsafe {
+        convert_pages(vcpu_pages_base, tsm_info.tvm_vcpu_state_pages);
+    }
+    next_page += PAGE_SIZE_4K * tsm_info.tvm_vcpu_state_pages;
+
     let vcpu_state_addr = next_page;
     next_page += num_vcpu_shared_pages * PAGE_SIZE_4K;
     // Safety: We own `vcpu_state_addr` and will only access it through volatile reads/writes.
-    unsafe { tee_host::add_vcpu(vmid, 0, vcpu_state_addr) }
+    unsafe { tee_host::add_vcpu(vmid, 0, vcpu_pages_base, vcpu_state_addr) }
         .expect("Tellus - TvmCpuCreate returned error");
     // Safety: `vcpu_state_addr` points to a sufficient number of pages to hold the requested layout
     // and will not be used for any other purpose for the duration of `kernel_init()`.
@@ -720,6 +721,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES,
     );
     reclaim_pages(state_pages_base, tvm_create_pages);
+    reclaim_pages(vcpu_pages_base, tsm_info.tvm_vcpu_state_pages);
     if has_aia {
         tee_interrupt::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
     }

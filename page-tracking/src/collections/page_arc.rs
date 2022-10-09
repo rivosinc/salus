@@ -8,7 +8,7 @@ use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use riscv_pages::{InternalClean, InternalDirty, Page, PageAddr, PageSize, PhysPage, RawAddr};
+use riscv_pages::{InternalClean, InternalDirty, PageAddr, PageSize, RawAddr, SequentialPages};
 
 use crate::collections::PageBox;
 use crate::PageTracker;
@@ -18,13 +18,15 @@ struct PageArcInner<T> {
     data: T,
     rc: AtomicUsize,
     page_size: PageSize,
+    page_count: u64,
     page_tracker: PageTracker,
 }
 
-/// A `PageArc` is a simplified `Arc`-like container, using a `Page` as the backing store for
-/// a reference-counted piece of data. Unlike `Arc`, `PageArc` does not support weak references.
+/// A `PageArc` is a simplified `Arc`-like container, using `SequentialPages` as the
+/// backing store for a reference-counted piece of data. Unlike `Arc`, `PageArc` does not support
+/// weak references.
 ///
-/// The backing `Page` is automatically released back to the previous owner using `PageTracker` when
+/// The backing pages are automatically released back to the previous owner using `PageTracker` when
 /// the last reference to the `PageArc` is dropped. The user may also convert the `PageArc` into a
 /// uniquely-owned `PageBox`.
 #[allow(clippy::derive_partial_eq_without_eq)] // Silence buggy clippy warning.
@@ -32,20 +34,30 @@ struct PageArcInner<T> {
 pub struct PageArc<T>(NonNull<PageArcInner<T>>);
 
 impl<T> PageArc<T> {
+    /// Return the number of pages that must be supplied to create a `PageArc` for type `T`.
+    pub const fn required_pages() -> u64 {
+        PageSize::num_4k_pages(core::mem::size_of::<PageArcInner<T>>() as u64)
+    }
+
     /// Creates a `PageArc` that wraps the given data using `page` as the backing store. The page is
     /// released back to the previous owner when the last reference is dropped using `page_tracker`.
-    pub fn new_with(data: T, page: Page<InternalClean>, page_tracker: PageTracker) -> Self {
-        let ptr = page.addr().bits() as *mut PageArcInner<T>;
+    pub fn new_with(
+        data: T,
+        pages: SequentialPages<InternalClean>,
+        page_tracker: PageTracker,
+    ) -> Self {
+        let ptr = pages.base().bits() as *mut PageArcInner<T>;
         assert!(!ptr.is_null()); // Explicitly ban pages at zero address.
         let inner = PageArcInner {
             data,
             rc: AtomicUsize::new(1),
-            page_size: page.size(),
+            page_size: pages.page_size(),
+            page_count: pages.len(),
             page_tracker,
         };
-        assert!(core::mem::size_of::<PageArcInner<T>>() <= page.size() as usize);
         unsafe {
             // Safe as the memory is totally owned and PageArcInner<T> fits in the page.
+            assert!(core::mem::size_of::<PageArcInner<T>>() <= pages.length_bytes() as usize);
             core::ptr::write(ptr, inner);
         }
         Self(NonNull::new(ptr).unwrap())
@@ -67,11 +79,18 @@ impl<T> PageArc<T> {
         this.inner().rc.load(Ordering::Acquire);
 
         let page_size = this.inner().page_size;
+        let page_count = this.inner().page_count;
         let page_tracker = this.inner().page_tracker.clone();
         // Safety: PageArcInner is repr(C) with data as the first field, therefore a pointer to data
         // is a page-aligned and properly initialized pointer to T.
-        let boxed =
-            unsafe { PageBox::from_raw(Self::as_ptr(&this) as *mut T, page_size, 1, page_tracker) };
+        let boxed = unsafe {
+            PageBox::from_raw(
+                Self::as_ptr(&this) as *mut T,
+                page_size,
+                page_count,
+                page_tracker,
+            )
+        };
         core::mem::forget(this);
         Ok(boxed)
     }
@@ -124,17 +143,21 @@ impl<T> Drop for PageArc<T> {
         }
 
         let page_tracker = self.inner().page_tracker.clone();
-        let page_size = self.inner().page_size;
-        // Safe because we now have unique ownership of the page this PageArc was constructed with.
-        let page: Page<InternalDirty> = unsafe {
-            Page::new_with_size(
+
+        // Safe because we now have unique ownership of the pages this PageArc was constructed with.
+        let pages = unsafe {
+            SequentialPages::<InternalDirty>::from_mem_range(
                 PageAddr::new(RawAddr::supervisor(self.0.as_ptr() as u64)).unwrap(),
-                page_size,
+                self.inner().page_size,
+                self.inner().page_count,
             )
+            .unwrap()
         };
 
-        // Unwrap ok: we have unique ownership of the page so we must be able to release it.
-        page_tracker.release_page(page).unwrap();
+        for p in pages {
+            // Unwrap ok: we have unique ownership of the page so we must be able to release it.
+            page_tracker.release_page(p).unwrap();
+        }
     }
 }
 
@@ -181,27 +204,24 @@ mod tests {
     use crate::TlbVersion;
     use riscv_pages::*;
 
-    fn stub_page() -> (PageTracker, Page<InternalClean>) {
+    fn stub_pages(n: usize) -> (PageTracker, SequentialPages<InternalClean>) {
         let (page_tracker, mut pages) = PageTracker::new_in_test();
-        let assigned_page = pages
-            .by_ref()
-            .take(1)
-            .map(|p| {
-                page_tracker
-                    .assign_page_for_internal_state(p, PageOwnerId::host())
-                    .unwrap()
-            })
-            .next()
-            .unwrap();
-        (page_tracker, assigned_page)
+        let assigned_pages = SequentialPages::from_pages(pages.by_ref().take(n).map(|p| {
+            page_tracker
+                .assign_page_for_internal_state(p, PageOwnerId::host())
+                .unwrap()
+        }))
+        .unwrap();
+        (page_tracker, assigned_pages)
     }
 
     #[test]
     fn lifecycle() {
-        let (page_tracker, backing_page) = stub_page();
-        let addr = backing_page.addr();
+        const TEST_PAGE_COUNT: usize = 1;
+        let (page_tracker, backing_pages) = stub_pages(TEST_PAGE_COUNT);
+        let addr = backing_pages.base();
         {
-            let arc = PageArc::new_with([5u8; 128], backing_page, page_tracker.clone());
+            let arc = PageArc::new_with([5u8; 128], backing_pages, page_tracker.clone());
             assert_eq!(PageArc::ref_count(&arc), 1);
             {
                 let copy = arc.clone();
@@ -221,6 +241,23 @@ mod tests {
             .is_ok());
     }
 
+    #[test]
+    #[should_panic]
+    fn new_with_not_enough_backing_pages_should_panic() {
+        const TEST_PAGE_COUNT: usize = 3;
+        const TEST_BYTES: usize = 1 + TEST_PAGE_COUNT * PageSize::Size4k as usize /* 1 byte bigger than backing pages */;
+        let (page_tracker, mut pages) = PageTracker::new_in_test();
+        let assigned_pages =
+            SequentialPages::from_pages(pages.by_ref().take(TEST_PAGE_COUNT).map(|p| {
+                page_tracker
+                    .assign_page_for_internal_state(p, PageOwnerId::host())
+                    .unwrap()
+            }))
+            .unwrap();
+
+        let _pb = PageArc::new_with([5u8; TEST_BYTES], assigned_pages, page_tracker.clone());
+    }
+
     #[derive(Debug)]
     struct ArcTest<'a> {
         flag: &'a mut bool,
@@ -234,14 +271,14 @@ mod tests {
 
     #[test]
     fn destructor() {
-        let (page_tracker, backing_page) = stub_page();
+        let (page_tracker, backing_pages) = stub_pages(3);
         let mut destroyed = false;
         {
             let arc = PageArc::new_with(
                 ArcTest {
                     flag: &mut destroyed,
                 },
-                backing_page,
+                backing_pages,
                 page_tracker.clone(),
             );
             assert_eq!(PageArc::ref_count(&arc), 1);

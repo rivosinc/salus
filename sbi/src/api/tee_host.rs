@@ -73,24 +73,10 @@ pub fn reclaim_pages(addr: u64, num_pages: u64) -> Result<()> {
 ///
 /// - tvm_state_addr: The base physical address of the confidential memory region to be used to hold
 /// the TVM's global state. Must be page-aligned and `TsmInfo::tvm_state_pages` pages in length.
-///
-/// - tvm_num_vcpus: The maximum number of vCPUs that will be created for this TVM. Must be less
-/// than or equal to `TsmInfo::tvm_max_vcpus`.
-///
-/// - tvm_vcpu_addr: The base physical address of the confidential memory region to be used to hold
-/// the TVM's vCPU state. Must be page-aligned and `TsmInfo::tvm_bytes_per_vcpu` * `tvm_num_vcpus`
-/// bytes in length, rounded up to the nearest multiple of 4kB.
-pub fn tvm_create(
-    tvm_page_directory_addr: u64,
-    tvm_state_addr: u64,
-    tvm_num_vcpus: u64,
-    tvm_vcpu_addr: u64,
-) -> Result<u64> {
+pub fn tvm_create(tvm_page_directory_addr: u64, tvm_state_addr: u64) -> Result<u64> {
     let tvm_create_params = TvmCreateParams {
         tvm_page_directory_addr,
         tvm_state_addr,
-        tvm_num_vcpus,
-        tvm_vcpu_addr,
     };
     let msg = SbiMessage::TeeHost(TvmCreate {
         params_addr: (&tvm_create_params as *const TvmCreateParams) as u64,
@@ -160,8 +146,11 @@ pub fn get_vcpu_register_set(vmid: u64, index: u64) -> Result<RegisterSetLocatio
     Ok(RegisterSetLocation::from(raw as u32))
 }
 
-/// Adds a vCPU with ID `vcpu_id` to the guest `vmid`, registering `shared_page_addr` as the
-/// location of the vCPU's shared-memory state area.
+/// Adds a vCPU with ID `vcpu_id` to the guest `vmid`, using 'state_page_addr' to hold the vCPU state and
+/// registering `shared_page_addr` as the location of the vCPU's shared-memory state area.
+///
+/// The address `state_page_addr` must reference confidential memory pages. The caller must provide
+/// `TsmInfo::tvm_vcpu_state_pages` pages.
 ///
 /// # Safety
 ///
@@ -169,10 +158,16 @@ pub fn get_vcpu_register_set(vmid: u64, index: u64) -> Result<RegisterSetLocatio
 /// sufficient to hold the structure layout returned from `get_vcpu_mem_layout()`. Since memory
 /// within the shared-memory state area may be read or written by the TSM at any time, the caller
 /// must treat the memory as volatile for the lifetime of the TVM.
-pub unsafe fn add_vcpu(vmid: u64, vcpu_id: u64, shared_page_addr: u64) -> Result<()> {
+pub unsafe fn add_vcpu(
+    vmid: u64,
+    vcpu_id: u64,
+    state_page_addr: u64,
+    shared_page_addr: u64,
+) -> Result<()> {
     let msg = SbiMessage::TeeHost(TvmCpuCreate {
         guest_id: vmid,
         vcpu_id,
+        state_page_addr,
         shared_page_addr,
     });
     ecall_send(&msg)?;

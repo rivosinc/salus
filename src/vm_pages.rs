@@ -20,6 +20,8 @@ use riscv_regs::{
 };
 use spin::{Mutex, Once};
 
+use crate::guest_tracking::GuestVm;
+
 use crate::vm::{Vm, VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_cpu::VmCpus;
 use crate::vm_id::VmId;
@@ -67,10 +69,6 @@ pub type InstructionFetchResult = core::result::Result<DecodedInstruction, Instr
 
 /// The number of pages for the `VmRegionList` vector.
 pub const TVM_REGION_LIST_PAGES: u64 = 1;
-
-/// The base number of state pages required to be donated for creating a new VM. For now, we just need
-/// one page to hold the VM state itself and whatever is required to hold the `VmRegionList`.
-pub const TVM_STATE_PAGES: u64 = 1 + TVM_REGION_LIST_PAGES;
 
 global_asm!(include_str!("guest_mem.S"));
 
@@ -812,6 +810,11 @@ impl<T: GuestStagePagingMode> VmPages<T> {
     pub fn as_ref<S>(&self) -> VmPagesRef<T, S> {
         VmPagesRef::new(self)
     }
+
+    /// Returns the number of pages that must be donated to create a VM.
+    pub const fn required_state_pages() -> u64 {
+        GuestVm::<T>::required_pages() + TVM_REGION_LIST_PAGES
+    }
 }
 
 /// A reference to a `VmPages` in a particular state `S` that exposes the appropriate functionality
@@ -1127,7 +1130,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         if !guest_root_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }
-        let state_pages = self.get_converted_pages(state_addr, TVM_STATE_PAGES)?;
+        let state_pages =
+            self.get_converted_pages(state_addr, VmPages::<T>::required_state_pages())?;
         if !state_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }

@@ -23,13 +23,8 @@ DEBIAN ?=
 ROOTFS_IMAGE := $(DEBIAN)/image.qcow2
 INITRD_IMAGE := $(DEBIAN)/initrd
 
-ifneq ($(VECTORS),)
-RELEASE_BINS := target/riscv64gcv-unknown-none-elf/release/
-DEBUG_BINS := target/riscv64gcv-unknown-none-elf/debug/
-else
 RELEASE_BINS := target/riscv64gc-unknown-none-elf/release/
 DEBUG_BINS := target/riscv64gc-unknown-none-elf/debug/
-endif
 
 KERNEL_ADDR := 0xc0200000
 INITRD_ADDR := 0xc2200000
@@ -74,9 +69,6 @@ check:
 		--doc
 
 CARGO_FLAGS :=
-ifneq ($(VECTORS),)
-CARGO_FLAGS += -Z build-std=core,alloc,proc_macro --target=riscv64gcv-unknown-none-elf.json
-endif
 
 .PHONY: salus
 salus:
@@ -92,7 +84,7 @@ tellus_bin: tellus
 	./create_guest_image.sh tellus_raw guestvm_raw tellus_guestvm
 
 guestvm:
-	RUSTFLAGS='-Clink-arg=-Tlds/guest.lds' cargo build $(CARGO_FLAGS) --package test_workloads --release --bin guestvm
+	RUSTFLAGS='-Ctarget-feature=+v -Clink-arg=-Tlds/guest.lds' cargo build $(CARGO_FLAGS) --package test_workloads --release --bin guestvm
 
 .PHONY: tellus
 tellus: guestvm

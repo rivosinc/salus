@@ -5,7 +5,9 @@
 //! Wrapper for basic FDT interaction.
 
 use crate::DeviceTreeResult;
+use core::str;
 use fdt_rs::base::iters::{DevTreeNodeIter, DevTreeReserveEntryIter};
+use fdt_rs::base::parse::ParsedTok;
 use fdt_rs::base::{DevTree, DevTreeProp};
 use fdt_rs::prelude::*;
 
@@ -57,6 +59,28 @@ impl<'a> Fdt<'a> {
     /// Returns the range of memory where the host VM's initramfs is loaded, if present.
     pub fn host_initramfs_region(&self) -> Option<FdtMemoryRegion> {
         self.get_module_node_region("multiboot,ramdisk")
+    }
+
+    /// This returns the property buf for the first property with the give name
+    pub fn get_property(&self, name: &str) -> Option<&str> {
+        let mut iter = self.inner.parse_iter();
+
+        while let Ok(Some(token)) = iter.next() {
+            if let ParsedTok::Prop(prop) = token {
+                let found_name = match self.inner.string_at_offset(prop.name_offset) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                if found_name.contains(name) {
+                    return match str::from_utf8(prop.prop_buf) {
+                        Ok(s) => Some(s),
+                        Err(_) => continue,
+                    };
+                };
+            }
+        }
+        None
     }
 
     pub(crate) fn inner(&self) -> DevTree {

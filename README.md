@@ -177,10 +177,6 @@ commandline.
 
 ### Vectors
 
-To run with the vector extension enabled requires a custom rust toolchain, due to a bug
-in nightly that prevents a no-std build with a custom target to not compile. Included in this
-directory is a patch file called PATCH.rust-vectors which should be applied to a rust compiler
-source code before building. Once you have you the custom toolchain configured, adding VECTORS=yes
-as an environment variable will cause the build to have the vector extension enabled.
-This problem seems to be the same as [Rust issue 98293](https://github.com/rust-lang/rust/issues/98293)
-or [Rust issue 98378](https://github.com/rust-lang/rust/issues/98378).
+Salus is able to detect if the CPU has the vector extensio. The same binary will 
+run on processor with or without the vector exension, and will enable vector code
+if the extension is present.

@@ -43,7 +43,6 @@ use page_tracking::*;
 use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, satp, scounteren};
-#[cfg(target_feature = "v")]
 use riscv_regs::{sstatus, vlenb, Readable, RiscvCsrInterface, MAX_VECTOR_REGISTER_LEN};
 use riscv_regs::{
     Exception, Interrupt, LocalRegisterCopy, ReadWriteable, SatpHelpers, Writeable, CSR, CSR_CYCLE,
@@ -417,7 +416,6 @@ pub fn setup_csrs() {
     trap::install_trap_handler();
 }
 
-#[cfg(target_feature = "v")]
 fn check_vector_width() {
     // Because we just ran setup_csrs(), we know vectors are off
     // Turn vectors on
@@ -446,10 +444,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     SbiConsole::set_as_console();
     println!("Salus: Boot test VM");
-
-    // Will panic if register width too long. (currently 256 bits)
-    #[cfg(target_feature = "v")]
-    check_vector_width();
 
     // Safe because we trust that the firmware passed a valid FDT.
     let hyp_fdt =
@@ -494,6 +488,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             println!("PmuInfo::init() failed with {:?}", e);
         }
     }
+    if cpu_info.has_vector() {
+        // Will panic if register width too long. (currently 256 bits)
+        check_vector_width();
+    } else {
+        println!("No vector support");
+    }
+
     println!(
         "{} CPU(s) present. Booting on CPU{} (hart {})",
         cpu_info.num_cpus(),

@@ -15,3 +15,8 @@ rice = { git = "https://github.com/rivosinc/rice" }
 s_mode_utils = { path = "../s-mode-utils" }
 sbi = { path = "../sbi" }
 riscv_regs = { path = "../riscv-regs" }
+
+[dependencies.fdt-rs]
+git = "https://github.com/rivosinc/fdt-rs"
+branch = "rivos/main"
+default-features = false

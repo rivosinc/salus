@@ -126,13 +126,11 @@ extern "C" {
     fn _restore_fp(state: *mut VmCpuState);
 }
 
-#[cfg(target_feature = "v")]
 extern "C" {
     fn _restore_vector(g: *mut VmCpuState);
     fn _save_vector(g: *mut VmCpuState);
 }
 
-#[cfg(target_feature = "v")]
 fn restore_vector(state: *mut VmCpuState) {
     unsafe {
         // Safe because the only memory it touches is known offsets of state
@@ -140,18 +138,12 @@ fn restore_vector(state: *mut VmCpuState) {
     }
 }
 
-#[cfg(target_feature = "v")]
 fn save_vector(state: *mut VmCpuState) {
     unsafe {
         // Safe because the only memory it touches is known offsets of state
         _save_vector(state);
     }
 }
-
-#[cfg(not(target_feature = "v"))]
-fn restore_vector(_state: *mut VmCpuState) {}
-#[cfg(not(target_feature = "v"))]
-fn save_vector(_state: *mut VmCpuState) {}
 
 #[allow(dead_code)]
 const fn host_gpr_offset(index: GprIndex) -> usize {
@@ -171,7 +163,6 @@ const fn guest_fpr_offset(index: usize) -> usize {
     offset_of!(VmCpuState, guest_regs) + offset_of!(GuestCpuState, fprs) + index * size_of::<u64>()
 }
 
-#[cfg(target_feature = "v")]
 const fn guest_vpr_offset(index: usize) -> usize {
     offset_of!(VmCpuState, guest_regs)
         + offset_of!(GuestCpuState, vprs)
@@ -291,7 +282,6 @@ global_asm!(
     guest_sepc = const guest_csr_offset!(sepc),
 );
 
-#[cfg(target_feature = "v")]
 global_asm!(
     include_str!("vectors.S"),
     guest_v0 =     const guest_vpr_offset(0),
@@ -552,8 +542,9 @@ impl VmCpu {
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
         sstatus.modify(sstatus::spp::Supervisor);
         sstatus.modify(sstatus::fs::Initial);
-        #[cfg(target_feature = "v")]
-        sstatus.modify(sstatus::vs::Initial);
+        if CpuInfo::get().has_vector() {
+            sstatus.modify(sstatus::vs::Initial);
+        }
         state.guest_regs.sstatus = sstatus.get();
 
         let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);

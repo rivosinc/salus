@@ -48,7 +48,6 @@ pub fn alloc_error(_layout: Layout) -> ! {
     abort()
 }
 
-#[cfg(target_feature = "v")]
 pub fn print_vector_csrs() {
     let mut vl: u64;
     let mut vcsr: u64;
@@ -75,7 +74,6 @@ pub fn print_vector_csrs() {
     println!("vtype {:#x}", vtype);
 }
 
-#[cfg(target_feature = "v")]
 pub fn test_vector() {
     let vec_len: u64 = 8;
     let vtype: u64 = 0xda;
@@ -271,13 +269,20 @@ fn test_attestation() {
 
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
-extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
+extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
     SbiConsole::set_as_console();
 
     println!("*****************************************");
     println!("Hello world from Tellus guest            ");
 
     base::probe_sbi_extension(sbi::EXT_TEE_GUEST).expect("TEE-Guest extension not present");
+
+    let vectors_enabled = boot_args & BOOT_ARG_VECTORS_ENABLED != 0;
+    if vectors_enabled {
+        println!("guestvm vector extension enabled (on)");
+    } else {
+        println!("guestvm vector extension disabled (off)");
+    }
 
     let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
     test_attestation();
@@ -300,17 +305,23 @@ extern "C" fn kernel_init(_hart_id: u64, shared_page_addr: u64) {
         NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
     )
     .expect("GuestVm -- AddSharedMemoryRegion failed");
-    println!("Accessing shared page at 0x{shared_page_addr:x}     ");
-    // Safety: We are assuming that the shared_page_addr is valid, and will be mapped in on a fault
+    println!("Accessing shared page at 0x{GUEST_SHARED_PAGES_START_ADDRESS:x}     ");
+    // Safety: We are assuming that GUEST_SHARED_PAGES_START_ADDRESS  is valid, and will be mapped in on a fault
     unsafe {
-        if core::ptr::read_volatile(shared_page_addr as *const u64) == GUEST_SHARE_PING {
+        if core::ptr::read_volatile(GUEST_SHARED_PAGES_START_ADDRESS as *const u64)
+            == GUEST_SHARE_PING
+        {
             // Write a known value for verification purposes
-            core::ptr::write_volatile(shared_page_addr as *mut u64, GUEST_SHARE_PONG);
+            core::ptr::write_volatile(
+                GUEST_SHARED_PAGES_START_ADDRESS as *mut u64,
+                GUEST_SHARE_PONG,
+            );
         }
     }
 
-    #[cfg(target_feature = "v")]
-    test_vector();
+    if vectors_enabled {
+        test_vector();
+    }
 
     tee_guest::add_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
         .expect("GuestVm - AddEmulatedMmioRegion failed");

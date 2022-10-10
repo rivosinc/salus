@@ -20,7 +20,6 @@ mod consts;
 
 use arrayvec::ArrayVec;
 use consts::*;
-#[cfg(target_feature = "v")]
 use core::arch::asm;
 use core::{ops::Range, ptr};
 use device_tree::Fdt;
@@ -233,7 +232,6 @@ fn exercise_pmu_functionality() {
     .expect_err("Successfully configured FW counter");
 }
 
-#[cfg(target_feature = "v")]
 fn store_into_vectors() {
     let vec_len: u64 = 8;
     let vtype: u64 = 0xda;
@@ -285,12 +283,11 @@ fn store_into_vectors() {
     }
 }
 
-#[cfg(target_feature = "v")]
 fn check_vectors() {
     println!("Reading vector registers");
     const REG_WIDTH_IN_U64S: usize = 4;
 
-    let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
+    let inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
     let bufp1 = inbuf.as_ptr();
     let bufp2: *const u64;
     let bufp3: *const u64;
@@ -358,6 +355,19 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         mem_range.base(),
         mem_range.size()
     );
+
+    // the 4 is to skip the rv64 or rv32 at the begging of the string
+    let vector_enabled = match fdt.get_property("riscv,isa") {
+        Some(rv) if rv.len() < 5 => false,
+        Some(rv) => rv.split('_').next().unwrap_or("")[4..].contains('v'),
+        None => false,
+    };
+
+    if vector_enabled {
+        println!("Tellus - Vector enabled");
+    } else {
+        println!("Tellus - Vector disabled");
+    };
 
     base::probe_sbi_extension(EXT_TEE_HOST).expect("Platform doesn't support TEE extension");
     let tsm_info = tee_host::get_info().expect("Tellus - TsmGetInfo failed");
@@ -506,7 +516,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Set the entry point.
     vcpu.set_sepc(0x8020_0000);
     // Set the kernel_init() parameter.
-    vcpu.set_gpr(GprIndex::A1, GUEST_SHARED_PAGES_START_ADDRESS);
+    vcpu.set_gpr(
+        GprIndex::A1,
+        if vector_enabled {
+            BOOT_ARG_VECTORS_ENABLED
+        } else {
+            0
+        },
+    );
 
     // TODO test that access to pages crashes somehow
     tee_host::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
@@ -522,8 +539,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     .expect("Tellus - TvmAddZeroPages failed");
     let mut zero_pages_added = PRE_FAULTED_ZERO_PAGES;
 
-    #[cfg(target_feature = "v")]
-    store_into_vectors();
+    if vector_enabled {
+        store_into_vectors();
+    }
 
     let mut shared_mem_region: Option<Range<u64>> = None;
     let mut mmio_region: Option<Range<u64>> = None;
@@ -684,9 +702,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         }
     }
 
-    #[cfg(target_feature = "v")]
-    check_vectors();
-
+    if vector_enabled {
+        check_vectors();
+    }
     tee_host::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
 
     // Safety: We own the page.

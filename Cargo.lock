@@ -712,6 +712,7 @@ dependencies = [
  "attestation",
  "der",
  "device_tree",
+ "fdt-rs",
  "hex-literal",
  "rice",
  "riscv_regs",

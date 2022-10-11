@@ -22,6 +22,8 @@ pub enum Error {
     LeafEntryNotTable,
     /// Failure creating a root page table at an address that isn't aligned as required.
     MisalignedPages(SequentialPages<InternalClean>),
+    /// Failure creating a root page table with an unsupported page size.
+    UnsupportedPageSizePages(SequentialPages<InternalClean>, PageSize),
     /// The requested page size isn't (yet) handled by the hypervisor.
     PageSizeNotSupported(PageSize),
     /// Attempt to create a mapping over an existing one.
@@ -37,7 +39,7 @@ pub enum Error {
     /// Attempt to unlock a PTE that is not locked.
     PteNotLocked,
     /// At least one of the pages for building a table root were not owned by the table's owner.
-    RootPageNotOwned,
+    RootPageNotOwned(SequentialPages<InternalClean>),
     /// The page was not in the range that the `GuestStageMapper` covers.
     OutOfMapRange,
     /// The page cannot be shared
@@ -483,8 +485,9 @@ struct PageTableInner<T: PagingMode> {
 impl<T: PagingMode> PageTableInner<T> {
     /// Creates a new `PageTableInner` from the pages in `root`.
     fn new(root: SequentialPages<InternalClean>) -> Result<Self> {
-        if root.page_size().is_huge() {
-            return Err(Error::PageSizeNotSupported(root.page_size()));
+        let page_size = root.page_size();
+        if page_size.is_huge() {
+            return Err(Error::UnsupportedPageSizePages(root, page_size));
         }
         if root.base().bits() & (T::TOP_LEVEL_ALIGN - 1) != 0 {
             return Err(Error::MisalignedPages(root));
@@ -731,7 +734,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             .page_addrs()
             .all(|paddr| page_tracker.is_owned(paddr, owner))
         {
-            return Err(Error::RootPageNotOwned);
+            return Err(Error::RootPageNotOwned(root));
         }
 
         let inner = PageTableInner::new(root)?;

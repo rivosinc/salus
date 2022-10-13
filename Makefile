@@ -22,6 +22,7 @@ LINUX_BIN := $(LINUX)/arch/riscv/boot/Image
 DEBIAN ?=
 ROOTFS_IMAGE := $(DEBIAN)/image.qcow2
 INITRD_IMAGE := $(DEBIAN)/initrd
+BUILDROOT_IMAGE := $(BUILDROOT)/output/images/rootfs.ext2
 
 RELEASE_BINS := target/riscv64gc-unknown-none-elf/release/
 DEBUG_BINS := target/riscv64gc-unknown-none-elf/debug/
@@ -29,6 +30,9 @@ DEBUG_BINS := target/riscv64gc-unknown-none-elf/debug/
 KERNEL_ADDR := 0xc0200000
 INITRD_ADDR := 0xc2200000
 BOOTARGS := keep_bootcon earlycon=sbi
+IOMMU_ARGS := -device x-riscv-iommu-pci
+NETWORK_ARGS := -netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7722-0.0.0.0:22 -device e1000e,netdev=usernet
+NVME_DEVICE_ARGS := -device nvme,serial=deadbeef,drive=hd
 
 # QEMU options:
 #
@@ -96,6 +100,7 @@ tellus: guestvm
 #  run_tellus: Run Tellus as the host VM.
 #  run_linux: Run a bare Linux kernel as the host VM.
 #  run_debian: Run a Linux kernel as the host VM with a Debian rootfs.
+#  run_buildroot: Run a Linux kernel as the host VM with a buildroot rootfs
 
 run_tellus_gdb: tellus_bin salus_debug
 	$(QEMU_BIN) \
@@ -126,11 +131,34 @@ run_debian: salus
 		-device guest-loader,kernel=$(LINUX_BIN),addr=$(KERNEL_ADDR) \
 		-append "$(BOOTARGS) root=LABEL=rootfs" \
 		-device guest-loader,initrd=$(INITRD_IMAGE),addr=$(INITRD_ADDR) \
-		-device x-riscv-iommu-pci \
 		-drive file=$(ROOTFS_IMAGE),if=none,id=hd \
-		-device nvme,serial=deadbeef,drive=hd \
-		-netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7722-0.0.0.0:22 \
-		-device e1000e,netdev=usernet \
+		$(NVME_DEVICE_ARGS) \
+		$(IOMMU_ARGS) \
+		$(NETWORK_ARGS) \
+		$(EXTRA_QEMU_ARGS)
+run_buildroot: salus
+	$(QEMU_BIN) \
+		$(MACH_ARGS) \
+		-kernel $(RELEASE_BINS)salus \
+		-device guest-loader,kernel=$(LINUX_BIN),addr=$(KERNEL_ADDR) \
+		-append "$(BOOTARGS) root=/dev/nvme0n1" \
+		-drive file="$(BUILDROOT_IMAGE),format=raw,id=hd" \
+		$(NVME_DEVICE_ARGS) \
+		$(IOMMU_ARGS) \
+		$(NETWORK_ARGS) \
+		$(EXTRA_QEMU_ARGS)
+
+run_buildroot_debug: salus_debug
+	$(QEMU_BIN) \
+		$(MACH_ARGS) \
+		-kernel $(DEBUG_BINS)salus \
+		-device guest-loader,kernel=$(LINUX_BIN),addr=$(KERNEL_ADDR) \
+		-append "$(BOOTARGS) root=/dev/nvme0n1" \
+		-drive file="$(BUILDROOT_IMAGE),format=raw,id=hd" \
+		$(NVME_DEVICE_ARGS) \
+		$(IOMMU_ARGS) \
+		$(NETWORK_ARGS) \
+		-s -S \
 		$(EXTRA_QEMU_ARGS)
 
 .PHONY: lint

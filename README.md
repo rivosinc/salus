@@ -177,6 +177,6 @@ commandline.
 
 ### Vectors
 
-Salus is able to detect if the CPU has the vector extensio. The same binary will 
-run on processor with or without the vector exension, and will enable vector code
-if the extension is present.
+Salus is able to detect if the CPU supports the vector extension. The same
+binary will run on processors with or without the exension, and will enable
+vector code if it is present.

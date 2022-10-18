@@ -543,12 +543,19 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // We start RAM in the host address space at the same location as it is in the supervisor
     // address space.
+    //
+    // Unwrap ok here and below since we must have at least one RAM region.
     let guest_ram_base = mem_map
         .regions()
         .find(|r| !matches!(r.region_type(), HwMemRegionType::Mmio(_)))
         .map(|r| RawAddr::guest(r.base().bits(), PageOwnerId::host()))
         .unwrap();
-    let guest_phys_size = mem_map.regions().last().unwrap().end().bits() - guest_ram_base.bits();
+    // For the purposes of calculating the total size of the host VM's guest physical address
+    // space, use the start and end of the (real) physical memory map. This is a bit of an
+    // over-estimate given that not all of the physical memory map ends up getting mapped into
+    // the host VM.
+    let guest_phys_size = mem_map.regions().last().unwrap().end().bits()
+        - mem_map.regions().next().unwrap().base().bits();
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.

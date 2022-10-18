@@ -37,11 +37,17 @@ pub enum PageState {
     /// data structures or as a page-table page for the VM.
     VmState,
 
-    /// Page has been invalidated and started the conversion operation at the given TLB version.
+    /// Page has been invalidated and started the conversion operation at the given TLB version in
+    /// the current owner's address space.
     Converting(TlbVersion),
 
-    /// Page has completed the conversion operation and is eligible for assignment or to be reclaimed.
-    /// The page must be locked exclusively before it can be assigned or reclaimed.
+    /// Page has been invalidated and started the unassignment operation at the given TLB version in
+    /// the current owner's address space. Upon completion, the page is returned to the previous owner
+    /// in the `Converted` state.
+    Unassigning(TlbVersion),
+
+    /// Page has completed the conversion or unassignment operation and is eligible for assignment or
+    /// to be reclaimed. The page must be locked exclusively before it can be assigned or reclaimed.
     Converted,
 }
 
@@ -110,7 +116,7 @@ impl PageInfo {
     pub fn owner(&self) -> Option<PageOwnerId> {
         use PageState::*;
         match self.state {
-            Converting(_) | Converted | Mapped | VmState | Shared(_) => {
+            Converting(_) | Unassigning(_) | Converted | Mapped | VmState | Shared(_) => {
                 if !self.owners.is_empty() {
                     Some(self.owners[self.owners.len() - 1])
                 } else {
@@ -146,7 +152,7 @@ impl PageInfo {
     pub fn release(&mut self) -> PageTrackingResult<()> {
         use PageState::*;
         match self.state {
-            Mapped | VmState | Converted | Converting(_) => {
+            Mapped | VmState | Converted | Converting(_) | Unassigning(_) => {
                 // Locked pages cannot be released
                 if self.locked {
                     return Err(PageTrackingError::PageLocked);
@@ -180,7 +186,7 @@ impl PageInfo {
         use PageState::*;
         if !matches!(new_state, Mapped | VmState | Converted) {
             // Going back to free/reserved isn't allowed, nor does it make sense for a page to
-            // immediately enter the "Converting" state.
+            // immediately enter the "Converting" or "Unassigning" state.
             return Err(PageTrackingError::InvalidStateTransition);
         }
         match self.state {
@@ -248,6 +254,49 @@ impl PageInfo {
         use PageState::*;
         match self.state {
             Converting(version) => version < tlb_version,
+            _ => false,
+        }
+    }
+
+    /// Transitions the page to Unassigning at `tlb_version` if it is currently Mapped.
+    pub fn begin_unassignment(&mut self, tlb_version: TlbVersion) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            Mapped => {
+                self.state = Unassigning(tlb_version);
+                Ok(())
+            }
+            _ => Err(PageTrackingError::PageNotUnassignable),
+        }
+    }
+
+    /// Transitions the page to Converted and returns it to the previous owner if it is Unassigning
+    /// with a TLB version older than `tlb_version`. The page may then be reassigned to child VMs.
+    pub fn complete_unassignment(&mut self, tlb_version: TlbVersion) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            Unassigning(version) => {
+                if version < tlb_version {
+                    if self.owners.is_empty() {
+                        Err(PageTrackingError::OwnerUnderflow)
+                    } else {
+                        self.owners.pop().unwrap();
+                        self.state = Converted;
+                        Ok(())
+                    }
+                } else {
+                    Err(PageTrackingError::PageNotUnassignable)
+                }
+            }
+            _ => Err(PageTrackingError::PageNotUnassignable),
+        }
+    }
+
+    /// Returns if the page is Unassigning and can complete unassignment at the given `tlb_version`.
+    pub fn is_unassignable(&self, tlb_version: TlbVersion) -> bool {
+        use PageState::*;
+        match self.state {
+            Unassigning(version) => version < tlb_version,
             _ => false,
         }
     }
@@ -716,9 +765,14 @@ mod tests {
         assert!(page.lock_for_assignment().is_ok());
         let guest_id = PageOwnerId::new(2).unwrap();
         assert!(page.assign(guest_id, PageState::Mapped).is_ok());
-        assert_eq!(page.release().unwrap(), ());
-        assert!(page.lock_for_assignment().is_ok());
+        let guest_version = TlbVersion::new();
+        assert!(page.begin_unassignment(guest_version).is_ok());
+        assert_eq!(page.state(), PageState::Unassigning(guest_version));
+        let guest_version = version.increment();
+        assert!(page.is_unassignable(guest_version));
+        assert!(page.complete_unassignment(guest_version).is_ok());
         assert_eq!(page.state(), PageState::Converted);
+        assert!(page.lock_for_assignment().is_ok());
         assert!(page.reclaim().is_ok());
 
         let mut page = PageInfo::new_reserved();

@@ -36,6 +36,8 @@ pub enum Error {
     PageNotConvertible,
     /// The page is not in a state where it can be assigned.
     PageNotAssignable,
+    /// The page is not in a state where it can be unassigned.
+    PageNotUnassignable,
     /// The page cannot be mapped back into the owner's address space.
     PageNotReclaimable,
     /// The page cannot be shared.
@@ -302,6 +304,34 @@ impl PageTracker {
         Ok(unsafe { P::DirtyPage::new(addr) })
     }
 
+    /// Marks the invalidated page as having started unassignment at `tlb_version`.
+    pub fn unassign_page_begin<P: InvalidatedPhysPage>(
+        &self,
+        page: P,
+        tlb_version: TlbVersion,
+    ) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(page.addr()).unwrap();
+        info.begin_unassignment(tlb_version)
+    }
+
+    /// Completes unassignment of the page at `addr` if it is owned by `owner` and was unassigned at
+    /// a TLB version older than `tlb_version`.
+    pub fn unassign_page_complete(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        mem_type: MemType,
+        tlb_version: TlbVersion,
+    ) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr)?;
+        if info.owner() != Some(owner) || info.mem_type() != mem_type {
+            return Err(Error::PageNotUnassignable);
+        }
+        info.complete_unassignment(tlb_version)
+    }
+
     /// Releases an exclusive reference to a locked page
     pub fn unlock_page<P: PhysPage>(&self, page: P) -> Result<()> {
         let mut page_tracker = self.inner.lock();
@@ -369,6 +399,25 @@ impl PageTracker {
             info.owner() == Some(owner)
                 && info.mem_type() == mem_type
                 && (info.state() == PageState::Converted || info.is_convertible(tlb_version))
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if and only if `addr` is a page owned by `owner` with type `mem_type` and
+    /// was unassigned at a TLB version older than `tlb_version`.
+    pub fn is_unassignable_page(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        mem_type: MemType,
+        tlb_version: TlbVersion,
+    ) -> bool {
+        let mut page_tracker = self.inner.lock();
+        if let Ok(info) = page_tracker.get(addr) {
+            info.owner() == Some(owner)
+                && info.mem_type() == mem_type
+                && info.is_unassignable(tlb_version)
         } else {
             false
         }

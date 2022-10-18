@@ -548,6 +548,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);
 
+    println!("HW memory map:");
+    for (i, r) in mem_map.regions().enumerate() {
+        println!(
+            "[{}] region: 0x{:x} -> 0x{:x}, {}",
+            i,
+            r.base().bits(),
+            r.end().bits() - 1,
+            r.region_type()
+        );
+    }
+
     // We start RAM in the host address space at the same location as it is in the supervisor
     // address space.
     let guest_ram_base = mem_map

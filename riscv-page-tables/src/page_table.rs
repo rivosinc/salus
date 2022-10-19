@@ -31,8 +31,10 @@ pub enum Error {
     PageNotMapped,
     /// The requested range couldn't be removed from the page table.
     PageNotUnmappable,
-    /// Attempt to access a non-converted page as confidential.
+    /// The requested range isn't converted.
     PageNotConverted,
+    /// The requested range couldn't be unassigned.
+    PageNotUnassignable,
     /// Attempt to lock a PTE that is already locked.
     PteLocked,
     /// Attempt to unlock a PTE that is not locked.
@@ -176,6 +178,11 @@ impl<'a, T: PagingMode> InvalidatedPte<'a, T> {
     fn lock(self) -> LockedPte<'a, T> {
         self.pte.lock();
         LockedPte::new(self.pte, self.level)
+    }
+
+    /// Clears the PTE.
+    fn clear(self) {
+        self.pte.clear();
     }
 }
 
@@ -911,6 +918,46 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         }
 
         Ok(pages)
+    }
+
+    /// Unassigns pages that were previously mapped in this page table if they were invalidated
+    /// at a TLB version older than `tlb_version`. Guarantees that the entire range has been
+    /// unassigned and the PTEs cleared upon success.
+    pub fn unassign_range(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
+        num_pages: u64,
+        tlb_version: TlbVersion,
+        mem_type: MemType,
+    ) -> Result<()> {
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
+        }
+
+        let mut inner = self.inner.lock();
+        for a in addr.iter_from().take(num_pages as usize) {
+            use TableEntryType::*;
+            match inner.walk(a.into()) {
+                Invalidated(pte) => {
+                    if !pte.level().is_leaf() {
+                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
+                    }
+                    self.page_tracker
+                        .unassign_page_complete(pte.page_addr(), self.owner, mem_type, tlb_version)
+                        .map_err(|_| Error::PageNotUnassignable)?;
+                    pte.clear();
+                }
+                Unused(_) => {
+                    continue;
+                }
+                _ => {
+                    return Err(Error::PageNotUnassignable);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn get_mapped_owned_4k_leaf(

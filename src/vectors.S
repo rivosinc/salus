@@ -1,5 +1,5 @@
 .section .text.init
-.global _run_guest_vector,_guest_exit_vector
+.global _restore_vector,_save_vector
 
 // t5 -> cached sstatus
 // a0 -> pointer to VmCpuState
@@ -7,7 +7,7 @@
 // guest before leaving salus and running the guest.
 .align 2
 _restore_vector:
-    
+
     // Save sstatus
     csrr t5, sstatus
 

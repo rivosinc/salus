@@ -122,22 +122,8 @@ extern "C" {
 }
 
 extern "C" {
-    fn _restore_vector(g: *mut VmCpuState);
-    fn _save_vector(g: *mut VmCpuState);
-}
-
-fn restore_vector(state: *mut VmCpuState) {
-    unsafe {
-        // Safe because the only memory it touches is known offsets of state
-        _restore_vector(state);
-    }
-}
-
-fn save_vector(state: *mut VmCpuState) {
-    unsafe {
-        // Safe because the only memory it touches is known offsets of state
-        _save_vector(state);
-    }
+    fn _restore_vector(state: *mut VmCpuState);
+    fn _save_vector(state: *mut VmCpuState);
 }
 
 #[allow(dead_code)]
@@ -629,11 +615,14 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let has_vector = CpuInfo::get().has_vector();
         let guest_id = self.vcpu.guest_id;
         let vcpu_state = &mut self.vcpu.state;
-        if has_vector {
-            restore_vector(vcpu_state);
-        }
 
         unsafe {
+            // Safe since _restore_vector() only reads within the bounds of the vector register
+            // state in VmCpuState.
+            if has_vector {
+                _restore_vector(vcpu_state);
+            }
+
             // Safe since _restore_fp() only reads within the bounds of the floating point
             // register state in VmCpuState.
             _restore_fp(vcpu_state);
@@ -659,7 +648,9 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         }
         // Check if vector state needs to be saved
         if has_vector && sstatus.matches_all(sstatus::vs::Dirty) {
-            save_vector(vcpu_state);
+            // Safe since _save_vector() only writes within the bounds of the vector register
+            // state in VmCpuState.
+            unsafe { _save_vector(vcpu_state) };
             sstatus.modify(sstatus::vs::Clean)
         }
         vcpu_state.guest_regs.sstatus = sstatus.get();

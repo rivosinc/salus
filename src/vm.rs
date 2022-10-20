@@ -869,14 +869,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
             TsmConvertPages {
                 page_addr,
-                page_type,
                 num_pages,
-            } => self.convert_pages(page_addr, page_type, num_pages).into(),
+            } => self.convert_pages(page_addr, num_pages).into(),
             TsmReclaimPages {
                 page_addr,
-                page_type,
                 num_pages,
-            } => self.reclaim_pages(page_addr, page_type, num_pages).into(),
+            } => self.reclaim_pages(page_addr, num_pages).into(),
             TsmInitiateFence => self.initiate_fence(active_vcpu).into(),
             TsmLocalFence => self.local_fence(active_vcpu).into(),
             AddPageTablePages {
@@ -1066,17 +1064,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(len as u64)
     }
 
-    /// Converts `num_pages` starting at guest physical address `page_addr` to confidential memory.
-    fn convert_pages(
-        &self,
-        page_addr: u64,
-        page_type: sbi::TsmPageType,
-        num_pages: u64,
-    ) -> EcallResult<u64> {
-        if page_type != sbi::TsmPageType::Page4k {
-            // TODO: Support converting hugepages.
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
+    /// Converts `num_pages` of 4kB page-size starting at guest physical address `page_addr` to confidential memory.
+    fn convert_pages(&self, page_addr: u64, num_pages: u64) -> EcallResult<u64> {
         let page_addr = self.guest_addr_from_raw(page_addr)?;
         self.vm_pages()
             .convert_pages(page_addr, num_pages)
@@ -1084,17 +1073,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(num_pages)
     }
 
-    /// Reclaims `num_pages` of confidential memory starting at guest physical address `page_addr`.
-    fn reclaim_pages(
-        &self,
-        page_addr: u64,
-        page_type: sbi::TsmPageType,
-        num_pages: u64,
-    ) -> EcallResult<u64> {
-        if page_type != sbi::TsmPageType::Page4k {
-            // TODO: Support converting hugepages.
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
+    /// Reclaims `num_pages` of 4kB page-size confidential memory starting at guest physical address `page_addr`.
+    fn reclaim_pages(&self, page_addr: u64, num_pages: u64) -> EcallResult<u64> {
         let page_addr = self.guest_addr_from_raw(page_addr)?;
         self.vm_pages()
             .reclaim_pages(page_addr, num_pages)

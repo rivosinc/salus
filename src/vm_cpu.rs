@@ -256,23 +256,19 @@ global_asm!(
     guest_f30 = const guest_fpr_offset(30),
     guest_f31 = const guest_fpr_offset(31),
     guest_fcsr = const guest_csr_offset!(fcsr),
-    sstatus_fs_dirty = const sstatus::fs::Dirty.value,
+    guest_v0 = const guest_vpr_offset(0),
+    guest_v8 = const guest_vpr_offset(8),
+    guest_v16 = const guest_vpr_offset(16),
+    guest_v24 = const guest_vpr_offset(24),
+    guest_vstart = const guest_csr_offset!(vstart),
+    guest_vcsr = const guest_csr_offset!(vcsr),
+    guest_vtype = const guest_csr_offset!(vtype),
+    guest_vl = const guest_csr_offset!(vl),
     guest_sstatus = const guest_csr_offset!(sstatus),
     guest_hstatus = const guest_csr_offset!(hstatus),
     guest_scounteren = const guest_csr_offset!(scounteren),
     guest_sepc = const guest_csr_offset!(sepc),
-);
-
-global_asm!(
-    include_str!("vectors.S"),
-    guest_v0 =     const guest_vpr_offset(0),
-    guest_v8 =     const guest_vpr_offset(8),
-    guest_v16 =    const guest_vpr_offset(16),
-    guest_v24 =    const guest_vpr_offset(24),
-    guest_vstart = const guest_csr_offset!(vstart),
-    guest_vcsr =   const guest_csr_offset!(vcsr),
-    guest_vtype =  const guest_csr_offset!(vtype),
-    guest_vl =     const guest_csr_offset!(vl),
+    sstatus_fs_dirty = const sstatus::fs::Dirty.value,
     sstatus_vs_enable = const sstatus::vs::Initial.value,
 );
 

@@ -259,7 +259,7 @@ pub enum TeeHostFunction {
         /// a1 = maximum number of bytes to be written
         len: u64,
     },
-    /// Converts `num_pages` of non-confidential memory starting at `page_addr`. The converted pages
+    /// Converts `num_pages` of 4kB page-size non-confidential memory starting at `page_addr`. The converted pages
     /// remain non-confidential, and thus may not be assigned for use by a child TVM, until the
     /// fence procedure, described below, has been completed.
     ///
@@ -267,21 +267,17 @@ pub enum TeeHostFunction {
     TsmConvertPages {
         /// a0 = base address of pages to convert
         page_addr: u64,
-        /// a1 = page size
-        page_type: TsmPageType,
-        /// a2 = number of pages
+        /// a1 = number of pages
         num_pages: u64,
     },
-    /// Reclaims `num_pages` of confidential memory starting at `page_addr`. The pages must not
+    /// Reclaims `num_pages` of 4kB page-size confidential memory starting at `page_addr`. The pages must not
     /// be currently assigned to an active TVM.
     ///
     /// a6 = 2
     TsmReclaimPages {
         /// a0 = base address of pages to reclaim
         page_addr: u64,
-        /// a1 = page size
-        page_type: TsmPageType,
-        /// a2 = number of pages
+        /// a1 = number of pages
         num_pages: u64,
     },
     /// Initiates a TLB invalidation sequence for all pages marked for conversion via calls to
@@ -483,13 +479,11 @@ impl TeeHostFunction {
             }),
             1 => Ok(TsmConvertPages {
                 page_addr: args[0],
-                page_type: TsmPageType::from_reg(args[1])?,
-                num_pages: args[2],
+                num_pages: args[1],
             }),
             2 => Ok(TsmReclaimPages {
                 page_addr: args[0],
-                page_type: TsmPageType::from_reg(args[1])?,
-                num_pages: args[2],
+                num_pages: args[1],
             }),
             3 => Ok(TsmInitiateFence),
             4 => Ok(TsmLocalFence),
@@ -562,12 +556,10 @@ impl SbiFunction for TeeHostFunction {
             } => 0,
             TsmConvertPages {
                 page_addr: _,
-                page_type: _,
                 num_pages: _,
             } => 1,
             TsmReclaimPages {
                 page_addr: _,
-                page_type: _,
                 num_pages: _,
             } => 2,
             TsmInitiateFence => 3,
@@ -671,12 +663,10 @@ impl SbiFunction for TeeHostFunction {
             } => *guest_id,
             TsmConvertPages {
                 page_addr,
-                page_type: _,
                 num_pages: _,
             } => *page_addr,
             TsmReclaimPages {
                 page_addr,
-                page_type: _,
                 num_pages: _,
             } => *page_addr,
             TvmAddMemoryRegion {
@@ -738,14 +728,12 @@ impl SbiFunction for TeeHostFunction {
             } => *src_addr,
             TsmConvertPages {
                 page_addr: _,
-                page_type,
-                num_pages: _,
-            } => *page_type as u64,
+                num_pages,
+            } => *num_pages,
             TsmReclaimPages {
                 page_addr: _,
-                page_type,
-                num_pages: _,
-            } => *page_type as u64,
+                num_pages,
+            } => *num_pages,
             TvmAddMemoryRegion {
                 guest_id: _,
                 region_type,
@@ -793,16 +781,6 @@ impl SbiFunction for TeeHostFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *dest_addr,
-            TsmConvertPages {
-                page_addr: _,
-                page_type: _,
-                num_pages,
-            } => *num_pages,
-            TsmReclaimPages {
-                page_addr: _,
-                page_type: _,
-                num_pages,
-            } => *num_pages,
             TvmAddMemoryRegion {
                 guest_id: _,
                 region_type: _,

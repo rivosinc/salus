@@ -949,92 +949,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
-    fn handle_attestation_msg(
-        &self,
-        attestation_func: AttestationFunction,
-        active_pages: &ActiveVmPages<T>,
-    ) -> EcallAction {
-        use AttestationFunction::*;
-        match attestation_func {
-            GetCapabilities {
-                caps_addr_out,
-                caps_size,
-            } => self
-                .get_attestation_capabilities(caps_addr_out, caps_size as usize, active_pages)
-                .into(),
-            GetEvidence {
-                cert_request_addr,
-                cert_request_size,
-                request_data_addr,
-                evidence_format,
-                cert_addr_out,
-                cert_size,
-            } => self
-                .guest_get_evidence(
-                    cert_request_addr,
-                    cert_request_size as usize,
-                    request_data_addr,
-                    evidence_format,
-                    cert_addr_out,
-                    cert_size as usize,
-                    active_pages,
-                )
-                .into(),
-
-            ExtendMeasurement {
-                measurement_data_addr,
-                measurement_data_size,
-                measurement_index,
-            } => self
-                .guest_extend_measurement(
-                    measurement_data_addr,
-                    measurement_data_size as usize,
-                    measurement_index as usize,
-                    active_pages,
-                )
-                .into(),
-
-            ReadMeasurement {
-                measurement_data_addr_out,
-                measurement_data_size,
-                measurement_index,
-            } => self
-                .guest_read_measurement(
-                    measurement_data_addr_out,
-                    measurement_data_size as usize,
-                    measurement_index as usize,
-                    active_pages,
-                )
-                .into(),
-        }
-    }
-
-    fn handle_tee_interrupt_msg(
-        &self,
-        interrupt_func: TeeInterruptFunction,
-        active_pages: &ActiveVmPages<T>,
-    ) -> EcallAction {
-        use TeeInterruptFunction::*;
-        match interrupt_func {
-            TvmAiaInit {
-                tvm_id,
-                params_addr,
-                len,
-            } => self
-                .guest_aia_init(tvm_id, params_addr, len as usize, active_pages)
-                .into(),
-            TvmCpuSetImsicAddr {
-                tvm_id,
-                vcpu_id,
-                imsic_addr,
-            } => self
-                .guest_set_vcpu_imsic_addr(tvm_id, vcpu_id, imsic_addr)
-                .into(),
-            TsmConvertImsic { imsic_addr } => self.convert_imsic(imsic_addr).into(),
-            TsmReclaimImsic { imsic_addr } => self.reclaim_imsic(imsic_addr).into(),
-        }
-    }
-
     fn get_tsm_info(
         &self,
         dest_addr: u64,
@@ -1335,6 +1249,90 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(num_pages)
     }
 
+    fn guest_add_shared_pages(
+        &self,
+        guest_id: u64,
+        page_addr: u64,
+        page_type: sbi::TsmPageType,
+        num_pages: u64,
+        guest_addr: u64,
+    ) -> EcallResult<u64> {
+        if page_type != TsmPageType::Page4k || num_pages == 0 {
+            return Err(EcallError::Sbi(SbiError::InvalidParam));
+        }
+        let page_addr = self.guest_addr_from_raw(page_addr)?;
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        self.vm_pages()
+            .add_shared_pages_to(page_addr, num_pages, guest_vm.vm_pages(), guest_addr)
+            .map_err(EcallError::from)?;
+
+        Ok(num_pages)
+    }
+
+    fn handle_attestation_msg(
+        &self,
+        attestation_func: AttestationFunction,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallAction {
+        use AttestationFunction::*;
+        match attestation_func {
+            GetCapabilities {
+                caps_addr_out,
+                caps_size,
+            } => self
+                .get_attestation_capabilities(caps_addr_out, caps_size as usize, active_pages)
+                .into(),
+            GetEvidence {
+                cert_request_addr,
+                cert_request_size,
+                request_data_addr,
+                evidence_format,
+                cert_addr_out,
+                cert_size,
+            } => self
+                .guest_get_evidence(
+                    cert_request_addr,
+                    cert_request_size as usize,
+                    request_data_addr,
+                    evidence_format,
+                    cert_addr_out,
+                    cert_size as usize,
+                    active_pages,
+                )
+                .into(),
+
+            ExtendMeasurement {
+                measurement_data_addr,
+                measurement_data_size,
+                measurement_index,
+            } => self
+                .guest_extend_measurement(
+                    measurement_data_addr,
+                    measurement_data_size as usize,
+                    measurement_index as usize,
+                    active_pages,
+                )
+                .into(),
+
+            ReadMeasurement {
+                measurement_data_addr_out,
+                measurement_data_size,
+                measurement_index,
+            } => self
+                .guest_read_measurement(
+                    measurement_data_addr_out,
+                    measurement_data_size as usize,
+                    measurement_index as usize,
+                    active_pages,
+                )
+                .into(),
+        }
+    }
+
     fn get_attestation_capabilities(
         &self,
         caps_addr_out: u64,
@@ -1488,6 +1486,32 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(measurement_data.len() as u64)
     }
 
+    fn handle_tee_interrupt_msg(
+        &self,
+        interrupt_func: TeeInterruptFunction,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallAction {
+        use TeeInterruptFunction::*;
+        match interrupt_func {
+            TvmAiaInit {
+                tvm_id,
+                params_addr,
+                len,
+            } => self
+                .guest_aia_init(tvm_id, params_addr, len as usize, active_pages)
+                .into(),
+            TvmCpuSetImsicAddr {
+                tvm_id,
+                vcpu_id,
+                imsic_addr,
+            } => self
+                .guest_set_vcpu_imsic_addr(tvm_id, vcpu_id, imsic_addr)
+                .into(),
+            TsmConvertImsic { imsic_addr } => self.convert_imsic(imsic_addr).into(),
+            TsmReclaimImsic { imsic_addr } => self.reclaim_imsic(imsic_addr).into(),
+        }
+    }
+
     fn guest_aia_init(
         &self,
         guest_id: u64,
@@ -1572,30 +1596,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .reclaim_imsic(imsic_addr)
             .map_err(EcallError::from)?;
         Ok(0)
-    }
-
-    fn guest_add_shared_pages(
-        &self,
-        guest_id: u64,
-        page_addr: u64,
-        page_type: sbi::TsmPageType,
-        num_pages: u64,
-        guest_addr: u64,
-    ) -> EcallResult<u64> {
-        if page_type != TsmPageType::Page4k || num_pages == 0 {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
-        let page_addr = self.guest_addr_from_raw(page_addr)?;
-        let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest
-            .as_finalized_vm()
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        self.vm_pages()
-            .add_shared_pages_to(page_addr, num_pages, guest_vm.vm_pages(), guest_addr)
-            .map_err(EcallError::from)?;
-
-        Ok(num_pages)
     }
 
     fn handle_tee_guest_msg(&self, guest_func: TeeGuestFunction) -> EcallAction {

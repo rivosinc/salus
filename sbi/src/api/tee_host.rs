@@ -42,7 +42,6 @@ pub fn get_info() -> Result<TsmInfo> {
 pub unsafe fn convert_pages(addr: u64, num_pages: u64) -> Result<()> {
     let msg = SbiMessage::TeeHost(TsmConvertPages {
         page_addr: addr,
-        page_type: TsmPageType::Page4k,
         num_pages,
     });
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
@@ -55,7 +54,6 @@ pub unsafe fn convert_pages(addr: u64, num_pages: u64) -> Result<()> {
 pub fn reclaim_pages(addr: u64, num_pages: u64) -> Result<()> {
     let msg = SbiMessage::TeeHost(TsmReclaimPages {
         page_addr: addr,
-        page_type: TsmPageType::Page4k,
         num_pages,
     });
     // Safety: The referenced pages are made accessible again, which is safe since we haven't

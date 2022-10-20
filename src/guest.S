@@ -275,3 +275,70 @@ _save_fp:
     sd    t0, ({guest_fcsr})(a0)
     csrw  sstatus, t1
     ret
+
+// Save guest vector state. A0 = pointer to VmCpuState.
+.global _save_vector
+_save_vector:
+    // Temporarily enable vectors
+    csrr  t5, sstatus
+    li    t0, {sstatus_vs_enable}
+    csrrs zero, sstatus, t0
+
+    // Store vector CSRs
+    csrr  t4, vcsr
+    sd    t4, {guest_vcsr}(a0)
+    csrr  t4, vstart
+    sd    t4, {guest_vstart}(a0)
+    csrr  t4, vtype
+    sd    t4, {guest_vtype}(a0)
+    csrr  t4, vl
+    sd    t4, {guest_vl}(a0)
+
+    // Store register file
+    addi   t3, a0, {guest_v0}
+    vs8r.v v0, (t3)
+    addi   t3, a0, {guest_v8}
+    vs8r.v v8, (t3)
+    addi   t3, a0, {guest_v16}
+    vs8r.v v16, (t3)
+    addi   t3, a0, {guest_v24}
+    vs8r.v v24, (t3)
+
+    // Restore sstatus
+    csrw  sstatus, t5
+    ret
+
+// Restore guest vector state. A0 = pointer to VmCpuState.
+.global _restore_vector
+_restore_vector:
+    // Temporarily enable vectors
+    csrr  t5, sstatus
+    li    t4, {sstatus_vs_enable}
+    csrrs zero, sstatus, t4
+
+    // Restore type and length
+    ld     t1, ({guest_vl})(a0)
+    ld     t2, ({guest_vtype})(a0)
+    vsetvl t0,t1,t2
+
+    // Restore vstart
+    ld     t0, ({guest_vstart})(a0)
+    csrw   vstart, t0
+
+    // Restore vcsr
+    ld     t0, ({guest_vcsr})(a0)
+    csrw   vcsr, t0
+
+    // Restore register file
+    addi   t3, a0, {guest_v0}
+    vl8r.v v0, (t3)
+    addi   t3, a0, {guest_v8}
+    vl8r.v v8, (t3)
+    addi   t3, a0, {guest_v16}
+    vl8r.v v16, (t3)
+    addi   t3, a0, {guest_v24}
+    vl8r.v v24, (t3)
+
+    // Restore sstatus
+    csrw  sstatus, t5
+    ret

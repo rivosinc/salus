@@ -9,6 +9,8 @@
 
 mod consts;
 pub use consts::*;
+mod debug_console;
+pub use debug_console::*;
 mod error;
 pub use error::*;
 mod function;
@@ -111,6 +113,8 @@ pub enum SbiMessage {
     HartState(StateFunction),
     /// Handles system reset.
     Reset(ResetFunction),
+    /// Handles output to the console for debug.
+    DebugConsole(DebugConsoleFunction),
     /// Provides capabilities for starting confidential virtual machines.
     TeeHost(TeeHostFunction),
     /// Provides interrupt virtualization for confidential virtual machines.
@@ -133,6 +137,7 @@ impl SbiMessage {
             EXT_BASE => BaseFunction::from_regs(args).map(SbiMessage::Base),
             EXT_HART_STATE => StateFunction::from_regs(args).map(SbiMessage::HartState),
             EXT_RESET => ResetFunction::from_regs(args).map(SbiMessage::Reset),
+            EXT_DBCN => DebugConsoleFunction::from_regs(args).map(SbiMessage::DebugConsole),
             EXT_TEE_HOST => TeeHostFunction::from_regs(args).map(SbiMessage::TeeHost),
             EXT_TEE_INTERRUPT => {
                 TeeInterruptFunction::from_regs(args).map(SbiMessage::TeeInterrupt)
@@ -152,6 +157,7 @@ impl SbiMessage {
             Base(_) => EXT_BASE,
             HartState(_) => EXT_HART_STATE,
             Reset(_) => EXT_RESET,
+            DebugConsole(_) => EXT_DBCN,
             TeeHost(_) => EXT_TEE_HOST,
             TeeInterrupt(_) => EXT_TEE_INTERRUPT,
             TeeGuest(_) => EXT_TEE_GUEST,
@@ -170,6 +176,7 @@ impl SbiMessage {
             Base(f) => f.a6(),
             HartState(f) => f.a6(),
             Reset(f) => f.a6(),
+            DebugConsole(f) => f.a6(),
             TeeHost(f) => f.a6(),
             TeeInterrupt(f) => f.a6(),
             TeeGuest(f) => f.a6(),
@@ -186,6 +193,7 @@ impl SbiMessage {
             Base(f) => f.a5(),
             HartState(f) => f.a5(),
             Reset(f) => f.a5(),
+            DebugConsole(f) => f.a5(),
             TeeHost(f) => f.a5(),
             TeeInterrupt(f) => f.a5(),
             TeeGuest(f) => f.a5(),
@@ -202,6 +210,7 @@ impl SbiMessage {
             Base(f) => f.a4(),
             HartState(f) => f.a4(),
             Reset(f) => f.a4(),
+            DebugConsole(f) => f.a4(),
             TeeHost(f) => f.a4(),
             TeeInterrupt(f) => f.a4(),
             TeeGuest(f) => f.a4(),
@@ -218,6 +227,7 @@ impl SbiMessage {
             Base(f) => f.a3(),
             HartState(f) => f.a3(),
             Reset(f) => f.a3(),
+            DebugConsole(f) => f.a3(),
             TeeHost(f) => f.a3(),
             TeeInterrupt(f) => f.a3(),
             TeeGuest(f) => f.a3(),
@@ -234,6 +244,7 @@ impl SbiMessage {
             Base(f) => f.a2(),
             HartState(f) => f.a2(),
             Reset(f) => f.a2(),
+            DebugConsole(f) => f.a2(),
             TeeHost(f) => f.a2(),
             TeeInterrupt(f) => f.a2(),
             TeeGuest(f) => f.a2(),
@@ -250,6 +261,7 @@ impl SbiMessage {
             Base(f) => f.a1(),
             HartState(f) => f.a1(),
             Reset(f) => f.a1(),
+            DebugConsole(f) => f.a1(),
             TeeHost(f) => f.a1(),
             TeeInterrupt(f) => f.a1(),
             TeeGuest(f) => f.a1(),
@@ -265,6 +277,7 @@ impl SbiMessage {
             PutChar(c) => *c,
             Base(f) => f.a0(),
             Reset(f) => f.a0(),
+            DebugConsole(f) => f.a0(),
             HartState(f) => f.a0(),
             TeeHost(f) => f.a0(),
             TeeInterrupt(f) => f.a0(),

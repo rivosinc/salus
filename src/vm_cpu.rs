@@ -4,7 +4,7 @@
 
 use core::arch::global_asm;
 use core::{marker::PhantomData, mem::size_of, ptr, ptr::NonNull};
-use drivers::{imsic::ImsicFileId, imsic::ImsicLocation, CpuId, CpuInfo, MAX_CPUS};
+use drivers::{imsic::*, CpuId, CpuInfo, MAX_CPUS};
 use memoffset::offset_of;
 use page_tracking::collections::PageBox;
 use page_tracking::TlbVersion;
@@ -20,7 +20,7 @@ use crate::vm_id::VmId;
 use crate::vm_pages::{ActiveVmPages, FinalizedVmPages, PinnedPages};
 use crate::vm_pmu::VmPmuState;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     VmCpuExists,
     VmCpuNotFound,
@@ -30,6 +30,11 @@ pub enum Error {
     WrongAddressSpace,
     InvalidSharedStatePtr,
     InsufficientSharedStatePages,
+    NoImsicVirtualization,
+    BindingImsic(ImsicError),
+    UnbindingImsic(ImsicError),
+    WrongBindStatus,
+    WrongPhysicalCpu,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -475,8 +480,24 @@ pub enum VmCpuTrap {
     // TODO: Add other exit causes as needed.
 }
 
-/// Used to store any per-physical-CPU state for a virtual CPU of a VM.
-struct CurrentCpu {
+// State of binding a vCPU to a physical CPU.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BindStatus {
+    Binding(CpuId, ImsicFileId),
+    Bound(CpuId, ImsicFileId),
+    Unbinding(CpuId, ImsicFileId),
+    Unbound,
+}
+
+// Virtual IMSIC state for a vCPU.
+struct ImsicState {
+    bind_status: BindStatus,
+    location: ImsicLocation,
+    sw_file: SwFile,
+}
+
+// The VMID and TLB version last used by a vCPU.
+struct PrevTlb {
     cpu: CpuId,
     vmid: VmId,
     tlb_version: TlbVersion,
@@ -486,12 +507,9 @@ struct CurrentCpu {
 pub struct VmCpu {
     state: VmCpuState,
     shared_area: VmCpuSharedArea,
-    imsic_location: Option<ImsicLocation>,
+    imsic_state: Option<ImsicState>,
     pmu_state: VmPmuState,
-    current_cpu: Option<CurrentCpu>,
-    // TODO: interrupt_file should really be part of CurrentCpu, but we have no way to migrate it
-    // at present.
-    interrupt_file: Option<ImsicFileId>,
+    prev_tlb: Option<PrevTlb>,
     pending_mmio_op: Option<MmioOperation>,
     guest_id: PageOwnerId,
     vcpu_id: u64,
@@ -532,11 +550,10 @@ impl VmCpu {
         Self {
             state,
             shared_area,
-            imsic_location: None,
+            imsic_state: None,
             pmu_state: VmPmuState::default(),
-            current_cpu: None,
+            prev_tlb: None,
             pending_mmio_op: None,
-            interrupt_file: None,
             guest_id,
             vcpu_id,
         }
@@ -545,6 +562,11 @@ impl VmCpu {
     // Returns a reference to the shared-memory state area for this vCPU.
     fn shared_area(&self) -> &VmCpuSharedArea {
         &self.shared_area
+    }
+
+    // Returns this vCPU's IMSIC location, if set.
+    fn get_imsic_location(&self) -> Option<ImsicLocation> {
+        self.imsic_state.as_ref().map(|i| i.location)
     }
 }
 
@@ -569,13 +591,24 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         mut vcpu: MutexGuard<'vcpu, VmCpu>,
         vm_pages: FinalizedVmPages<'pages, T>,
         parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
-    ) -> Self {
+    ) -> Result<Self> {
         let this_cpu = PerCpu::this_cpu();
-        if let Some(ref c) = vcpu.current_cpu && c.cpu != this_cpu.cpu_id() {
-            // If we've changed CPUs, then any per-CPU state is invalid.
-            //
-            // TODO: Migration between physical CPUs needs to be done explicitly via TEECALL.
-            vcpu.current_cpu = None;
+        // We must be bound to the current CPU if IMSIC virtualization is enabled.
+        if let Some(ref imsic_state) = vcpu.imsic_state {
+            match imsic_state.bind_status {
+                BindStatus::Bound(cpu_id, _) => {
+                    if cpu_id != this_cpu.cpu_id() {
+                        return Err(Error::WrongPhysicalCpu);
+                    }
+                }
+                _ => {
+                    return Err(Error::WrongBindStatus);
+                }
+            }
+        }
+        // If we're running on a new CPU, then any previous VMID or TLB version we used is inavlid.
+        if let Some(ref prev_tlb) = vcpu.prev_tlb && prev_tlb.cpu != this_cpu.cpu_id() {
+            vcpu.prev_tlb = None;
         }
 
         // We store the parent vCPU as a trait object as a means of type-erasure for ActiveVmCpu's
@@ -591,7 +624,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             power_off: false,
         };
         active_vcpu.restore();
-        active_vcpu
+        Ok(active_vcpu)
     }
 
     /// Runs this vCPU until it traps.
@@ -605,8 +638,6 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         //    any SGEI at HS level.
         //  - If this is a guest: set HGEIE[1] on entry; switch to the host VM for any SGEI that
         //    occur, injecting an SEI for the host interrupts and SGEI for guest VM interrupts.
-
-        // TODO: Enforce that the vCPU has an assigned interrupt file before running.
 
         let has_vector = CpuInfo::get().has_vector();
         let guest_id = self.vcpu.guest_id;
@@ -829,6 +860,11 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         }
     }
 
+    /// Returns the location of this vCPU's virtualized IMSIC.
+    pub fn get_imsic_location(&self) -> Option<ImsicLocation> {
+        self.vcpu.get_imsic_location()
+    }
+
     /// Returns this active vCPU's `ActiveVmPages`.
     pub fn active_pages(&self) -> &ActiveVmPages<'pages, T> {
         // Unwrap ok since it's not possible to externally hold a reference to an `ActiveVmCpu` with
@@ -933,27 +969,22 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let mut vmid_tracker = this_cpu.vmid_tracker_mut();
         // If VMIDs rolled over next_vmid() will do the necessary flush and the previous TLB version
         // doesn't matter.
-        let (vmid, prev_tlb_version) = match self.vcpu.current_cpu {
-            Some(ref c) if c.vmid.version() == vmid_tracker.current_version() => {
-                (c.vmid, Some(c.tlb_version))
+        let (vmid, tlb_version) = match self.vcpu.prev_tlb {
+            Some(ref prev_tlb) if prev_tlb.vmid.version() == vmid_tracker.current_version() => {
+                (prev_tlb.vmid, Some(prev_tlb.tlb_version))
             }
             _ => (vmid_tracker.next_vmid(), None),
         };
 
         // enter_with_vmid() will fence if prev_tlb_version is stale.
-        let active_pages = self.vm_pages.enter_with_vmid(vmid, prev_tlb_version);
+        let active_pages = self.vm_pages.enter_with_vmid(vmid, tlb_version);
 
-        // Update our per-CPU state in case VMID or TLB version changed.
-        if let Some(ref mut c) = self.vcpu.current_cpu {
-            c.vmid = vmid;
-            c.tlb_version = active_pages.tlb_version();
-        } else {
-            self.vcpu.current_cpu = Some(CurrentCpu {
-                cpu: this_cpu.cpu_id(),
-                vmid,
-                tlb_version: active_pages.tlb_version(),
-            });
-        }
+        // Record the TLB version we're using.
+        self.vcpu.prev_tlb = Some(PrevTlb {
+            cpu: this_cpu.cpu_id(),
+            vmid,
+            tlb_version: active_pages.tlb_version(),
+        });
 
         self.active_pages = Some(active_pages);
     }
@@ -1038,23 +1069,124 @@ impl<'vcpu> IdleVmCpu<'vcpu> {
 
     /// Sets the location of this vCPU's virtualized IMSIC.
     pub fn set_imsic_location(&mut self, imsic_location: ImsicLocation) {
-        self.vcpu.imsic_location = Some(imsic_location);
+        self.vcpu.imsic_state = Some(ImsicState {
+            location: imsic_location,
+            sw_file: SwFile::new(),
+            bind_status: BindStatus::Unbound,
+        });
     }
 
     /// Returns the location of this vCPU's virtualized IMSIC.
     pub fn get_imsic_location(&self) -> Option<ImsicLocation> {
-        self.vcpu.imsic_location
+        self.vcpu.get_imsic_location()
     }
 
-    /// Sets the interrupt file for this vCPU.
-    pub fn set_interrupt_file(&mut self, interrupt_file: ImsicFileId) {
-        self.vcpu.interrupt_file = Some(interrupt_file);
+    /// Prepares to bind this vCPU to `interrupt_file` on the current physical CPU.
+    pub fn bind_imsic_prepare(&mut self, interrupt_file: ImsicFileId) -> Result<()> {
+        let mut imsic_state = self
+            .vcpu
+            .imsic_state
+            .as_mut()
+            .ok_or(Error::NoImsicVirtualization)?;
+        // The vCPU must be completely unbound to start a bind operation.
+        if imsic_state.bind_status != BindStatus::Unbound {
+            return Err(Error::WrongBindStatus);
+        }
+
+        // Initialize the guest IMSIC file we're getting bound to.
+        let imsic = Imsic::get();
+        imsic
+            .restore_guest_file_prepare(interrupt_file, &mut imsic_state.sw_file)
+            .map_err(Error::BindingImsic)?;
+
+        imsic_state.bind_status = BindStatus::Binding(PerCpu::this_cpu().cpu_id(), interrupt_file);
+        Ok(())
+    }
+
+    /// Completes the IMSIC bind operation started in `bind_imsic_prepare()`.
+    pub fn bind_imsic_finish(&mut self) -> Result<()> {
+        let mut imsic_state = self
+            .vcpu
+            .imsic_state
+            .as_mut()
+            .ok_or(Error::NoImsicVirtualization)?;
+        // Make sure there's a bind operation was started on this CPU.
+        let (cpu, interrupt_file) = match imsic_state.bind_status {
+            BindStatus::Binding(cpu, interrupt_file) => (cpu, interrupt_file),
+            _ => {
+                return Err(Error::WrongBindStatus);
+            }
+        };
+        if cpu != PerCpu::this_cpu().cpu_id() {
+            return Err(Error::WrongPhysicalCpu);
+        }
+
+        // Finish restoring state from the SW interrupt file.
+        let imsic = Imsic::get();
+        imsic
+            .restore_guest_file_finish(interrupt_file, &mut imsic_state.sw_file)
+            .map_err(Error::BindingImsic)?;
+        imsic_state.bind_status = BindStatus::Bound(cpu, interrupt_file);
 
         // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
         let mut hstatus =
             LocalRegisterCopy::<u64, hstatus::Register>::new(self.vcpu.state.guest_regs.hstatus);
         hstatus.modify(hstatus::vgein.val(interrupt_file.bits() as u64));
         self.vcpu.state.guest_regs.hstatus = hstatus.get();
+
+        Ok(())
+    }
+
+    /// Prepares to unbind this vCPU from its current interrupt file.
+    pub fn unbind_imsic_prepare(&mut self) -> Result<()> {
+        let mut imsic_state = self
+            .vcpu
+            .imsic_state
+            .as_mut()
+            .ok_or(Error::NoImsicVirtualization)?;
+        // We must be bound (to the current CPU) to start an unbind.
+        let (cpu, interrupt_file) = match imsic_state.bind_status {
+            BindStatus::Bound(cpu, interrupt_file) => (cpu, interrupt_file),
+            _ => {
+                return Err(Error::WrongBindStatus);
+            }
+        };
+        if cpu != PerCpu::this_cpu().cpu_id() {
+            return Err(Error::WrongPhysicalCpu);
+        }
+
+        let imsic = Imsic::get();
+        imsic
+            .save_guest_file_prepare(interrupt_file, &mut imsic_state.sw_file)
+            .map_err(Error::UnbindingImsic)?;
+        imsic_state.bind_status = BindStatus::Unbinding(cpu, interrupt_file);
+        Ok(())
+    }
+
+    /// Completes the IMSIC unbind operation started in `unbind_imsic_prepare()`.
+    pub fn unbind_imsic_finish(&mut self) -> Result<()> {
+        let mut imsic_state = self
+            .vcpu
+            .imsic_state
+            .as_mut()
+            .ok_or(Error::NoImsicVirtualization)?;
+        // We must be bound (to the current CPU) to start an unbind.
+        let (cpu, interrupt_file) = match imsic_state.bind_status {
+            BindStatus::Unbinding(cpu, interrupt_file) => (cpu, interrupt_file),
+            _ => {
+                return Err(Error::WrongBindStatus);
+            }
+        };
+        if cpu != PerCpu::this_cpu().cpu_id() {
+            return Err(Error::WrongPhysicalCpu);
+        }
+
+        let imsic = Imsic::get();
+        imsic
+            .save_guest_file_finish(interrupt_file, &mut imsic_state.sw_file)
+            .map_err(Error::UnbindingImsic)?;
+        imsic_state.bind_status = BindStatus::Unbound;
+        Ok(())
     }
 }
 
@@ -1193,7 +1325,7 @@ impl VmCpus {
                 if let Some(ref mut p) = parent_vcpu {
                     p.save();
                 }
-                Ok(ActiveVmCpu::restore_from(self, vcpu, vm_pages, parent_vcpu))
+                ActiveVmCpu::restore_from(self, vcpu, vm_pages, parent_vcpu)
             }
             VmCpuStatus::Running => Err(Error::VmCpuRunning),
             VmCpuStatus::PoweredOff => Err(Error::VmCpuOff),

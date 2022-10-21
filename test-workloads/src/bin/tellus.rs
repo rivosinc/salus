@@ -544,6 +544,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         store_into_vectors();
     }
 
+    // Bind to a guest interrupt file if AIA is enabled.
+    if has_aia {
+        tee_interrupt::bind_vcpu_imsic(vmid, 0, 1 << 1).expect("Tellus - TvmCpuBindImsic failed");
+    }
+
     let mut shared_mem_region: Option<Range<u64>> = None;
     let mut mmio_region: Option<Range<u64>> = None;
     loop {
@@ -706,6 +711,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     if vector_enabled {
         check_vectors();
     }
+
+    if has_aia {
+        // A fence is needed in between begin & end.
+        tee_interrupt::unbind_vcpu_imsic_begin(vmid, 0).expect("Tellus - TvmCpuUnbindImsic failed");
+        tee_host::tvm_initiate_fence(vmid).expect("Tellus - TvmInitiateFence failed");
+        tee_interrupt::unbind_vcpu_imsic_end(vmid, 0).expect("Tellus - TvmCpuUnbindImsic failed");
+    }
+
     tee_host::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
 
     // Safety: We own the page.

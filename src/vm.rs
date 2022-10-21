@@ -1809,6 +1809,16 @@ enum MmioEmulationError {
     InvalidAddress(u64),
 }
 
+impl core::fmt::Display for MmioEmulationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MmioEmulationError::FailedDecode(i) => write!(f, "FailedDecode {i:x}"),
+            MmioEmulationError::InvalidInstruction(i) => write!(f, "InvalidInstruction {i:?}"),
+            MmioEmulationError::InvalidAddress(i) => write!(f, "InvalidAddress {i:x}"),
+        }
+    }
+}
+
 /// Represents the special VM that serves as the host for the system.
 pub struct HostVm<T: GuestStagePagingMode> {
     inner: GuestVm<T>,
@@ -2115,7 +2125,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
                         }
                         GuestLoadPageFault | GuestStorePageFault => {
                             if let Err(err) = self.handle_page_fault(vcpu_id) {
-                                println!("Unhandled page fault: {:?}", err);
+                                println!("Unhandled page fault: {}", err);
                                 return;
                             }
                         }

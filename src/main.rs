@@ -50,7 +50,7 @@ use riscv_regs::{
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
-use s_mode_utils::sbi_console::SbiConsole;
+use s_mode_utils::sbi_console::SbiConsoleV01;
 use smp::PerCpu;
 use spin::Once;
 use vm::HostVm;
@@ -429,7 +429,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Reset CSRs to a sane state.
     setup_csrs();
 
-    SbiConsole::set_as_console();
+    SbiConsoleV01::set_as_console();
     println!("Salus: Boot test VM");
 
     // Safe because we trust that the firmware passed a valid FDT.

@@ -652,6 +652,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 EcallAction::Break(VmExitCause::FatalEcall(msg), SbiReturn::success(0))
             }
             SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
+            SbiMessage::DebugConsole(debug_con_func) => {
+                self.handle_debug_console(debug_con_func, active_vcpu.active_pages())
+            }
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
             SbiMessage::TeeHost(host_func) => self.handle_tee_host_msg(host_func, active_vcpu),
             SbiMessage::TeeInterrupt(interrupt_func) => {
@@ -808,6 +811,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 | sbi::EXT_BASE
                 | sbi::EXT_HART_STATE
                 | sbi::EXT_RESET
+                | sbi::EXT_DBCN
                 | sbi::EXT_TEE_HOST
                 | sbi::EXT_TEE_INTERRUPT
                 | sbi::EXT_TEE_GUEST
@@ -820,6 +824,52 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             _ => 0,
         };
         SbiReturn::success(ret)
+    }
+
+    // Handles the printing of characters from VM memory.
+    // Copies the characters to a bounce buffer, parses them as UTF-8, and sends them on to the
+    // console.
+    // On success or error, returns the number of bytes written.
+    fn debug_console_print(
+        &self,
+        mut len: u64,
+        addr: u64,
+        active_pages: &ActiveVmPages<T>,
+    ) -> core::result::Result<u64, u64> {
+        let mut chunk = [0u8; 256];
+        let mut curr_addr = addr;
+        while len > 0 {
+            let count = core::cmp::min(len as usize, chunk.len());
+            active_pages
+                .copy_from_guest(
+                    &mut chunk[0..count],
+                    RawAddr::guest(curr_addr, self.page_owner_id()),
+                )
+                .map_err(|_| curr_addr - addr)?;
+            let s = core::str::from_utf8(&chunk[0..count]).map_err(|_| curr_addr - addr)?;
+            print!("{s}");
+            curr_addr += count as u64;
+            len -= count as u64;
+        }
+        Ok(len)
+    }
+
+    fn handle_debug_console(
+        &self,
+        debug_con_func: DebugConsoleFunction,
+        active_pages: &ActiveVmPages<T>,
+    ) -> EcallAction {
+        match debug_con_func {
+            DebugConsoleFunction::PutString { len, addr } => {
+                EcallAction::Continue(match self.debug_console_print(len, addr, active_pages) {
+                    Ok(n) => SbiReturn::success(n),
+                    Err(n) => SbiReturn {
+                        error_code: sbi::SBI_ERR_INVALID_ADDRESS,
+                        return_value: n,
+                    },
+                })
+            }
+        }
     }
 
     fn handle_hart_state_msg(&self, hsm_func: StateFunction) -> EcallAction {

@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Debug Console for printing strings through SBI.
+pub mod debug_console;
+
 /// Host interfaces for reset extension.
 pub mod reset;
 

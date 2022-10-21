@@ -11,7 +11,7 @@ use drivers::{
     CpuInfo,
 };
 use page_tracking::collections::PageBox;
-use page_tracking::{HypPageAlloc, PageList, PageTracker};
+use page_tracking::{HypPageAlloc, LockedPageList, PageList, PageTracker};
 use rice::x509::{request::CertReq, MAX_CSR_LEN};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
@@ -1011,6 +1011,26 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         self.vm().guests.as_ref()
     }
 
+    // Cleans and assigns the pages in `pages` as internal state pages for `owner`.
+    fn assign_pages(
+        pages: LockedPageList<Page<ConvertedDirty>>,
+        owner: PageOwnerId,
+    ) -> PageList<Page<InternalClean>> {
+        let page_tracker = pages.page_tracker();
+        let mut assigned = PageList::new(page_tracker.clone());
+        for page in pages {
+            // Unwrap ok: we have an exclusive reference to the converted page, so it must be
+            // assignable.
+            let page = page_tracker
+                .assign_page_for_internal_state(page.clean(), owner)
+                .unwrap();
+            // Unwrap ok: since we had an exclusive reference to the page prior to assignment, it
+            // can't be on any other list.
+            assigned.push(page).unwrap();
+        }
+        assigned
+    }
+
     fn add_guest(
         &self,
         params_addr: u64,
@@ -1036,15 +1056,54 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let params: sbi::TvmCreateParams =
             unsafe { core::ptr::read_unaligned(param_bytes.as_slice().as_ptr().cast()) };
 
-        // Now create the VM, claiming the pages that the host donated to us.
+        // Now claim the pages that the host donated to us.
         let page_root_addr = self.guest_addr_from_raw(params.tvm_page_directory_addr)?;
-        let state_addr = self.guest_addr_from_raw(params.tvm_state_addr)?;
-
-        let guest_vm = self
+        let guest_root_pages = self
             .vm_pages()
-            .create_guest_vm(page_root_addr, state_addr)?;
+            .get_converted_pages(page_root_addr, 4)
+            .map_err(EcallError::from)?;
+        if !guest_root_pages.is_contiguous() {
+            return Err(EcallError::Sbi(SbiError::InvalidAddress));
+        }
+        // Unwrap ok: guest_root_pages must be non-empty.
+        let guest_root_base = guest_root_pages.peek().unwrap().bits();
+        if (guest_root_base as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
+            return Err(EcallError::Sbi(SbiError::InvalidAddress));
+        }
+        let state_page_addr = self.guest_addr_from_raw(params.tvm_state_addr)?;
+        let guest_box_pages = self
+            .vm_pages()
+            .get_converted_pages(state_page_addr, GuestVm::<T>::required_pages())
+            .map_err(EcallError::from)?;
+        if !guest_box_pages.is_contiguous() {
+            return Err(EcallError::Sbi(SbiError::InvalidAddress));
+        }
 
-        let id = guest_vm.page_owner_id();
+        // Allocate an ID for the new guest so that we can assign pages to it.
+        let id = self
+            .page_tracker()
+            .add_active_guest()
+            .map_err(|_| EcallError::Sbi(SbiError::Failed))?;
+
+        // Assert safe here. We checked above that `guest_root_pages` is contiguous.
+        let guest_root_pages =
+            SequentialPages::from_pages(Self::assign_pages(guest_root_pages, id)).unwrap();
+        // Unwrap ok: `guest_root_pages` is suitably aligned and owned by the new VM.
+        let guest_root =
+            GuestStagePageTable::new(guest_root_pages, id, self.page_tracker()).unwrap();
+
+        let vm = Vm::new(
+            VmPages::new(guest_root, self.vm_pages().nesting() + 1),
+            VmCpus::new(),
+        )
+        .map_err(|_| EcallError::Sbi(SbiError::Failed))?;
+
+        // Assert safe here. We checked above that `guest_box_pages` is contiguous.
+        let guest_box_pages =
+            SequentialPages::from_pages(Self::assign_pages(guest_box_pages, id)).unwrap();
+        // Unwrap safe. We allocated `GustVm::<T>::required_pages()` above.
+        let guest_vm = GuestVm::new(vm, guest_box_pages).unwrap();
+
         self.guests()
             .and_then(|g| g.add(guest_vm).ok())
             .ok_or(EcallError::Sbi(SbiError::Failed))?;
@@ -1107,6 +1166,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         state_page_addr: u64,
         shared_page_addr: u64,
     ) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_initializing_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+
         // Pin the pages that the VM wants to use for the shared state buffer.
         let shared_page_addr = self.guest_addr_from_raw(shared_page_addr)?;
         let pin = self
@@ -1116,18 +1180,28 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let shared_area = VmCpuSharedArea::from_pinned_pages(pin)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidAddress))?;
 
-        let guest = self.guest_by_id(guest_id)?;
-        let guest_vm = guest
-            .as_initializing_vm()
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let vcpu_state_page_addr = self.guest_addr_from_raw(state_page_addr)?;
-        let vcpu_box = self.vm_pages().create_guest_vcpu(
-            vcpu_id,
-            shared_area,
-            vcpu_state_page_addr,
-            guest_vm.vm_pages(),
-        )?;
+        // Get the converted pages that will be used to hold the private vCPU state. These pages
+        // must be physically contiguous.
+        let state_page_addr = self.guest_addr_from_raw(state_page_addr)?;
+        let pages = self
+            .vm_pages()
+            .get_converted_pages(state_page_addr, VmCpus::required_state_pages_per_vcpu())
+            .map_err(EcallError::from)?;
+        if !pages.is_contiguous() {
+            return Err(EcallError::Sbi(SbiError::InvalidAddress));
+        }
+
+        // Assert safe here. We checked above that `pages` is contiguous.
+        let vcpu_pages =
+            SequentialPages::from_pages(Self::assign_pages(pages, guest_vm.page_owner_id()))
+                .unwrap();
+        let vcpu_box = PageBox::new_with(
+            VmCpusEntry::new(vcpu_id, guest_vm.page_owner_id(), shared_area),
+            vcpu_pages,
+            self.page_tracker(),
+        );
         guest_vm.add_vcpu(vcpu_box)?;
+
         Ok(0)
     }
 
@@ -1151,11 +1225,23 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         from_addr: u64,
         num_pages: u64,
     ) -> EcallResult<u64> {
-        let from_page_addr = self.guest_addr_from_raw(from_addr)?;
         let guest = self.guest_by_id(guest_id)?;
-        self.vm_pages()
-            .add_pte_pages_to(from_page_addr, num_pages, guest.as_any_vm().vm_pages())
+        let guest_vm = guest.as_any_vm();
+        let from_page_addr = self.guest_addr_from_raw(from_addr)?;
+        let pages = self
+            .vm_pages()
+            .get_converted_pages(from_page_addr, num_pages)
             .map_err(EcallError::from)?;
+        for page in pages {
+            // Unwrap ok: we have an exclusive reference to the converted page, so it must be
+            // assignable.
+            let page = self
+                .page_tracker()
+                .assign_page_for_internal_state(page.clean(), guest_vm.page_owner_id())
+                .unwrap();
+            // Unwrap ok: converted pages are always 4kB.
+            guest_vm.vm_pages().add_pte_page(page).unwrap();
+        }
 
         Ok(0)
     }
@@ -1197,15 +1283,35 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
-        let from_page_addr = self.guest_addr_from_raw(page_addr)?;
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        self.vm_pages()
-            .add_zero_pages_to(from_page_addr, num_pages, guest_vm.vm_pages(), to_page_addr)
+
+        // Get the pages we're trying to insert.
+        let from_page_addr = self.guest_addr_from_raw(page_addr)?;
+        let pages = self
+            .vm_pages()
+            .get_converted_pages(from_page_addr, num_pages)
             .map_err(EcallError::from)?;
+
+        // Reserve the PTEs in the destination page table.
+        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        let mapper = guest_vm
+            .vm_pages()
+            .map_zero_pages(to_page_addr, num_pages)
+            .map_err(EcallError::from)?;
+
+        for (page, addr) in pages.zip(to_page_addr.iter_from()) {
+            // Unwrap ok: we have an exclusive reference to the converted page, so it must be
+            // assignable.
+            let page = self
+                .page_tracker()
+                .assign_page_for_mapping(page.clean(), guest_vm.page_owner_id())
+                .unwrap();
+            // Unwrap ok: the address is in range and we haven't mapped it yet.
+            mapper.map_page(addr, page).unwrap();
+        }
 
         Ok(num_pages)
     }
@@ -1227,23 +1333,56 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
 
-        let src_page_addr = self.guest_addr_from_raw(src_addr)?;
-        let from_page_addr = self.guest_addr_from_raw(dest_addr)?;
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
             .as_initializing_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        active_pages
-            .copy_and_add_data_pages_builder(
-                src_page_addr,
-                from_page_addr,
-                num_pages,
-                guest_vm.vm_pages(),
-                to_page_addr,
-                guest_vm.attestation_mgr(),
-            )
+
+        // Get the pages we're going to be copying to and inserting.
+        let from_page_addr = self.guest_addr_from_raw(dest_addr)?;
+        let pages = self
+            .vm_pages()
+            .get_converted_pages(from_page_addr, num_pages)
             .map_err(EcallError::from)?;
+
+        // Reserve the PTEs in the destination page table.
+        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        let mapper = guest_vm
+            .vm_pages()
+            .map_measured_pages(to_page_addr, num_pages)
+            .map_err(EcallError::from)?;
+
+        // Make sure we can initialize the full set of pages before we start actually inserting
+        // them into the destination page table.
+        let src_page_addr = self.guest_addr_from_raw(src_addr)?;
+        let mut initialized_pages = LockedPageList::new(self.page_tracker());
+        for (page, addr) in pages.zip(src_page_addr.iter_from()) {
+            match page.try_initialize(|bytes| active_pages.copy_from_guest(bytes, addr.into())) {
+                Ok(p) => {
+                    // Unwrap ok since the page cannot have been on any other list.
+                    initialized_pages.push(p).unwrap();
+                }
+                Err((e, p)) => {
+                    // Unwrap ok since the page must have been locked.
+                    self.page_tracker().unlock_page(p).unwrap();
+                    return Err(EcallError::from(e));
+                }
+            };
+        }
+
+        // Now insert the pages.
+        for (page, addr) in initialized_pages.zip(to_page_addr.iter_from()) {
+            // Unwrap ok: we have an exclusive reference to the converted page, so it must be
+            // assignable.
+            let page = self
+                .page_tracker()
+                .assign_page_for_mapping(page, guest_vm.page_owner_id())
+                .unwrap();
+            // Unwrap ok: the address is in range and we haven't mapped it yet.
+            mapper
+                .map_page(addr, page, guest_vm.attestation_mgr())
+                .unwrap();
+        }
 
         Ok(num_pages)
     }
@@ -1259,15 +1398,36 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         if page_type != TsmPageType::Page4k || num_pages == 0 {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
-        let page_addr = self.guest_addr_from_raw(page_addr)?;
+
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        self.vm_pages()
-            .add_shared_pages_to(page_addr, num_pages, guest_vm.vm_pages(), guest_addr)
+
+        // Get the pages we're trying to insert.
+        let from_page_addr = self.guest_addr_from_raw(page_addr)?;
+        let pages = self
+            .vm_pages()
+            .get_shared_pages(from_page_addr, num_pages)
             .map_err(EcallError::from)?;
+
+        // Reserve the PTEs in the destination page table.
+        let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
+        let mapper = guest_vm
+            .vm_pages()
+            .map_shared_pages(to_page_addr, num_pages)
+            .map_err(EcallError::from)?;
+
+        for (page, addr) in pages.zip(to_page_addr.iter_from()) {
+            // Unwrap ok: we have an exclusive reference to the converted page, so it must still
+            // be in a state in which it can be shared.
+            let page = self
+                .page_tracker()
+                .share_page(page, self.page_owner_id())
+                .unwrap();
+            // Unwrap ok: the address is in range and we haven't mapped it yet.
+            mapper.map_page(addr, page).unwrap();
+        }
 
         Ok(num_pages)
     }

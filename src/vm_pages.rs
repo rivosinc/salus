@@ -975,6 +975,23 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
+    /// Acquries an exclusive reference to the converted IMSIC page at `imsic_addr`.
+    pub fn get_converted_imsic(
+        &self,
+        imsic_addr: GuestPageAddr,
+    ) -> Result<LockedPageList<ImsicGuestPage<ConvertedClean>>> {
+        let version = self.inner.tlb_tracker.current();
+        self.inner
+            .root
+            .get_converted_range::<ImsicGuestPage<ConvertedClean>>(
+                imsic_addr,
+                PageSize::Size4k,
+                1,
+                version,
+            )
+            .map_err(Error::Paging)
+    }
+
     /// Converts the guest interrupt file at `imsic_addr` to confidential.
     pub fn convert_imsic(&self, imsic_addr: GuestPageAddr) -> Result<()> {
         if self.inner.nesting >= MAX_PAGE_OWNERS - 1 {
@@ -1044,6 +1061,61 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         // Unwrap ok since `imsic_addr` is within the range of the mapper.
         mapper.map_page(imsic_addr, mappable).unwrap();
         Ok(())
+    }
+
+    /// Invalidates the IMSIC interrupt file mapped at `imsic_addr` and begins the unassignment
+    /// process.
+    pub fn unassign_imsic_begin(&self, imsic_addr: GuestPageAddr) -> Result<()> {
+        // Make sure it's actually an IMSIC address.
+        let geometry = self
+            .inner
+            .imsic_geometry
+            .get()
+            .ok_or(Error::NoImsicVirtualization)?;
+        let location = geometry
+            .addr_to_location(imsic_addr)
+            .ok_or(Error::InvalidImsicLocation)?;
+
+        let mut invalidated = self
+            .inner
+            .root
+            .invalidate_range::<ImsicGuestPage<Invalidated>>(imsic_addr, PageSize::Size4k, 1)
+            .map_err(Error::Paging)?;
+        // Unwrap ok since we have exactly one page in the list and the page must be unassignable
+        // since it was just invalidated.
+        invalidated
+            .next()
+            .and_then(|p| {
+                self.inner
+                    .page_tracker
+                    .unassign_page_begin(p, self.inner.tlb_tracker.current())
+                    .ok()
+            })
+            .unwrap();
+
+        // Unmap it from our MSI page table as well, if we have one.
+        if let Some(iommu_context) = self.inner.iommu_context.get() {
+            // Unwrap ok: we've already checked that `location` is valid and it must've been mapped
+            // in the MSI page table if it was in the CPU page tables.
+            iommu_context.msi_page_table.unmap(location).unwrap();
+        }
+
+        Ok(())
+    }
+
+    /// Verifies that the TLB flush for the IMSIC interrupt file that was mapped at `imsic_addr`
+    /// has been completed and completes unassignment of the page.
+    pub fn unassign_imsic_end(&self, imsic_addr: GuestPageAddr) -> Result<()> {
+        self.inner
+            .root
+            .unassign_range(
+                imsic_addr,
+                PageSize::Size4k,
+                1,
+                self.inner.tlb_tracker.current(),
+                MemType::Mmio(DeviceMemType::Imsic),
+            )
+            .map_err(Error::Paging)
     }
 
     /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.

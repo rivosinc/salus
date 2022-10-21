@@ -2,11 +2,12 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use arrayvec::ArrayVec;
 use attestation::AttestationManager;
 use core::arch::global_asm;
 use core::marker::PhantomData;
 use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
-use page_tracking::collections::{PageBox, PageVec};
+use page_tracking::collections::PageBox;
 use page_tracking::{
     LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
 };
@@ -66,9 +67,6 @@ pub enum InstructionFetchError {
 }
 
 pub type InstructionFetchResult = core::result::Result<DecodedInstruction, InstructionFetchError>;
-
-/// The number of pages for the `VmRegionList` vector.
-pub const TVM_REGION_LIST_PAGES: u64 = 1;
 
 global_asm!(include_str!("guest_mem.S"));
 
@@ -242,19 +240,22 @@ struct VmRegion {
     region_type: VmRegionType,
 }
 
+// The maximum number of distinct memory regions we support in `VmRegionList`.
+const MAX_MEM_REGIONS: usize = 128;
+
 /// The regions of guest physical address space for a VM. Used to track which parts of the address
 /// space are designated for a particular purpose. The region list is created during VM initialization
 /// and remains static after the VM is finalized. Pages may only be inserted into a VM's address space
 /// if the mapping falls within a region of the proper type.
 pub struct VmRegionList {
-    regions: Mutex<PageVec<VmRegion>>,
+    regions: Mutex<ArrayVec<VmRegion, MAX_MEM_REGIONS>>,
 }
 
 impl VmRegionList {
-    /// Creates a new `VmRegionList` using `pages` as the backing store.
-    pub fn new(pages: SequentialPages<InternalClean>, page_tracker: PageTracker) -> Self {
+    // Creates an empty `VmRegionList`.
+    fn new() -> Self {
         Self {
-            regions: Mutex::new(PageVec::new(pages, page_tracker)),
+            regions: Mutex::new(ArrayVec::new()),
         }
     }
 
@@ -286,9 +287,8 @@ impl VmRegionList {
             region_type,
         };
         regions
-            .try_reserve(1)
+            .try_insert(index, region)
             .map_err(|_| Error::InsufficientVmRegionSpace)?;
-        regions.insert(index, region);
 
         // Coalesce with same-typed regions before and after this one, if possible.
         // Avoid potential underflows and overflows on index.
@@ -780,13 +780,13 @@ pub struct VmPages<T: GuestStagePagingMode> {
 
 impl<T: GuestStagePagingMode> VmPages<T> {
     /// Creates a new `VmPages` from the given root page table.
-    pub fn new(root: GuestStagePageTable<T>, regions: VmRegionList, nesting: usize) -> Self {
+    pub fn new(root: GuestStagePageTable<T>, nesting: usize) -> Self {
         let page_tracker = root.page_tracker();
         Self {
             page_owner_id: root.page_owner_id(),
             page_tracker: page_tracker.clone(),
             tlb_tracker: TlbTracker::new(),
-            regions,
+            regions: VmRegionList::new(),
             nesting,
             root,
             pte_pages: PtePagePool::new(page_tracker),
@@ -809,11 +809,6 @@ impl<T: GuestStagePagingMode> VmPages<T> {
     /// the current state of the VM to which this `VmPages` belongs.
     pub fn as_ref<S>(&self) -> VmPagesRef<T, S> {
         VmPagesRef::new(self)
-    }
-
-    /// Returns the number of pages that must be donated to create a VM.
-    pub const fn required_state_pages() -> u64 {
-        GuestVm::<T>::required_pages() + TVM_REGION_LIST_PAGES
     }
 }
 
@@ -1128,22 +1123,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         if !guest_root_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }
-
-        // Take memory from `state_addr`. The total number of pages we require is
-        // `VmPages::<T>::required_state_pages()`.
-        //
-        // Use the first `GuestVm::<T>::required_pages()` of the state_addr region for the `GuestVm`.
-        let guest_vm_required_pages = GuestVm::<T>::required_pages();
-        let guest_vm_pages = self.get_converted_pages(state_addr, guest_vm_required_pages)?;
+        let guest_vm_pages =
+            self.get_converted_pages(state_addr, GuestVm::<T>::required_pages())?;
         if !guest_vm_pages.is_contiguous() {
-            return Err(Error::NonContiguousPages);
-        }
-        // Take `TVM_REGION_LIST_PAGES` from the `state_addr` region for the region list vector.
-        let region_vec_addr = state_addr
-            .checked_add_pages(guest_vm_required_pages)
-            .ok_or(Error::AddressOverflow)?;
-        let region_vec_pages = self.get_converted_pages(region_vec_addr, TVM_REGION_LIST_PAGES)?;
-        if !region_vec_pages.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }
 
@@ -1160,13 +1142,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             GuestStagePageTable::new(guest_root_pages, id, self.inner.page_tracker.clone())
                 .unwrap();
 
-        // Assert safe here. We checked above that `region_vec_pages` is contiguous.
-        let region_vec_pages =
-            SequentialPages::from_pages(self.assign_state_pages_for(region_vec_pages, id)).unwrap();
-        let region_vec = VmRegionList::new(region_vec_pages, self.inner.page_tracker.clone());
-
         let vm = Vm::new(
-            VmPages::new(guest_root, region_vec, self.inner.nesting + 1),
+            VmPages::new(guest_root, self.inner.nesting + 1),
             VmCpus::new(),
         )
         .map_err(Error::VmCreationFailed)?;

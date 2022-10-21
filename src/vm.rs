@@ -28,7 +28,6 @@ use crate::vm_cpu::{
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
     ActiveVmPages, AnyVmPages, InstructionFetchError, PageFaultType, VmPages, VmPagesRef,
-    VmRegionList, TVM_REGION_LIST_PAGES,
 };
 
 #[derive(Debug)]
@@ -965,7 +964,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let tsm_info = sbi::TsmInfo {
             tsm_state: sbi::TsmState::TsmReady,
             tsm_version: 0,
-            tvm_state_pages: VmPages::<T>::required_state_pages(),
+            tvm_state_pages: GuestVm::<T>::required_pages(),
             tvm_max_vcpus: VM_CPUS_MAX as u64,
             tvm_vcpu_state_pages: VmCpus::required_state_pages_per_vcpu(),
         };
@@ -1673,7 +1672,6 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         let vm_state_pages =
             hyp_mem.take_pages_for_host_state(GuestVm::<T>::required_pages() as usize);
         let guest_tracking_pages = hyp_mem.take_pages_for_host_state(HOSTVM_GUEST_TRACKING_PAGES);
-        let region_vec_pages = hyp_mem.take_pages_for_host_state(TVM_REGION_LIST_PAGES as usize);
 
         // Pages for the array of vCPUs.
         let num_cpus = CpuInfo::get().num_cpus();
@@ -1695,8 +1693,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         let root =
             GuestStagePageTable::new(root_table_pages, PageOwnerId::host(), page_tracker.clone())
                 .unwrap();
-        let region_vec = VmRegionList::new(region_vec_pages, page_tracker.clone());
-        let vm_pages = VmPages::new(root, region_vec, 0);
+        let vm_pages = VmPages::new(root, 0);
         let init_pages = vm_pages.as_ref();
         init_pages.set_imsic_geometry(imsic_geometry).unwrap();
         for p in pte_pages {

@@ -7,10 +7,7 @@ use attestation::AttestationManager;
 use core::arch::global_asm;
 use core::marker::PhantomData;
 use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
-use page_tracking::collections::PageBox;
-use page_tracking::{
-    LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
-};
+use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion, MAX_PAGE_OWNERS};
 use riscv_page_tables::{
     tlb, GuestStageMapper, GuestStagePageTable, GuestStagePagingMode, PageTableError,
 };
@@ -21,15 +18,11 @@ use riscv_regs::{
 };
 use spin::{Mutex, Once};
 
-use crate::guest_tracking::GuestVm;
-
-use crate::vm::{Vm, VmStateAny, VmStateFinalized, VmStateInitializing};
-use crate::vm_cpu::{VmCpuSharedArea, VmCpus, VmCpusEntry};
+use crate::vm::{VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_id::VmId;
 
 #[derive(Debug)]
 pub enum Error {
-    GuestId(PageTrackingError),
     Paging(PageTableError),
     PageFault(PageFaultType, Exception, GuestPhysAddr),
     NestingTooDeep,
@@ -43,10 +36,8 @@ pub enum Error {
     OverlappingVmRegion,
     InsufficientVmRegionSpace,
     InvalidMapRegion,
-    SharedPageNotMapped,
     EmptyPageRange,
     Measurement(attestation::Error),
-    VmCreationFailed(crate::vm::Error),
     NoImsicVirtualization,
     ImsicGeometryAlreadySet,
     IommuContextAlreadySet,
@@ -586,48 +577,6 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         }
     }
 
-    /// Copies `count` pages from `src_addr` in the current guest to the converted pages starting at
-    /// `from_addr`. The pages are then mapped into the child's address space at `to_addr`.
-    pub fn copy_and_add_data_pages_builder<D: digest::Digest, H: hkdf::HmacImpl<D>>(
-        &self,
-        src_addr: GuestPageAddr,
-        from_addr: GuestPageAddr,
-        count: u64,
-        to: InitializingVmPages<T>,
-        to_addr: GuestPageAddr,
-        measurement: &AttestationManager<D, H>,
-    ) -> Result<u64> {
-        let converted_pages = self.vm_pages.get_converted_pages(from_addr, count)?;
-        let mapper = to.map_measured_pages(to_addr, count)?;
-
-        // Make sure we can initialize the full set of pages before mapping them.
-        let page_tracker = self.vm_pages.page_tracker();
-        let mut initialized_pages = LockedPageList::new(page_tracker.clone());
-        for (dirty, src_addr) in converted_pages.zip(src_addr.iter_from()) {
-            match dirty.try_initialize(|bytes| self.copy_from_guest(bytes, src_addr.into())) {
-                Ok(p) => initialized_pages.push(p).unwrap(),
-                Err((e, p)) => {
-                    // Unwrap ok since the page must have been locked.
-                    page_tracker.unlock_page(p).unwrap();
-                    return Err(e);
-                }
-            };
-        }
-
-        // Now map & measure the pages.
-        let new_owner = to.page_owner_id();
-        for (initialized, to_addr) in initialized_pages.zip(to_addr.iter_from()) {
-            // Unwrap ok since we've guaranteed there's space for another owner.
-            let mappable = page_tracker
-                .assign_page_for_mapping(initialized, new_owner)
-                .unwrap();
-            // Unwrap ok since the address is in range and we haven't mapped it yet.
-            mapper.map_page(to_addr, mappable, measurement).unwrap();
-        }
-
-        Ok(count)
-    }
-
     /// Fetches and decodes the instruction at `pc` in the guest's virtual address space.
     pub fn fetch_guest_instruction(
         &self,
@@ -833,15 +782,15 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         self.inner.page_owner_id
     }
 
+    /// Returns the level of nesting of this VM, with 0 being the host.
+    pub fn nesting(&self) -> usize {
+        self.inner.nesting
+    }
+
     // Returns the address of the root page table for this VM.
     fn root_address(&self) -> SupervisorPageAddr {
         // TODO: Cache this to avoid bouncing off the lock?
         self.inner.root.get_root_address()
-    }
-
-    /// Returns the global page tracking structure.
-    pub fn page_tracker(&self) -> PageTracker {
-        self.inner.page_tracker()
     }
 
     /// Returns this VM's IMSIC geometry if it was set up for IMSIC virtualization.
@@ -950,9 +899,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         self.do_map_pages(page_addr, count, VmRegionType::Shared)
     }
 
-    // Returns a list of converted and locked pages created from `num_pages` starting at
-    // `page_addr`.
-    fn get_converted_pages(
+    /// Acquries an exclusive reference to the `num_pages` converted pages starting at `page_addr`.
+    pub fn get_converted_pages(
         &self,
         page_addr: GuestPageAddr,
         num_pages: u64,
@@ -966,6 +914,18 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 num_pages,
                 version,
             )
+            .map_err(Error::Paging)
+    }
+
+    /// Acquries an exclusive reference to the `num_pages` shared pages starting at `page_addr`.
+    pub fn get_shared_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        num_pages: u64,
+    ) -> Result<LockedPageList<Page<Shareable>>> {
+        self.inner
+            .root
+            .get_shareable_range(page_addr, PageSize::Size4k, num_pages)
             .map_err(Error::Paging)
     }
 
@@ -1087,183 +1047,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
-    // Assigns the converted pages in `pages` to `new_owner` as state pages.
-    fn assign_state_pages_for(
-        &self,
-        pages: LockedPageList<Page<ConvertedDirty>>,
-        new_owner: PageOwnerId,
-    ) -> PageList<Page<InternalClean>> {
-        let mut assigned_pages = PageList::new(self.inner.page_tracker.clone());
-        for page in pages {
-            // Unwrap ok since we've guaranteed there is space for another owner.
-            let assigned = self
-                .inner
-                .page_tracker
-                .assign_page_for_internal_state(page.clean(), new_owner)
-                .unwrap();
-            // Unwrap ok since we uniquely own the page and it can't be on another list.
-            assigned_pages.push(assigned).unwrap();
-        }
-        assigned_pages
-    }
-
-    /// Creates a new `GuestVm` using pages donated by `self`. The returned `GuestVm` is in the initializing
-    /// state, ready for its address space to be constructed.
-    pub fn create_guest_vm(
-        &self,
-        page_root_addr: GuestPageAddr,
-        state_addr: GuestPageAddr,
-    ) -> Result<GuestVm<T>> {
-        if (page_root_addr.bits() as *const u64).align_offset(T::TOP_LEVEL_ALIGN as usize) != 0 {
-            return Err(Error::UnalignedAddress);
-        }
-
-        // Make sure we can grab the pages first before we start wiping and assigning them.
-        let guest_root_pages = self.get_converted_pages(page_root_addr, 4)?;
-        if !guest_root_pages.is_contiguous() {
-            return Err(Error::NonContiguousPages);
-        }
-        let guest_vm_pages =
-            self.get_converted_pages(state_addr, GuestVm::<T>::required_pages())?;
-        if !guest_vm_pages.is_contiguous() {
-            return Err(Error::NonContiguousPages);
-        }
-
-        let id = self
-            .inner
-            .page_tracker
-            .add_active_guest()
-            .map_err(Error::GuestId)?;
-
-        // Assert safe here. We checked above that `guest_root_pages` is contiguous.
-        let guest_root_pages =
-            SequentialPages::from_pages(self.assign_state_pages_for(guest_root_pages, id)).unwrap();
-        let guest_root =
-            GuestStagePageTable::new(guest_root_pages, id, self.inner.page_tracker.clone())
-                .unwrap();
-
-        let vm = Vm::new(
-            VmPages::new(guest_root, self.inner.nesting + 1),
-            VmCpus::new(),
-        )
-        .map_err(Error::VmCreationFailed)?;
-
-        // Assert safe here. We checked above that `guest_vm_pages` is contiguous.
-        let guest_vm_pages =
-            SequentialPages::from_pages(self.assign_state_pages_for(guest_vm_pages, id)).unwrap();
-        // Unwrap safe. We allocated `GustVm::<T>::required_pages()` above.
-        let guest_vm = GuestVm::new(vm, guest_vm_pages).unwrap();
-        Ok(guest_vm)
-    }
-
-    /// Create a new `VmCpusEntry` using pages donated by `self`. The returned `VmCpusEntry` is ready to be
-    /// added to the VmCpus array of the initializing VM.
-    pub fn create_guest_vcpu(
-        &self,
-        vcpu_id: u64,
-        shared_area: VmCpuSharedArea,
-        state_addr: GuestPageAddr,
-        to: InitializingVmPages<T>,
-    ) -> Result<PageBox<VmCpusEntry>> {
-        let converted_pages =
-            self.get_converted_pages(state_addr, VmCpus::required_state_pages_per_vcpu())?;
-        if !converted_pages.is_contiguous() {
-            return Err(Error::NonContiguousPages);
-        }
-
-        let guest_id = to.page_owner_id();
-        let vcpu_entry = VmCpusEntry::new(vcpu_id, guest_id, shared_area);
-
-        // Assert safe here. We checked above that `converted_pages` is contiguous.
-        let vcpu_pages =
-            SequentialPages::from_pages(self.assign_state_pages_for(converted_pages, guest_id))
-                .unwrap();
-        let pagebox = PageBox::new_with(vcpu_entry, vcpu_pages, self.inner.page_tracker.clone());
-        Ok(pagebox)
-    }
-
-    /// Adds pages to be used for building page table entries to a guest of this VM.
-    pub fn add_pte_pages_to(
-        &self,
-        from_addr: GuestPageAddr,
-        count: u64,
-        to: AnyVmPages<T>,
-    ) -> Result<()> {
-        let converted_pages = self.get_converted_pages(from_addr, count)?;
-        let new_owner = to.page_owner_id();
-        for page in converted_pages {
-            // Unwrap ok since we've guaranteed the page is assignable.
-            let assigned = self
-                .inner
-                .page_tracker
-                .assign_page_for_internal_state(page.clean(), new_owner)
-                .unwrap();
-            // Unwrap ok, pages must be 4kB.
-            to.add_pte_page(assigned).unwrap();
-        }
-        Ok(())
-    }
-
-    /// Adds zero-filled pages to the given guest.
-    pub fn add_zero_pages_to(
-        &self,
-        from_addr: GuestPageAddr,
-        count: u64,
-        to: FinalizedVmPages<T>,
-        to_addr: GuestPageAddr,
-    ) -> Result<u64> {
-        let converted_pages = self.get_converted_pages(from_addr, count)?;
-        let mapper = to.map_zero_pages(to_addr, count)?;
-        let new_owner = to.page_owner_id();
-        for (page, guest_addr) in converted_pages.zip(to_addr.iter_from()) {
-            // Unwrap ok since we've guaranteed there's space for another owner.
-            let mappable = self
-                .inner
-                .page_tracker
-                .assign_page_for_mapping(page.clean(), new_owner)
-                .unwrap();
-            // Unwrap ok since the address is in range and we haven't mapped it yet.
-            mapper.map_page(guest_addr, mappable).unwrap();
-        }
-        Ok(count)
-    }
-
-    /// Maps num_pages of shared 4Kb pages starting at `from_addr` to the specified guest. The
-    /// range must fit in a range declared by a call to `add_shared_memory_region`.
-    pub fn add_shared_pages_to(
-        &self,
-        from_addr: GuestPageAddr,
-        count: u64,
-        to: FinalizedVmPages<T>,
-        to_addr: GuestPageAddr,
-    ) -> Result<()> {
-        let shared_list = self
-            .inner
-            .root
-            .get_shareable_range::<Page<Shareable>>(from_addr, PageSize::Size4k, count)
-            .map_err(|_| Error::SharedPageNotMapped)?;
-        let mapper = to.map_shared_pages(to_addr, count)?;
-        let owner = self.inner.page_owner_id;
-        for (page, addr) in shared_list.zip(to_addr.iter_from()) {
-            // Unwrap ok: we have exclusive ownership, and get_shareable_range() has ensured success
-            let mappable = self.inner.page_tracker.share_page(page, owner).unwrap();
-            // Unwrap ok: we have exclusive ownership and have already filled in the PTE.
-            mapper.map_page(addr, mappable).unwrap();
-        }
-        Ok(())
-    }
-
     /// Pins `count` pages starting at `addr` as shared pages, returning a `PinnedPages` structure
     /// the will release the pin when dropped. Used to share memory between a VM on the hypervisor.
     pub fn pin_shared_pages(&self, addr: GuestPageAddr, count: u64) -> Result<PinnedPages> {
         if count == 0 {
             return Err(Error::EmptyPageRange);
         }
-        let shared_list = self
-            .inner
-            .root
-            .get_shareable_range::<Page<Shareable>>(addr, PageSize::Size4k, count)
-            .map_err(|_| Error::SharedPageNotMapped)?;
+        let shared_list = self.get_shared_pages(addr, count)?;
         if !shared_list.is_contiguous() {
             return Err(Error::NonContiguousPages);
         }

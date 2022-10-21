@@ -814,6 +814,9 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         count: u64,
         region_type: VmRegionType,
     ) -> Result<VmPagesMapper<'a, T, M>> {
+        if count == 0 {
+            return Err(Error::EmptyPageRange);
+        }
         VmPagesMapper::new_in_region(self.inner, page_addr, count, region_type)
     }
 
@@ -905,6 +908,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         page_addr: GuestPageAddr,
         num_pages: u64,
     ) -> Result<LockedPageList<Page<ConvertedDirty>>> {
+        if num_pages == 0 {
+            return Err(Error::EmptyPageRange);
+        }
+
         let version = self.inner.tlb_tracker.current();
         self.inner
             .root
@@ -934,6 +941,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         if self.inner.nesting >= MAX_PAGE_OWNERS - 1 {
             // We shouldn't bother converting pages if we won't be able to assign them.
             return Err(Error::NestingTooDeep);
+        }
+
+        if num_pages == 0 {
+            return Err(Error::EmptyPageRange);
         }
 
         let invalidated_pages = self

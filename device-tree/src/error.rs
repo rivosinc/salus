@@ -44,12 +44,12 @@ impl From<DevTreeError> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
-            Error::StrError(e) => write!(f, "String error: {}", e),
+            Error::StrError(e) => write!(f, "String error: {e}"),
             Error::InvalidNodeId => write!(f, "Invalid node ID"),
             Error::MalformedFdt => write!(f, "Malformed FDT"),
             Error::PropNotFound => write!(f, "Property not found"),
-            Error::FdtError(e) => write!(f, "FDT error: {}", e),
-            Error::AllocError(e) => write!(f, "Memory allocation error: {}", e),
+            Error::FdtError(e) => write!(f, "FDT error: {e}"),
+            Error::AllocError(e) => write!(f, "Memory allocation error: {e}"),
         }
     }
 }

@@ -334,7 +334,7 @@ impl DeviceTreeNode {
         // TODO: Use identation to make this prettier.
         writeln!(f, "{} {{", self.name())?;
         for p in self.props() {
-            writeln!(f, "{}", p)?;
+            writeln!(f, "{p}")?;
         }
         for &n in self.children() {
             let node = tree.get_node(n).unwrap();
@@ -566,13 +566,13 @@ impl fmt::Display for DeviceTreeProp {
         }
 
         if let Some(s) = self.value_str().filter(|&s| printable(s)) {
-            write!(f, "{} = \"{}\";", self.name(), s)?;
+            write!(f, "{} = \"{s}\";", self.name())?;
         } else if self.value_raw().is_empty() {
             write!(f, "{};", self.name())?;
         } else {
             write!(f, "{} =", self.name())?;
             for v in self.value_u32() {
-                write!(f, " 0x{:08x}", v)?;
+                write!(f, " 0x{v:08x}")?;
             }
             write!(f, ";")?;
         }

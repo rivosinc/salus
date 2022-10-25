@@ -32,7 +32,7 @@ impl fmt::Display for MemType {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match &self {
             MemType::Ram => write!(f, "RAM"),
-            MemType::Mmio(d) => write!(f, "MMIO ({}", d),
+            MemType::Mmio(d) => write!(f, "MMIO ({d})"),
         }
     }
 }

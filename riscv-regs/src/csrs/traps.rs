@@ -263,8 +263,8 @@ impl Exception {
 impl fmt::Display for Trap {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
-            Trap::Interrupt(i) => write!(f, "{} interrupt", i),
-            Trap::Exception(e) => write!(f, "{} exception", e),
+            Trap::Interrupt(i) => write!(f, "{i} interrupt"),
+            Trap::Exception(e) => write!(f, "{e} exception"),
         }
     }
 }

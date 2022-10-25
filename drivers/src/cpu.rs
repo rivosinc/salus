@@ -237,7 +237,7 @@ impl CpuInfo {
         // VM to ease translation.
         for (i, &phandle) in self.intc_phandles.iter().enumerate() {
             let mut cpu_name = ArrayString::<16>::new();
-            fmt::write(&mut cpu_name, format_args!("cpu@{:x}", i)).unwrap();
+            fmt::write(&mut cpu_name, format_args!("cpu@{i:x}")).unwrap();
             let cpu_node_id = dt.add_node(cpu_name.as_str(), Some(cpus_id))?;
             let cpu_node = dt.get_mut_node(cpu_node_id).unwrap();
             cpu_node.add_prop("device_type")?.set_value_str("cpu")?;

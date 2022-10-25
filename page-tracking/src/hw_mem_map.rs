@@ -371,8 +371,8 @@ impl fmt::Display for HwMemRegionType {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match &self {
             HwMemRegionType::Available => write!(f, "available"),
-            HwMemRegionType::Reserved(r) => write!(f, "reserved ({})", r),
-            HwMemRegionType::Mmio(d) => write!(f, "mmio ({})", d),
+            HwMemRegionType::Reserved(r) => write!(f, "reserved ({r})"),
+            HwMemRegionType::Mmio(d) => write!(f, "mmio ({d})"),
         }
     }
 }

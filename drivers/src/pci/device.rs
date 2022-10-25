@@ -80,7 +80,7 @@ impl fmt::Display for HeaderType {
             HeaderType::Endpoint => write!(f, "Endpoint"),
             HeaderType::PciBridge => write!(f, "PciBridge"),
             HeaderType::CardBusBridge => write!(f, "CardBusBridge"),
-            HeaderType::Unknown(h) => write!(f, "Unknown(0x{:x})", h),
+            HeaderType::Unknown(h) => write!(f, "Unknown(0x{h:x})"),
         }
     }
 }

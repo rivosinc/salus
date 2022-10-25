@@ -468,6 +468,8 @@ pub enum PageFaultType {
     Shared,
     /// A page fault taken to an emulated MMIO page.
     Mmio,
+    /// A page fault taken to an IMSIC guest interrupt file page.
+    Imsic,
     /// A page fault taken when accessing memory outside of any valid region of guest physical
     /// address space. These faults are not resolvable.
     Unmapped,
@@ -616,9 +618,11 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
                 Exception::GuestLoadPageFault | Exception::GuestStorePageFault => Mmio,
                 _ => Unmapped,
             },
-            // TODO: Faults in an IMSIC region should report a separate fault type so that the host
-            // can "swap in" a vCPU currently using an MRIF.
-            Some(VmRegionType::Imsic) => Unmapped,
+            Some(VmRegionType::Imsic) => match exception {
+                // Only stores can be made to an IMSIC page.
+                Exception::GuestStorePageFault => Imsic,
+                _ => Unmapped,
+            },
             _ => Unmapped,
         }
     }

@@ -204,7 +204,7 @@ impl From<EcallResult<u64>> for EcallAction {
                 match pf {
                     // Unhandleable page faults or page faults in MMIO space just result in an
                     // error to the caller.
-                    Unmapped | Mmio => Continue(SbiReturn::from(SbiError::InvalidAddress)),
+                    Unmapped | Mmio | Imsic => Continue(SbiReturn::from(SbiError::InvalidAddress)),
                     Confidential | Shared => {
                         let addr = PageAddr::with_round_down(addr, PageSize::Size4k);
                         Retry(VmExitCause::PageFault(e, addr))
@@ -548,7 +548,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                         .get_page_fault_cause(exception, fault_addr);
                     use PageFaultType::*;
                     match pf {
-                        Confidential | Shared => {
+                        Confidential | Shared | Imsic => {
                             break VmExitCause::PageFault(
                                 exception,
                                 PageAddr::with_round_down(fault_addr, PageSize::Size4k),

@@ -28,7 +28,7 @@ DEBUG_BINS := target/riscv64gc-unknown-none-elf/debug/
 
 KERNEL_ADDR := 0xc0200000
 INITRD_ADDR := 0xc2200000
-BOOTARGS := console=hvc0 earlycon=sbi
+BOOTARGS := keep_bootcon earlycon=sbi
 
 # QEMU options:
 #

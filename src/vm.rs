@@ -45,6 +45,10 @@ pub type Result<T> = core::result::Result<T, Error>;
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
 
+// Report ourselves as being SBI v1.0 compliant.
+const SBI_SPEC_MAJOR_VERSION_SHIFT: u64 = 24;
+const SBI_SPEC_VERSION: u64 = 1 << SBI_SPEC_MAJOR_VERSION_SHIFT;
+
 // Pages used by the `PageVec` for the Host VM guest tracking.
 const HOSTVM_GUEST_TRACKING_PAGES: usize = 2;
 
@@ -803,7 +807,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     fn handle_base_msg(&self, base_func: BaseFunction) -> SbiReturn {
         use BaseFunction::*;
         let ret = match base_func {
-            GetSpecificationVersion => 3,
+            GetSpecificationVersion => SBI_SPEC_VERSION,
             GetImplementationID => SBI_IMPL_ID_SALUS,
             GetImplementationVersion => 0,
             ProbeSbiExtension(ext) => match ext {

@@ -24,14 +24,14 @@ register_bitfields![u64,
     ],
 
     pub DirectoryPointer [
-        Ppn OFFSET(0) NUMBITS(44),
-        Busy OFFSET(59) NUMBITS(1),
-        Mode OFFSET(60) NUMBITS(4),
+        Mode OFFSET(0) NUMBITS(4),
+        Busy OFFSET(4) NUMBITS(1),
+        Ppn OFFSET(10) NUMBITS(44),
     ],
 
     pub QueueBase [
         Log2SzMinus1 OFFSET(0) NUMBITS(5),
-        Ppn OFFSET(5) NUMBITS(44),
+        Ppn OFFSET(10) NUMBITS(44),
     ],
 ];
 

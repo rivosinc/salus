@@ -159,7 +159,7 @@ struct NonLeafEntry(u64);
 
 const NL_PFN_BITS: u64 = 44;
 const NL_PFN_MASK: u64 = (1 << NL_PFN_BITS) - 1;
-const NL_PFN_SHIFT: u64 = 12;
+const NL_PFN_SHIFT: u64 = 10;
 const NL_VALID: u64 = 1;
 
 impl NonLeafEntry {

@@ -461,6 +461,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Discover the CPU topology.
     CpuInfo::parse_from(&hyp_dt);
     let cpu_info = CpuInfo::get();
+    if !cpu_info.has_aia() {
+        // We require AIA support for interrupts and SMP support; no point continuing without it.
+        panic!("CPU does not support AIA");
+    }
     if cpu_info.has_sstc() {
         println!("Sstc support present");
         // Only write henvcfg when Sstc is present to avoid blowing up on versions of QEMU which

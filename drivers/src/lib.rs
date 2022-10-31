@@ -101,7 +101,7 @@ mod tests {
                 .unwrap();
             node.add_prop("riscv,isa")
                 .unwrap()
-                .set_value_str("rv64imafdcvsuh_sstc")
+                .set_value_str("rv64imafdcvsuh_sstc_ssaia")
                 .unwrap();
             node.add_prop("mmu-type")
                 .unwrap()
@@ -119,7 +119,7 @@ mod tests {
             intc_node
                 .add_prop("compatible")
                 .unwrap()
-                .set_value_str("riscv,cpu-intc-aia\0riscv,cpu-intc")
+                .set_value_str("riscv,cpu-intc")
                 .unwrap();
             intc_node
                 .add_prop("phandle")

@@ -32,6 +32,8 @@ impl CpuId {
 /// Holds static global information about CPU features and topology.
 #[derive(Debug)]
 pub struct CpuInfo {
+    // True if the AIA extension is supported.
+    has_aia: bool,
     // True if the Sstc extension is supported.
     has_sstc: bool,
     // True if the Sscofpmf extension is supported.
@@ -136,16 +138,6 @@ impl CpuInfo {
             .unwrap();
         // All of our memory management currently assumes SV48 compatibility.
         assert!(mmu_string == "riscv,sv48" || mmu_string == "riscv,sv57");
-        // 'interrupt-controller' sub-node indicates if AIA is supported. We rely on AIA support
-        // in order to direct interrupts to VS level, so mandate its presence.
-        let intc_node = intc_node_from_cpu_node(dt, cpu0);
-        intc_node
-            .props()
-            .find(|p| {
-                p.name() == "compatible"
-                    && p.value_str().unwrap_or("").contains("riscv,cpu-intc-aia")
-            })
-            .expect("CPU does not support AIA");
 
         let mut hart_ids = ArrayVec::new();
         hart_ids.push(hart_id_from_cpu_node(cpu0));
@@ -159,6 +151,7 @@ impl CpuInfo {
         }
 
         let cpu_info = CpuInfo {
+            has_aia: isa_string_has_extension(isa_string, "ssaia"),
             has_sstc: isa_string_has_extension(isa_string, "sstc"),
             has_sscofpmf: isa_string_has_extension(isa_string, "sscofpmf"),
             has_vector: isa_string_has_base_extension(isa_string, 'v'),
@@ -174,6 +167,11 @@ impl CpuInfo {
     /// called yet.
     pub fn get() -> &'static CpuInfo {
         CPU_INFO.get().unwrap()
+    }
+
+    /// Returns true if the AIA extension is supported.
+    pub fn has_aia(&self) -> bool {
+        self.has_aia
     }
 
     /// Returns true if the Sstc extension is supported.
@@ -259,7 +257,7 @@ impl CpuInfo {
             intc_node.add_prop("phandle")?.set_value_u32(&[phandle])?;
             intc_node
                 .add_prop("compatible")?
-                .set_value_str("riscv,cpu-intc-aia\0riscv,cpu-intc")?;
+                .set_value_str("riscv,cpu-intc")?;
         }
 
         // TODO: Add CPU topology info (socket, package, etc)  in 'cpu-map'.

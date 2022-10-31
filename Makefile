@@ -46,7 +46,7 @@ else
 CPU_TYPE := rv64
 endif
 
-CPU_ARGS := $(CPU_TYPE),x-aia=true,sscofpmf=true
+CPU_ARGS := $(CPU_TYPE),x-smaia=true,x-ssaia=true,sscofpmf=true
 
 MACH_ARGS := -M virt,aia=aplic-imsic,aia-guests=4 -cpu $(CPU_ARGS)
 MACH_ARGS += -smp $(NCPU) -m $(MEM_SIZE) -nographic

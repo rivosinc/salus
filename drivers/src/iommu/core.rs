@@ -44,7 +44,7 @@ static IOMMU: Once<Iommu> = Once::new();
 
 // Identifiers from the QEMU RFC implementation.
 const IOMMU_VENDOR_ID: u16 = 0x1efd;
-const IOMMU_DEVICE_ID: u16 = 0x8001;
+const IOMMU_DEVICE_ID: u16 = 0xedf1;
 
 impl Iommu {
     /// Probes for and initializes the IOMMU device on the given PCI root. Uses `get_page` to

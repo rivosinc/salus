@@ -465,12 +465,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // We require AIA support for interrupts and SMP support; no point continuing without it.
         panic!("CPU does not support AIA");
     }
-    if cpu_info.has_sstc() {
-        println!("Sstc support present");
-        // Only write henvcfg when Sstc is present to avoid blowing up on versions of QEMU which
-        // don't support the *envcfg registers.
-        CSR.henvcfg.modify(henvcfg::stce.val(1));
+    if !cpu_info.has_sstc() {
+        // We don't implement or use the SBI timer extension and thus require Sstc for timers.
+        panic!("CPU does not support Sstc");
     }
+    // Only write henvcfg when Sstc is present to avoid blowing up on versions of QEMU which
+    // don't support the *envcfg registers.
+    CSR.henvcfg.modify(henvcfg::stce.val(1));
     if cpu_info.has_sscofpmf() {
         // Only probe for PMU counters if we have Sscofpmf; we can't expose counters to guests
         // unless we have support for per-mode filtering.

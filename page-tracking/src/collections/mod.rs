@@ -12,7 +12,7 @@
 //! codebase.
 //!
 //! Each page is given to the hypervisor for a specific purpose. For example, a page can be used to
-//! hold a guest's state(`PageBox<State>`), or a list of children VMs (`PageVec<Guest>).
+//! hold a guest's state(`PageBox<State>`), or a list of children VMs (`PageVec<Guest>`).
 
 extern crate alloc;
 

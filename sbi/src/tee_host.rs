@@ -25,6 +25,8 @@ pub enum RegisterSetId {
     SupervisorCsrs = 1,
     /// HS-level CSRs.
     HypervisorCsrs = 2,
+    /// Sstc extension CSRs.
+    SstcCsrs = 3,
 }
 
 impl RegisterSetId {
@@ -34,6 +36,7 @@ impl RegisterSetId {
             0 => Ok(RegisterSetId::Gprs),
             1 => Ok(RegisterSetId::SupervisorCsrs),
             2 => Ok(RegisterSetId::HypervisorCsrs),
+            3 => Ok(RegisterSetId::SstcCsrs),
             _ => Err(Error::InvalidParam),
         }
     }
@@ -44,6 +47,7 @@ impl RegisterSetId {
             RegisterSetId::Gprs => core::mem::size_of::<Gprs>(),
             RegisterSetId::SupervisorCsrs => core::mem::size_of::<SupervisorCsrs>(),
             RegisterSetId::HypervisorCsrs => core::mem::size_of::<HypervisorCsrs>(),
+            RegisterSetId::SstcCsrs => core::mem::size_of::<SstcCsrs>(),
         }
     }
 }
@@ -129,6 +133,14 @@ pub struct HypervisorCsrs {
     ///    register in `gprs` corresponding to the 'rs2' register in the instruction upon return
     ///    from `TvmCpuRun`.
     pub htinst: u64,
+}
+
+/// Sstc extension CSRs. Structure for register sets of type `RegisterSetId::SstcCsrs`.
+#[repr(C)]
+#[derive(Default)]
+pub struct SstcCsrs {
+    /// VS-level `stimecmp` CSR for a TVM vCPU. Written by the TSM upon return from `TvmCpuRun`.
+    pub vstimecmp: u64,
 }
 
 /// Provides the state of the confidential VM supervisor.

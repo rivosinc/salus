@@ -939,9 +939,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         vcpu_csrs.vscause = CSR.vscause.get();
         vcpu_csrs.vstval = CSR.vstval.get();
         vcpu_csrs.vsatp = CSR.vsatp.get();
-        if CpuInfo::get().has_sstc() {
-            vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
-        }
+        vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
     }
 
     // Restores the VS-level CSRs.
@@ -957,9 +955,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         CSR.vscause.set(vcpu_csrs.vscause);
         CSR.vstval.set(vcpu_csrs.vstval);
         CSR.vsatp.set(vcpu_csrs.vsatp);
-        if CpuInfo::get().has_sstc() {
-            CSR.vstimecmp.set(vcpu_csrs.vstimecmp);
-        }
+        CSR.vstimecmp.set(vcpu_csrs.vstimecmp);
     }
 
     // Restores the VM's address space.

@@ -33,11 +33,11 @@ BOOTARGS := keep_bootcon earlycon=sbi
 # QEMU options:
 #
 #  NCPU: Number of CPUs to boot with. Default: 1
-#  MEM_SIZE: RAM size for the emulated system. Default: 4GB
+#  MEM_SIZE: RAM size for the emulated system. Default: 2GB
 #  EXTRA_QEMU_ARGS: Any extra flags to pass to QEMU (e.g. other devices).
 
 NCPU ?= 1
-MEM_SIZE ?= 4096
+MEM_SIZE ?= 2048
 EXTRA_QEMU_ARGS ?=
 
 ifneq ($(VECTORS),)

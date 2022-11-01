@@ -283,6 +283,7 @@ pub struct VmCpuSharedState {
     gprs: sbi::Gprs,
     s_csrs: sbi::SupervisorCsrs,
     hs_csrs: sbi::HypervisorCsrs,
+    sstc_csrs: sbi::SstcCsrs,
 }
 
 /// Defines the layout of `VmCpuSharedState` in terms of `RegisterSetLocation`s.
@@ -298,6 +299,10 @@ pub const VM_CPU_SHARED_LAYOUT: &[sbi::RegisterSetLocation] = &[
     sbi::RegisterSetLocation {
         id: sbi::RegisterSetId::HypervisorCsrs as u16,
         offset: offset_of!(VmCpuSharedState, hs_csrs) as u16,
+    },
+    sbi::RegisterSetLocation {
+        id: sbi::RegisterSetId::SstcCsrs as u16,
+        offset: offset_of!(VmCpuSharedState, sstc_csrs) as u16,
     },
 ];
 
@@ -350,6 +355,7 @@ impl<'a> VmCpuSharedStateRef<'a> {
     define_accessors! {s_csrs, stval, stval, set_stval}
     define_accessors! {hs_csrs, htval, htval, set_htval}
     define_accessors! {hs_csrs, htinst, htinst, set_htinst}
+    define_accessors! {sstc_csrs, vstimecmp, vstimecmp, set_vstimecmp}
 
     /// Reads the general purpose register at `index`.
     pub fn gpr(&self, index: GprIndex) -> u64 {
@@ -766,6 +772,8 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     /// state, depending on if the exit cause is resumable.
     pub fn exit(mut self, cause: VmExitCause) {
         let shared = self.vcpu.shared_area();
+        shared.as_ref().set_vstimecmp(CSR.vstimecmp.get());
+
         use VmExitCause::*;
         match cause {
             ResumableEcall(msg) | FatalEcall(msg) => {

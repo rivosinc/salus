@@ -471,38 +471,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(status as u64)
     }
 
-    fn process_decoded_instruction(
-        active_vcpu: &mut ActiveVmCpu<T>,
-        inst: DecodedInstruction,
-    ) -> ControlFlow<VmExitCause> {
-        // We only emulate WFI and Crrss for PMU registers for now.
-        // Everything else gets redirected as an illegal instruction exception.
-        match inst.instruction() {
-            Instruction::Csrrs(csr_type)
-            if let Ok(value) = active_vcpu.pmu().get_cached_csr_value(csr_type.csr().into())  => {
-                // Unwrap ok: rd is 12-bits and instruction is already decoded.
-                let gpr_index = GprIndex::from_raw(csr_type.rd()).unwrap();
-                active_vcpu.set_gpr(gpr_index, value);
-                active_vcpu.inc_sepc(inst.len() as u64);
-                ControlFlow::Continue(())
-            }
-            Instruction::Wfi => {
-                // Just advance SEPC and exit. We place no constraints on when a vCPU
-                // may be resumed from WFI since, per the privileged spec, it's only
-                // a hint and it's perfectly valid for WFI to be a no-op.
-                active_vcpu.inc_sepc(inst.len() as u64);
-                ControlFlow::Break(VmExitCause::Wfi(inst))
-            }
-            _ => {
-                active_vcpu.inject_exception(
-                    Exception::IllegalInstruction,
-                    inst.raw() as u64,
-                );
-                ControlFlow::Continue(())
-            }
-        }
-    }
-
     /// Run `vcpu_id` until an unhandled exit is encountered. Save/restore `host_context` on entry/exit
     /// from the vCPU being run.
     pub fn run_vcpu(&self, vcpu_id: u64, host_context: VmCpuParent) -> EcallResult<u64> {
@@ -629,7 +597,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                         }
                     };
 
-                    match Self::process_decoded_instruction(&mut active_vcpu, inst) {
+                    match self.handle_virtual_instruction(inst, &mut active_vcpu) {
                         ControlFlow::Continue(_) => continue,
                         ControlFlow::Break(reason) => break reason,
                     };
@@ -658,6 +626,79 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         active_vcpu.exit(cause);
 
         Ok(u64::from(!cause.is_resumable()))
+    }
+
+    // Handles a virtual instruction trap taken due to `inst`.
+    fn handle_virtual_instruction(
+        &self,
+        inst: DecodedInstruction,
+        active_vcpu: &mut ActiveVmCpu<T>,
+    ) -> ControlFlow<VmExitCause> {
+        // We only emulate WFI and CSR instructions (for select CSRs) for now.
+        // Everything else gets redirected as an illegal instruction exception.
+        if let Some((csr, value, mask, rd)) = Self::decode_csr_instruction(inst, active_vcpu) {
+            if let Ok(rd_value) = active_vcpu.virtual_csr_rmw(csr, value, mask) {
+                active_vcpu.set_gpr(rd, rd_value);
+                active_vcpu.inc_sepc(inst.len() as u64);
+            } else {
+                active_vcpu.inject_exception(Exception::IllegalInstruction, inst.raw() as u64);
+            }
+            ControlFlow::Continue(())
+        } else if matches!(inst.instruction(), Instruction::Wfi) {
+            // Just advance SEPC and exit. We place no constraints on when a vCPU
+            // may be resumed from WFI since, per the privileged spec, it's only
+            // a hint and it's perfectly valid for WFI to be a no-op.
+            active_vcpu.inc_sepc(inst.len() as u64);
+            ControlFlow::Break(VmExitCause::Wfi(inst))
+        } else {
+            active_vcpu.inject_exception(Exception::IllegalInstruction, inst.raw() as u64);
+            ControlFlow::Continue(())
+        }
+    }
+
+    // Decodes a CSR read-modify-write instruction into a (csr num, value, mask, dest) tuple.
+    fn decode_csr_instruction(
+        inst: DecodedInstruction,
+        active_vcpu: &ActiveVmCpu<T>,
+    ) -> Option<(u16, u64, u64, GprIndex)> {
+        // Unwrap ok for all of the `GprIndex::from_raw()` below since the rs1/rd fields of
+        // instructions must obviously map to GPRs.
+        match inst.instruction() {
+            Instruction::Csrrw(csr_type) => {
+                let rs1 = GprIndex::from_raw(csr_type.rs1()).unwrap();
+                let value = active_vcpu.get_gpr(rs1);
+                let rd = GprIndex::from_raw(csr_type.rd()).unwrap();
+                Some((csr_type.csr() as u16, value, !0u64, rd))
+            }
+            Instruction::Csrrs(csr_type) => {
+                let rs1 = GprIndex::from_raw(csr_type.rs1()).unwrap();
+                let mask = active_vcpu.get_gpr(rs1);
+                let rd = GprIndex::from_raw(csr_type.rd()).unwrap();
+                Some((csr_type.csr() as u16, !0u64, mask, rd))
+            }
+            Instruction::Csrrc(csr_type) => {
+                let rs1 = GprIndex::from_raw(csr_type.rs1()).unwrap();
+                let mask = active_vcpu.get_gpr(rs1);
+                let rd = GprIndex::from_raw(csr_type.rd()).unwrap();
+                Some((csr_type.csr() as u16, 0u64, mask, rd))
+            }
+            Instruction::Csrrwi(csri_type) => {
+                let value = csri_type.zimm() as u64;
+                let rd = GprIndex::from_raw(csri_type.rd()).unwrap();
+                Some((csri_type.csr() as u16, value, !0u64, rd))
+            }
+            Instruction::Csrrsi(csri_type) => {
+                let mask = csri_type.zimm() as u64;
+                let rd = GprIndex::from_raw(csri_type.rd()).unwrap();
+                Some((csri_type.csr() as u16, !0u64, mask, rd))
+            }
+            Instruction::Csrrci(csri_type) => {
+                let mask = csri_type.zimm() as u64;
+                let rd = GprIndex::from_raw(csri_type.rd()).unwrap();
+                Some((csri_type.csr() as u16, 0u64, mask, rd))
+            }
+            _ => None,
+        }
     }
 
     /// Handles ecalls from the guest.

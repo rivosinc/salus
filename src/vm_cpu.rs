@@ -42,6 +42,7 @@ pub enum Error {
     AllowingInterrupt(vm_interrupts::Error),
     DenyingInterrupt(vm_interrupts::Error),
     InjectingInterrupt(vm_interrupts::Error),
+    InvalidCsrAccess,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -826,6 +827,19 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 self.set_gpr(GprIndex::A0, ret.error_code as u64);
                 self.set_gpr(GprIndex::A1, ret.return_value);
             }
+        }
+    }
+
+    /// Emulates a CSR read-modify-write operation taken from a virtual instruction trap. Returns
+    /// the previous value of the (virtual) CSR.
+    pub fn virtual_csr_rmw(&mut self, csr_num: u16, _value: u64, mask: u64) -> Result<u64> {
+        // We only support reading PMU CSRs for now.
+        match csr_num {
+            CSR_CYCLE..=CSR_HPMCOUNTER31 if mask == 0 => self
+                .pmu()
+                .get_cached_csr_value(csr_num.into())
+                .map_err(|_| Error::InvalidCsrAccess),
+            _ => Err(Error::InvalidCsrAccess),
         }
     }
 

@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::core::MAX_INTERRUPT_IDS;
+
 // A single EIE/EIP pair.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -11,7 +13,7 @@ struct SwFileEntry {
 }
 
 /// The number of 64-bit EIE/EIP pairs in an interrupt file, as mandated by the AIA specification.
-pub const SW_FILE_ENTRIES: usize = 32;
+pub const SW_FILE_ENTRIES: usize = MAX_INTERRUPT_IDS / 64;
 
 /// Holds the software-visible state of an IMSIC guest interrupt file. Used when a guest interrupt
 /// file is swapped out.

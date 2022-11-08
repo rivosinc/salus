@@ -17,6 +17,9 @@ use super::geometry::*;
 use super::sw_file::SwFile;
 use crate::{CpuId, CpuInfo, MAX_CPUS};
 
+/// The maximum number of IMSIC interrupt IDs, as per the AIA specification.
+pub const MAX_INTERRUPT_IDS: usize = 2048;
+
 const MAX_GUEST_FILES: usize = 7;
 const MAX_MMIO_REGIONS: usize = 8;
 
@@ -265,7 +268,7 @@ pub struct Imsic {
     per_cpu: Mutex<ImsicCpuState>,
     mmio_regions: ArrayVec<SupervisorPageRange, MAX_MMIO_REGIONS>,
     geometry: ImsicGeometry<SupervisorPhys>,
-    interrupt_ids: u32,
+    interrupt_ids: usize,
     phandle: u32,
 }
 
@@ -315,8 +318,11 @@ impl Imsic {
         let interrupt_ids = imsic_node
             .props()
             .find(|p| p.name() == "riscv,num-ids")
-            .and_then(|p| p.value_u32().next())
+            .and_then(|p| p.value_u32().next().map(|v| v as usize))
             .ok_or(Error::MissingProperty("riscv,num-ids"))?;
+        if interrupt_ids == 0 || interrupt_ids > MAX_INTERRUPT_IDS {
+            return Err(Error::InvalidInterruptIds(interrupt_ids));
+        }
 
         // We must have at least one guest interrupt file to start the host.
         let guest_index_bits = imsic_node
@@ -521,6 +527,11 @@ impl Imsic {
         .unwrap()
     }
 
+    /// Returns the number of implemented external interrupt IDs.
+    pub fn interrupt_ids(&self) -> usize {
+        self.interrupt_ids
+    }
+
     /// Takes ownership over the guest interrupt file pages for `cpu`, returning an iterator over
     /// the pages.
     pub fn take_guest_files(&self, cpu: CpuId) -> Result<ImsicGuestPageIter> {
@@ -579,7 +590,7 @@ impl Imsic {
 
     // Returns the number EIE/EIP registers used by the IMSIC.
     fn num_ei_regs(&self) -> usize {
-        (self.interrupt_ids as usize + 63) / 64
+        (self.interrupt_ids + 63) / 64
     }
 
     // Returns an ImsicGuestCsrAccess struct providing scoped access to guest_file's CSRs.
@@ -704,7 +715,7 @@ impl Imsic {
         imsic_node.add_prop("riscv,ipi-id")?.set_value_u32(&[1])?;
         imsic_node
             .add_prop("riscv,num-ids")?
-            .set_value_u32(&[self.interrupt_ids])?;
+            .set_value_u32(&[self.interrupt_ids as u32])?;
         if self.geometry.group_index_bits() > 0 {
             // These only matter when we have multiple groups.
             imsic_node

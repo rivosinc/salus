@@ -260,7 +260,9 @@ fn hyp_map_region(
         // Safe as we will create exactly one mapping to each page and will switch to
         // using that mapping exclusively.
         unsafe {
-            mapper.map_4k_addr(virt, phys, pte_fields).unwrap();
+            mapper
+                .map_addr(virt, phys, pte_fields, PageSize::Size4k)
+                .unwrap();
         }
     }
 }
@@ -319,7 +321,7 @@ fn map_fixed_device(
     // Safe to map access to the device because this will be the only mapping it is used through.
     unsafe {
         mapper
-            .map_4k_addr(virt_base, phys_base, pte_fields)
+            .map_addr(virt_base, phys_base, pte_fields, PageSize::Size4k)
             .unwrap();
     }
 }

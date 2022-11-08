@@ -19,12 +19,16 @@ pub enum Error {
     InsufficientPtePages,
     /// Attempt to access a middle-level page table, but found a leaf.
     LeafEntryNotTable,
+    /// Attempt to access a leaf page table, but found a middle-level.
+    TableEntryNotLeaf,
     /// Failure creating a root page table at an address that isn't aligned as required.
     MisalignedPages(SequentialPages<InternalClean>),
     /// Failure creating a root page table with an unsupported page size.
     UnsupportedPageSizePages(SequentialPages<InternalClean>, PageSize),
     /// The requested page size isn't (yet) handled by the hypervisor.
     PageSizeNotSupported(PageSize),
+    /// The requested size doesn't match what is found
+    PageSizeMismatch(PageSize, PageSize),
     /// Attempt to create a mapping over an existing one.
     MappingExists,
     /// The requested range isn't mapped.
@@ -45,6 +49,8 @@ pub enum Error {
     OutOfMapRange,
     /// The page cannot be shared
     PageNotShareable,
+    /// Invalid address, should be page aligned
+    InvalidPageAddress(u64),
 }
 /// Hold the result of page table operations.
 pub type Result<T> = core::result::Result<T, Error>;
@@ -283,11 +289,6 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
         }
     }
 
-    /// Returns the `PageTableLevel` this table is at.
-    fn level(&self) -> T::Level {
-        self.level
-    }
-
     /// Returns a mutable reference to the raw PTE at the given guest address.
     fn entry_mut(&mut self, index: PageTableIndex<T>) -> &'a mut Pte {
         let pte_addr =
@@ -482,6 +483,7 @@ pub trait GuestStagePagingMode: PagingMode<MappedAddressSpace = GuestPhys> {
 }
 
 /// The internal state of a paging hierarchy.
+#[derive(Debug)]
 struct PageTableInner<T: PagingMode> {
     root: SequentialPages<InternalClean>,
     table_type: PhantomData<T>,
@@ -524,18 +526,24 @@ impl<T: PagingMode> PageTableInner<T> {
     ///
     /// The caller must guarantee that `paddr` references a page uniquely owned by the root
     /// `GuestStagePageTable`.
-    unsafe fn map_4k_leaf(
+
+    unsafe fn map_leaf(
         &mut self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         paddr: SupervisorPageAddr,
+        page_size: PageSize,
         perms: PteFieldBits,
     ) -> Result<()> {
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
         match entry {
             Locked(l) => {
-                if !l.level().is_leaf() {
-                    return Err(Error::PageSizeNotSupported(l.level().leaf_page_size()));
+                if l.level().leaf_page_size() != page_size {
+                    // maybe not?
+                    return Err(Error::PageSizeMismatch(
+                        page_size,
+                        l.level().leaf_page_size(),
+                    ));
                 }
                 l.map_leaf(paddr, perms);
                 Ok(())
@@ -548,16 +556,23 @@ impl<T: PagingMode> PageTableInner<T> {
 
     /// Locks the invalid leaf PTE mapping `vaddr`, filling in any missing intermediate page tables
     /// using `get_pte_page`.
-    fn lock_4k_leaf_for_mapping(
+    /// Locks the invalid leaf PTE mapping `vaddr`, filling in any missing intermediate page tables
+    /// using `get_pte_page`.
+    fn lock_leaf_for_mapping(
         &mut self,
         vaddr: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<()> {
         let mut table = PageTable::from_root(self);
-        while !table.level().is_leaf() {
+
+        // match the level to the page size
+        while table.level.leaf_page_size() != page_size {
             table = table.next_level_or_fill_fn(RawAddr::from(vaddr), get_pte_page)?;
         }
+
         let entry = table.entry_for_addr_mut(RawAddr::from(vaddr));
+
         use TableEntryType::*;
         match entry {
             Invalidated(i) => {
@@ -570,12 +585,12 @@ impl<T: PagingMode> PageTableInner<T> {
             }
             Locked(_) => Err(Error::PteLocked),
             Leaf(_) => Err(Error::MappingExists),
-            Table(_) => unreachable!(),
+            Table(_) => Err(Error::TableEntryNotLeaf),
         }
     }
 
     /// Unlocks the leaf PTE mapping `vaddr`.
-    fn unlock_4k_leaf(&mut self, vaddr: PageAddr<T::MappedAddressSpace>) -> Result<()> {
+    fn unlock_leaf(&mut self, vaddr: PageAddr<T::MappedAddressSpace>) -> Result<()> {
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
         match entry {
@@ -624,8 +639,7 @@ impl<T: PagingMode> PageTableInner<T> {
 
 /// A paging hierarchy for a given addressing type.
 /// This is used for HS and HU paging modes such as Sv48.
-///
-/// TODO: Support non-4k page sizes.
+#[derive(Debug)]
 pub struct FirstStagePageTable<T: FirstStagePagingMode> {
     inner: Mutex<PageTableInner<T>>,
 }
@@ -658,13 +672,18 @@ impl<T: FirstStagePagingMode> FirstStagePageTable<T> {
         num_pages: u64,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<FirstStageMapper<T>> {
-        if page_size.is_huge() {
-            return Err(Error::PageSizeNotSupported(page_size));
+        let mut inner = self.inner.lock();
+
+        if !page_size.is_aligned(addr.bits()) {
+            return Err(Error::InvalidPageAddress(addr.bits()));
         }
 
-        let mut inner = self.inner.lock();
-        for a in addr.iter_from().take(num_pages as usize) {
-            inner.lock_4k_leaf_for_mapping(a, get_pte_page)?;
+        let iterator = match addr.iter_from_with_size(page_size) {
+            Some(i) => i,
+            None => return Err(Error::OutOfMapRange),
+        };
+        for a in iterator.take(num_pages as usize) {
+            inner.lock_leaf_for_mapping(a, page_size, get_pte_page)?;
         }
 
         Ok(FirstStageMapper::new(self, addr, num_pages))
@@ -700,19 +719,34 @@ impl<'a, T: FirstStagePagingMode> FirstStageMapper<'a, T> {
     /// # Safety
     ///
     /// Don't create aliases.
-    pub unsafe fn map_4k_addr(
+    pub unsafe fn map_addr(
         &self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         paddr: PageAddr<SupervisorPhys>,
         pte_perms: PteFieldBits,
+        page_size: PageSize,
     ) -> Result<()> {
-        let end_vaddr = self.vaddr.checked_add_pages(self.num_pages).unwrap();
-        if vaddr < self.vaddr || vaddr >= end_vaddr {
+        if !page_size.is_aligned(vaddr.bits()) {
+            return Err(PageTableError::InvalidPageAddress(vaddr.bits()));
+        }
+        if !page_size.is_aligned(paddr.bits()) {
+            return Err(PageTableError::InvalidPageAddress(paddr.bits()));
+        }
+
+        if let Some(end_vaddr) = self
+            .vaddr
+            .checked_add_pages_with_size(self.num_pages, page_size)
+        {
+            if vaddr < self.vaddr || vaddr >= end_vaddr {
+                return Err(Error::OutOfMapRange);
+            }
+        } else {
             return Err(Error::OutOfMapRange);
         }
 
         let mut inner = self.owner.inner.lock();
-        inner.map_4k_leaf(vaddr, paddr, pte_perms)
+
+        inner.map_leaf(vaddr, paddr, page_size, pte_perms)
     }
 }
 
@@ -789,7 +823,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         let mut mapper = GuestStageMapper::new(self, addr, 0);
         let mut inner = self.inner.lock();
         for a in addr.iter_from().take(num_pages as usize) {
-            inner.lock_4k_leaf_for_mapping(a, get_pte_page)?;
+            inner.lock_leaf_for_mapping(a, page_size, get_pte_page)?;
             mapper.num_pages += 1;
         }
 
@@ -1059,7 +1093,7 @@ impl<'a, T: PagingMode> GuestStageMapper<'a, T> {
         let pte_fields = PteFieldBits::user_leaf_with_perms(PteLeafPerms::RWX);
         unsafe {
             // Safe since we uniquely own page_to_map.
-            inner.map_4k_leaf(vaddr, page_to_map.addr(), pte_fields)
+            inner.map_leaf(vaddr, page_to_map.addr(), PageSize::Size4k, pte_fields)
         }
     }
 }
@@ -1072,7 +1106,7 @@ impl<'a, T: PagingMode> Drop for GuestStageMapper<'a, T> {
             // mapped (which will unlock the PTE), but may succeed if the holder of the
             // GuestStageMapper bailed before having filled the entire range (e.g. because of
             // another failure).
-            let _ = inner.unlock_4k_leaf(a);
+            let _ = inner.unlock_leaf(a);
         }
     }
 }

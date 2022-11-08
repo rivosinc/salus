@@ -12,7 +12,7 @@ use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, PageSize, RawAddr};
 use riscv_regs::*;
 use sbi::{self, SbiMessage, SbiReturnType};
-use spin::{Mutex, MutexGuard, Once, RwLock, RwLockReadGuard};
+use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::smp::PerCpu;
 use crate::vm::{MmioOpcode, MmioOperation, VmExitCause};
@@ -22,6 +22,7 @@ use crate::vm_pmu::VmPmuState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    BadVmCpuId,
     VmCpuExists,
     VmCpuNotFound,
     VmCpuRunning,
@@ -31,6 +32,7 @@ pub enum Error {
     InvalidSharedStatePtr,
     InsufficientSharedStatePages,
     NoImsicVirtualization,
+    ImsicLocationAlreadySet,
     BindingImsic(ImsicError),
     UnbindingImsic(ImsicError),
     WrongBindStatus,
@@ -105,7 +107,7 @@ pub struct VmCpuTrapState {
 /// between VMs.
 #[derive(Default)]
 #[repr(C)]
-struct VmCpuState {
+struct VmCpuRegisters {
     // CPU state that's shared between our's and the guest's execution environment. Saved/restored
     // when entering/exiting a VM.
     host_regs: HostCpuState,
@@ -121,49 +123,51 @@ struct VmCpuState {
 
 // The vCPU context switch, defined in guest.S
 extern "C" {
-    fn _run_guest(state: *mut VmCpuState);
-    fn _save_fp(state: *mut VmCpuState);
-    fn _restore_fp(state: *mut VmCpuState);
+    fn _run_guest(state: *mut VmCpuRegisters);
+    fn _save_fp(state: *mut VmCpuRegisters);
+    fn _restore_fp(state: *mut VmCpuRegisters);
 }
 
 extern "C" {
-    fn _restore_vector(state: *mut VmCpuState);
-    fn _save_vector(state: *mut VmCpuState);
+    fn _restore_vector(state: *mut VmCpuRegisters);
+    fn _save_vector(state: *mut VmCpuRegisters);
 }
 
 #[allow(dead_code)]
 const fn host_gpr_offset(index: GprIndex) -> usize {
-    offset_of!(VmCpuState, host_regs)
+    offset_of!(VmCpuRegisters, host_regs)
         + offset_of!(HostCpuState, gprs)
         + (index as usize) * size_of::<u64>()
 }
 
 #[allow(dead_code)]
 const fn guest_gpr_offset(index: GprIndex) -> usize {
-    offset_of!(VmCpuState, guest_regs)
+    offset_of!(VmCpuRegisters, guest_regs)
         + offset_of!(GuestCpuState, gprs)
         + (index as usize) * size_of::<u64>()
 }
 
 const fn guest_fpr_offset(index: usize) -> usize {
-    offset_of!(VmCpuState, guest_regs) + offset_of!(GuestCpuState, fprs) + index * size_of::<u64>()
+    offset_of!(VmCpuRegisters, guest_regs)
+        + offset_of!(GuestCpuState, fprs)
+        + index * size_of::<u64>()
 }
 
 const fn guest_vpr_offset(index: usize) -> usize {
-    offset_of!(VmCpuState, guest_regs)
+    offset_of!(VmCpuRegisters, guest_regs)
         + offset_of!(GuestCpuState, vprs)
         + index * size_of::<riscv_regs::VectorRegister>()
 }
 
 macro_rules! host_csr_offset {
     ($reg:tt) => {
-        offset_of!(VmCpuState, host_regs) + offset_of!(HostCpuState, $reg)
+        offset_of!(VmCpuRegisters, host_regs) + offset_of!(HostCpuState, $reg)
     };
 }
 
 macro_rules! guest_csr_offset {
     ($reg:tt) => {
-        offset_of!(VmCpuState, guest_regs) + offset_of!(GuestCpuState, $reg)
+        offset_of!(VmCpuRegisters, guest_regs) + offset_of!(GuestCpuState, $reg)
     };
 }
 
@@ -486,22 +490,6 @@ pub enum VmCpuTrap {
     // TODO: Add other exit causes as needed.
 }
 
-// State of binding a vCPU to a physical CPU.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum BindStatus {
-    Binding(CpuId, ImsicFileId),
-    Bound(CpuId, ImsicFileId),
-    Unbinding(CpuId, ImsicFileId),
-    Unbound,
-}
-
-// Virtual IMSIC state for a vCPU.
-struct ImsicState {
-    bind_status: BindStatus,
-    location: ImsicLocation,
-    sw_file: SwFile,
-}
-
 // The VMID and TLB version last used by a vCPU.
 struct PrevTlb {
     cpu: CpuId,
@@ -509,25 +497,18 @@ struct PrevTlb {
     tlb_version: TlbVersion,
 }
 
-/// Represents a single virtual CPU of a VM.
-pub struct VmCpu {
-    state: VmCpuState,
-    shared_area: VmCpuSharedArea,
-    imsic_state: Option<ImsicState>,
-    pmu_state: VmPmuState,
+// The architectural state of a vCPU.
+struct VmCpuArchState {
+    regs: VmCpuRegisters,
+    pmu: VmPmuState,
     prev_tlb: Option<PrevTlb>,
     pending_mmio_op: Option<MmioOperation>,
-    guest_id: PageOwnerId,
-    vcpu_id: u64,
 }
 
-impl VmCpu {
-    // Creates a new vCPU.
-    pub fn new(vcpu_id: u64, guest_id: PageOwnerId, shared_area: VmCpuSharedArea) -> Self {
-        let mut state = VmCpuState::default();
-
-        // A0 holds the hart ID on entry.
-        state.guest_regs.gprs.set_reg(GprIndex::A0, vcpu_id);
+impl VmCpuArchState {
+    // Sets up the architectural state for a new vCPU.
+    fn new(guest_id: PageOwnerId) -> Self {
+        let mut regs = VmCpuRegisters::default();
 
         let mut hstatus = LocalRegisterCopy::<u64, hstatus::Register>::new(0);
         hstatus.modify(hstatus::spv.val(1));
@@ -537,7 +518,7 @@ impl VmCpu {
             // in the hypervisor is WFI ourselves.
             hstatus.modify(hstatus::vtw.val(1));
         }
-        state.guest_regs.hstatus = hstatus.get();
+        regs.guest_regs.hstatus = hstatus.get();
 
         let mut sstatus = LocalRegisterCopy::<u64, sstatus::Register>::new(0);
         sstatus.modify(sstatus::spp::Supervisor);
@@ -545,91 +526,95 @@ impl VmCpu {
         if CpuInfo::get().has_vector() {
             sstatus.modify(sstatus::vs::Initial);
         }
-        state.guest_regs.sstatus = sstatus.get();
+        regs.guest_regs.sstatus = sstatus.get();
 
         let mut scounteren = LocalRegisterCopy::<u64, scounteren::Register>::new(0);
         scounteren.modify(scounteren::cycle.val(1));
         scounteren.modify(scounteren::time.val(1));
         scounteren.modify(scounteren::instret.val(1));
-        state.guest_regs.scounteren = scounteren.get();
+        regs.guest_regs.scounteren = scounteren.get();
 
         Self {
-            state,
-            shared_area,
-            imsic_state: None,
-            pmu_state: VmPmuState::default(),
+            regs,
+            pmu: VmPmuState::default(),
             prev_tlb: None,
             pending_mmio_op: None,
-            guest_id,
-            vcpu_id,
         }
     }
+}
 
-    // Returns a reference to the shared-memory state area for this vCPU.
-    fn shared_area(&self) -> &VmCpuSharedArea {
-        &self.shared_area
-    }
+// Sets the status on dropping depending on the state of power_off.
+// Used by ActiveVmCpu sto set the Vcpu's state on de-activation.
+struct StatusSet<'vcpu> {
+    vcpu: &'vcpu VmCpu,
+    // True if this vCPU should be powered-off on drop().
+    power_off: bool,
+}
 
-    // Returns this vCPU's IMSIC location, if set.
-    fn get_imsic_location(&self) -> Option<ImsicLocation> {
-        self.imsic_state.as_ref().map(|i| i.location)
+impl<'vcpu> Drop for StatusSet<'vcpu> {
+    fn drop(&mut self) {
+        let mut status = self.vcpu.status.write();
+        assert_eq!(*status, VmCpuStatus::Running);
+        *status = if self.power_off {
+            VmCpuStatus::PoweredOff
+        } else {
+            VmCpuStatus::Runnable
+        };
     }
 }
 
 /// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
 pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> {
-    container: &'vcpu VmCpus,
-    vcpu: MutexGuard<'vcpu, VmCpu>,
+    vcpu: &'vcpu VmCpu,
+    // We hold a lock on vcpu.arch for the lifetime of this object to avoid having to
+    // repeatedly acquire it for every register modification. Must be dropped before `status_set`,
+    // so declared first.
+    arch: MutexGuard<'vcpu, VmCpuArchState>,
     vm_pages: FinalizedVmPages<'pages, T>,
     // `None` if this vCPU is itself running a child vCPU. Restored when the child vCPU exits.
     active_pages: Option<ActiveVmPages<'pages, T>>,
     // The parent vCPU which activated us.
     parent_vcpu: Option<&'prev mut dyn VmCpuSaveState>,
-    // True if this vCPU should be powered-off on drop().
-    power_off: bool,
+    // Important drop order, status_set must come _after_ `arch` to maintain lock ordering.
+    // on drop StatusSet takes the status lock.
+    status_set: StatusSet<'vcpu>,
 }
 
 impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, 'prev, T> {
     // Restores and activates the vCPU state from `vcpu`, with the VM address space represented by
     // `vm_pages`.
     fn restore_from(
-        container: &'vcpu VmCpus,
-        mut vcpu: MutexGuard<'vcpu, VmCpu>,
+        vcpu: &'vcpu VmCpu,
         vm_pages: FinalizedVmPages<'pages, T>,
         parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
     ) -> Result<Self> {
-        let this_cpu = PerCpu::this_cpu();
-        // We must be bound to the current CPU if IMSIC virtualization is enabled.
-        if let Some(ref imsic_state) = vcpu.imsic_state {
-            match imsic_state.bind_status {
-                BindStatus::Bound(cpu_id, _) => {
-                    if cpu_id != this_cpu.cpu_id() {
-                        return Err(Error::WrongPhysicalCpu);
-                    }
-                }
-                _ => {
-                    return Err(Error::WrongBindStatus);
-                }
-            }
-        }
+        let mut arch = vcpu.arch.lock();
         // If we're running on a new CPU, then any previous VMID or TLB version we used is inavlid.
-        if let Some(ref prev_tlb) = vcpu.prev_tlb && prev_tlb.cpu != this_cpu.cpu_id() {
-            vcpu.prev_tlb = None;
+        if let Some(ref prev_tlb) = arch.prev_tlb && prev_tlb.cpu != PerCpu::this_cpu().cpu_id() {
+            arch.prev_tlb = None;
         }
 
         // We store the parent vCPU as a trait object as a means of type-erasure for ActiveVmCpu's
         // inner lifetimes.
-        let parent_vcpu = parent_vcpu.map(|p| p as &mut dyn VmCpuSaveState);
+        let mut parent_vcpu = parent_vcpu.map(|p| p as &mut dyn VmCpuSaveState);
 
+        // Save the state of the parent (if any) and swap in ours.
+        if let Some(ref mut p) = parent_vcpu {
+            p.save();
+        }
         let mut active_vcpu = Self {
-            container,
             vcpu,
+            arch,
             vm_pages,
             active_pages: None,
             parent_vcpu,
-            power_off: false,
+            status_set: StatusSet {
+                vcpu,
+                power_off: false,
+            },
         };
         active_vcpu.restore();
+
         Ok(active_vcpu)
     }
 
@@ -647,63 +632,63 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
         let has_vector = CpuInfo::get().has_vector();
         let guest_id = self.vcpu.guest_id;
-        let vcpu_state = &mut self.vcpu.state;
+        let regs = &mut self.arch.regs;
 
         unsafe {
             // Safe since _restore_vector() only reads within the bounds of the vector register
-            // state in VmCpuState.
+            // state in VmCpuRegisters.
             if has_vector {
-                _restore_vector(vcpu_state);
+                _restore_vector(regs);
             }
 
             // Safe since _restore_fp() only reads within the bounds of the floating point
-            // register state in VmCpuState.
-            _restore_fp(vcpu_state);
+            // register state in VmCpuRegisters.
+            _restore_fp(regs);
 
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table.
-            _run_guest(vcpu_state);
+            _run_guest(regs);
         }
 
         // Save off the trap information.
-        vcpu_state.trap_csrs.scause = CSR.scause.get();
-        vcpu_state.trap_csrs.stval = CSR.stval.get();
-        vcpu_state.trap_csrs.htval = CSR.htval.get();
-        vcpu_state.trap_csrs.htinst = CSR.htinst.get();
+        regs.trap_csrs.scause = CSR.scause.get();
+        regs.trap_csrs.stval = CSR.stval.get();
+        regs.trap_csrs.htval = CSR.htval.get();
+        regs.trap_csrs.htinst = CSR.htinst.get();
 
         // Check if FPU state needs to be saved.
-        let mut sstatus = LocalRegisterCopy::new(vcpu_state.guest_regs.sstatus);
+        let mut sstatus = LocalRegisterCopy::new(regs.guest_regs.sstatus);
         if sstatus.matches_all(sstatus::fs::Dirty) {
             // Safe since _save_fp() only writes within the bounds of the floating point register
-            // state in VmCpuState.
-            unsafe { _save_fp(vcpu_state) };
+            // state in VmCpuRegisters.
+            unsafe { _save_fp(regs) };
             sstatus.modify(sstatus::fs::Clean);
         }
         // Check if vector state needs to be saved
         if has_vector && sstatus.matches_all(sstatus::vs::Dirty) {
             // Safe since _save_vector() only writes within the bounds of the vector register
-            // state in VmCpuState.
-            unsafe { _save_vector(vcpu_state) };
+            // state in VmCpuRegisters.
+            unsafe { _save_vector(regs) };
             sstatus.modify(sstatus::vs::Clean)
         }
-        vcpu_state.guest_regs.sstatus = sstatus.get();
+        regs.guest_regs.sstatus = sstatus.get();
 
         // Determine the exit cause from the trap CSRs.
         use Exception::*;
-        match Trap::from_scause(vcpu_state.trap_csrs.scause).unwrap() {
+        match Trap::from_scause(regs.trap_csrs.scause).unwrap() {
             Trap::Exception(VirtualSupervisorEnvCall) => {
-                let sbi_msg = SbiMessage::from_regs(vcpu_state.guest_regs.gprs.a_regs()).ok();
+                let sbi_msg = SbiMessage::from_regs(regs.guest_regs.gprs.a_regs()).ok();
                 VmCpuTrap::Ecall(sbi_msg)
             }
             Trap::Exception(GuestInstructionPageFault)
             | Trap::Exception(GuestLoadPageFault)
             | Trap::Exception(GuestStorePageFault) => {
                 let fault_addr = RawAddr::guest(
-                    vcpu_state.trap_csrs.htval << 2 | vcpu_state.trap_csrs.stval & 0x03,
+                    regs.trap_csrs.htval << 2 | regs.trap_csrs.stval & 0x03,
                     guest_id,
                 );
                 VmCpuTrap::PageFault {
-                    exception: Exception::from_scause_reason(vcpu_state.trap_csrs.scause).unwrap(),
+                    exception: Exception::from_scause_reason(regs.trap_csrs.scause).unwrap(),
                     fault_addr,
                     // Note that this address is not necessarily guest virtual as the guest may or
                     // may not have 1st-stage translation enabled in VSATP. We still use GuestVirtAddr
@@ -711,15 +696,15 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     // TEECALL) which are exclusively guest-physical. Furthermore we only access guest
                     // instructions via the HLVX instruction, which will take the VSATP translation
                     // mode into account.
-                    fault_pc: RawAddr::guest_virt(vcpu_state.guest_regs.sepc, guest_id),
-                    priv_level: PrivilegeLevel::from_hstatus(vcpu_state.guest_regs.hstatus),
+                    fault_pc: RawAddr::guest_virt(regs.guest_regs.sepc, guest_id),
+                    priv_level: PrivilegeLevel::from_hstatus(regs.guest_regs.hstatus),
                 }
             }
             Trap::Exception(VirtualInstruction) => {
                 VmCpuTrap::VirtualInstruction {
                     // See above re: this address being guest virtual.
-                    fault_pc: RawAddr::guest_virt(vcpu_state.guest_regs.sepc, guest_id),
-                    priv_level: PrivilegeLevel::from_hstatus(vcpu_state.guest_regs.hstatus),
+                    fault_pc: RawAddr::guest_virt(regs.guest_regs.sepc, guest_id),
+                    priv_level: PrivilegeLevel::from_hstatus(regs.guest_regs.hstatus),
                 }
             }
             Trap::Exception(e) => {
@@ -730,13 +715,13 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     // medeleg, in which case firmware may send it our way instead.
                     VmCpuTrap::DelegatedException {
                         exception: e,
-                        stval: vcpu_state.trap_csrs.stval,
+                        stval: regs.trap_csrs.stval,
                     }
                 } else {
-                    VmCpuTrap::Other(vcpu_state.trap_csrs.clone())
+                    VmCpuTrap::Other(regs.trap_csrs.clone())
                 }
             }
-            _ => VmCpuTrap::Other(vcpu_state.trap_csrs.clone()),
+            _ => VmCpuTrap::Other(regs.trap_csrs.clone()),
         }
     }
 
@@ -771,7 +756,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     /// deactivates this vCPU. The vCPU is either returned to the `Available` or `PoweredOff`
     /// state, depending on if the exit cause is resumable.
     pub fn exit(mut self, cause: VmExitCause) {
-        let shared = self.vcpu.shared_area();
+        let shared = &self.vcpu.shared_area;
         shared.as_ref().set_vstimecmp(CSR.vstimecmp.get());
 
         use VmExitCause::*;
@@ -804,7 +789,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 shared.as_ref().set_gpr(GprIndex::A0, val);
 
                 // We'll complete a load instruction the next time this vCPU is run.
-                self.vcpu.pending_mmio_op = Some(mmio_op);
+                self.arch.pending_mmio_op = Some(mmio_op);
             }
             Wfi(inst) => {
                 shared.update_with_vi_exit(inst.raw() as u64);
@@ -814,7 +799,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
         };
 
-        self.power_off = cause.is_fatal();
+        self.status_set.power_off = cause.is_fatal();
     }
 
     /// Delivers the given exception to the vCPU, setting up its register state to handle the trap
@@ -827,31 +812,31 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         }
         vsstatus.modify(sstatus::sie.val(0));
         let sstatus =
-            LocalRegisterCopy::<u64, sstatus::Register>::new(self.vcpu.state.guest_regs.sstatus);
+            LocalRegisterCopy::<u64, sstatus::Register>::new(self.arch.regs.guest_regs.sstatus);
         vsstatus.modify(sstatus::spp.val(sstatus.read(sstatus::spp)));
         CSR.vsstatus.set(vsstatus.get());
 
         CSR.vscause.set(Trap::Exception(exception).to_scause());
         CSR.vstval.set(stval);
-        CSR.vsepc.set(self.vcpu.state.guest_regs.sepc);
+        CSR.vsepc.set(self.arch.regs.guest_regs.sepc);
 
         // Redirect the vCPU to its STVEC on entry.
-        self.vcpu.state.guest_regs.sepc = CSR.vstvec.get();
+        self.arch.regs.guest_regs.sepc = CSR.vstvec.get();
     }
 
     /// Gets one of the vCPU's general purpose registers.
     pub fn get_gpr(&self, gpr: GprIndex) -> u64 {
-        self.vcpu.state.guest_regs.gprs.reg(gpr)
+        self.arch.regs.guest_regs.gprs.reg(gpr)
     }
 
     /// Sets one of the vCPU's general-purpose registers.
     pub fn set_gpr(&mut self, gpr: GprIndex, value: u64) {
-        self.vcpu.state.guest_regs.gprs.set_reg(gpr, value);
+        self.arch.regs.guest_regs.gprs.set_reg(gpr, value);
     }
 
     /// Increments the current `sepc` CSR value by `value`.
     pub fn inc_sepc(&mut self, value: u64) {
-        self.vcpu.state.guest_regs.sepc += value;
+        self.arch.regs.guest_regs.sepc += value;
     }
 
     /// Increments SEPC and Updates A0/A1 with the result of an SBI call.
@@ -891,15 +876,15 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     /// Returns a mutable reference to this active vCPU's PMU state.
     pub fn pmu(&mut self) -> &mut VmPmuState {
-        &mut self.vcpu.pmu_state
+        &mut self.arch.pmu
     }
 
     // Completes any pending MMIO operation for this CPU.
     fn complete_pending_mmio_op(&mut self) {
         // Complete any pending load operations. The host is expected to have written the value
         // to complete the load to A0.
-        if let Some(mmio_op) = self.vcpu.pending_mmio_op {
-            let val = self.vcpu.shared_area().as_ref().gpr(GprIndex::A0);
+        if let Some(mmio_op) = self.arch.pending_mmio_op {
+            let val = self.vcpu.shared_area.as_ref().gpr(GprIndex::A0);
             use MmioOpcode::*;
             // Write the value to the actual destination register.
             match mmio_op.opcode() {
@@ -927,8 +912,8 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 _ => (),
             };
 
-            self.vcpu.pending_mmio_op = None;
-            self.vcpu.shared_area().as_ref().set_gpr(GprIndex::A0, 0);
+            self.arch.pending_mmio_op = None;
+            self.vcpu.shared_area.as_ref().set_gpr(GprIndex::A0, 0);
 
             // Advance SEPC past the faulting instruction.
             self.inc_sepc(mmio_op.len() as u64);
@@ -937,7 +922,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     // Saves the VS-level CSRs.
     fn save_vcpu_csrs(&mut self) {
-        let vcpu_csrs = &mut self.vcpu.state.guest_vcpu_csrs;
+        let vcpu_csrs = &mut self.arch.regs.guest_vcpu_csrs;
         vcpu_csrs.htimedelta = CSR.htimedelta.get();
         vcpu_csrs.vsstatus = CSR.vsstatus.get();
         vcpu_csrs.vsie = CSR.vsie.get();
@@ -952,7 +937,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     // Restores the VS-level CSRs.
     fn restore_vcpu_csrs(&mut self) {
-        let vcpu_csrs = &self.vcpu.state.guest_vcpu_csrs;
+        let vcpu_csrs = &self.arch.regs.guest_vcpu_csrs;
         // Safe as these don't take effect until V=1.
         CSR.htimedelta.set(vcpu_csrs.htimedelta);
         CSR.vsstatus.set(vcpu_csrs.vsstatus);
@@ -973,7 +958,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let mut vmid_tracker = this_cpu.vmid_tracker_mut();
         // If VMIDs rolled over next_vmid() will do the necessary flush and the previous TLB version
         // doesn't matter.
-        let (vmid, tlb_version) = match self.vcpu.prev_tlb {
+        let (vmid, tlb_version) = match self.arch.prev_tlb {
             Some(ref prev_tlb) if prev_tlb.vmid.version() == vmid_tracker.current_version() => {
                 (prev_tlb.vmid, Some(prev_tlb.tlb_version))
             }
@@ -984,7 +969,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         let active_pages = self.vm_pages.enter_with_vmid(vmid, tlb_version);
 
         // Record the TLB version we're using.
-        self.vcpu.prev_tlb = Some(PrevTlb {
+        self.arch.prev_tlb = Some(PrevTlb {
             cpu: this_cpu.cpu_id(),
             vmid,
             tlb_version: active_pages.tlb_version(),
@@ -1025,97 +1010,57 @@ impl<T: GuestStagePagingMode> Drop for ActiveVmCpu<'_, '_, '_, T> {
         if let Some(ref mut p) = self.parent_vcpu {
             p.restore();
         }
-
-        // Unwrap safe because vcpu is locked and running, so vcpu must be at `vcpu_id`.
-        let once_entry = self
-            .container
-            .inner
-            .get(self.vcpu.vcpu_id as usize)
-            .unwrap();
-        let entry = once_entry.get().unwrap();
-        let mut status = entry.status.write();
-        assert_eq!(*status, VmCpuStatus::Running);
-        *status = if self.power_off {
-            VmCpuStatus::PoweredOff
-        } else {
-            VmCpuStatus::Runnable
-        };
     }
 }
 
-/// A present, but idle vCPU. A vCPU in this state is guaranteed not to change state as long as
-/// the `IdleVmCpu` object is held.
-pub struct IdleVmCpu<'vcpu> {
-    _status: RwLockReadGuard<'vcpu, VmCpuStatus>,
-    vcpu: MutexGuard<'vcpu, VmCpu>,
+// State of binding a vCPU to a physical CPU.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BindStatus {
+    Binding(CpuId, ImsicFileId),
+    Bound(CpuId, ImsicFileId),
+    Unbinding(CpuId, ImsicFileId),
+    Unbound,
 }
 
-impl<'vcpu> IdleVmCpu<'vcpu> {
-    /// Sets the entry point (SEPC, A1) for this vCPU.
-    pub fn set_entry_args(&mut self, sepc: u64, opaque: u64) {
-        self.vcpu.state.guest_regs.sepc = sepc;
-        self.vcpu
-            .state
-            .guest_regs
-            .gprs
-            .set_reg(GprIndex::A1, opaque);
-    }
+// Virtual external interrupt state for a vCPU.
+struct VmCpuExtInterrupts {
+    bind_status: BindStatus,
+    imsic_location: ImsicLocation,
+    sw_file: SwFile,
+}
 
-    /// Latches the entry point of this vCPU from the shared-memory state buffer, returning the
-    /// (SEPC, A1) pair. Should only be called for the boot vCPU.
-    pub fn latch_entry_args(&mut self) -> (u64, u64) {
-        let shared = self.vcpu.shared_area().as_ref();
-        let sepc = shared.sepc();
-        let arg = shared.gpr(GprIndex::A1);
-        self.set_entry_args(sepc, arg);
-        (sepc, arg)
-    }
-
-    /// Sets the location of this vCPU's virtualized IMSIC.
-    pub fn set_imsic_location(&mut self, imsic_location: ImsicLocation) {
-        self.vcpu.imsic_state = Some(ImsicState {
-            location: imsic_location,
-            sw_file: SwFile::new(),
+impl VmCpuExtInterrupts {
+    fn new(imsic_location: ImsicLocation) -> Self {
+        Self {
             bind_status: BindStatus::Unbound,
-        });
+            imsic_location,
+            sw_file: SwFile::new(),
+        }
     }
 
-    /// Returns the location of this vCPU's virtualized IMSIC.
-    pub fn get_imsic_location(&self) -> Option<ImsicLocation> {
-        self.vcpu.get_imsic_location()
+    fn imsic_location(&self) -> ImsicLocation {
+        self.imsic_location
     }
 
-    /// Prepares to bind this vCPU to `interrupt_file` on the current physical CPU.
-    pub fn bind_imsic_prepare(&mut self, interrupt_file: ImsicFileId) -> Result<()> {
-        let mut imsic_state = self
-            .vcpu
-            .imsic_state
-            .as_mut()
-            .ok_or(Error::NoImsicVirtualization)?;
+    fn bind_imsic_prepare(&mut self, interrupt_file: ImsicFileId) -> Result<()> {
         // The vCPU must be completely unbound to start a bind operation.
-        if imsic_state.bind_status != BindStatus::Unbound {
+        if self.bind_status != BindStatus::Unbound {
             return Err(Error::WrongBindStatus);
         }
 
         // Initialize the guest IMSIC file we're getting bound to.
         let imsic = Imsic::get();
         imsic
-            .restore_guest_file_prepare(interrupt_file, &mut imsic_state.sw_file)
+            .restore_guest_file_prepare(interrupt_file, &mut self.sw_file)
             .map_err(Error::BindingImsic)?;
 
-        imsic_state.bind_status = BindStatus::Binding(PerCpu::this_cpu().cpu_id(), interrupt_file);
+        self.bind_status = BindStatus::Binding(PerCpu::this_cpu().cpu_id(), interrupt_file);
         Ok(())
     }
 
-    /// Completes the IMSIC bind operation started in `bind_imsic_prepare()`.
-    pub fn bind_imsic_finish(&mut self) -> Result<()> {
-        let mut imsic_state = self
-            .vcpu
-            .imsic_state
-            .as_mut()
-            .ok_or(Error::NoImsicVirtualization)?;
+    fn bind_imsic_finish(&mut self) -> Result<ImsicFileId> {
         // Make sure there's a bind operation was started on this CPU.
-        let (cpu, interrupt_file) = match imsic_state.bind_status {
+        let (cpu, interrupt_file) = match self.bind_status {
             BindStatus::Binding(cpu, interrupt_file) => (cpu, interrupt_file),
             _ => {
                 return Err(Error::WrongBindStatus);
@@ -1128,28 +1073,15 @@ impl<'vcpu> IdleVmCpu<'vcpu> {
         // Finish restoring state from the SW interrupt file.
         let imsic = Imsic::get();
         imsic
-            .restore_guest_file_finish(interrupt_file, &mut imsic_state.sw_file)
+            .restore_guest_file_finish(interrupt_file, &mut self.sw_file)
             .map_err(Error::BindingImsic)?;
-        imsic_state.bind_status = BindStatus::Bound(cpu, interrupt_file);
-
-        // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
-        let mut hstatus =
-            LocalRegisterCopy::<u64, hstatus::Register>::new(self.vcpu.state.guest_regs.hstatus);
-        hstatus.modify(hstatus::vgein.val(interrupt_file.bits() as u64));
-        self.vcpu.state.guest_regs.hstatus = hstatus.get();
-
-        Ok(())
+        self.bind_status = BindStatus::Bound(cpu, interrupt_file);
+        Ok(interrupt_file)
     }
 
-    /// Prepares to unbind this vCPU from its current interrupt file.
-    pub fn unbind_imsic_prepare(&mut self) -> Result<()> {
-        let mut imsic_state = self
-            .vcpu
-            .imsic_state
-            .as_mut()
-            .ok_or(Error::NoImsicVirtualization)?;
+    fn unbind_imsic_prepare(&mut self) -> Result<()> {
         // We must be bound (to the current CPU) to start an unbind.
-        let (cpu, interrupt_file) = match imsic_state.bind_status {
+        let (cpu, interrupt_file) = match self.bind_status {
             BindStatus::Bound(cpu, interrupt_file) => (cpu, interrupt_file),
             _ => {
                 return Err(Error::WrongBindStatus);
@@ -1161,21 +1093,15 @@ impl<'vcpu> IdleVmCpu<'vcpu> {
 
         let imsic = Imsic::get();
         imsic
-            .save_guest_file_prepare(interrupt_file, &mut imsic_state.sw_file)
+            .save_guest_file_prepare(interrupt_file, &mut self.sw_file)
             .map_err(Error::UnbindingImsic)?;
-        imsic_state.bind_status = BindStatus::Unbinding(cpu, interrupt_file);
+        self.bind_status = BindStatus::Unbinding(cpu, interrupt_file);
         Ok(())
     }
 
-    /// Completes the IMSIC unbind operation started in `unbind_imsic_prepare()`.
-    pub fn unbind_imsic_finish(&mut self) -> Result<()> {
-        let mut imsic_state = self
-            .vcpu
-            .imsic_state
-            .as_mut()
-            .ok_or(Error::NoImsicVirtualization)?;
+    fn unbind_imsic_finish(&mut self) -> Result<()> {
         // We must be bound (to the current CPU) to start an unbind.
-        let (cpu, interrupt_file) = match imsic_state.bind_status {
+        let (cpu, interrupt_file) = match self.bind_status {
             BindStatus::Unbinding(cpu, interrupt_file) => (cpu, interrupt_file),
             _ => {
                 return Err(Error::WrongBindStatus);
@@ -1187,14 +1113,26 @@ impl<'vcpu> IdleVmCpu<'vcpu> {
 
         let imsic = Imsic::get();
         imsic
-            .save_guest_file_finish(interrupt_file, &mut imsic_state.sw_file)
+            .save_guest_file_finish(interrupt_file, &mut self.sw_file)
             .map_err(Error::UnbindingImsic)?;
-        imsic_state.bind_status = BindStatus::Unbound;
+        self.bind_status = BindStatus::Unbound;
         Ok(())
+    }
+
+    fn is_bound_on_this_cpu(&self) -> Result<()> {
+        match self.bind_status {
+            BindStatus::Bound(cpu_id, _) => {
+                if cpu_id != PerCpu::this_cpu().cpu_id() {
+                    return Err(Error::WrongPhysicalCpu);
+                }
+                Ok(())
+            }
+            _ => Err(Error::WrongBindStatus),
+        }
     }
 }
 
-/// Represents the state of a vCPU in a VM.
+/// The availability of vCPU in a VM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmCpuStatus {
     /// The vCPU is not powered on.
@@ -1205,27 +1143,158 @@ pub enum VmCpuStatus {
     Running,
 }
 
-pub struct VmCpusEntry {
-    // Locking: status must be locked before vcpu.
+/// Represents a single virtual CPU of a VM.
+pub struct VmCpu {
+    // Locking: status -> arch -> ext_interrupts.
     status: RwLock<VmCpuStatus>,
-    vcpu: Mutex<VmCpu>,
+    arch: Mutex<VmCpuArchState>,
+    ext_interrupts: Once<Mutex<VmCpuExtInterrupts>>,
+    shared_area: VmCpuSharedArea,
+    guest_id: PageOwnerId,
+    vcpu_id: u64,
 }
 
-impl VmCpusEntry {
-    pub fn new(vcpu_id: u64, guest_id: PageOwnerId, shared_area: VmCpuSharedArea) -> VmCpusEntry {
-        let status = VmCpuStatus::PoweredOff;
-        let vcpu = VmCpu::new(vcpu_id, guest_id, shared_area);
-
-        VmCpusEntry {
-            status: RwLock::new(status),
-            vcpu: Mutex::new(vcpu),
+impl VmCpu {
+    /// Creates a new `VmCpu` with ID `vcpu_id` using `shared_area` for the vCPU's shared memory
+    /// state area. The returned `VmCpu` is initially powered off.
+    pub fn new(vcpu_id: u64, guest_id: PageOwnerId, shared_area: VmCpuSharedArea) -> VmCpu {
+        VmCpu {
+            status: RwLock::new(VmCpuStatus::PoweredOff),
+            arch: Mutex::new(VmCpuArchState::new(guest_id)),
+            ext_interrupts: Once::new(),
+            shared_area,
+            guest_id,
+            vcpu_id,
         }
+    }
+
+    /// Powers on this vCPU and sets its entry point to the specified SEPC and A1 values.
+    pub fn power_on(&self, sepc: u64, opaque: u64) -> Result<()> {
+        let mut status = self.status.write();
+        if *status != VmCpuStatus::PoweredOff {
+            return Err(Error::VmCpuAlreadyPowered);
+        }
+        let mut arch = self.arch.lock();
+        arch.regs.guest_regs.sepc = sepc;
+        arch.regs
+            .guest_regs
+            .gprs
+            .set_reg(GprIndex::A0, self.vcpu_id);
+        arch.regs.guest_regs.gprs.set_reg(GprIndex::A1, opaque);
+        *status = VmCpuStatus::Runnable;
+        Ok(())
+    }
+
+    /// Powers on this vCPU, latching the entry point from its shared memory state area. Returns
+    /// the (SEPC, A1) pair on success.
+    pub fn power_on_and_latch_entry_args(&self) -> Result<(u64, u64)> {
+        let shared = self.shared_area.as_ref();
+        let sepc = shared.sepc();
+        let arg = shared.gpr(GprIndex::A1);
+        self.power_on(sepc, arg)?;
+        Ok((sepc, arg))
+    }
+
+    /// Returns the ID of the vCPU in the guest.
+    pub fn vcpu_id(&self) -> u64 {
+        self.vcpu_id
+    }
+
+    /// Returns the runnability status of this vCPU.
+    pub fn status(&self) -> VmCpuStatus {
+        *self.status.read()
+    }
+
+    /// Activates this vCPU, swapping in its register state. Takes exclusive ownership of the
+    /// ability to run this vCPU. If `parent_vcpu` is not `None`, its state is saved before this
+    /// vCPU is activated and is restored when the returned `ActiveVmCpu` is dropped.
+    pub fn activate<'vcpu, 'pages, 'prev: 'vcpu + 'pages, T: GuestStagePagingMode>(
+        &'vcpu self,
+        vm_pages: FinalizedVmPages<'pages, T>,
+        parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
+    ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'prev, T>> {
+        let mut status = self.status.write();
+        match *status {
+            VmCpuStatus::Runnable => {
+                if self.guest_id != vm_pages.page_owner_id() {
+                    return Err(Error::WrongAddressSpace);
+                }
+
+                // We must be bound to the current CPU if IMSIC virtualization is enabled.
+                if let Some(ext_interrupts) = self.ext_interrupts.get() {
+                    ext_interrupts.lock().is_bound_on_this_cpu()?;
+                }
+
+                let active_vcpu = ActiveVmCpu::restore_from(self, vm_pages, parent_vcpu)?;
+                *status = VmCpuStatus::Running;
+                Ok(active_vcpu)
+            }
+            VmCpuStatus::Running => Err(Error::VmCpuRunning),
+            VmCpuStatus::PoweredOff => Err(Error::VmCpuOff),
+        }
+    }
+
+    /// Enables IMSIC virtualization for this vCPU, setting the location of the virtualized ISMIC
+    /// in guest physical address space.
+    pub fn enable_imsic_virtualization(&self, imsic_location: ImsicLocation) -> Result<()> {
+        self.ext_interrupts
+            .call_once(|| Mutex::new(VmCpuExtInterrupts::new(imsic_location)));
+        if self.ext_interrupts.get().unwrap().lock().imsic_location != imsic_location {
+            return Err(Error::ImsicLocationAlreadySet);
+        }
+        Ok(())
+    }
+
+    fn ext_interrupts(&self) -> Result<&Mutex<VmCpuExtInterrupts>> {
+        self.ext_interrupts
+            .get()
+            .ok_or(Error::NoImsicVirtualization)
+    }
+
+    /// Returns the location of this vCPU's virtualized IMSIC.
+    pub fn get_imsic_location(&self) -> Option<ImsicLocation> {
+        self.ext_interrupts()
+            .ok()
+            .map(|ei| ei.lock().imsic_location())
+    }
+
+    /// Prepares to bind this vCPU to `interrupt_file` on the current physical CPU.
+    pub fn bind_imsic_prepare(&self, interrupt_file: ImsicFileId) -> Result<()> {
+        // We skip the self.status check here (and similarly for the other bind/unbind calls)
+        // since the only way for the vCPU to be presently running is to be bound to a different
+        // physical CPU.
+        self.ext_interrupts()?
+            .lock()
+            .bind_imsic_prepare(interrupt_file)
+    }
+
+    /// Completes the IMSIC bind operation started in `bind_imsic_prepare()`.
+    pub fn bind_imsic_finish(&self) -> Result<()> {
+        let interrupt_file = self.ext_interrupts()?.lock().bind_imsic_finish()?;
+
+        // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
+        let mut arch = self.arch.lock();
+        let mut hstatus =
+            LocalRegisterCopy::<u64, hstatus::Register>::new(arch.regs.guest_regs.hstatus);
+        hstatus.modify(hstatus::vgein.val(interrupt_file.bits() as u64));
+        arch.regs.guest_regs.hstatus = hstatus.get();
+        Ok(())
+    }
+
+    /// Prepares to unbind this vCPU from its current interrupt file.
+    pub fn unbind_imsic_prepare(&self) -> Result<()> {
+        self.ext_interrupts()?.lock().unbind_imsic_prepare()
+    }
+
+    /// Completes the IMSIC unbind operation started in `unbind_imsic_prepare()`.
+    pub fn unbind_imsic_finish(&self) -> Result<()> {
+        self.ext_interrupts()?.lock().unbind_imsic_finish()
     }
 }
 
 /// The set of vCPUs in a VM.
 pub struct VmCpus {
-    inner: [Once<PageBox<VmCpusEntry>>; VM_CPUS_MAX],
+    inner: [Once<PageBox<VmCpu>>; VM_CPUS_MAX],
 }
 
 impl VmCpus {
@@ -1236,25 +1305,20 @@ impl VmCpus {
         }
     }
 
-    /// Adds the vCPU at `vcpu_id` as an available vCPU using `shared_area` as the vCPU's shared
-    /// state-memory state area.
-    pub fn add_vcpu(&self, vcpu_entry: PageBox<VmCpusEntry>) -> Result<()> {
-        // Locking before status is safe here. This vcpu_entry is not in VmCpus yet.
-        let vcpu_id = vcpu_entry.vcpu.lock().vcpu_id;
-        let once_entry = self
-            .inner
-            .get(vcpu_id as usize)
-            .ok_or(Error::VmCpuNotFound)?;
+    /// Adds the given vCPU to the set of vCPUs.
+    pub fn add_vcpu(&self, vcpu: PageBox<VmCpu>) -> Result<()> {
+        let vcpu_id = vcpu.vcpu_id();
+        let once_entry = self.inner.get(vcpu_id as usize).ok_or(Error::BadVmCpuId)?;
 
         // CAVEAT: following code is tricky.
         //
         // What we need is a OnceLock or a way to check that we have
         // indeed set the value we passed. Since we don't have this
-        // (for now), we determine if the `vcpu_entry` has been set by
+        // (for now), we determine if the `vcpu` has been set by
         // checking the underlying pointer of the `PageBox`.
-        let ptr: *const VmCpusEntry = &*vcpu_entry;
-        let once_val = once_entry.call_once(|| vcpu_entry);
-        let once_ptr: *const VmCpusEntry = &**once_val;
+        let ptr: *const VmCpu = &*vcpu;
+        let once_val = once_entry.call_once(|| vcpu);
+        let once_ptr: *const VmCpu = &**once_val;
 
         if once_ptr != ptr {
             Err(Error::VmCpuExists)
@@ -1263,92 +1327,19 @@ impl VmCpus {
         }
     }
 
-    /// Returns a reference to the vCPU with `vcpu_id` if it exists and is not currently running.
-    /// The returned `IdleVmCpu` is guaranteed not to change state until it is dropped.
-    pub fn get_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
-        let entry = self
+    /// Returns a reference to the vCPU with `vcpu_id` if it exists.
+    pub fn get_vcpu(&self, vcpu_id: u64) -> Result<&VmCpu> {
+        let vcpu = self
             .inner
             .get(vcpu_id as usize)
             .and_then(|once| once.get())
             .ok_or(Error::VmCpuNotFound)?;
-        let status = entry.status.read();
-        match *status {
-            VmCpuStatus::PoweredOff | VmCpuStatus::Runnable => Ok(IdleVmCpu {
-                _status: status,
-                vcpu: entry.vcpu.lock(),
-            }),
-            VmCpuStatus::Running => Err(Error::VmCpuRunning),
-        }
-    }
-
-    /// Marks the vCPU with `vcpu_id` as powered on and runnable and returns a reference to it.
-    /// The returned `IdleVmCpu` is guaranteed not to change state until it is dropped.
-    pub fn power_on_vcpu(&self, vcpu_id: u64) -> Result<IdleVmCpu> {
-        let entry = self
-            .inner
-            .get(vcpu_id as usize)
-            .and_then(|once| once.get())
-            .ok_or(Error::VmCpuNotFound)?;
-        let mut status = entry.status.write();
-        match *status {
-            VmCpuStatus::PoweredOff => {
-                *status = VmCpuStatus::Runnable;
-                Ok(IdleVmCpu {
-                    _status: status.downgrade(),
-                    vcpu: entry.vcpu.lock(),
-                })
-            }
-            VmCpuStatus::Running | VmCpuStatus::Runnable => Err(Error::VmCpuAlreadyPowered),
-        }
-    }
-
-    /// Takes exclusive ownership of and activates the vCPU with `vcpu_id`, returning it as an
-    /// `ActiveVmCpu`. If `parent_vcpu` is not `None`, its state is saved before this vCPU is
-    /// activated and is restored when the returned `ActiveVmCpu` is dropped.
-    pub fn activate_vcpu<'vcpu, 'pages, 'prev: 'vcpu + 'pages, T: GuestStagePagingMode>(
-        &'vcpu self,
-        vcpu_id: u64,
-        vm_pages: FinalizedVmPages<'pages, T>,
-        mut parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
-    ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'prev, T>> {
-        let entry = self
-            .inner
-            .get(vcpu_id as usize)
-            .and_then(|once| once.get())
-            .ok_or(Error::VmCpuNotFound)?;
-        let mut status = entry.status.write();
-        match *status {
-            VmCpuStatus::Runnable => {
-                let vcpu = entry.vcpu.lock();
-                if vcpu.guest_id != vm_pages.page_owner_id() {
-                    return Err(Error::WrongAddressSpace);
-                }
-                *status = VmCpuStatus::Running;
-
-                // Context-switch to the vCPU.
-                if let Some(ref mut p) = parent_vcpu {
-                    p.save();
-                }
-                ActiveVmCpu::restore_from(self, vcpu, vm_pages, parent_vcpu)
-            }
-            VmCpuStatus::Running => Err(Error::VmCpuRunning),
-            VmCpuStatus::PoweredOff => Err(Error::VmCpuOff),
-        }
-    }
-
-    /// Returns the status of the specified vCPU.
-    pub fn get_vcpu_status(&self, vcpu_id: u64) -> Result<VmCpuStatus> {
-        let entry = self
-            .inner
-            .get(vcpu_id as usize)
-            .and_then(|once| once.get())
-            .ok_or(Error::VmCpuNotFound)?;
-        Ok(*entry.status.read())
+        Ok(vcpu)
     }
 
     /// Returns the number of pages that must be donated to create a vCPU.
     pub const fn required_state_pages_per_vcpu() -> u64 {
-        PageBox::<VmCpusEntry>::required_pages()
+        PageBox::<VmCpu>::required_pages()
     }
 }
 

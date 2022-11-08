@@ -22,8 +22,8 @@ use sbi::{Error as SbiError, *};
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm_cpu::{
-    ActiveVmCpu, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpuStatus, VmCpuTrap,
-    VmCpus, VmCpusEntry, VM_CPUS_MAX, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
+    ActiveVmCpu, VmCpu, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpuStatus,
+    VmCpuTrap, VmCpus, VM_CPUS_MAX, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -306,13 +306,11 @@ impl<T: GuestStagePagingMode> Vm<T> {
         // Enable the boot vCPU; we assume this is always vCPU 0.
         //
         // TODO: Should we allow a non-0 boot vCPU to be specified when creating the TVM?
-        let (sepc, arg) = {
-            let mut vcpu = self
-                .vcpus
-                .power_on_vcpu(0)
-                .map_err(|_| Error::MissingBootCpu)?;
-            vcpu.latch_entry_args()
-        };
+        let (sepc, arg) = self
+            .vcpus
+            .get_vcpu(0)
+            .and_then(|v| v.power_on_and_latch_entry_args())
+            .map_err(|_| Error::MissingBootCpu)?;
         // Latch and measure the entry point of the boot vCPU.
         self.attestation_mgr.set_epc(sepc);
         self.attestation_mgr.set_arg(arg);
@@ -411,7 +409,7 @@ pub type InitializingVm<'a, T> = VmRef<'a, T, VmStateInitializing>;
 
 impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
     /// Adds a vCPU to this VM.
-    fn add_vcpu(&self, vcpu_box: PageBox<VmCpusEntry>) -> EcallResult<()> {
+    fn add_vcpu(&self, vcpu_box: PageBox<VmCpu>) -> EcallResult<()> {
         self.vm()
             .vcpus
             .add_vcpu(vcpu_box)
@@ -427,16 +425,11 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
         if !geometry.location_is_valid(location) {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
-        let mut vcpu = self
-            .vm()
+        self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        if vcpu.get_imsic_location().is_some() {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
-        vcpu.set_imsic_location(location);
-        Ok(())
+            .and_then(|v| v.enable_imsic_virtualization(location))
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 }
 
@@ -447,13 +440,11 @@ pub type FinalizedVm<'a, T> = VmRef<'a, T, VmStateFinalized>;
 impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     /// Sets the entry point of the specified vCPU and makes it runnable.
     fn start_vcpu(&self, vcpu_id: u64, start_addr: u64, opaque: u64) -> EcallResult<()> {
-        let mut vcpu = self
-            .vm()
+        self.vm()
             .vcpus
-            .power_on_vcpu(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        vcpu.set_entry_args(start_addr, opaque);
-        Ok(())
+            .get_vcpu(vcpu_id)
+            .and_then(|v| v.power_on(start_addr, opaque))
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 
     /// Gets the state of the specified vCPU.
@@ -461,8 +452,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let vcpu_status = self
             .vm()
             .vcpus
-            .get_vcpu_status(vcpu_id)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+            .get_vcpu(vcpu_id)
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?
+            .status();
         let status = match vcpu_status {
             VmCpuStatus::Runnable | VmCpuStatus::Running => HartState::Started,
             VmCpuStatus::PoweredOff => HartState::Stopped,
@@ -504,11 +496,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
     /// Run this guest until an unhandled exit is encountered.
     fn run_vcpu(&self, vcpu_id: u64, parent_vcpu: Option<&mut ActiveVmCpu<T>>) -> EcallResult<u64> {
-        // Take the vCPU out of self.vcpus, giving us exclusive ownership.
-        let mut active_vcpu = self
+        let vcpu = self
             .vm()
             .vcpus
-            .activate_vcpu(vcpu_id, self.vm_pages(), parent_vcpu)
+            .get_vcpu(vcpu_id)
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        // Activate the vCPU, giving us exclusive ownership over the ability to run it.
+        let mut active_vcpu = vcpu
+            .activate(self.vm_pages(), parent_vcpu)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         // Run until there's an exit we can't handle.
         let cause = loop {
@@ -1249,7 +1244,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             SequentialPages::from_pages(Self::assign_pages(pages, guest_vm.page_owner_id()))
                 .unwrap();
         let vcpu_box = PageBox::new_with(
-            VmCpusEntry::new(vcpu_id, guest_vm.page_owner_id(), shared_area),
+            VmCpu::new(vcpu_id, guest_vm.page_owner_id(), shared_area),
             vcpu_pages,
             self.page_tracker(),
         );
@@ -1849,7 +1844,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
-            .and_then(|mut vcpu| vcpu.bind_imsic_prepare(interrupt_file))
+            .and_then(|vcpu| vcpu.bind_imsic_prepare(interrupt_file))
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 
@@ -1857,7 +1852,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
-            .and_then(|mut vcpu| vcpu.bind_imsic_finish())
+            .and_then(|vcpu| vcpu.bind_imsic_finish())
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 
@@ -1940,7 +1935,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
-            .and_then(|mut vcpu| vcpu.unbind_imsic_prepare())
+            .and_then(|vcpu| vcpu.unbind_imsic_prepare())
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 
@@ -1968,7 +1963,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
-            .and_then(|mut vcpu| vcpu.unbind_imsic_finish())
+            .and_then(|vcpu| vcpu.unbind_imsic_finish())
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 
@@ -2133,9 +2128,9 @@ impl<T: GuestStagePagingMode> HostVm<T> {
                     unsafe { VmCpuSharedArea::new(&mut this.vcpu_shared[i]) }.unwrap();
 
                 // Allocate vCPU.
-                let vcpu_entry = VmCpusEntry::new(i as u64, PageOwnerId::host(), shared_area);
+                let vcpu = VmCpu::new(i as u64, PageOwnerId::host(), shared_area);
                 let vcpu_pages = state_pages_iter.next().unwrap();
-                let vcpu_box = PageBox::new_with(vcpu_entry, vcpu_pages, page_tracker.clone());
+                let vcpu_box = PageBox::new_with(vcpu, vcpu_pages, page_tracker.clone());
                 init_vm.add_vcpu(vcpu_box).unwrap();
 
                 let imsic_loc = imsic.supervisor_file_location(CpuId::new(i)).unwrap();

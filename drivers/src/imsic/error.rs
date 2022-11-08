@@ -13,6 +13,8 @@ pub enum Error {
     MissingProperty(&'static str),
     /// Unexpected number of parent interrupts specified in the device tree.
     InvalidParentInterruptCount(usize),
+    /// Invalid number of external interrupt IDs.
+    InvalidInterruptIds(usize),
     /// Invalid number of guest files per hart specified in the IMSIC geometry.
     InvalidGuestsPerHart(usize),
     /// Invalid group index shift specified in the IMSIC geometry.

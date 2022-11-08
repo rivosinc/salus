@@ -16,7 +16,8 @@
     ptr_sub_ptr,
     slice_ptr_get,
     let_chains,
-    is_some_and
+    is_some_and,
+    negative_impls
 )]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};

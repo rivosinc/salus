@@ -1013,6 +1013,10 @@ impl<T: GuestStagePagingMode> Drop for ActiveVmCpu<'_, '_, '_, T> {
     }
 }
 
+// ActiveVmCpu is used to guard CSR and TLB state which is local to the current physical CPU and
+// thus cannot be safely shared between threads.
+impl<T: GuestStagePagingMode> !Sync for ActiveVmCpu<'_, '_, '_, T> {}
+
 // State of binding a vCPU to a physical CPU.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum BindStatus {

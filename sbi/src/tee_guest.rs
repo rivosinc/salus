@@ -24,6 +24,27 @@ pub enum TeeGuestFunction {
         /// a2 = length of the region
         len: u64,
     },
+    /// Allows injection of the specified external interrupt ID into the calling TVM vCPU. Passing
+    /// an ID of -1 allows injection of all external interrupts. TVM vCPUs are started with
+    /// injection of external interrupts completely disabled by default.
+    ///
+    /// Returns an error if the specified external interrupt ID is invalid.
+    ///
+    /// a6 = 1
+    AllowExternalInterrupt {
+        /// a0 = interrupt ID
+        id: i64,
+    },
+    /// Denies injection of the specified external interrupt ID into the calling TVM vCPU. Passing
+    /// an ID of -1 denies injection of all external interrupts.
+    ///
+    /// Returns an error if the specified external interrupt ID is invalid.
+    ///
+    /// a6 = 2
+    DenyExternalInterrupt {
+        /// a0 = interrupt ID
+        id: i64,
+    },
 }
 
 impl TeeGuestFunction {
@@ -36,6 +57,8 @@ impl TeeGuestFunction {
                 addr: args[1],
                 len: args[2],
             }),
+            1 => Ok(AllowExternalInterrupt { id: args[0] as i64 }),
+            2 => Ok(DenyExternalInterrupt { id: args[0] as i64 }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -46,6 +69,8 @@ impl SbiFunction for TeeGuestFunction {
         use TeeGuestFunction::*;
         match self {
             AddMemoryRegion { .. } => 0,
+            AllowExternalInterrupt { .. } => 1,
+            DenyExternalInterrupt { .. } => 2,
         }
     }
 
@@ -57,6 +82,8 @@ impl SbiFunction for TeeGuestFunction {
                 addr: _,
                 len: _,
             } => *region_type as u64,
+            AllowExternalInterrupt { id } => *id as u64,
+            DenyExternalInterrupt { id } => *id as u64,
         }
     }
 
@@ -68,6 +95,7 @@ impl SbiFunction for TeeGuestFunction {
                 addr,
                 len: _,
             } => *addr,
+            _ => 0,
         }
     }
 
@@ -79,6 +107,7 @@ impl SbiFunction for TeeGuestFunction {
                 addr: _,
                 len,
             } => *len,
+            _ => 0,
         }
     }
 }

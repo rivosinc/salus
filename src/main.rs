@@ -33,6 +33,7 @@ mod trap;
 mod vm;
 mod vm_cpu;
 mod vm_id;
+mod vm_interrupts;
 mod vm_pages;
 mod vm_pmu;
 

@@ -17,6 +17,7 @@ use spin::{Mutex, MutexGuard, Once, RwLock};
 use crate::smp::PerCpu;
 use crate::vm::{MmioOpcode, MmioOperation, VmExitCause};
 use crate::vm_id::VmId;
+use crate::vm_interrupts::{self, VmCpuExtInterrupts};
 use crate::vm_pages::{ActiveVmPages, FinalizedVmPages, PinnedPages};
 use crate::vm_pmu::VmPmuState;
 
@@ -33,10 +34,9 @@ pub enum Error {
     InsufficientSharedStatePages,
     NoImsicVirtualization,
     ImsicLocationAlreadySet,
-    BindingImsic(ImsicError),
-    UnbindingImsic(ImsicError),
-    WrongBindStatus,
-    WrongPhysicalCpu,
+    VmCpuNotBound,
+    Binding(vm_interrupts::Error),
+    Unbinding(vm_interrupts::Error),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -1017,125 +1017,6 @@ impl<T: GuestStagePagingMode> Drop for ActiveVmCpu<'_, '_, '_, T> {
 // thus cannot be safely shared between threads.
 impl<T: GuestStagePagingMode> !Sync for ActiveVmCpu<'_, '_, '_, T> {}
 
-// State of binding a vCPU to a physical CPU.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum BindStatus {
-    Binding(CpuId, ImsicFileId),
-    Bound(CpuId, ImsicFileId),
-    Unbinding(CpuId, ImsicFileId),
-    Unbound,
-}
-
-// Virtual external interrupt state for a vCPU.
-struct VmCpuExtInterrupts {
-    bind_status: BindStatus,
-    imsic_location: ImsicLocation,
-    sw_file: SwFile,
-}
-
-impl VmCpuExtInterrupts {
-    fn new(imsic_location: ImsicLocation) -> Self {
-        Self {
-            bind_status: BindStatus::Unbound,
-            imsic_location,
-            sw_file: SwFile::new(),
-        }
-    }
-
-    fn imsic_location(&self) -> ImsicLocation {
-        self.imsic_location
-    }
-
-    fn bind_imsic_prepare(&mut self, interrupt_file: ImsicFileId) -> Result<()> {
-        // The vCPU must be completely unbound to start a bind operation.
-        if self.bind_status != BindStatus::Unbound {
-            return Err(Error::WrongBindStatus);
-        }
-
-        // Initialize the guest IMSIC file we're getting bound to.
-        let imsic = Imsic::get();
-        imsic
-            .restore_guest_file_prepare(interrupt_file, &mut self.sw_file)
-            .map_err(Error::BindingImsic)?;
-
-        self.bind_status = BindStatus::Binding(PerCpu::this_cpu().cpu_id(), interrupt_file);
-        Ok(())
-    }
-
-    fn bind_imsic_finish(&mut self) -> Result<ImsicFileId> {
-        // Make sure there's a bind operation was started on this CPU.
-        let (cpu, interrupt_file) = match self.bind_status {
-            BindStatus::Binding(cpu, interrupt_file) => (cpu, interrupt_file),
-            _ => {
-                return Err(Error::WrongBindStatus);
-            }
-        };
-        if cpu != PerCpu::this_cpu().cpu_id() {
-            return Err(Error::WrongPhysicalCpu);
-        }
-
-        // Finish restoring state from the SW interrupt file.
-        let imsic = Imsic::get();
-        imsic
-            .restore_guest_file_finish(interrupt_file, &mut self.sw_file)
-            .map_err(Error::BindingImsic)?;
-        self.bind_status = BindStatus::Bound(cpu, interrupt_file);
-        Ok(interrupt_file)
-    }
-
-    fn unbind_imsic_prepare(&mut self) -> Result<()> {
-        // We must be bound (to the current CPU) to start an unbind.
-        let (cpu, interrupt_file) = match self.bind_status {
-            BindStatus::Bound(cpu, interrupt_file) => (cpu, interrupt_file),
-            _ => {
-                return Err(Error::WrongBindStatus);
-            }
-        };
-        if cpu != PerCpu::this_cpu().cpu_id() {
-            return Err(Error::WrongPhysicalCpu);
-        }
-
-        let imsic = Imsic::get();
-        imsic
-            .save_guest_file_prepare(interrupt_file, &mut self.sw_file)
-            .map_err(Error::UnbindingImsic)?;
-        self.bind_status = BindStatus::Unbinding(cpu, interrupt_file);
-        Ok(())
-    }
-
-    fn unbind_imsic_finish(&mut self) -> Result<()> {
-        // We must be bound (to the current CPU) to start an unbind.
-        let (cpu, interrupt_file) = match self.bind_status {
-            BindStatus::Unbinding(cpu, interrupt_file) => (cpu, interrupt_file),
-            _ => {
-                return Err(Error::WrongBindStatus);
-            }
-        };
-        if cpu != PerCpu::this_cpu().cpu_id() {
-            return Err(Error::WrongPhysicalCpu);
-        }
-
-        let imsic = Imsic::get();
-        imsic
-            .save_guest_file_finish(interrupt_file, &mut self.sw_file)
-            .map_err(Error::UnbindingImsic)?;
-        self.bind_status = BindStatus::Unbound;
-        Ok(())
-    }
-
-    fn is_bound_on_this_cpu(&self) -> Result<()> {
-        match self.bind_status {
-            BindStatus::Bound(cpu_id, _) => {
-                if cpu_id != PerCpu::this_cpu().cpu_id() {
-                    return Err(Error::WrongPhysicalCpu);
-                }
-                Ok(())
-            }
-            _ => Err(Error::WrongBindStatus),
-        }
-    }
-}
-
 /// The availability of vCPU in a VM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmCpuStatus {
@@ -1225,8 +1106,10 @@ impl VmCpu {
                 }
 
                 // We must be bound to the current CPU if IMSIC virtualization is enabled.
-                if let Some(ext_interrupts) = self.ext_interrupts.get() {
-                    ext_interrupts.lock().is_bound_on_this_cpu()?;
+                if let Some(ext_interrupts) = self.ext_interrupts.get() &&
+                    !ext_interrupts.lock().is_bound_on_this_cpu()
+                {
+                    return Err(Error::VmCpuNotBound);
                 }
 
                 let active_vcpu = ActiveVmCpu::restore_from(self, vm_pages, parent_vcpu)?;
@@ -1243,7 +1126,7 @@ impl VmCpu {
     pub fn enable_imsic_virtualization(&self, imsic_location: ImsicLocation) -> Result<()> {
         self.ext_interrupts
             .call_once(|| Mutex::new(VmCpuExtInterrupts::new(imsic_location)));
-        if self.ext_interrupts.get().unwrap().lock().imsic_location != imsic_location {
+        if self.ext_interrupts.get().unwrap().lock().imsic_location() != imsic_location {
             return Err(Error::ImsicLocationAlreadySet);
         }
         Ok(())
@@ -1270,11 +1153,16 @@ impl VmCpu {
         self.ext_interrupts()?
             .lock()
             .bind_imsic_prepare(interrupt_file)
+            .map_err(Error::Binding)
     }
 
     /// Completes the IMSIC bind operation started in `bind_imsic_prepare()`.
     pub fn bind_imsic_finish(&self) -> Result<()> {
-        let interrupt_file = self.ext_interrupts()?.lock().bind_imsic_finish()?;
+        let interrupt_file = self
+            .ext_interrupts()?
+            .lock()
+            .bind_imsic_finish()
+            .map_err(Error::Binding)?;
 
         // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
         let mut arch = self.arch.lock();
@@ -1287,12 +1175,18 @@ impl VmCpu {
 
     /// Prepares to unbind this vCPU from its current interrupt file.
     pub fn unbind_imsic_prepare(&self) -> Result<()> {
-        self.ext_interrupts()?.lock().unbind_imsic_prepare()
+        self.ext_interrupts()?
+            .lock()
+            .unbind_imsic_prepare()
+            .map_err(Error::Unbinding)
     }
 
     /// Completes the IMSIC unbind operation started in `unbind_imsic_prepare()`.
     pub fn unbind_imsic_finish(&self) -> Result<()> {
-        self.ext_interrupts()?.lock().unbind_imsic_finish()
+        self.ext_interrupts()?
+            .lock()
+            .unbind_imsic_finish()
+            .map_err(Error::Unbinding)
     }
 }
 

@@ -126,6 +126,9 @@ impl PerCpu {
     }
 }
 
+// PerCpu state obviously cannot be shared between threads.
+impl !Sync for PerCpu {}
+
 /// Halts this CPU until an interrupt (for example, delivered via `kick_cpu()`) is received.
 pub fn wfi() {
     CSR.sstatus.modify(sstatus::sie.val(1));

@@ -146,6 +146,23 @@ pub enum TeeInterruptFunction {
         /// a1 = vCPU ID
         vcpu_id: u64,
     },
+    /// Injects an external interrupt with the given `interrupt_id` into the specified vCPU. If the
+    /// vCPU is presently bound to an IMSIC guest interrupt file, the interrupt is immediately
+    /// injected by writing to the interrupt file. If it is not bound, the interrupt is recorded
+    /// in software and will be injected once the vCPU becomes bound. The specified interrupt ID
+    /// must be valid and must have been allowed by the guest with `allow_external_interrupt()`.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 7
+    TvmCpuInjectExternalInterrupt {
+        /// a0 = TVM ID
+        tvm_id: u64,
+        /// a1 = vCPU ID
+        vcpu_id: u64,
+        /// a2 = interrupt ID
+        interrupt_id: u64,
+    },
 }
 
 impl TeeInterruptFunction {
@@ -182,6 +199,11 @@ impl TeeInterruptFunction {
                 tvm_id: args[0],
                 vcpu_id: args[1],
             }),
+            7 => Ok(TvmCpuInjectExternalInterrupt {
+                tvm_id: args[0],
+                vcpu_id: args[1],
+                interrupt_id: args[2],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -198,6 +220,7 @@ impl SbiFunction for TeeInterruptFunction {
             TvmCpuBindImsic { .. } => 4,
             TvmCpuUnbindImsicBegin { .. } => 5,
             TvmCpuUnbindImsicEnd { .. } => 6,
+            TvmCpuInjectExternalInterrupt { .. } => 7,
         }
     }
 
@@ -223,6 +246,11 @@ impl SbiFunction for TeeInterruptFunction {
             } => *tvm_id,
             TvmCpuUnbindImsicBegin { tvm_id, vcpu_id: _ } => *tvm_id,
             TvmCpuUnbindImsicEnd { tvm_id, vcpu_id: _ } => *tvm_id,
+            TvmCpuInjectExternalInterrupt {
+                tvm_id,
+                vcpu_id: _,
+                interrupt_id: _,
+            } => *tvm_id,
         }
     }
 
@@ -246,6 +274,11 @@ impl SbiFunction for TeeInterruptFunction {
             } => *vcpu_id,
             TvmCpuUnbindImsicBegin { tvm_id: _, vcpu_id } => *vcpu_id,
             TvmCpuUnbindImsicEnd { tvm_id: _, vcpu_id } => *vcpu_id,
+            TvmCpuInjectExternalInterrupt {
+                tvm_id: _,
+                vcpu_id,
+                interrupt_id: _,
+            } => *vcpu_id,
             _ => 0,
         }
     }
@@ -268,6 +301,11 @@ impl SbiFunction for TeeInterruptFunction {
                 vcpu_id: _,
                 imsic_mask,
             } => *imsic_mask,
+            TvmCpuInjectExternalInterrupt {
+                tvm_id: _,
+                vcpu_id: _,
+                interrupt_id,
+            } => *interrupt_id,
             _ => 0,
         }
     }

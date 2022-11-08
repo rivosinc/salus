@@ -1751,6 +1751,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TvmCpuUnbindImsicEnd { tvm_id, vcpu_id } => {
                 self.guest_unbind_vcpu_end(tvm_id, vcpu_id).into()
             }
+            _ => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
         }
     }
 
@@ -2004,6 +2005,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                     Err(_) => result.into(),
                 }
             }
+            _ => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
         }
     }
 

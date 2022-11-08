@@ -85,3 +85,16 @@ pub fn unbind_vcpu_imsic_end(tvm_id: u64, vcpu_id: u64) -> Result<()> {
     unsafe { ecall_send(&msg) }?;
     Ok(())
 }
+
+/// Injects an external interrupt into the specified vCPU. The interrupt ID must have been
+/// allowed with `allow_external_interrupt()` by the guest.
+pub fn inject_external_interrupt(tvm_id: u64, vcpu_id: u64, interrupt_id: u64) -> Result<()> {
+    let msg = SbiMessage::TeeInterrupt(TvmCpuInjectExternalInterrupt {
+        tvm_id,
+        vcpu_id,
+        interrupt_id,
+    });
+    // Safety: Does not access host memory.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}

@@ -604,6 +604,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                         }
                                     }
                                 }
+                                _ => {
+                                    continue;
+                                }
                             }
                         }
                         _ => {

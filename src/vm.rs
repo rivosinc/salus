@@ -659,7 +659,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             SbiMessage::TeeInterrupt(interrupt_func) => {
                 self.handle_tee_interrupt_msg(interrupt_func, active_vcpu)
             }
-            SbiMessage::TeeGuest(guest_func) => self.handle_tee_guest_msg(guest_func),
+            SbiMessage::TeeGuest(guest_func) => self.handle_tee_guest_msg(guest_func, active_vcpu),
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
@@ -1987,25 +1987,29 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    fn handle_tee_guest_msg(&self, guest_func: TeeGuestFunction) -> EcallAction {
+    fn handle_tee_guest_msg(
+        &self,
+        guest_func: TeeGuestFunction,
+        active_vcpu: &ActiveVmCpu<T>,
+    ) -> EcallAction {
         use TeeGuestFunction::*;
-        match guest_func {
+        let result = match guest_func {
             AddMemoryRegion {
                 region_type,
                 addr,
                 len,
-            } => {
-                let result = self.add_memory_region(region_type, addr, len);
-                // Notify the host if the call succeeded.
-                match result {
-                    Ok(r) => EcallAction::Break(
-                        VmExitCause::ResumableEcall(SbiMessage::TeeGuest(guest_func)),
-                        SbiReturn::success(r),
-                    ),
-                    Err(_) => result.into(),
-                }
-            }
-            _ => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
+            } => self.add_memory_region(region_type, addr, len),
+            AllowExternalInterrupt { id } => self.allow_ext_interrupt(id, active_vcpu),
+            DenyExternalInterrupt { id } => self.deny_ext_interrupt(id, active_vcpu),
+        };
+
+        // Notify the host if a TEE-Guest call succeeds.
+        match result {
+            Ok(r) => EcallAction::Break(
+                VmExitCause::ResumableEcall(SbiMessage::TeeGuest(guest_func)),
+                SbiReturn::success(r),
+            ),
+            Err(_) => result.into(),
         }
     }
 
@@ -2028,6 +2032,26 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 .map_err(EcallError::from),
             _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
         }?;
+        Ok(0)
+    }
+
+    fn allow_ext_interrupt(&self, id: i64, active_vcpu: &ActiveVmCpu<T>) -> EcallResult<u64> {
+        if id == -1 {
+            active_vcpu.allow_all_ext_interrupts()
+        } else {
+            active_vcpu.allow_ext_interrupt(id as usize)
+        }
+        .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        Ok(0)
+    }
+
+    fn deny_ext_interrupt(&self, id: i64, active_vcpu: &ActiveVmCpu<T>) -> EcallResult<u64> {
+        if id == -1 {
+            active_vcpu.deny_all_ext_interrupts()
+        } else {
+            active_vcpu.deny_ext_interrupt(id as usize)
+        }
+        .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         Ok(0)
     }
 }

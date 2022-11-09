@@ -37,6 +37,8 @@ pub enum Error {
     VmCpuNotBound,
     Binding(vm_interrupts::Error),
     Unbinding(vm_interrupts::Error),
+    AllowingInterrupt(vm_interrupts::Error),
+    DenyingInterrupt(vm_interrupts::Error),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -877,6 +879,38 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     /// Returns a mutable reference to this active vCPU's PMU state.
     pub fn pmu(&mut self) -> &mut VmPmuState {
         &mut self.arch.pmu
+    }
+
+    /// Adds `id` to the list of injectable external interrupts.
+    pub fn allow_ext_interrupt(&self, id: usize) -> Result<()> {
+        self.vcpu
+            .ext_interrupts()?
+            .lock()
+            .allow_interrupt(id)
+            .map_err(Error::AllowingInterrupt)
+    }
+
+    /// Allows injection of all external interrupts.
+    pub fn allow_all_ext_interrupts(&self) -> Result<()> {
+        let ext_interrupts = self.vcpu.ext_interrupts()?;
+        ext_interrupts.lock().allow_all_interrupts();
+        Ok(())
+    }
+
+    /// Removes `id` from the list of injectable external interrupts.
+    pub fn deny_ext_interrupt(&self, id: usize) -> Result<()> {
+        self.vcpu
+            .ext_interrupts()?
+            .lock()
+            .deny_interrupt(id)
+            .map_err(Error::DenyingInterrupt)
+    }
+
+    /// Disables injection of all external interrupts.
+    pub fn deny_all_ext_interrupts(&self) -> Result<()> {
+        let ext_interrupts = self.vcpu.ext_interrupts()?;
+        ext_interrupts.lock().deny_all_interrupts();
+        Ok(())
     }
 
     // Completes any pending MMIO operation for this CPU.

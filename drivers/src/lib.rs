@@ -31,7 +31,7 @@ pub use cpu::{CpuId, CpuInfo, MAX_CPUS};
 
 #[cfg(test)]
 mod tests {
-    use super::imsic::Imsic;
+    use super::imsic::{Imsic, ImsicFileId};
     use super::*;
     use alloc::vec::Vec;
     use device_tree::DeviceTree;
@@ -253,14 +253,18 @@ mod tests {
         let group0_addr = geometry.base_addr();
         assert_eq!(group0_addr.bits(), 0x4000_0000);
         let per_hart_pages = 1 << GUEST_BITS as u64;
-        let cpu1_loc = imsic.supervisor_file_location(CpuId::new(1)).unwrap();
+        let cpu1_loc = imsic
+            .phys_file_location(CpuId::new(1), ImsicFileId::Supervisor)
+            .unwrap();
         assert_eq!(
             geometry.location_to_addr(cpu1_loc).unwrap(),
             group0_addr.checked_add_pages(per_hart_pages).unwrap()
         );
         let group1_addr =
             PageAddr::new(RawAddr::supervisor(group0_addr.bits() + (1 << GROUP_SHIFT))).unwrap();
-        let cpu2_loc = imsic.supervisor_file_location(CpuId::new(2)).unwrap();
+        let cpu2_loc = imsic
+            .phys_file_location(CpuId::new(2), ImsicFileId::Supervisor)
+            .unwrap();
         assert_eq!(geometry.location_to_addr(cpu2_loc).unwrap(), group1_addr);
 
         // Make sure `HwMemMap` got updated.

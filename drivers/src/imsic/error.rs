@@ -45,6 +45,8 @@ pub enum Error {
     GuestFilesTaken(CpuId),
     /// The provided IMSIC file ID was not a valid guest interrupt file.
     InvalidGuestFile,
+    /// The provided IMSIC interrupt ID was out of range.
+    InvalidInterruptId(u32),
 }
 
 /// Holds the result of IMSIC operations.

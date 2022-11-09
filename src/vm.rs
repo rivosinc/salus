@@ -2135,7 +2135,9 @@ impl<T: GuestStagePagingMode> HostVm<T> {
                 let vcpu_box = PageBox::new_with(vcpu, vcpu_pages, page_tracker.clone());
                 init_vm.add_vcpu(vcpu_box).unwrap();
 
-                let imsic_loc = imsic.supervisor_file_location(CpuId::new(i)).unwrap();
+                let imsic_loc = imsic
+                    .phys_file_location(CpuId::new(i), ImsicFileId::Supervisor)
+                    .unwrap();
                 init_vm
                     .set_vcpu_imsic_location(i as u64, imsic_loc)
                     .unwrap();

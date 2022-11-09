@@ -550,16 +550,20 @@ impl Imsic {
         Ok(iter)
     }
 
-    /// Returns the IMSIC location specifier of the supervisor level interrupt file for the given
-    /// CPU.
-    pub fn supervisor_file_location(&self, cpu: CpuId) -> Result<ImsicLocation> {
+    /// Returns the IMSIC location specifier of the interrupt file on the specified physical CPU.
+    pub fn phys_file_location(&self, cpu: CpuId, file: ImsicFileId) -> Result<ImsicLocation> {
         let cpus = self.per_cpu.lock();
         let pcpu = cpus.get_cpu(cpu).ok_or(Error::InvalidCpu(cpu))?;
-        Ok(ImsicLocation::new(
-            pcpu.group,
-            pcpu.hart,
-            ImsicFileId::supervisor(),
-        ))
+        Ok(ImsicLocation::new(pcpu.group, pcpu.hart, file))
+    }
+
+    // Returns the address of the interrupt file on the specified physical CPU.
+    fn phys_file_addr(&self, cpu: CpuId, file: ImsicFileId) -> Result<SupervisorPageAddr> {
+        self.phys_file_location(cpu, file).and_then(|loc| {
+            self.geometry
+                .location_to_addr(loc)
+                .ok_or(Error::InvalidGuestFile)
+        })
     }
 
     /// Returns the phandle of this IMSIC's node in the device-tree.
@@ -567,18 +571,26 @@ impl Imsic {
         self.phandle
     }
 
-    /// Sends an IPI to the specified CPU.
-    pub fn send_ipi(&self, cpu: CpuId) -> Result<()> {
-        // If the CPU is valid, then its IMSIC location must be valid.
-        let addr = self
-            .geometry
-            .location_to_addr(self.supervisor_file_location(cpu)?)
-            .unwrap();
+    /// Sends an IPI with the raw `id` to the specified CPU and interrupt file by writing the
+    /// interrupt file's memory-mapped `seteipnum` register. This can be used to inject arbitrary
+    /// interrupts into the destination interrupt file. The caller is responsible for ensuring
+    /// that the destination CPU and interrupt file is in the proper state to receive the
+    /// interrupt.
+    pub fn send_ipi_raw(&self, cpu: CpuId, file: ImsicFileId, id: u32) -> Result<()> {
+        let addr = self.phys_file_addr(cpu, file)?;
+        if id == 0 || (id as usize) >= self.interrupt_ids() {
+            return Err(Error::InvalidInterruptId(id));
+        }
         unsafe {
-            // Safe since `addr` maps a valid supervisor-level IMSIC interrupt file.
-            core::ptr::write_volatile(addr.bits() as *mut u32, ImsicInterruptId::Ipi as u32)
+            // Safe since `addr` maps a valid IMSIC interrupt file.
+            core::ptr::write_volatile(addr.bits() as *mut u32, id)
         };
         Ok(())
+    }
+
+    /// Sends a supervisor-level IPI to the specified CPU.
+    pub fn send_ipi(&self, cpu: CpuId) -> Result<()> {
+        self.send_ipi_raw(cpu, ImsicFileId::Supervisor, ImsicInterruptId::Ipi as u32)
     }
 
     /// Claims and returns the ID of the next pending interrupt in this CPU's supervisor-level

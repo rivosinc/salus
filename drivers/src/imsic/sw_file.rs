@@ -71,6 +71,11 @@ impl SwFile {
         self.entries[index].pending = val;
     }
 
+    /// Sets the bit corresponding to `id` in the EIP register array.
+    pub fn set_eip_bit(&mut self, id: usize) {
+        self.entries[id / 64].pending |= 1 << (id % 64);
+    }
+
     /// Returns the saved value of the EIE register at `index`.
     pub fn eie(&self, index: usize) -> u64 {
         self.entries[index].enable

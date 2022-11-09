@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use arrayvec::ArrayVec;
 use drivers::{imsic::*, CpuId};
 
 use crate::smp::PerCpu;
@@ -12,6 +13,7 @@ pub enum Error {
     UnbindingImsic(ImsicError),
     WrongBindStatus,
     WrongPhysicalCpu,
+    InvalidInterruptId(usize),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -25,11 +27,56 @@ enum BindStatus {
     Unbound,
 }
 
+const ALLOW_LIST_ENTRIES: usize = MAX_INTERRUPT_IDS / 64;
+
+// Bitmap tracking the per-vCPU allowed external interrupts.
+struct AllowList {
+    bits: ArrayVec<u64, ALLOW_LIST_ENTRIES>,
+    num_ids: usize,
+}
+
+impl AllowList {
+    fn new(num_ids: usize) -> Self {
+        let mut bits = ArrayVec::new();
+        let entries = (num_ids + 63) / 64;
+        for _ in 0..entries {
+            bits.push(0);
+        }
+
+        Self { bits, num_ids }
+    }
+
+    fn allow_id(&mut self, id: usize) -> Result<()> {
+        if id == 0 || id >= self.num_ids {
+            return Err(Error::InvalidInterruptId(id));
+        }
+        self.bits[id / 64] |= 1 << (id % 64);
+        Ok(())
+    }
+
+    fn allow_all(&mut self) {
+        self.bits.iter_mut().for_each(|i| *i = !0u64);
+    }
+
+    fn deny_id(&mut self, id: usize) -> Result<()> {
+        if id == 0 || id >= self.num_ids {
+            return Err(Error::InvalidInterruptId(id));
+        }
+        self.bits[id / 64] &= !(1 << (id % 64));
+        Ok(())
+    }
+
+    fn deny_all(&mut self) {
+        self.bits.iter_mut().for_each(|i| *i = 0u64);
+    }
+}
+
 /// Virtual external interrupt state for a vCPU.
 pub struct VmCpuExtInterrupts {
     bind_status: BindStatus,
     imsic_location: ImsicLocation,
     sw_file: SwFile,
+    allowed_ids: AllowList,
 }
 
 impl VmCpuExtInterrupts {
@@ -40,6 +87,7 @@ impl VmCpuExtInterrupts {
             bind_status: BindStatus::Unbound,
             imsic_location,
             sw_file: SwFile::new(),
+            allowed_ids: AllowList::new(Imsic::get().interrupt_ids()),
         }
     }
 
@@ -135,5 +183,25 @@ impl VmCpuExtInterrupts {
             BindStatus::Bound(cpu_id, _) => cpu_id == PerCpu::this_cpu().cpu_id(),
             _ => false,
         }
+    }
+
+    /// Adds `id` to the list of injectable external interrupts.
+    pub fn allow_interrupt(&mut self, id: usize) -> Result<()> {
+        self.allowed_ids.allow_id(id)
+    }
+
+    /// Allows injection of all external interrupts.
+    pub fn allow_all_interrupts(&mut self) {
+        self.allowed_ids.allow_all();
+    }
+
+    /// Removes `id` from the list of injectable external interrupts.
+    pub fn deny_interrupt(&mut self, id: usize) -> Result<()> {
+        self.allowed_ids.deny_id(id)
+    }
+
+    /// Disables injection of all external interrupts.
+    pub fn deny_all_interrupts(&mut self) {
+        self.allowed_ids.deny_all();
     }
 }

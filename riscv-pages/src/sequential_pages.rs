@@ -39,7 +39,7 @@ pub struct SequentialPages<S: State> {
 }
 
 impl<S: State> SequentialPages<S> {
-    /// Creates a `SequentialPages` form the passed iterator.
+    /// Creates a `SequentialPages` from the passed iterator.
     ///
     /// If the passed pages are not consecutive, an Error will be returned holding an iterator to
     /// the passed in pages so they don't leak.
@@ -302,6 +302,8 @@ mod tests {
     use super::*;
     use crate::{PageAddr, RawAddr};
 
+    const TWO_MEG: u64 = 0x20_0000;
+
     #[test]
     fn create_success() {
         let pages: [Page<ConvertedDirty>; 4] = unsafe {
@@ -318,6 +320,37 @@ mod tests {
     }
 
     #[test]
+    fn create_success_huge() {
+        let pages: [Page<ConvertedDirty>; 4] = unsafe {
+            // Not safe, but memory won't be touched in the test...
+            [
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(1_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(2_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(3_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(4_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
+            ]
+        };
+
+        let rv = SequentialPages::from_pages(pages);
+        if rv.is_err() {
+            println!("{:?}", rv);
+        }
+        assert!(rv.is_ok());
+    }
+
+    #[test]
     fn create_failure() {
         let pages: [Page<ConvertedDirty>; 4] = unsafe {
             // Not safe, but memory won't be touched in the test...
@@ -326,6 +359,41 @@ mod tests {
                 Page::new(PageAddr::new(RawAddr::supervisor(0x2000)).unwrap()),
                 Page::new(PageAddr::new(RawAddr::supervisor(0x4000)).unwrap()),
                 Page::new(PageAddr::new(RawAddr::supervisor(0x5000)).unwrap()),
+            ]
+        };
+        let result = SequentialPages::from_pages(pages);
+        match result {
+            Ok(_) => panic!("didn't fail with non-sequential pages"),
+            Err(Error::NonContiguous(returned_pages)) => {
+                assert_eq!(returned_pages.count(), 4);
+            }
+            Err(_) => {
+                panic!("failed with unexpected error");
+            }
+        }
+    }
+
+    #[test]
+    fn create_failure_huge() {
+        let pages: [Page<ConvertedDirty>; 4] = unsafe {
+            // Not safe, but memory won't be touched in the test...
+            [
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(1_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(2_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(3_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
+                Page::new_with_size(
+                    PageAddr::new(RawAddr::supervisor(6_u64 * TWO_MEG)).unwrap(),
+                    PageSize::Size2M,
+                ),
             ]
         };
         let result = SequentialPages::from_pages(pages);
@@ -364,6 +432,21 @@ mod tests {
     }
 
     #[test]
+    fn from_single_huge() {
+        let p: Page<ConvertedDirty> = unsafe {
+            // Not safe, Just a test.
+            Page::new_with_size(
+                PageAddr::new(RawAddr::supervisor(TWO_MEG)).unwrap(),
+                PageSize::Size2M,
+            )
+        };
+        let seq = SequentialPages::from(p);
+        let mut pages = seq.into_iter();
+        assert_eq!(TWO_MEG, pages.next().unwrap().addr().bits());
+        assert!(pages.next().is_none());
+    }
+
+    #[test]
     fn unsafe_range() {
         // Not safe, but this is a test
         let seq: SequentialPages<ConvertedDirty> = unsafe {
@@ -382,12 +465,32 @@ mod tests {
         assert!(pages.next().is_none());
     }
 
+    #[test]
+    fn unsafe_range_huge() {
+        // Not safe, but this is a test
+        let seq: SequentialPages<ConvertedDirty> = unsafe {
+            SequentialPages::from_mem_range(
+                PageAddr::new(RawAddr::supervisor(TWO_MEG)).unwrap(),
+                PageSize::Size2M,
+                4,
+            )
+            .unwrap()
+        };
+        let mut pages = seq.into_iter();
+        assert_eq!(1_u64 * TWO_MEG, pages.next().unwrap().addr().bits());
+        assert_eq!(2_u64 * TWO_MEG, pages.next().unwrap().addr().bits());
+        assert_eq!(3_u64 * TWO_MEG, pages.next().unwrap().addr().bits());
+        assert_eq!(4_u64 * TWO_MEG, pages.next().unwrap().addr().bits());
+        assert!(pages.next().is_none());
+    }
+
     fn create_test_sequential_pages(
         base: SupervisorPageAddr,
         len: u64,
+        page_size: PageSize,
     ) -> SequentialPages<ConvertedDirty> {
         // NOT SAFE, but this is a test
-        unsafe { SequentialPages::from_mem_range(base, PageSize::Size4k, len).unwrap() }
+        unsafe { SequentialPages::from_mem_range(base, page_size, len).unwrap() }
     }
 
     #[test]
@@ -398,7 +501,36 @@ mod tests {
         let chunk_size = NonZeroU64::new(4).unwrap();
 
         // Create a SequentialPages of length 16
-        let seq = create_test_sequential_pages(base_addr, seq_len);
+        let seq = create_test_sequential_pages(base_addr, seq_len, PageSize::Size4k);
+        let page_size = seq.page_size();
+
+        // ... and a chunk iterator of 4 pages.
+        let mut iter = seq.into_chunks_iter(chunk_size);
+        assert_eq!(iter.size_hint(), (4, Some(4)));
+        let mut addr = base_addr;
+        // First four call will contain exactly `chunk_size` sequential pages.
+        for _i in 0..4 {
+            let subseq = iter.next().unwrap();
+            assert_eq!(subseq.base(), addr);
+            assert_eq!(subseq.len(), chunk_size.get());
+            assert_eq!(subseq.page_size(), page_size);
+            addr = addr
+                .checked_add_pages_with_size(chunk_size.get(), page_size)
+                .unwrap();
+        }
+        // Fifth call should be None.
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn chunks_iterator_exact_multiple_huge() {
+        // Test chunk iterator when the chunk size is a multiple of the length.
+        let base_addr = PageAddr::new(RawAddr::supervisor(TWO_MEG)).unwrap();
+        let seq_len: u64 = 16;
+        let chunk_size = NonZeroU64::new(4).unwrap();
+
+        // Create a SequentialPages of length 16
+        let seq = create_test_sequential_pages(base_addr, seq_len, PageSize::Size2M);
         let page_size = seq.page_size();
 
         // ... and a chunk iterator of 4 pages.
@@ -427,7 +559,41 @@ mod tests {
         let chunk_size = NonZeroU64::new(5).unwrap();
 
         // Create a SequentialPages of length 16
-        let seq = create_test_sequential_pages(base_addr, seq_len);
+        let seq = create_test_sequential_pages(base_addr, seq_len, PageSize::Size4k);
+        let page_size = seq.page_size();
+
+        // ... and a chunk iterator of 5 pages.
+        let mut iter = seq.into_chunks_iter(chunk_size);
+        assert_eq!(iter.size_hint(), (4, Some(4)));
+        let mut addr = base_addr;
+        // First three call will contain exactly `chunk_size` sequential pages.
+        for _i in 0..3 {
+            let subseq = iter.next().unwrap();
+            assert_eq!(subseq.page_size(), page_size);
+            assert_eq!(subseq.base(), addr);
+            assert_eq!(subseq.len(), chunk_size.get());
+            addr = addr
+                .checked_add_pages_with_size(chunk_size.get(), page_size)
+                .unwrap();
+        }
+        // Fifth call should be contain a sequential page of length one.
+        let subseq = iter.next().unwrap();
+        assert_eq!(subseq.page_size(), page_size);
+        assert_eq!(subseq.base(), addr);
+        assert_eq!(subseq.len(), 1);
+        // Sixth call should be none.
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn chunks_iterator_with_remainder_huge() {
+        // Test chunk iterator when the chunk size is not a multiple of the length.
+        let base_addr = PageAddr::new(RawAddr::supervisor(TWO_MEG)).unwrap();
+        let seq_len: u64 = 16;
+        let chunk_size = NonZeroU64::new(5).unwrap();
+
+        // Create a SequentialPages of length 16
+        let seq = create_test_sequential_pages(base_addr, seq_len, PageSize::Size2M);
         let page_size = seq.page_size();
 
         // ... and a chunk iterator of 5 pages.
@@ -466,7 +632,46 @@ mod tests {
         let chunk_size = NonZeroU64::new(1).unwrap();
 
         // Create a SequentialPages of length 16 at `(u64::MAX - 16 * PageSize::Size4k)`
-        let seq = create_test_sequential_pages(base_addr, seq_len);
+        let seq = create_test_sequential_pages(base_addr, seq_len, PageSize::Size4k);
+        let page_size = seq.page_size();
+
+        // ... and a chunk iterator of 1 pages.
+        let mut iter = seq.into_chunks_iter(chunk_size);
+        assert_eq!(iter.size_hint(), (16, Some(16)));
+        let mut addr = base_addr;
+
+        for _i in 0..15 {
+            let subseq = iter.next().unwrap();
+            assert_eq!(subseq.page_size(), page_size);
+            assert_eq!(subseq.base(), addr);
+            assert_eq!(subseq.len(), chunk_size.get());
+            addr = addr
+                .checked_add_pages_with_size(chunk_size.get(), page_size)
+                .unwrap();
+        }
+        // Check last page of the iterator.
+        let subseq = iter.next().unwrap();
+        assert_eq!(subseq.page_size(), page_size);
+        assert_eq!(subseq.base(), addr);
+        assert_eq!(subseq.len(), chunk_size.get());
+        // Check that we're done.
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn chunks_iterator_at_last_page_huge() {
+        // Test chunk iterator page limit: the last page of the sequence is at the last possible
+        // page address of a u64 address space. This is to check we can safely iterate over
+        // sequences of any u64 address.
+        let seq_len: u64 = 16;
+        let base_addr = PageAddr::new(RawAddr::supervisor(
+            u64::MAX - seq_len * PageSize::Size2M as u64 + 1,
+        ))
+        .unwrap();
+        let chunk_size = NonZeroU64::new(1).unwrap();
+
+        // Create a SequentialPages of length 16 at `(u64::MAX - 16 * PageSize::Size4k)`
+        let seq = create_test_sequential_pages(base_addr, seq_len, PageSize::Size2M);
         let page_size = seq.page_size();
 
         // ... and a chunk iterator of 1 pages.
@@ -498,7 +703,7 @@ mod tests {
         let seq_len: u64 = 0;
         let base_addr = PageAddr::new(RawAddr::supervisor(0x1000)).unwrap();
         let chunk_size = NonZeroU64::new(1).unwrap();
-        let seq = create_test_sequential_pages(base_addr, seq_len);
+        let seq = create_test_sequential_pages(base_addr, seq_len, PageSize::Size4k);
         let mut iter = seq.into_chunks_iter(chunk_size);
 
         // Check that we can't iterate on an empty Sequence.

@@ -784,6 +784,36 @@ mod tests {
     }
 
     #[test]
+    fn page_iter_start2m() {
+        let addr2m = PageAddr::new(RawAddr::supervisor(0)).unwrap();
+        let mut addrs = addr2m.iter_from_with_size(PageSize::Size2M).unwrap();
+        assert_eq!(addrs.next(), Some(addr2m));
+        assert_eq!(
+            addrs.next(),
+            Some(PageAddr::new(RawAddr::supervisor(0x20_0000)).unwrap())
+        );
+        assert_eq!(
+            addrs.next(),
+            Some(PageAddr::new(RawAddr::supervisor(0x40_0000)).unwrap())
+        );
+        assert_eq!(
+            addrs.next(),
+            Some(PageAddr::new(RawAddr::supervisor(0x60_0000)).unwrap())
+        );
+
+        let addr_m = PageAddr::with_alignment(RawAddr::supervisor(0), PageSize::Size1G).unwrap();
+        let mut addrs = addr_m.iter_from_with_size(PageSize::Size1G).unwrap();
+        assert_eq!(addrs.next(), Some(addr_m));
+        assert_eq!(
+            addrs.next(),
+            Some(
+                PageAddr::with_alignment(RawAddr::supervisor(0x4000_0000), PageSize::Size1G)
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
     fn page_iter_end_addr_space() {
         let addr4k = PageAddr::new(RawAddr::supervisor(0_u64.wrapping_sub(4096))).unwrap();
         let mut addrs = addr4k.iter_from();

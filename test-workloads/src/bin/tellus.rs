@@ -604,6 +604,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                         }
                                     }
                                 }
+                                AllowExternalInterrupt { id } => {
+                                    // Try to inject the allow-listed interrupt into the guest.
+                                    // If guest allowed all interrupts (-1), just pick a random
+                                    // one.
+                                    let id = u64::try_from(id).unwrap_or(7);
+                                    println!("Injecting interrupt {id} into guest");
+                                    tee_interrupt::inject_external_interrupt(vmid, 0, id)
+                                        .expect("Tellus - InjectExternalInterrupt failed");
+                                }
                                 _ => {
                                     continue;
                                 }

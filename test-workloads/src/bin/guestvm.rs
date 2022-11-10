@@ -341,6 +341,10 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
     // Safety: WFI behavior is well-defined.
     unsafe { asm!("wfi", options(nomem, nostack)) };
 
+    // TODO: Set up and interrupt handler and enable interrupts so that we can receive injected
+    // interrupts.
+    tee_guest::allow_external_interrupt(3).expect("GuestVm - AllowExternalInterrupt failed");
+
     println!("Exiting guest");
     println!("*****************************************");
 

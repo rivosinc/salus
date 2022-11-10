@@ -14,6 +14,7 @@ pub enum Error {
     WrongBindStatus,
     WrongPhysicalCpu,
     InvalidInterruptId(usize),
+    DeniedInterruptId(usize),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -68,6 +69,10 @@ impl AllowList {
 
     fn deny_all(&mut self) {
         self.bits.iter_mut().for_each(|i| *i = 0u64);
+    }
+
+    fn is_allowed(&self, id: usize) -> bool {
+        id < self.num_ids && id != 0 && (self.bits[id / 64] & (1 << (id % 64))) != 0
     }
 }
 
@@ -203,5 +208,23 @@ impl VmCpuExtInterrupts {
     /// Disables injection of all external interrupts.
     pub fn deny_all_interrupts(&mut self) {
         self.allowed_ids.deny_all();
+    }
+
+    /// Injects the specified external interrupt ID into this vCPU, if allowed.
+    pub fn inject_interrupt(&mut self, id: usize) -> Result<()> {
+        if !self.allowed_ids.is_allowed(id) {
+            return Err(Error::DeniedInterruptId(id));
+        }
+        match self.bind_status {
+            BindStatus::Bound(cpu_id, file) => {
+                // Unwrap ok: CPU ID and file must be valid if a vCPU is bound to it.
+                Imsic::get().send_ipi_raw(cpu_id, file, id as u32).unwrap();
+            }
+            _ => {
+                // For everything else, just update the SW file.
+                self.sw_file.set_eip_bit(id);
+            }
+        }
+        Ok(())
     }
 }

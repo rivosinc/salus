@@ -39,6 +39,7 @@ pub enum Error {
     Unbinding(vm_interrupts::Error),
     AllowingInterrupt(vm_interrupts::Error),
     DenyingInterrupt(vm_interrupts::Error),
+    InjectingInterrupt(vm_interrupts::Error),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -1221,6 +1222,14 @@ impl VmCpu {
             .lock()
             .unbind_imsic_finish()
             .map_err(Error::Unbinding)
+    }
+
+    /// Injects the specified external interrupt ID into this vCPU, if allowed.
+    pub fn inject_ext_interrupt(&self, id: usize) -> Result<()> {
+        self.ext_interrupts()?
+            .lock()
+            .inject_interrupt(id)
+            .map_err(Error::InjectingInterrupt)
     }
 }
 

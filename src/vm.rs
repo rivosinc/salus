@@ -1751,7 +1751,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TvmCpuUnbindImsicEnd { tvm_id, vcpu_id } => {
                 self.guest_unbind_vcpu_end(tvm_id, vcpu_id).into()
             }
-            _ => Err(EcallError::Sbi(SbiError::NotSupported)).into(),
+            TvmCpuInjectExternalInterrupt {
+                tvm_id,
+                vcpu_id,
+                interrupt_id,
+            } => self
+                .guest_inject_ext_interrupt(tvm_id, vcpu_id, interrupt_id)
+                .into(),
         }
     }
 
@@ -1984,6 +1990,30 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         // Finish saving the IMSIC state to the SW file.
         guest_vm.unbind_vcpu_end(vcpu_id)?;
 
+        Ok(0)
+    }
+
+    fn inject_ext_interrupt(&self, vcpu_id: u64, interrupt_id: u64) -> EcallResult<()> {
+        let vcpu = self
+            .vm()
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        vcpu.inject_ext_interrupt(interrupt_id as usize)
+            .map_err(|_| EcallError::Sbi(SbiError::Denied))
+    }
+
+    fn guest_inject_ext_interrupt(
+        &self,
+        guest_id: u64,
+        vcpu_id: u64,
+        interrupt_id: u64,
+    ) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        guest_vm.inject_ext_interrupt(vcpu_id, interrupt_id)?;
         Ok(0)
     }
 

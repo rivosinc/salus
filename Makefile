@@ -6,7 +6,7 @@
 #  DEBIAN: Path to a pre-baked Debian image.
 
 RV64_PREFIX ?= riscv64-unknown-elf-
-OBJCOPY := $(RV64_PREFIX)objcopy
+OBJCOPY ?= $(RV64_PREFIX)objcopy
 
 QEMU ?=
 ifneq ($(QEMU),)

@@ -1,10 +1,11 @@
 name: Docs
 
 on:
-  pull_request_target:
-    branches: ["main"]
+  pull_request:
     types:
       - closed
+    branches:
+      - 'main'
   workflow_dispatch:
 
 env:
@@ -17,6 +18,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event.pull_request.merged == true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -24,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+      with:
+        ref: "main"
     - name: Install riscv64 target
       run: rustup target add riscv64gc-unknown-none-elf
     - name: Generate Docs

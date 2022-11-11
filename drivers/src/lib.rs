@@ -24,6 +24,8 @@ pub mod iommu;
 pub mod pci;
 /// Caches information about platform hardware and firmware PMU counters.
 pub mod pmu;
+/// Provide a simple platform reset driver
+pub mod reset;
 /// Provides a simple UART driver for console output.
 pub mod uart;
 

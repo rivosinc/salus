@@ -25,6 +25,8 @@ pub enum DeviceMemType {
     PciBar,
     /// UART device.
     Uart,
+    /// Reset device.
+    Reset,
     // TODO: Add more types here.
 }
 
@@ -44,6 +46,7 @@ impl fmt::Display for DeviceMemType {
             DeviceMemType::PciConfig => write!(f, "PCI ECAM"),
             DeviceMemType::PciBar => write!(f, "PCI BAR"),
             DeviceMemType::Uart => write!(f, "UART"),
+            DeviceMemType::Reset => write!(f, "RESET"),
         }
     }
 }

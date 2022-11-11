@@ -38,7 +38,10 @@ mod vm_pages;
 mod vm_pmu;
 
 use device_tree::{DeviceTree, Fdt};
-use drivers::{imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, uart::UartDriver, CpuInfo};
+use drivers::{
+    imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
+    CpuInfo,
+};
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
 use page_tracking::*;
@@ -107,12 +110,7 @@ pub fn alloc_error(_layout: Layout) -> ! {
 // Powers off this machine.
 fn poweroff() -> ! {
     println!("Shutting down");
-    // Safety: on this platform, a write of 0x5555 to 0x100000 will trigger the platform to
-    // poweroff, which is defined behavior.
-    unsafe {
-        core::ptr::write_volatile(0x10_0000 as *mut u32, 0x5555);
-    }
-    abort()
+    ResetDriver::shutdown();
 }
 
 /// The host VM that all CPUs enter at boot.
@@ -292,9 +290,6 @@ fn setup_hyp_paging(mem_map: &mut HwMemMap) {
         hyp_map_region(&sv48, base, size, perms, &mut || pte_pages.next());
     }
 
-    // TODO - reset device is hard coded in vm.rs
-    map_fixed_device(0x10_0000, &sv48, &mut || pte_pages.next());
-
     // Install the page table in satp
     let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
     satp.set_from(&sv48, 0);
@@ -302,25 +297,6 @@ fn setup_hyp_paging(mem_map: &mut HwMemMap) {
     SATP_VAL.call_once(|| satp.get());
     CSR.satp.set(satp.get());
     tlb::sfence_vma(None, None);
-}
-
-// Adds some hard-coded device location to the given sv48 page table so that the devices can be
-// accessed by the hypervisor. Identity maps a single page at base to base.
-fn map_fixed_device(
-    base: u64,
-    sv48: &FirstStagePageTable<Sv48>,
-    get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
-) {
-    let virt_base = PageAddr::new(RawAddr::supervisor_virt(base)).unwrap();
-    let phys_base = PageAddr::new(RawAddr::supervisor(base)).unwrap();
-    let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::RW);
-    let mapper = sv48
-        .map_range(virt_base, PageSize::Size4k, 1, get_pte_page)
-        .unwrap();
-    // Safe to map access to the device because this will be the only mapping it is used through.
-    unsafe {
-        mapper.map_addr(virt_base, phys_base, pte_fields).unwrap();
-    }
 }
 
 /// Creates a heap from the given `mem_map`, marking the region occupied by the heap as reserved.
@@ -529,6 +505,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             );
         }
     }
+
+    // Probe for hardcoded reset device. Not really a probe.
+    ResetDriver::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up Reset Device");
 
     setup_hyp_paging(&mut mem_map);
 

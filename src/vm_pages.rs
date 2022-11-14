@@ -127,8 +127,18 @@ impl TlbTracker {
     }
 
     /// Returns the current TLB version of this tracker.
-    fn current(&self) -> TlbVersion {
+    fn current_version(&self) -> TlbVersion {
         self.inner.lock().current.version
+    }
+
+    /// Returns the minimum TLB version with active references.
+    fn min_version(&self) -> TlbVersion {
+        let inner = self.inner.lock();
+        if let Some(prev) = inner.prev.as_ref() && prev.count() != 0 {
+            prev.version()
+        } else {
+            inner.current.version()
+        }
     }
 
     /// Attempts to increment the current TLB version. The TLB version can only be incremented if
@@ -916,7 +926,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             return Err(Error::EmptyPageRange);
         }
 
-        let version = self.inner.tlb_tracker.current();
+        let version = self.inner.tlb_tracker.min_version();
         self.inner
             .root
             .get_converted_range::<Page<ConvertedDirty>>(
@@ -956,7 +966,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .root
             .invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
             .map_err(Error::Paging)?;
-        let version = self.inner.tlb_tracker.current();
+        let version = self.inner.tlb_tracker.current_version();
         for page in invalidated_pages {
             // Unwrap ok since the page was just invalidated.
             self.inner.page_tracker.convert_page(page, version).unwrap();
@@ -984,7 +994,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         &self,
         imsic_addr: GuestPageAddr,
     ) -> Result<LockedPageList<ImsicGuestPage<ConvertedClean>>> {
-        let version = self.inner.tlb_tracker.current();
+        let version = self.inner.tlb_tracker.min_version();
         self.inner
             .root
             .get_converted_range::<ImsicGuestPage<ConvertedClean>>(
@@ -1027,7 +1037,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .and_then(|p| {
                 self.inner
                     .page_tracker
-                    .convert_page(p, self.inner.tlb_tracker.current())
+                    .convert_page(p, self.inner.tlb_tracker.current_version())
                     .ok()
             })
             .unwrap();
@@ -1051,7 +1061,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 imsic_addr,
                 PageSize::Size4k,
                 1,
-                self.inner.tlb_tracker.current(),
+                self.inner.tlb_tracker.min_version(),
             )
             .map_err(Error::Paging)?;
         // Unwrap ok since the PTE for the page must have previously been invalid and all of
@@ -1092,7 +1102,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .and_then(|p| {
                 self.inner
                     .page_tracker
-                    .unassign_page_begin(p, self.inner.tlb_tracker.current())
+                    .unassign_page_begin(p, self.inner.tlb_tracker.current_version())
                     .ok()
             })
             .unwrap();
@@ -1116,7 +1126,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 imsic_addr,
                 PageSize::Size4k,
                 1,
-                self.inner.tlb_tracker.current(),
+                self.inner.tlb_tracker.min_version(),
                 MemType::Mmio(DeviceMemType::Imsic),
             )
             .map_err(Error::Paging)

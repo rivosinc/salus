@@ -483,7 +483,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     tee_host::add_confidential_memory_region(
         vmid,
         USABLE_RAM_START_ADDRESS,
-        (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K,
+        GUEST_RAM_END_ADDRESS - USABLE_RAM_START_ADDRESS,
     )
     .expect("Tellus - TvmAddConfidentialMemoryRegion failed");
 
@@ -583,12 +583,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 } => {
                                     use TeeMemoryRegion::*;
                                     match region_type {
-                                        Shared => {
-                                            shared_mem_region = Some(Range {
-                                                start: addr,
-                                                end: addr + len,
-                                            });
-                                        }
                                         EmulatedMmio => {
                                             mmio_region = Some(Range {
                                                 start: addr,
@@ -603,6 +597,12 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                             break;
                                         }
                                     }
+                                }
+                                ShareMemory { addr, len } => {
+                                    shared_mem_region = Some(Range {
+                                        start: addr,
+                                        end: addr + len,
+                                    });
                                 }
                                 AllowExternalInterrupt { id } => {
                                     // Try to inject the allow-listed interrupt into the guest.

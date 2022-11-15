@@ -300,13 +300,19 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
         next_page += PAGE_SIZE_4K;
     }
 
-    tee_guest::add_shared_memory_region(
-        GUEST_SHARED_PAGES_START_ADDRESS,
-        NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
-    )
-    .expect("GuestVm -- AddSharedMemoryRegion failed");
+    // Convert some of our memory to shared.
+    //
+    // Safety: We haven't touched this memory and we won't touch it until the call returns.
+    unsafe {
+        tee_guest::share_memory(
+            GUEST_SHARED_PAGES_START_ADDRESS,
+            NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+        )
+        .expect("GuestVm -- ShareMemory failed");
+    }
     println!("Accessing shared page at 0x{GUEST_SHARED_PAGES_START_ADDRESS:x}     ");
-    // Safety: We are assuming that GUEST_SHARED_PAGES_START_ADDRESS  is valid, and will be mapped in on a fault
+    // Safety: We are assuming that GUEST_SHARED_PAGES_START_ADDRESS is valid, and will be mapped
+    // in on a fault.
     unsafe {
         if core::ptr::read_volatile(GUEST_SHARED_PAGES_START_ADDRESS as *const u64)
             == GUEST_SHARE_PING

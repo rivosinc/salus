@@ -401,7 +401,7 @@ pub enum TeeHostFunction {
         guest_addr: u64,
     },
     /// Maps non-confidential shared pages in a region of shared memory previously registered by
-    /// the guest via `AddMemoryRegion` in the TEE-Guest API.
+    /// the guest via `ShareMemory` in the TEE-Guest API.
     ///
     /// a6 = 12
     TvmAddSharedPages {

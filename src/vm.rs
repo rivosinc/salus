@@ -2031,7 +2031,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self.add_memory_region(region_type, addr, len),
             AllowExternalInterrupt { id } => self.allow_ext_interrupt(id, active_vcpu),
             DenyExternalInterrupt { id } => self.deny_ext_interrupt(id, active_vcpu),
-            _ => Err(EcallError::Sbi(SbiError::NotSupported)),
+            ShareMemory { addr, len } => self.share_mem_region(addr, len),
+            UnshareMemory { addr, len } => self.unshare_mem_region(addr, len),
         };
 
         // Notify the host if a TEE-Guest call succeeds.
@@ -2063,6 +2064,22 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 .map_err(EcallError::from),
             _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
         }?;
+        Ok(0)
+    }
+
+    fn share_mem_region(&self, addr: u64, len: u64) -> EcallResult<u64> {
+        let addr = self.guest_addr_from_raw(addr)?;
+        self.vm_pages()
+            .share_mem_region(addr, len)
+            .map_err(EcallError::from)?;
+        Ok(0)
+    }
+
+    fn unshare_mem_region(&self, addr: u64, len: u64) -> EcallResult<u64> {
+        let addr = self.guest_addr_from_raw(addr)?;
+        self.vm_pages()
+            .unshare_mem_region(addr, len)
+            .map_err(EcallError::from)?;
         Ok(0)
     }
 

@@ -35,6 +35,8 @@ pub enum Error {
     TlbFenceInProgress,
     OverlappingVmRegion,
     InsufficientVmRegionSpace,
+    VmRegionNotFound,
+    VmRegionPopulated,
     InvalidMapRegion,
     EmptyPageRange,
     Measurement(attestation::Error),
@@ -232,9 +234,12 @@ enum VmRegionType {
     Imsic,
     // PCI BAR pages.
     Pci,
+    // Temporary region type for regions that are being updated.
+    Updating,
 }
 
 // A contiguous region of guest physical address space.
+#[derive(Clone, Debug)]
 struct VmRegion {
     start: GuestPageAddr,
     end: GuestPageAddr,
@@ -262,7 +267,7 @@ impl VmRegionList {
     // Inserts a region at [`start`, `end`) of type `region_type`.
     fn add(
         &mut self,
-        mut start: GuestPageAddr,
+        start: GuestPageAddr,
         end: GuestPageAddr,
         region_type: VmRegionType,
     ) -> Result<()> {
@@ -288,26 +293,92 @@ impl VmRegionList {
         self.regions
             .try_insert(index, region)
             .map_err(|_| Error::InsufficientVmRegionSpace)?;
-
-        // Coalesce with same-typed regions before and after this one, if possible.
-        // Avoid potential underflows and overflows on index.
-        if let Some(ref mut before) = index.checked_sub(1).and_then(|i| self.regions.get_mut(i)) {
-            if before.end == start && before.region_type == region_type {
-                before.end = end;
-                start = before.start;
-                self.regions.remove(index);
-                index -= 1;
-            }
-        }
-
-        if let Some(ref mut after) = index.checked_add(1).and_then(|i| self.regions.get_mut(i)) {
-            if after.start == end && after.region_type == region_type {
-                after.start = start;
-                self.regions.remove(index);
-            }
-        }
-
+        self.try_coalesce_at(index);
         Ok(())
+    }
+
+    // Prepares to update region type of the range [`start`, `end`), which must be in an existing
+    // region of type `region_type`. Call `finish()` on the returned `VmRegionUpdater` to complete
+    // the update. If the returned `VmRegionUpdater` is dropped before calling `finish()`, the
+    // region returns to its previous type.
+    fn update(
+        &mut self,
+        start: GuestPageAddr,
+        end: GuestPageAddr,
+        region_type: VmRegionType,
+    ) -> Result<VmRegionUpdater> {
+        let mut index = self
+            .regions
+            .iter()
+            .position(|r| r.start <= start && end <= r.end && r.region_type == region_type)
+            .ok_or(Error::VmRegionNotFound)?;
+
+        // Make sure we have space to split the region.
+        let to_split = &self.regions[index].clone();
+        let mut to_reserve = 0;
+        if to_split.start != start {
+            to_reserve += 1;
+        }
+        if to_split.end != end {
+            to_reserve += 1;
+        }
+        if self.regions.remaining_capacity() < to_reserve {
+            return Err(Error::InsufficientVmRegionSpace);
+        }
+
+        // Now do the split, marking the range to be updated as 'Updating'.
+        if to_split.start != start {
+            let prev = VmRegion {
+                start: to_split.start,
+                end: start,
+                region_type,
+            };
+            self.regions.insert(index, prev);
+            index += 1;
+        }
+        self.regions[index] = VmRegion {
+            start,
+            end,
+            region_type: VmRegionType::Updating,
+        };
+        if to_split.end != end {
+            let next = VmRegion {
+                start: end,
+                end: to_split.end,
+                region_type,
+            };
+            self.regions.insert(index + 1, next);
+        }
+
+        Ok(VmRegionUpdater::new(self, index, region_type))
+    }
+
+    // Try to coalesce the region list at `index`. Called after modifying the region list to
+    // coalesce entries with the same region type.
+    fn try_coalesce_at(&mut self, mut index: usize) {
+        if let Some(region) = self.regions.get(index) {
+            let mut start = region.start;
+            let end = region.end;
+            let region_type = region.region_type;
+
+            // Coalesce with same-typed regions before and after this one, if possible.
+            // Avoid potential underflows and overflows on index.
+            if let Some(ref mut prev) = index.checked_sub(1).and_then(|i| self.regions.get_mut(i)) {
+                if prev.end == start && prev.region_type == region_type {
+                    prev.end = end;
+                    start = prev.start;
+                    self.regions.remove(index);
+                    index -= 1;
+                }
+            }
+
+            if let Some(ref mut next) = index.checked_add(1).and_then(|i| self.regions.get_mut(i)) {
+                if next.start == end && next.region_type == region_type {
+                    next.start = start;
+                    self.regions.remove(index);
+                }
+            }
+        }
     }
 
     // Returns if the range [`start`, `end`) is fully contained within a region of type `region_type`.
@@ -328,6 +399,41 @@ impl VmRegionList {
             .iter()
             .find(|r| r.start.bits() <= addr.bits() && r.end.bits() > addr.bits())
             .map(|r| r.region_type)
+    }
+}
+
+// A reference to a `VmRegion` that is in the process of being updated. The referenced region
+// is converted back into its previous region type if this object is dropped before `finish()`
+// is called.
+struct VmRegionUpdater<'a> {
+    region_list: &'a mut VmRegionList,
+    index: usize,
+    region_type: VmRegionType,
+}
+
+impl<'a> VmRegionUpdater<'a> {
+    // Creates a new `VmRegionUpdater` at `index` in `region_list` that will revert back to
+    // `region_type` when dropped.
+    fn new(region_list: &'a mut VmRegionList, index: usize, region_type: VmRegionType) -> Self {
+        Self {
+            region_list,
+            index,
+            region_type,
+        }
+    }
+
+    // Completes the update, setting the region type to `new_type`.
+    fn finish(mut self, new_type: VmRegionType) {
+        self.region_type = new_type;
+    }
+}
+
+impl<'a> Drop for VmRegionUpdater<'a> {
+    fn drop(&mut self) {
+        let to_update = &mut self.region_list.regions[self.index];
+        to_update.region_type = self.region_type;
+        // Need to coalesce again in case we reverted back to the old region type.
+        self.region_list.try_coalesce_at(self.index);
     }
 }
 
@@ -893,6 +999,46 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     /// space.
     pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
         self.do_add_region(page_addr, len, VmRegionType::Mmio)
+    }
+
+    /// Converts the specified memory region from confidential to shared.
+    pub fn share_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+        let mut regions = self.inner.regions.write();
+        let region = regions.update(page_addr, end, VmRegionType::Confidential)?;
+
+        // TODO: Handle populated ranges.
+        if !self.inner.root.range_is_empty(page_addr, len) {
+            return Err(Error::VmRegionPopulated);
+        }
+
+        region.finish(VmRegionType::Shared);
+        Ok(())
+    }
+
+    /// Converts the specified memory region from shared to confidential.
+    pub fn unshare_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+        let mut regions = self.inner.regions.write();
+        let region = regions.update(page_addr, end, VmRegionType::Shared)?;
+
+        // TODO: Handle populated ranges.
+        if !self.inner.root.range_is_empty(page_addr, len) {
+            return Err(Error::VmRegionPopulated);
+        }
+
+        region.finish(VmRegionType::Confidential);
+        Ok(())
     }
 
     /// Locks `count` 4kB pages starting at `page_addr` for mapping of zero-filled pages in a

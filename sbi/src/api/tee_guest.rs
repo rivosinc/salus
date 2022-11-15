@@ -37,6 +37,34 @@ pub fn add_shared_memory_region(addr: u64, len: u64) -> Result<()> {
     Ok(())
 }
 
+/// Converts the specified range of address space from confidential to shared.
+///
+/// # Safety
+///
+/// This operation is destructive; the contents of memory in the range to be converted are lost.
+/// The calling VM must not access the memory in this range on any other CPUs until this call
+/// returns, at which point accesses within the range are guaranteed to be to memory shared with
+/// the host.
+pub unsafe fn share_memory(addr: u64, len: u64) -> Result<()> {
+    let msg = SbiMessage::TeeGuest(ShareMemory { addr, len });
+    ecall_send(&msg)?;
+    Ok(())
+}
+
+/// Converts the specified range of address space from shared to confidential.
+///
+/// # Safety
+///
+/// This operation is destructive; the contents of memory in the range to be converted are lost.
+/// The calling VM must not access the memory in this range on any other CPUs until this call
+/// returns, at which point accesses within the range are guaranteed to be to memory that is
+/// confidential to the calling VM.
+pub unsafe fn unshare_memory(addr: u64, len: u64) -> Result<()> {
+    let msg = SbiMessage::TeeGuest(UnshareMemory { addr, len });
+    ecall_send(&msg)?;
+    Ok(())
+}
+
 /// Allows injection of the specified external interrupt ID by the host to the calling CPU.
 pub fn allow_external_interrupt(id: u64) -> Result<()> {
     let msg = SbiMessage::TeeGuest(AllowExternalInterrupt { id: id as i64 });

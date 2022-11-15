@@ -45,6 +45,36 @@ pub enum TeeGuestFunction {
         /// a0 = interrupt ID
         id: i64,
     },
+    /// Requests conversion of the specified range of guest physical address space from confidential
+    /// to shared. The caller is blocked until the host has completed the invalidation and removal
+    /// of any confidential pages that were mapped into the region. Upon return, all accesses by
+    /// the TVM within the range are guaranteed to be to shared memory.
+    ///
+    /// Both `addr` and `len` must be 4kB-aligned, and the range must lie within an existing region
+    /// of confidential memory. Returns 0 on success.
+    ///
+    /// a6 = 3
+    ShareMemory {
+        /// a0 = start address of the region
+        addr: u64,
+        /// a1 = length of the region
+        len: u64,
+    },
+    /// Requests conversion of the specified range of guest physical address space from shared to
+    /// confidential. The caller is blocked until the host has completed the invalidation and
+    /// removal of any shared pages that were mapped into the region. Upon return, all accesses by
+    /// the TVM within the range are guaranteed to be to confidential memory.
+    ///
+    /// Both `addr` and `len` must be 4kB-aligned, and the range must lie within an existing region
+    /// of shared memory. Returns 0 on success.
+    ///
+    /// a6 = 4
+    UnshareMemory {
+        /// a0 = start address of the region
+        addr: u64,
+        /// a1 = length of the region
+        len: u64,
+    },
 }
 
 impl TeeGuestFunction {
@@ -59,6 +89,14 @@ impl TeeGuestFunction {
             }),
             1 => Ok(AllowExternalInterrupt { id: args[0] as i64 }),
             2 => Ok(DenyExternalInterrupt { id: args[0] as i64 }),
+            3 => Ok(ShareMemory {
+                addr: args[0],
+                len: args[1],
+            }),
+            4 => Ok(UnshareMemory {
+                addr: args[0],
+                len: args[1],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -71,6 +109,8 @@ impl SbiFunction for TeeGuestFunction {
             AddMemoryRegion { .. } => 0,
             AllowExternalInterrupt { .. } => 1,
             DenyExternalInterrupt { .. } => 2,
+            ShareMemory { .. } => 3,
+            UnshareMemory { .. } => 4,
         }
     }
 
@@ -84,6 +124,8 @@ impl SbiFunction for TeeGuestFunction {
             } => *region_type as u64,
             AllowExternalInterrupt { id } => *id as u64,
             DenyExternalInterrupt { id } => *id as u64,
+            ShareMemory { addr, len: _ } => *addr,
+            UnshareMemory { addr, len: _ } => *addr,
         }
     }
 
@@ -95,6 +137,8 @@ impl SbiFunction for TeeGuestFunction {
                 addr,
                 len: _,
             } => *addr,
+            ShareMemory { addr: _, len } => *len,
+            UnshareMemory { addr: _, len } => *len,
             _ => 0,
         }
     }

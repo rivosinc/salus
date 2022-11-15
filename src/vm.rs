@@ -2031,6 +2031,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self.add_memory_region(region_type, addr, len),
             AllowExternalInterrupt { id } => self.allow_ext_interrupt(id, active_vcpu),
             DenyExternalInterrupt { id } => self.deny_ext_interrupt(id, active_vcpu),
+            _ => Err(EcallError::Sbi(SbiError::NotSupported)),
         };
 
         // Notify the host if a TEE-Guest call succeeds.

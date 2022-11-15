@@ -919,15 +919,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         let mut inner = self.inner.lock();
         let mut pages = LockedPageList::new(self.page_tracker.clone());
         for a in addr.iter_from().take(num_pages as usize) {
-            let entry = Self::get_mapped_owned_4k_leaf(
-                &mut inner,
-                a,
-                self.page_tracker.clone(),
-                self.owner,
-                P::mem_type(),
-            )?;
-            // Unwrap ok, PFN must have been properly aligned in order to have been mapped.
-            let paddr = entry.page_addr();
+            let paddr = inner.get_mapped_4k_leaf(a)?.page_addr();
             let page = self
                 .page_tracker
                 .get_shareable_page::<P>(paddr, self.owner)

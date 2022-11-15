@@ -972,6 +972,16 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         Ok(())
     }
 
+    /// Returns true if the specified range is completely unpopulated, including pages that are
+    /// converted or in the process of conversion.
+    pub fn range_is_empty(&self, vaddr: PageAddr<T::MappedAddressSpace>, len: u64) -> bool {
+        let mut inner = self.inner.lock();
+        vaddr
+            .iter_from()
+            .take(PageSize::num_4k_pages(len) as usize)
+            .all(|va| matches!(inner.walk(va.into()), TableEntryType::Unused(_)))
+    }
+
     fn get_mapped_owned_4k_leaf(
         inner: &mut PageTableInner<T>,
         vaddr: PageAddr<T::MappedAddressSpace>,

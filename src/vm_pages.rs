@@ -989,12 +989,6 @@ pub type AnyVmPages<'a, T> = VmPagesRef<'a, T, VmStateAny>;
 pub type FinalizedVmPages<'a, T> = VmPagesRef<'a, T, VmStateFinalized>;
 
 impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
-    /// Adds a shared memory region of `len` bytes starting at `page_addr` to this VM's address
-    /// space.
-    pub fn add_shared_memory_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        self.do_add_region(page_addr, len, VmRegionType::Shared)
-    }
-
     /// Adds an emulated MMIO region of `len` bytes starting at `page_addr` to this VM's address
     /// space.
     pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {

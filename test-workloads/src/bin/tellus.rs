@@ -30,7 +30,7 @@ use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::{base, pmu, reset, tee_host, tee_interrupt};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
-    PmuHardware, SbiMessage, TeeMemoryRegion, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
+    PmuHardware, SbiMessage, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
 };
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -576,27 +576,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         Ok(TeeGuest(guest_func)) => {
                             use sbi::TeeGuestFunction::*;
                             match guest_func {
-                                AddMemoryRegion {
-                                    region_type,
-                                    addr,
-                                    len,
-                                } => {
-                                    use TeeMemoryRegion::*;
-                                    match region_type {
-                                        EmulatedMmio => {
-                                            mmio_region = Some(Range {
-                                                start: addr,
-                                                end: addr + len,
-                                            });
-                                        }
-                                        _ => {
-                                            println!(
-                                                "Unexpected memory region {:?} from guest",
-                                                region_type
-                                            );
-                                            break;
-                                        }
-                                    }
+                                AddMmioRegion { addr, len } => {
+                                    mmio_region = Some(Range {
+                                        start: addr,
+                                        end: addr + len,
+                                    });
                                 }
                                 ShareMemory { addr, len } => {
                                     shared_mem_region = Some(Range {

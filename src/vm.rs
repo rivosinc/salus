@@ -2024,15 +2024,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     ) -> EcallAction {
         use TeeGuestFunction::*;
         let result = match guest_func {
-            AddMemoryRegion {
-                region_type,
-                addr,
-                len,
-            } => self.add_memory_region(region_type, addr, len),
-            AllowExternalInterrupt { id } => self.allow_ext_interrupt(id, active_vcpu),
-            DenyExternalInterrupt { id } => self.deny_ext_interrupt(id, active_vcpu),
+            AddMmioRegion { addr, len } => self.add_mmio_region(addr, len),
             ShareMemory { addr, len } => self.share_mem_region(addr, len),
             UnshareMemory { addr, len } => self.unshare_mem_region(addr, len),
+            AllowExternalInterrupt { id } => self.allow_ext_interrupt(id, active_vcpu),
+            DenyExternalInterrupt { id } => self.deny_ext_interrupt(id, active_vcpu),
         };
 
         // Notify the host if a TEE-Guest call succeeds.
@@ -2045,25 +2041,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
-    fn add_memory_region(
-        &self,
-        region_type: TeeMemoryRegion,
-        addr: u64,
-        len: u64,
-    ) -> EcallResult<u64> {
+    fn add_mmio_region(&self, addr: u64, len: u64) -> EcallResult<u64> {
         let addr = self.guest_addr_from_raw(addr)?;
-        use TeeMemoryRegion::*;
-        match region_type {
-            Shared => self
-                .vm_pages()
-                .add_shared_memory_region(addr, len)
-                .map_err(EcallError::from),
-            EmulatedMmio => self
-                .vm_pages()
-                .add_mmio_region(addr, len)
-                .map_err(EcallError::from),
-            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
-        }?;
+        self.vm_pages()
+            .add_mmio_region(addr, len)
+            .map_err(EcallError::from)?;
         Ok(0)
     }
 

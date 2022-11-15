@@ -4,7 +4,7 @@
 
 use crate::TeeHostFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};
-use crate::{RegisterSetLocation, TeeMemoryRegion, TsmInfo, TsmPageType, TvmCreateParams};
+use crate::{RegisterSetLocation, TsmInfo, TsmPageType, TvmCreateParams};
 
 /// Initiates a TSM fence on this CPU.
 pub fn tsm_initiate_fence() -> Result<()> {
@@ -180,15 +180,14 @@ pub unsafe fn add_vcpu(
     Ok(())
 }
 
-/// Declares the confidential region of the guest's physical address space.
-pub fn add_confidential_memory_region(vmid: u64, guest_addr: u64, len: u64) -> Result<()> {
+/// Declares a memory region in the guest's physical address space.
+pub fn add_memory_region(vmid: u64, guest_addr: u64, len: u64) -> Result<()> {
     let msg = SbiMessage::TeeHost(TvmAddMemoryRegion {
         guest_id: vmid,
-        region_type: TeeMemoryRegion::Confidential,
         guest_addr,
         len,
     });
-    // Safety: `TvmAddConfidentialMemoryRegion` doesn't access our memory at all.
+    // Safety: `TvmAddMemoryRegion` doesn't access our memory at all.
     unsafe { ecall_send(&msg) }?;
     Ok(())
 }

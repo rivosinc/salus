@@ -219,22 +219,22 @@ impl Drop for PinnedPages {
     }
 }
 
-/// Types of regions in a VM's guest physical address space.
+// Types of regions in a VM's guest physical address space.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum VmRegionType {
-    /// Memory that is private to this VM.
+enum VmRegionType {
+    // Memory that is private to this VM.
     Confidential,
-    /// Memory that is shared with the parent
+    // Memory that is shared with the parent
     Shared,
-    /// Emulated MMIO region; accesses always cause a fault that is forwarded to the VM's host.
+    // Emulated MMIO region; accesses always cause a fault that is forwarded to the VM's host.
     Mmio,
-    /// IMSIC interrupt file pages.
+    // IMSIC interrupt file pages.
     Imsic,
-    /// PCI BAR pages.
+    // PCI BAR pages.
     Pci,
 }
 
-/// A contiguous region of guest physical address space.
+// A contiguous region of guest physical address space.
 struct VmRegion {
     start: GuestPageAddr,
     end: GuestPageAddr,
@@ -244,11 +244,11 @@ struct VmRegion {
 // The maximum number of distinct memory regions we support in `VmRegionList`.
 const MAX_MEM_REGIONS: usize = 128;
 
-/// The regions of guest physical address space for a VM. Used to track which parts of the address
-/// space are designated for a particular purpose. The region list is created during VM initialization
-/// and remains static after the VM is finalized. Pages may only be inserted into a VM's address space
-/// if the mapping falls within a region of the proper type.
-pub struct VmRegionList {
+// The regions of guest physical address space for a VM. Used to track which parts of the address
+// space are designated for a particular purpose. The region list is created during VM initialization
+// and remains static after the VM is finalized. Pages may only be inserted into a VM's address space
+// if the mapping falls within a region of the proper type.
+struct VmRegionList {
     regions: Mutex<ArrayVec<VmRegion, MAX_MEM_REGIONS>>,
 }
 
@@ -260,7 +260,7 @@ impl VmRegionList {
         }
     }
 
-    /// Inserts a region at [`start`, `end`) of type `region_type`.
+    // Inserts a region at [`start`, `end`) of type `region_type`.
     fn add(
         &self,
         mut start: GuestPageAddr,
@@ -312,7 +312,7 @@ impl VmRegionList {
         Ok(())
     }
 
-    /// Returns if the range [`start`, `end`) is fully contained within a region of type `region_type`.
+    // Returns if the range [`start`, `end`) is fully contained within a region of type `region_type`.
     fn contains(
         &self,
         start: GuestPageAddr,
@@ -325,7 +325,7 @@ impl VmRegionList {
             .any(|r| r.start <= start && r.end >= end && r.region_type == region_type)
     }
 
-    /// Returns the type of the region that `addr` resides in, or `None` if it's not in any region.
+    // Returns the type of the region that `addr` resides in, or `None` if it's not in any region.
     fn find(&self, addr: GuestPhysAddr) -> Option<VmRegionType> {
         let regions = self.regions.lock();
         regions

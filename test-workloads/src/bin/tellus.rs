@@ -480,12 +480,12 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let donated_pages_base = next_page;
 
     // Declare the confidential region of the guest's physical address space.
-    tee_host::add_confidential_memory_region(
+    tee_host::add_memory_region(
         vmid,
         USABLE_RAM_START_ADDRESS,
         GUEST_RAM_END_ADDRESS - USABLE_RAM_START_ADDRESS,
     )
-    .expect("Tellus - TvmAddConfidentialMemoryRegion failed");
+    .expect("Tellus - TvmAddMemoryRegion failed");
 
     // Add data pages
     // Safety: The passed-in pages are unmapped and we do not access them again until they're

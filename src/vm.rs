@@ -932,11 +932,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 .into(),
             TvmAddMemoryRegion {
                 guest_id,
-                region_type,
                 guest_addr,
                 len,
             } => self
-                .guest_add_memory_region(guest_id, region_type, guest_addr, len)
+                .guest_add_memory_region(guest_id, guest_addr, len)
                 .into(),
             TvmAddZeroPages {
                 guest_id,
@@ -1297,7 +1296,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     fn guest_add_memory_region(
         &self,
         guest_id: u64,
-        region_type: TeeMemoryRegion,
         guest_addr: u64,
         len: u64,
     ) -> EcallResult<u64> {
@@ -1306,14 +1304,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .as_initializing_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
         let guest_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
-        use TeeMemoryRegion::*;
-        match region_type {
-            Confidential => guest_vm
-                .vm_pages()
-                .add_confidential_memory_region(guest_addr, len)
-                .map_err(EcallError::from),
-            _ => Err(EcallError::Sbi(SbiError::InvalidParam)),
-        }?;
+        guest_vm
+            .vm_pages()
+            .add_confidential_memory_region(guest_addr, len)
+            .map_err(EcallError::from)?;
         Ok(0)
     }
 

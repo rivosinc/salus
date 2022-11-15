@@ -226,38 +226,6 @@ impl TsmPageType {
     }
 }
 
-/// Types of memory regions that can be created in a TVM.
-#[repr(u64)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TeeMemoryRegion {
-    /// A region of memory where a TVM's host may insert pages of confidential memory. The region
-    /// is initially unpopulated. Accesses by the TVM to unmapped pages in the regino will cause
-    /// a guest page fault exit with the faulting page address reported to the TVM's host.
-    Confidential = 0,
-    /// A region of memory where a TVM's host may insert pages of shared, non-confidential memory.
-    /// The region is initially unpopulated. Accesses by the TVM to unmapped pages in the region
-    /// will cause a guest page fault exit with the faulting page address reported to the TVM's
-    /// host.
-    Shared = 1,
-    /// An unpopulated region of memory where accesses by the TVM will cause guest page fault
-    /// exit with the faulting address and a transformed version of the faulting instruction
-    /// reported to the TVM's host, allowing the host to emulate the faulting memory access.
-    EmulatedMmio = 2,
-}
-
-impl TeeMemoryRegion {
-    /// Returns the `TeeMemoryRegion` corresponding to the value.
-    pub fn from_reg(reg: u64) -> Result<Self> {
-        use TeeMemoryRegion::*;
-        match reg {
-            0 => Ok(Confidential),
-            1 => Ok(Shared),
-            2 => Ok(EmulatedMmio),
-            _ => Err(Error::InvalidParam),
-        }
-    }
-}
-
 /// Functions provided by the TEE Host extension.
 #[derive(Copy, Clone, Debug)]
 pub enum TeeHostFunction {
@@ -332,21 +300,20 @@ pub enum TeeHostFunction {
         guest_id: u64,
     },
     /// Adds a memory region to the TVM identified by `guest_id` at the specified range of guest
-    /// physical address space. Both `addr` and `len` must be 4kB-aligned and must not overlap with
-    /// any previously-added regions.
+    /// physical address space. The memory range is confidential to the guest and may only be
+    /// populated with confidential pages. The guest may later convert parts of this region to
+    /// shared memory with the `ShareMemory` TEE-Guest call.
     ///
-    /// Only `Confidential` regions may be added by the host, and they may only be added prior to
-    /// TVM finalization.
+    /// Both `addr` and `len` must be 4kB-aligned and must not overlap with any previously-added
+    /// regions. Memory regions may only be added prior to TVM finalization.
     ///
     /// a6 = 8
     TvmAddMemoryRegion {
         /// a0 = guest id
         guest_id: u64,
-        /// a1 = type of memory region
-        region_type: TeeMemoryRegion,
-        /// a2 = start of the region
+        /// a1 = start of the region
         guest_addr: u64,
-        /// a3 = length of the region
+        /// a2 = length of the region
         len: u64,
     },
     /// Adds `num_pages` 4kB pages of confidential memory starting at `page_addr` to the page-table
@@ -522,9 +489,8 @@ impl TeeHostFunction {
             7 => Ok(TvmDestroy { guest_id: args[0] }),
             8 => Ok(TvmAddMemoryRegion {
                 guest_id: args[0],
-                region_type: TeeMemoryRegion::from_reg(args[1])?,
-                guest_addr: args[2],
-                len: args[3],
+                guest_addr: args[1],
+                len: args[2],
             }),
             9 => Ok(AddPageTablePages {
                 guest_id: args[0],
@@ -600,7 +566,6 @@ impl SbiFunction for TeeHostFunction {
             TvmDestroy { guest_id: _ } => 7,
             TvmAddMemoryRegion {
                 guest_id: _,
-                region_type: _,
                 guest_addr: _,
                 len: _,
             } => 8,
@@ -700,7 +665,6 @@ impl SbiFunction for TeeHostFunction {
             } => *page_addr,
             TvmAddMemoryRegion {
                 guest_id,
-                region_type: _,
                 guest_addr: _,
                 len: _,
             } => *guest_id,
@@ -766,10 +730,9 @@ impl SbiFunction for TeeHostFunction {
             } => *num_pages,
             TvmAddMemoryRegion {
                 guest_id: _,
-                region_type,
-                guest_addr: _,
+                guest_addr,
                 len: _,
-            } => *region_type as u64,
+            } => *guest_addr,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr,
@@ -813,10 +776,9 @@ impl SbiFunction for TeeHostFunction {
             } => *dest_addr,
             TvmAddMemoryRegion {
                 guest_id: _,
-                region_type: _,
-                guest_addr,
-                len: _,
-            } => *guest_addr,
+                guest_addr: _,
+                len,
+            } => *len,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr: _,
@@ -852,12 +814,6 @@ impl SbiFunction for TeeHostFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_type as u64,
-            TvmAddMemoryRegion {
-                guest_id: _,
-                region_type: _,
-                guest_addr: _,
-                len,
-            } => *len,
             TvmAddSharedPages {
                 guest_id: _,
                 page_addr: _,

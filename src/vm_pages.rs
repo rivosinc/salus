@@ -16,7 +16,7 @@ use riscv_regs::{
     hgatp, hstatus, DecodedInstruction, Exception, LocalRegisterCopy, PrivilegeLevel, Readable,
     RiscvCsrInterface, Writeable, CSR,
 };
-use spin::{Mutex, Once};
+use spin::{Mutex, Once, RwLock, RwLockReadGuard};
 
 use crate::vm::{VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_id::VmId;
@@ -245,33 +245,31 @@ struct VmRegion {
 const MAX_MEM_REGIONS: usize = 128;
 
 // The regions of guest physical address space for a VM. Used to track which parts of the address
-// space are designated for a particular purpose. The region list is created during VM initialization
-// and remains static after the VM is finalized. Pages may only be inserted into a VM's address space
-// if the mapping falls within a region of the proper type.
+// space are designated for a particular purpose. Pages may only be inserted into a VM's address
+// space if the mapping falls within a region of the proper type.
 struct VmRegionList {
-    regions: Mutex<ArrayVec<VmRegion, MAX_MEM_REGIONS>>,
+    regions: ArrayVec<VmRegion, MAX_MEM_REGIONS>,
 }
 
 impl VmRegionList {
     // Creates an empty `VmRegionList`.
     fn new() -> Self {
         Self {
-            regions: Mutex::new(ArrayVec::new()),
+            regions: ArrayVec::new(),
         }
     }
 
     // Inserts a region at [`start`, `end`) of type `region_type`.
     fn add(
-        &self,
+        &mut self,
         mut start: GuestPageAddr,
         end: GuestPageAddr,
         region_type: VmRegionType,
     ) -> Result<()> {
-        let mut regions = self.regions.lock();
         // Keep the list sorted, inserting the region in the requested spot as long as it doesn't
         // overlap with anything else.
         let mut index = 0;
-        for other in regions.iter() {
+        for other in self.regions.iter() {
             if other.start > start {
                 if other.start < end {
                     return Err(Error::OverlappingVmRegion);
@@ -287,25 +285,25 @@ impl VmRegionList {
             end,
             region_type,
         };
-        regions
+        self.regions
             .try_insert(index, region)
             .map_err(|_| Error::InsufficientVmRegionSpace)?;
 
         // Coalesce with same-typed regions before and after this one, if possible.
         // Avoid potential underflows and overflows on index.
-        if let Some(ref mut before) = index.checked_sub(1).and_then(|i| regions.get_mut(i)) {
+        if let Some(ref mut before) = index.checked_sub(1).and_then(|i| self.regions.get_mut(i)) {
             if before.end == start && before.region_type == region_type {
                 before.end = end;
                 start = before.start;
-                regions.remove(index);
+                self.regions.remove(index);
                 index -= 1;
             }
         }
 
-        if let Some(ref mut after) = index.checked_add(1).and_then(|i| regions.get_mut(i)) {
+        if let Some(ref mut after) = index.checked_add(1).and_then(|i| self.regions.get_mut(i)) {
             if after.start == end && after.region_type == region_type {
                 after.start = start;
-                regions.remove(index);
+                self.regions.remove(index);
             }
         }
 
@@ -319,16 +317,14 @@ impl VmRegionList {
         end: GuestPageAddr,
         region_type: VmRegionType,
     ) -> bool {
-        let regions = self.regions.lock();
-        regions
+        self.regions
             .iter()
             .any(|r| r.start <= start && r.end >= end && r.region_type == region_type)
     }
 
     // Returns the type of the region that `addr` resides in, or `None` if it's not in any region.
     fn find(&self, addr: GuestPhysAddr) -> Option<VmRegionType> {
-        let regions = self.regions.lock();
-        regions
+        self.regions
             .iter()
             .find(|r| r.start.bits() <= addr.bits() && r.end.bits() > addr.bits())
             .map(|r| r.region_type)
@@ -340,6 +336,7 @@ impl VmRegionList {
 pub struct VmPagesMapper<'a, T: GuestStagePagingMode, M> {
     vm_pages: &'a VmPages<T>,
     mapper: GuestStageMapper<'a, T>,
+    _region_guard: RwLockReadGuard<'a, VmRegionList>,
     _mapper_type: PhantomData<M>,
 }
 
@@ -355,7 +352,8 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
         let end = page_addr
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
-        if !vm_pages.regions.contains(page_addr, end, region_type) {
+        let regions = vm_pages.regions.read();
+        if !regions.contains(page_addr, end, region_type) {
             return Err(Error::InvalidMapRegion);
         }
         let mapper = vm_pages
@@ -367,6 +365,7 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
         Ok(Self {
             vm_pages,
             mapper,
+            _region_guard: regions,
             _mapper_type: PhantomData,
         })
     }
@@ -621,7 +620,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         fault_addr: GuestPhysAddr,
     ) -> PageFaultType {
         use PageFaultType::*;
-        match self.vm_pages.inner.regions.find(fault_addr) {
+        match self.vm_pages.inner.regions.read().find(fault_addr) {
             Some(VmRegionType::Confidential) => Confidential,
             Some(VmRegionType::Shared) => Shared,
             Some(VmRegionType::Mmio) => match exception {
@@ -732,7 +731,7 @@ pub struct VmPages<T: GuestStagePagingMode> {
     page_owner_id: PageOwnerId,
     page_tracker: PageTracker,
     tlb_tracker: TlbTracker,
-    regions: VmRegionList,
+    regions: RwLock<VmRegionList>,
     // How many nested TVMs deep this VM is, with 0 being the host.
     nesting: usize,
     root: GuestStagePageTable<T>,
@@ -749,7 +748,7 @@ impl<T: GuestStagePagingMode> VmPages<T> {
             page_owner_id: root.page_owner_id(),
             page_tracker: page_tracker.clone(),
             tlb_tracker: TlbTracker::new(),
-            regions: VmRegionList::new(),
+            regions: RwLock::new(VmRegionList::new()),
             nesting,
             root,
             pte_pages: PtePagePool::new(page_tracker),
@@ -865,7 +864,7 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
                 .ok_or(Error::AddressOverflow)?,
         )
         .ok_or(Error::UnalignedAddress)?;
-        self.inner.regions.add(page_addr, end, region_type)
+        self.inner.regions.write().add(page_addr, end, region_type)
     }
 }
 
@@ -1210,14 +1209,13 @@ impl<'a, T: GuestStagePagingMode> InitializingVmPages<'a, T> {
             .inner
             .imsic_geometry
             .try_call_once(|| {
+                let mut regions = self.inner.regions.write();
                 for range in geometry.group_ranges() {
                     let end = range
                         .base()
                         .checked_add_pages(range.num_pages())
                         .ok_or(Error::AddressOverflow)?;
-                    self.inner
-                        .regions
-                        .add(range.base(), end, VmRegionType::Imsic)?;
+                    regions.add(range.base(), end, VmRegionType::Imsic)?;
                 }
                 Ok(geometry)
             })?

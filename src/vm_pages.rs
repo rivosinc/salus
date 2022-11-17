@@ -1089,28 +1089,45 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .map_err(Error::Paging)
     }
 
-    /// Converts `num_pages` starting at guest physical address `page_addr` to confidential memory.
-    pub fn convert_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
+    fn do_convert_pages<P: InvalidatedPhysPage>(
+        &self,
+        page_addr: GuestPageAddr,
+        num_pages: u64,
+    ) -> Result<()> {
         if self.inner.nesting >= MAX_PAGE_OWNERS - 1 {
             // We shouldn't bother converting pages if we won't be able to assign them.
             return Err(Error::NestingTooDeep);
         }
-
         if num_pages == 0 {
             return Err(Error::EmptyPageRange);
         }
 
-        let invalidated_pages = self
+        let version = self.inner.tlb_tracker.current_version();
+        let invalidated = self
             .inner
             .root
-            .invalidate_range::<Page<Invalidated>>(page_addr, PageSize::Size4k, num_pages)
+            .invalidate_range(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
+                self.inner.page_tracker.is_mapped_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    P::mem_type(),
+                )
+            })
             .map_err(Error::Paging)?;
-        let version = self.inner.tlb_tracker.current_version();
-        for page in invalidated_pages {
-            // Unwrap ok since the page was just invalidated.
+        for paddr in invalidated {
+            // Safety: We've verified the typing of the page and we must have unique
+            // ownership since the page was mapped before it was invalidated.
+            let page = unsafe { P::new(paddr) };
+            // Unwrap ok: Page was mapped and has just been invalidated.
             self.inner.page_tracker.convert_page(page, version).unwrap();
         }
+
         Ok(())
+    }
+
+    /// Converts `num_pages` starting at guest physical address `page_addr` to confidential memory.
+    pub fn convert_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
+        self.do_convert_pages::<Page<Invalidated>>(page_addr, num_pages)
     }
 
     /// Reclaims `num_pages` of confidential memory starting at guest physical address `page_addr`.
@@ -1147,11 +1164,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
 
     /// Converts the guest interrupt file at `imsic_addr` to confidential.
     pub fn convert_imsic(&self, imsic_addr: GuestPageAddr) -> Result<()> {
-        if self.inner.nesting >= MAX_PAGE_OWNERS - 1 {
-            // We shouldn't bother converting pages if we won't be able to assign them.
-            return Err(Error::NestingTooDeep);
-        }
-
         // Make sure it's actually an IMSIC address and that it's a guest (not supervisor) file.
         let geometry = self
             .inner
@@ -1165,21 +1177,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             return Err(Error::InvalidImsicLocation);
         }
 
-        let mut invalidated = self
-            .inner
-            .root
-            .invalidate_range::<ImsicGuestPage<Invalidated>>(imsic_addr, PageSize::Size4k, 1)
-            .map_err(Error::Paging)?;
-        // Unwrap ok since the page was just invalidated.
-        invalidated
-            .next()
-            .and_then(|p| {
-                self.inner
-                    .page_tracker
-                    .convert_page(p, self.inner.tlb_tracker.current_version())
-                    .ok()
-            })
-            .unwrap();
+        self.do_convert_pages::<ImsicGuestPage<Invalidated>>(imsic_addr, 1)?;
 
         // Unmap it from our MSI page table as well, if we have one.
         if let Some(iommu_context) = self.inner.iommu_context.get() {
@@ -1229,22 +1227,27 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .addr_to_location(imsic_addr)
             .ok_or(Error::InvalidImsicLocation)?;
 
-        let mut invalidated = self
+        let invalidated = self
             .inner
             .root
-            .invalidate_range::<ImsicGuestPage<Invalidated>>(imsic_addr, PageSize::Size4k, 1)
-            .map_err(Error::Paging)?;
-        // Unwrap ok since we have exactly one page in the list and the page must be unassignable
-        // since it was just invalidated.
-        invalidated
-            .next()
-            .and_then(|p| {
-                self.inner
-                    .page_tracker
-                    .unassign_page_begin(p, self.inner.tlb_tracker.current_version())
-                    .ok()
+            .invalidate_range(imsic_addr, PageSize::Size4k as u64, |addr| {
+                self.inner.page_tracker.is_mapped_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    MemType::Mmio(DeviceMemType::Imsic),
+                )
             })
-            .unwrap();
+            .map_err(Error::Paging)?;
+        for paddr in invalidated {
+            // Safety: We've verified the typing of the page and we must have unique
+            // ownership since the page was mapped before it was invalidated.
+            let page: ImsicGuestPage<Invalidated> = unsafe { ImsicGuestPage::new(paddr) };
+            // Unwrap ok: Page was mapped and has just been invalidated.
+            self.inner
+                .page_tracker
+                .unassign_page_begin(page, self.inner.tlb_tracker.current_version())
+                .unwrap();
+        }
 
         // Unmap it from our MSI page table as well, if we have one.
         if let Some(iommu_context) = self.inner.iommu_context.get() {

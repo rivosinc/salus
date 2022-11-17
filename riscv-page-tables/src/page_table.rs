@@ -4,7 +4,7 @@
 
 use crate::pte::{Pte, PteFieldBits, PteLeafPerms};
 use core::marker::PhantomData;
-use page_tracking::{LockedPageList, PageTracker, TlbVersion};
+use page_tracking::PageTracker;
 use riscv_pages::*;
 use spin::Mutex;
 
@@ -921,8 +921,8 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let mut inner = self.inner.lock();
-        // TODO: Support huge pages, making sure we're mappings aren't partially covering the
-        // address range.
+        // TODO: Support huge pages, making sure mappings aren't partially covering the address
+        // range.
         for va in vaddr.iter_from().take(num_pages as usize) {
             let paddr = inner.get_mapped_4k_leaf(va)?.page_addr();
             if !pred(paddr) {
@@ -936,43 +936,35 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         }))
     }
 
-    /// Returns a list of converted pages that were previously mapped in this page table if they were
-    /// invalidated a TLB version older than `tlb_version`. Guarantees that the full range of pages
-    /// are converted pages.
-    pub fn get_converted_range<P: ConvertedPhysPage>(
+    /// Verifies the entire virtual address range is invalidated and that `pred` returns true for
+    /// each page, returning an iterator that yields the pages.
+    pub fn get_invalidated_pages<F>(
         &self,
-        addr: PageAddr<T::MappedAddressSpace>,
-        page_size: PageSize,
-        num_pages: u64,
-        tlb_version: TlbVersion,
-    ) -> Result<LockedPageList<P::DirtyPage>> {
-        if page_size.is_huge() {
-            return Err(Error::PageSizeNotSupported(page_size));
-        }
-
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        len: u64,
+        mut pred: F,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    where
+        F: FnMut(SupervisorPageAddr) -> bool,
+    {
+        let num_pages = PageSize::num_4k_pages(len);
+        vaddr
+            .checked_add_pages(num_pages)
+            .ok_or(Error::AddressOverflow)?;
         let mut inner = self.inner.lock();
-        let page_tracker = self.page_tracker.clone();
-        let mut pages = LockedPageList::new(self.page_tracker.clone());
-        for a in addr.iter_from().take(num_pages as usize) {
-            let paddr = Self::get_converted_4k_leaf(
-                &mut inner,
-                a,
-                self.page_tracker.clone(),
-                self.owner,
-                P::mem_type(),
-                tlb_version,
-            )?
-            .page_addr();
-            // Unwrap ok since we've already verified that this page is owned and converted.
-            let page = page_tracker
-                .get_converted_page::<P>(paddr, self.owner, tlb_version)
-                .unwrap();
-            // Unwrap ok since we have unique ownership of the page and therefore it can't be on
-            // any other list.
-            pages.push(page).unwrap();
+        // TODO: Support huge pages, making sure mappings aren't partially covering the address
+        // range.
+        for va in vaddr.iter_from().take(num_pages as usize) {
+            let paddr = inner.get_invalidated_4k_leaf(va)?.page_addr();
+            if !pred(paddr) {
+                return Err(Error::PredicateFailed);
+            }
         }
 
-        Ok(pages)
+        Ok(vaddr.iter_from().take(num_pages as usize).map(move |va| {
+            // Unwrap ok: We checked that the entire range was invalidated above.
+            inner.get_invalidated_4k_leaf(va).unwrap().page_addr()
+        }))
     }
 
     /// Returns true if the specified range is completely unpopulated, including pages that are
@@ -983,25 +975,6 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             .iter_from()
             .take(PageSize::num_4k_pages(len) as usize)
             .all(|va| matches!(inner.walk(va.into()), TableEntryType::Unused(_)))
-    }
-
-    // Returns the invalid 4kB leaf PTE mapping `vaddr` if the PFN the PTE references is a
-    // page that was converted at a TLB version older than `tlb_version`.
-    fn get_converted_4k_leaf(
-        inner: &mut PageTableInner<T>,
-        vaddr: PageAddr<T::MappedAddressSpace>,
-        page_tracker: PageTracker,
-        owner: PageOwnerId,
-        mem_type: MemType,
-        tlb_version: TlbVersion,
-    ) -> Result<InvalidatedPte<T>> {
-        inner.get_invalidated_4k_leaf(vaddr).and_then(|l| {
-            if !page_tracker.is_converted_page(l.page_addr(), owner, mem_type, tlb_version) {
-                Err(Error::PageNotUnmappable)
-            } else {
-                Ok(l)
-            }
-        })
     }
 }
 

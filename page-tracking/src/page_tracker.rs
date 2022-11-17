@@ -332,8 +332,8 @@ impl PageTracker {
         info.complete_unassignment(tlb_version)
     }
 
-    /// Releases an exclusive reference to a locked page
-    pub fn unlock_page<P: PhysPage>(&self, page: P) -> Result<()> {
+    /// Releases an exclusive reference to a "ConvertedLocked" page.
+    pub fn unlock_page<P: ConvertedPhysPage>(&self, page: P) -> Result<()> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr())?;
         info.unlock()
@@ -366,8 +366,10 @@ impl PageTracker {
         }
     }
 
-    /// Acquires an exclusive reference to the shareable page at `addr` if it's owned by owner,
-    /// and in Mapped or Shared state.
+    /// Acquires a reference to the shareable page at `addr` if it's owned by owner, and in a
+    /// "Mapped" or "Shared" state. As there can naturally be multiple outstanding references to
+    /// a "Mapped" or "Shared" page, the caller is responsible for providing the necessary
+    /// synchronization around state transitions.
     pub fn get_shareable_page<P: ShareablePhysPage>(
         &self,
         addr: SupervisorPageAddr,
@@ -379,8 +381,7 @@ impl PageTracker {
             return Err(Error::PageNotShareable);
         }
 
-        info.lock_for_assignment()?;
-        // Safe since we've taken exclusive ownership of the page, verified its typing.
+        // Safe since we've verified the typing of the page.
         // TODO: Page size
         Ok(unsafe { P::new(addr) })
     }

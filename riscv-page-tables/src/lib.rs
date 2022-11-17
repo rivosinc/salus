@@ -163,14 +163,23 @@ mod tests {
             page_tracker.convert_page(page, version).unwrap();
         }
         let version = version.increment();
-        let mut converted_pages = guest_page_table
-            .get_converted_range::<Page<ConvertedDirty>>(gpa_base, PageSize::Size4k, 2, version)
+        let converted = guest_page_table
+            .get_invalidated_pages(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
+                page_tracker.is_converted_page(addr, id, MemType::Ram, version)
+            })
             .unwrap();
-        let dirty_page = converted_pages.next().unwrap();
+        let mut locked_pages = LockedPageList::new(page_tracker.clone());
+        for paddr in converted {
+            let page = page_tracker
+                .get_converted_page::<Page<ConvertedDirty>>(paddr, id, version)
+                .unwrap();
+            locked_pages.push(page).unwrap();
+        }
+        let dirty_page = locked_pages.next().unwrap();
         assert_eq!(dirty_page.addr(), page_addrs[0]);
         assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
         page_tracker.unlock_page(dirty_page).unwrap();
-        let clean_page = converted_pages.next().unwrap().clean();
+        let clean_page = locked_pages.next().unwrap().clean();
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
         page_tracker.unlock_page(clean_page).unwrap();

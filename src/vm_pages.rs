@@ -1054,26 +1054,52 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         self.do_map_pages(page_addr, count, VmRegionType::Shared)
     }
 
+    fn do_get_converted_pages<P: ConvertedPhysPage>(
+        &self,
+        page_addr: GuestPageAddr,
+        num_pages: u64,
+    ) -> Result<LockedPageList<P::DirtyPage>> {
+        if num_pages == 0 {
+            return Err(Error::EmptyPageRange);
+        }
+
+        let version = self.inner.tlb_tracker.min_version();
+        let converted = self
+            .inner
+            .root
+            .get_invalidated_pages(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
+                self.inner.page_tracker.is_converted_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    P::mem_type(),
+                    version,
+                )
+            })
+            .map_err(Error::Paging)?;
+
+        // Lock the pages for assignment.
+        let mut locked_pages = LockedPageList::new(self.inner.page_tracker());
+        for paddr in converted {
+            // Unwrap ok: The pages are guaranteed to be converted and no one else can get a
+            // reference to them until the iterator is destroyed.
+            let page = self
+                .inner
+                .page_tracker
+                .get_converted_page::<P>(paddr, self.inner.page_owner_id, version)
+                .unwrap();
+            locked_pages.push(page).unwrap();
+        }
+
+        Ok(locked_pages)
+    }
+
     /// Acquries an exclusive reference to the `num_pages` converted pages starting at `page_addr`.
     pub fn get_converted_pages(
         &self,
         page_addr: GuestPageAddr,
         num_pages: u64,
     ) -> Result<LockedPageList<Page<ConvertedDirty>>> {
-        if num_pages == 0 {
-            return Err(Error::EmptyPageRange);
-        }
-
-        let version = self.inner.tlb_tracker.min_version();
-        self.inner
-            .root
-            .get_converted_range::<Page<ConvertedDirty>>(
-                page_addr,
-                PageSize::Size4k,
-                num_pages,
-                version,
-            )
-            .map_err(Error::Paging)
+        self.do_get_converted_pages::<Page<ConvertedDirty>>(page_addr, num_pages)
     }
 
     /// Acquries an exclusive reference to the `num_pages` shared pages starting at `page_addr`.
@@ -1162,16 +1188,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         &self,
         imsic_addr: GuestPageAddr,
     ) -> Result<LockedPageList<ImsicGuestPage<ConvertedClean>>> {
-        let version = self.inner.tlb_tracker.min_version();
-        self.inner
-            .root
-            .get_converted_range::<ImsicGuestPage<ConvertedClean>>(
-                imsic_addr,
-                PageSize::Size4k,
-                1,
-                version,
-            )
-            .map_err(Error::Paging)
+        self.do_get_converted_pages::<ImsicGuestPage<ConvertedClean>>(imsic_addr, 1)
     }
 
     /// Converts the guest interrupt file at `imsic_addr` to confidential.
@@ -1203,16 +1220,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
 
     /// Reclaims the confidential guest interrupt file at `imsic_addr`.
     pub fn reclaim_imsic(&self, imsic_addr: GuestPageAddr) -> Result<()> {
-        let mut converted = self
-            .inner
-            .root
-            .get_converted_range::<ImsicGuestPage<ConvertedClean>>(
-                imsic_addr,
-                PageSize::Size4k,
-                1,
-                self.inner.tlb_tracker.min_version(),
-            )
-            .map_err(Error::Paging)?;
+        let mut converted = self.get_converted_imsic(imsic_addr)?;
         // Unwrap ok since the PTE for the page must have previously been invalid and all of
         // the intermediate page-tables must already have been populated.
         let mapper = self.map_imsic_pages(imsic_addr, 1).unwrap();

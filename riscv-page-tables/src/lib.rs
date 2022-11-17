@@ -152,10 +152,16 @@ mod tests {
             assert!(mapper.map_page(gpa, mappable).is_ok());
         }
         let version = TlbVersion::new();
-        guest_page_table
-            .invalidate_range::<Page<Invalidated>>(gpa_base, PageSize::Size4k, 2)
-            .unwrap()
-            .for_each(|invalidated| page_tracker.convert_page(invalidated, version).unwrap());
+        let invalidated = guest_page_table
+            .invalidate_range(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
+                page_tracker.is_mapped_page(addr, id, MemType::Ram)
+            })
+            .unwrap();
+        for paddr in invalidated {
+            // Safety: Not safe - just a test
+            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
+            page_tracker.convert_page(page, version).unwrap();
+        }
         let version = version.increment();
         let mut converted_pages = guest_page_table
             .get_converted_range::<Page<ConvertedDirty>>(gpa_base, PageSize::Size4k, 2, version)

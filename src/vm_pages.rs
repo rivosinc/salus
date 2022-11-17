@@ -1262,16 +1262,32 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     /// Verifies that the TLB flush for the IMSIC interrupt file that was mapped at `imsic_addr`
     /// has been completed and completes unassignment of the page.
     pub fn unassign_imsic_end(&self, imsic_addr: GuestPageAddr) -> Result<()> {
-        self.inner
+        let version = self.inner.tlb_tracker.min_version();
+        let unmapped = self
+            .inner
             .root
-            .unassign_range(
-                imsic_addr,
-                PageSize::Size4k,
-                1,
-                self.inner.tlb_tracker.min_version(),
-                MemType::Mmio(DeviceMemType::Imsic),
-            )
-            .map_err(Error::Paging)
+            .unmap_range(imsic_addr, PageSize::Size4k as u64, |addr| {
+                self.inner.page_tracker.is_unassignable_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    MemType::Mmio(DeviceMemType::Imsic),
+                    version,
+                )
+            })
+            .map_err(Error::Paging)?;
+        for paddr in unmapped {
+            // Unwrap ok: we verified the page was unassignable above.
+            self.inner
+                .page_tracker
+                .unassign_page_complete(
+                    paddr,
+                    self.inner.page_owner_id,
+                    MemType::Mmio(DeviceMemType::Imsic),
+                    version,
+                )
+                .unwrap();
+        }
+        Ok(())
     }
 
     /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.

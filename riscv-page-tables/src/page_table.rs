@@ -37,8 +37,6 @@ pub enum Error {
     PageNotUnmappable,
     /// The requested range isn't converted.
     PageNotConverted,
-    /// The requested range couldn't be unassigned.
-    PageNotUnassignable,
     /// Attempt to lock a PTE that is already locked.
     PteLocked,
     /// Attempt to unlock a PTE that is not locked.
@@ -855,6 +853,58 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         }))
     }
 
+    /// Verifies the entire virtual address range is invalidated (or unpopulated) and that `pred`
+    /// returns true for each invalidated page, returning an iterator that yields the pages after
+    /// clearing their PTEs.
+    pub fn unmap_range<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        len: u64,
+        mut pred: F,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    where
+        F: FnMut(SupervisorPageAddr) -> bool,
+    {
+        let num_pages = PageSize::num_4k_pages(len);
+        vaddr
+            .checked_add_pages(num_pages)
+            .ok_or(Error::AddressOverflow)?;
+        let mut inner = self.inner.lock();
+        // TODO: Support huge pages, making sure we're not clearing PTEs that only partially cover
+        // the address range.
+        for va in vaddr.iter_from().take(num_pages as usize) {
+            use TableEntryType::*;
+            match inner.walk(va.into()) {
+                Invalidated(pte) => {
+                    if !pte.level().is_leaf() {
+                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
+                    }
+                    if !pred(pte.page_addr()) {
+                        return Err(Error::PredicateFailed);
+                    }
+                }
+                Unused(_) => {
+                    continue;
+                }
+                _ => {
+                    return Err(Error::PageNotUnmappable);
+                }
+            }
+        }
+
+        Ok(vaddr
+            .iter_from()
+            .take(num_pages as usize)
+            .filter_map(move |va| {
+                // Skip over non-invalidated PTEs -- we verified there were no mapped or locked PTEs
+                // above.
+                let pte = inner.get_invalidated_4k_leaf(va).ok()?;
+                let paddr = pte.page_addr();
+                pte.clear();
+                Some(paddr)
+            }))
+    }
+
     /// Returns a list of converted pages that were previously mapped in this page table if they were
     /// invalidated a TLB version older than `tlb_version`. Guarantees that the full range of pages
     /// are converted pages.
@@ -920,46 +970,6 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         }
 
         Ok(pages)
-    }
-
-    /// Unassigns pages that were previously mapped in this page table if they were invalidated
-    /// at a TLB version older than `tlb_version`. Guarantees that the entire range has been
-    /// unassigned and the PTEs cleared upon success.
-    pub fn unassign_range(
-        &self,
-        addr: PageAddr<T::MappedAddressSpace>,
-        page_size: PageSize,
-        num_pages: u64,
-        tlb_version: TlbVersion,
-        mem_type: MemType,
-    ) -> Result<()> {
-        if page_size.is_huge() {
-            return Err(Error::PageSizeNotSupported(page_size));
-        }
-
-        let mut inner = self.inner.lock();
-        for a in addr.iter_from().take(num_pages as usize) {
-            use TableEntryType::*;
-            match inner.walk(a.into()) {
-                Invalidated(pte) => {
-                    if !pte.level().is_leaf() {
-                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
-                    }
-                    self.page_tracker
-                        .unassign_page_complete(pte.page_addr(), self.owner, mem_type, tlb_version)
-                        .map_err(|_| Error::PageNotUnassignable)?;
-                    pte.clear();
-                }
-                Unused(_) => {
-                    continue;
-                }
-                _ => {
-                    return Err(Error::PageNotUnassignable);
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Returns true if the specified range is completely unpopulated, including pages that are

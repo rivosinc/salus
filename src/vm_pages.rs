@@ -28,7 +28,6 @@ pub enum Error {
     NestingTooDeep,
     UnalignedAddress,
     UnsupportedPageSize(PageSize),
-    NonContiguousPages,
     AddressOverflow,
     TlbCountUnderflow,
     InvalidTlbVersion,
@@ -1078,15 +1077,28 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     }
 
     /// Acquries an exclusive reference to the `num_pages` shared pages starting at `page_addr`.
-    pub fn get_shared_pages(
+    pub fn get_shareable_pages(
         &self,
         page_addr: GuestPageAddr,
         num_pages: u64,
-    ) -> Result<LockedPageList<Page<Shareable>>> {
-        self.inner
+    ) -> Result<impl 'a + Iterator<Item = Page<Shareable>>> {
+        Ok(self
+            .inner
             .root
-            .get_shareable_range(page_addr, PageSize::Size4k, num_pages)
-            .map_err(Error::Paging)
+            .get_mapped_pages(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
+                self.inner.page_tracker.is_shareable_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    MemType::Ram,
+                )
+            })
+            .map_err(Error::Paging)?
+            .map(|addr| {
+                self.inner
+                    .page_tracker
+                    .get_shareable_page(addr, self.inner.page_owner_id)
+                    .unwrap()
+            }))
     }
 
     fn do_convert_pages<P: InvalidatedPhysPage>(
@@ -1302,21 +1314,45 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
-    /// Pins `count` pages starting at `addr` as shared pages, returning a `PinnedPages` structure
-    /// the will release the pin when dropped. Used to share memory between a VM on the hypervisor.
-    pub fn pin_shared_pages(&self, addr: GuestPageAddr, count: u64) -> Result<PinnedPages> {
+    /// Pins `count` physically-contiguous pages starting at `page_addr` as shared pages, returning
+    /// a `PinnedPages` structure that will release the pin when dropped. Used to share memory
+    /// between a VM on the hypervisor.
+    pub fn pin_shared_pages(&self, page_addr: GuestPageAddr, count: u64) -> Result<PinnedPages> {
         if count == 0 {
             return Err(Error::EmptyPageRange);
         }
-        let shared_list = self.get_shared_pages(addr, count)?;
-        if !shared_list.is_contiguous() {
-            return Err(Error::NonContiguousPages);
-        }
-        // Unwrap ok: we know the list isn't empty.
-        let base_addr = shared_list.peek().unwrap();
-        for page in shared_list {
-            // Unwrap ok: we have exclusive ownership, and get_shareable_range() has ensured
-            // that these pages are eligible to be shared.
+
+        // Get the mapped pages, making sure they're contiguous.
+        let mut prev_addr: Option<SupervisorPageAddr> = None;
+        let pages = self
+            .inner
+            .root
+            .get_mapped_pages(page_addr, count * PageSize::Size4k as u64, |addr| {
+                if let Some(p) = prev_addr && p.checked_add_pages(1) != Some(addr) {
+                    false
+                } else {
+                    prev_addr = Some(addr);
+                    self.inner
+                        .page_tracker
+                        .is_shareable_page(addr, self.inner.page_owner_id, MemType::Ram)
+                }
+            })
+            .map_err(Error::Paging)?
+            .map(|addr| {
+                self.inner
+                    .page_tracker
+                    .get_shareable_page::<Page<Shareable>>(addr, self.inner.page_owner_id)
+                    .unwrap()
+            });
+
+        let mut base_addr: Option<SupervisorPageAddr> = None;
+        for (i, page) in pages.enumerate() {
+            if i == 0 {
+                base_addr = Some(page.addr());
+            }
+
+            // Unwrap ok: The page is guaranteed to be in a shareable state until the iterator is
+            // destroyed.
             self.inner
                 .page_tracker
                 .share_page(page, self.inner.page_owner_id)
@@ -1324,8 +1360,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         }
         // Safety: the range of pages is shared and owned by the current VM.
         let pin = unsafe {
+            // Unwrap ok, we know there must be at least one page.
             PinnedPages::new(
-                SupervisorPageRange::new(base_addr, count),
+                SupervisorPageRange::new(base_addr.unwrap(), count),
                 self.inner.page_tracker.clone(),
                 self.inner.page_owner_id,
             )

@@ -905,6 +905,37 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             }))
     }
 
+    /// Verifies the entire virtual address range is mapped and that `pred` returns true for
+    /// each page, returning an iterator that yields the pages.
+    pub fn get_mapped_pages<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        len: u64,
+        mut pred: F,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    where
+        F: FnMut(SupervisorPageAddr) -> bool,
+    {
+        let num_pages = PageSize::num_4k_pages(len);
+        vaddr
+            .checked_add_pages(num_pages)
+            .ok_or(Error::AddressOverflow)?;
+        let mut inner = self.inner.lock();
+        // TODO: Support huge pages, making sure we're mappings aren't partially covering the
+        // address range.
+        for va in vaddr.iter_from().take(num_pages as usize) {
+            let paddr = inner.get_mapped_4k_leaf(va)?.page_addr();
+            if !pred(paddr) {
+                return Err(Error::PredicateFailed);
+            }
+        }
+
+        Ok(vaddr.iter_from().take(num_pages as usize).map(move |va| {
+            // Unwrap ok: We checked that the entire range was mapped above.
+            inner.get_mapped_4k_leaf(va).unwrap().page_addr()
+        }))
+    }
+
     /// Returns a list of converted pages that were previously mapped in this page table if they were
     /// invalidated a TLB version older than `tlb_version`. Guarantees that the full range of pages
     /// are converted pages.
@@ -936,34 +967,6 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             let page = page_tracker
                 .get_converted_page::<P>(paddr, self.owner, tlb_version)
                 .unwrap();
-            // Unwrap ok since we have unique ownership of the page and therefore it can't be on
-            // any other list.
-            pages.push(page).unwrap();
-        }
-
-        Ok(pages)
-    }
-
-    /// Returns a list of shareable pages for the given range. Gurantees that the full range of pages
-    /// are shareable
-    pub fn get_shareable_range<P: ShareablePhysPage>(
-        &self,
-        addr: PageAddr<T::MappedAddressSpace>,
-        page_size: PageSize,
-        num_pages: u64,
-    ) -> Result<LockedPageList<P>> {
-        if page_size.is_huge() {
-            return Err(Error::PageSizeNotSupported(page_size));
-        }
-
-        let mut inner = self.inner.lock();
-        let mut pages = LockedPageList::new(self.page_tracker.clone());
-        for a in addr.iter_from().take(num_pages as usize) {
-            let paddr = inner.get_mapped_4k_leaf(a)?.page_addr();
-            let page = self
-                .page_tracker
-                .get_shareable_page::<P>(paddr, self.owner)
-                .map_err(|_| Error::PageNotShareable)?;
             // Unwrap ok since we have unique ownership of the page and therefore it can't be on
             // any other list.
             pages.push(page).unwrap();

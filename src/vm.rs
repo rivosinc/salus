@@ -1450,7 +1450,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let from_page_addr = self.guest_addr_from_raw(page_addr)?;
         let pages = self
             .vm_pages()
-            .get_shared_pages(from_page_addr, num_pages)
+            .get_shareable_pages(from_page_addr, num_pages)
             .map_err(EcallError::from)?;
 
         // Reserve the PTEs in the destination page table.
@@ -1461,8 +1461,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(EcallError::from)?;
 
         for (page, addr) in pages.zip(to_page_addr.iter_from()) {
-            // Unwrap ok: we have an exclusive reference to the converted page, so it must still
-            // be in a state in which it can be shared.
+            // Unwrap ok: The page is guaranteed to be in a shareable state until the iterator is
+            // destroyed.
             let page = self
                 .page_tracker()
                 .share_page(page, self.page_owner_id())

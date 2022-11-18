@@ -35,7 +35,6 @@ pub enum Error {
     OverlappingVmRegion,
     InsufficientVmRegionSpace,
     VmRegionNotFound,
-    VmRegionPopulated,
     InvalidMapRegion,
     EmptyPageRange,
     Measurement(attestation::Error),
@@ -97,10 +96,10 @@ impl RefCountedTlbVersion {
         self.count += 1;
     }
 
-    /// Decrements the reference count for this version.
-    fn put(&mut self) -> Result<()> {
+    /// Decrements the reference count for this version, returning the new reference count.
+    fn put(&mut self) -> Result<u64> {
         self.count = self.count.checked_sub(1).ok_or(Error::TlbCountUnderflow)?;
-        Ok(())
+        Ok(self.count)
     }
 }
 
@@ -143,16 +142,21 @@ impl TlbTracker {
     }
 
     /// Attempts to increment the current TLB version. The TLB version can only be incremented if
-    /// there are no outstanding references to versions other than the current version.
-    fn increment(&self) -> Result<()> {
+    /// there are no outstanding references to versions other than the current version. Returns
+    /// true if there were no outstanding references to the current TLB version.
+    fn increment(&self) -> Result<bool> {
         let mut inner = self.inner.lock();
         if inner.prev.as_ref().filter(|v| v.count() != 0).is_none() {
             // We're only ok to proceed with an increment if there's no references to the previous
             // TLB version.
             let next = inner.current.version().increment();
-            inner.prev = Some(inner.current.clone());
+            if inner.current.count() != 0 {
+                inner.prev = Some(inner.current.clone());
+            } else {
+                inner.prev = None;
+            }
             inner.current = RefCountedTlbVersion::new(next);
-            Ok(())
+            Ok(inner.prev.is_none())
         } else {
             Err(Error::TlbFenceInProgress)
         }
@@ -165,13 +169,21 @@ impl TlbTracker {
         inner.current.version()
     }
 
-    /// Drops a reference to the given TLB version.
-    fn put_version(&self, version: TlbVersion) -> Result<()> {
+    /// Drops a reference to the given TLB version. Returns true if the last reference has been
+    /// dropped to the previous TLB version, indicating that a TLB shootdown has completed.
+    fn put_version(&self, version: TlbVersion) -> Result<bool> {
         let mut inner = self.inner.lock();
         if inner.current.version() == version {
-            inner.current.put()
+            inner.current.put()?;
+            Ok(false)
         } else if let Some(prev) = inner.prev.as_mut().filter(|v| v.version() == version) {
-            prev.put()
+            let count = prev.put()?;
+            if count == 0 {
+                inner.prev = None;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         } else {
             Err(Error::InvalidTlbVersion)
         }
@@ -233,6 +245,10 @@ enum VmRegionType {
     Imsic,
     // PCI BAR pages.
     Pci,
+    // Memory that started conversion from confidential to shared at the given TLB version.
+    Sharing(TlbVersion),
+    // Memory that started conversion from shared to confidential at the given TLB version.
+    Unsharing(TlbVersion),
     // Temporary region type for regions that are being updated.
     Updating,
 }
@@ -352,9 +368,29 @@ impl VmRegionList {
         Ok(VmRegionUpdater::new(self, index, region_type))
     }
 
-    // Try to coalesce the region list at `index`. Called after modifying the region list to
-    // coalesce entries with the same region type.
-    fn try_coalesce_at(&mut self, mut index: usize) {
+    // Calls `update_fn` on each region, updating the region to the returned `VmRegionType`. No
+    // action is taken if `update_fn` returns `None`.
+    fn update_all<F>(&mut self, mut update_fn: F)
+    where
+        F: FnMut(&VmRegion) -> Option<VmRegionType>,
+    {
+        let mut i = 0;
+        while i < self.regions.len() {
+            let r = &mut self.regions[i];
+            if let Some(new_type) = update_fn(r) {
+                r.region_type = new_type;
+                // Need to coalesce since the region type might have changed. Unwrap ok here
+                // since we know 'i' is a valid index.
+                i = self.try_coalesce_at(i).unwrap() + 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Try to coalesce the region list at `index`, returning the index of the coalesced region.
+    // Called after modifying the region list to coalesce entries with the same region type.
+    fn try_coalesce_at(&mut self, mut index: usize) -> Option<usize> {
         if let Some(region) = self.regions.get(index) {
             let mut start = region.start;
             let end = region.end;
@@ -377,6 +413,10 @@ impl VmRegionList {
                     self.regions.remove(index);
                 }
             }
+
+            Some(index)
+        } else {
+            None
         }
     }
 
@@ -600,11 +640,15 @@ impl<'a, T: GuestStagePagingMode> Drop for ActiveVmPages<'a, T> {
     fn drop(&mut self) {
         // Unwrap ok since tlb_tracker won't increment the version while there are outstanding
         // references.
-        self.vm_pages
+        let flush_completed = self
+            .vm_pages
             .inner
             .tlb_tracker
             .put_version(self.tlb_version)
             .unwrap();
+        if flush_completed {
+            self.vm_pages.complete_pending_unassignment();
+        }
     }
 }
 
@@ -994,8 +1038,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         self.do_add_region(page_addr, len, VmRegionType::Mmio)
     }
 
-    /// Converts the specified memory region from confidential to shared.
-    pub fn share_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+    /// Converts the specified memory region from confidential to shared. Returns the TLB version
+    /// at which the conversion will be completed.
+    pub fn share_mem_region_begin(&self, page_addr: GuestPageAddr, len: u64) -> Result<TlbVersion> {
         let end = PageAddr::new(
             RawAddr::from(page_addr)
                 .checked_increment(len)
@@ -1005,17 +1050,73 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let mut regions = self.inner.regions.write();
         let region = regions.update(page_addr, end, VmRegionType::Confidential)?;
 
-        // TODO: Handle populated ranges.
-        if !self.inner.root.range_is_empty(page_addr, len) {
-            return Err(Error::VmRegionPopulated);
+        // Zap any mapped pages.
+        let invalidated = self
+            .inner
+            .root
+            .invalidate_range_sparse(page_addr, len, |addr| {
+                self.inner
+                    .page_tracker
+                    .is_mapped_page(addr, self.inner.page_owner_id, MemType::Ram)
+            })
+            .map_err(Error::Paging)?;
+        let version = self.inner.tlb_tracker.current_version();
+        let mut num_pages = 0;
+        for paddr in invalidated {
+            // Safety: We've verified the typing of the page and we must have unique
+            // ownership since the page was mapped before it was invalidated.
+            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
+            // Unwrap ok: Page was mapped and has just been invalidated.
+            self.inner
+                .page_tracker
+                .unassign_page_begin(page, version)
+                .unwrap();
+            num_pages += 1;
         }
 
-        region.finish(VmRegionType::Shared);
+        // If the range was populated we need a TLB flush before the conversion to shared can
+        // be completed.
+        if num_pages != 0 {
+            region.finish(VmRegionType::Sharing(version));
+            Ok(version.increment())
+        } else {
+            region.finish(VmRegionType::Shared);
+            Ok(self.inner.tlb_tracker.min_version())
+        }
+    }
+
+    // Complete the pending unassignment of confidential pages in the given region.
+    fn share_mem_region_end(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        let version = self.inner.tlb_tracker.min_version();
+        let unmapped = self
+            .inner
+            .root
+            .unmap_range(page_addr, len, |addr| {
+                self.inner.page_tracker.is_unassignable_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    MemType::Ram,
+                    version,
+                )
+            })
+            .map_err(Error::Paging)?;
+        for paddr in unmapped {
+            // Unwrap ok: we verified the page was unassignable above.
+            self.inner
+                .page_tracker
+                .unassign_page_complete(paddr, self.inner.page_owner_id, MemType::Ram, version)
+                .unwrap();
+        }
         Ok(())
     }
 
-    /// Converts the specified memory region from shared to confidential.
-    pub fn unshare_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+    /// Converts the specified memory region from shared to confidential. Returns the TLB version
+    /// at which the conversion will be completed.
+    pub fn unshare_mem_region_begin(
+        &self,
+        page_addr: GuestPageAddr,
+        len: u64,
+    ) -> Result<TlbVersion> {
         let end = PageAddr::new(
             RawAddr::from(page_addr)
                 .checked_increment(len)
@@ -1025,13 +1126,78 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let mut regions = self.inner.regions.write();
         let region = regions.update(page_addr, end, VmRegionType::Shared)?;
 
-        // TODO: Handle populated ranges.
-        if !self.inner.root.range_is_empty(page_addr, len) {
-            return Err(Error::VmRegionPopulated);
-        }
+        // Zap any mapped pages. We don't track the TLB version in PageTracker, so just consume
+        // the iterator.
+        let num_pages = self
+            .inner
+            .root
+            .invalidate_range_sparse(page_addr, len, |addr| {
+                self.inner.page_tracker.is_shared_page(addr, MemType::Ram)
+                    && !self
+                        .inner
+                        .page_tracker
+                        .is_owned(addr, self.inner.page_owner_id)
+            })
+            .map_err(Error::Paging)?
+            .count();
 
-        region.finish(VmRegionType::Confidential);
+        // If the range was populated we need a TLB flush before the conversion to confidential can
+        // be completed.
+        if num_pages != 0 {
+            let version = self.inner.tlb_tracker.current_version();
+            region.finish(VmRegionType::Unsharing(version));
+            Ok(version.increment())
+        } else {
+            region.finish(VmRegionType::Confidential);
+            Ok(self.inner.tlb_tracker.min_version())
+        }
+    }
+
+    // Complete the pending unassignment of confidential pages in the given region.
+    fn unshare_mem_region_end(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        // We don't track TLB versions of shared pages in PageTracker, so the caller is responsible
+        // for making sure the flush has completed.
+        let unmapped = self
+            .inner
+            .root
+            .unmap_range(page_addr, len, |addr| {
+                self.inner.page_tracker.is_shared_page(addr, MemType::Ram)
+                    && !self
+                        .inner
+                        .page_tracker
+                        .is_owned(addr, self.inner.page_owner_id)
+            })
+            .map_err(Error::Paging)?;
+        for paddr in unmapped {
+            // Unwrap ok: We verified above that it's a shared page we don't own, therefore we
+            // must be able to drop our reference to it.
+            self.inner
+                .page_tracker
+                .release_page_by_addr(paddr, self.inner.page_owner_id)
+                .unwrap();
+        }
         Ok(())
+    }
+
+    // Complete any (un)sharing operations with TLB versions older than the current one. Called
+    // whenever a TLB shootdown is completed.
+    fn complete_pending_unassignment(&self) {
+        let min_version = self.inner.tlb_tracker.min_version();
+        let mut regions = self.inner.regions.write();
+        regions.update_all(|r| {
+            let len = r.end.bits() - r.start.bits();
+            match r.region_type {
+                VmRegionType::Sharing(v) if v < min_version => self
+                    .share_mem_region_end(r.start, len)
+                    .ok()
+                    .map(|_| VmRegionType::Shared),
+                VmRegionType::Unsharing(v) if v < min_version => self
+                    .unshare_mem_region_end(r.start, len)
+                    .ok()
+                    .map(|_| VmRegionType::Confidential),
+                _ => None,
+            }
+        });
     }
 
     /// Locks `count` 4kB pages starting at `page_addr` for mapping of zero-filled pages in a
@@ -1317,12 +1483,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
 
     /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.
     pub fn initiate_fence(&self) -> Result<()> {
-        self.inner.tlb_tracker.increment()?;
+        let flush_completed = self.inner.tlb_tracker.increment()?;
         // If we have an IOMMU context then we need to issue a fence there as well as our page
         // tables may be used for DMA translation.
         if let Some(iommu_context) = self.inner.iommu_context.get() {
             // Unwrap ok since we must have an IOMMU to have a `VmIommuContext`.
             Iommu::get().unwrap().fence(iommu_context.gscid, None);
+        }
+        // If there weren't any references to the old TLB version, we can immediately proceed
+        // with any pending unassignment operations.
+        if flush_completed {
+            self.complete_pending_unassignment();
         }
         Ok(())
     }

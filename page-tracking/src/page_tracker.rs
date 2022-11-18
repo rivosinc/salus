@@ -386,6 +386,16 @@ impl PageTracker {
         Ok(unsafe { P::new(addr) })
     }
 
+    /// Returns true if and only if `addr` is a "Shared" page with type `mem_type`.
+    pub fn is_shared_page(&self, addr: SupervisorPageAddr, mem_type: MemType) -> bool {
+        let mut page_tracker = self.inner.lock();
+        if let Ok(info) = page_tracker.get(addr) {
+            info.mem_type() == mem_type && info.is_shared()
+        } else {
+            false
+        }
+    }
+
     /// Returns true if and only if `addr` is a "Mapped" or "Shared" page owned by `owner` with
     /// type `mem_type`.
     pub fn is_shareable_page(

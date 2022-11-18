@@ -136,7 +136,6 @@ impl MmioOperation {
 pub enum VmExitCause {
     FatalEcall(SbiMessage),
     ResumableEcall(SbiMessage),
-    #[allow(dead_code)]
     BlockingEcall(SbiMessage, TlbVersion),
     PageFault(Exception, GuestPageAddr),
     MmioFault(MmioOperation, GuestPhysAddr),
@@ -2028,8 +2027,27 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         use TeeGuestFunction::*;
         let result = match guest_func {
             AddMmioRegion { addr, len } => self.add_mmio_region(addr, len),
-            ShareMemory { addr, len } => self.share_mem_region(addr, len),
-            UnshareMemory { addr, len } => self.unshare_mem_region(addr, len),
+            ShareMemory { addr, len } | UnshareMemory { addr, len } => {
+                let result = if matches!(guest_func, ShareMemory { .. }) {
+                    self.share_mem_region(addr, len)
+                } else {
+                    self.unshare_mem_region(addr, len)
+                };
+
+                // Block if we need a TLB invalidation.
+                let action = match result {
+                    Ok(tlbv) if tlbv > self.vm_pages().min_tlb_version() => EcallAction::Break(
+                        VmExitCause::BlockingEcall(SbiMessage::TeeGuest(guest_func), tlbv),
+                        SbiReturn::success(0),
+                    ),
+                    Ok(_) => EcallAction::Break(
+                        VmExitCause::ResumableEcall(SbiMessage::TeeGuest(guest_func)),
+                        SbiReturn::success(0),
+                    ),
+                    Err(_) => result.map(|_| 0).into(),
+                };
+                return action;
+            }
             AllowExternalInterrupt { id } => self.allow_ext_interrupt(id, active_vcpu),
             DenyExternalInterrupt { id } => self.deny_ext_interrupt(id, active_vcpu),
         };
@@ -2052,20 +2070,18 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    fn share_mem_region(&self, addr: u64, len: u64) -> EcallResult<u64> {
+    fn share_mem_region(&self, addr: u64, len: u64) -> EcallResult<TlbVersion> {
         let addr = self.guest_addr_from_raw(addr)?;
         self.vm_pages()
-            .share_mem_region(addr, len)
-            .map_err(EcallError::from)?;
-        Ok(0)
+            .share_mem_region_begin(addr, len)
+            .map_err(EcallError::from)
     }
 
-    fn unshare_mem_region(&self, addr: u64, len: u64) -> EcallResult<u64> {
+    fn unshare_mem_region(&self, addr: u64, len: u64) -> EcallResult<TlbVersion> {
         let addr = self.guest_addr_from_raw(addr)?;
         self.vm_pages()
-            .unshare_mem_region(addr, len)
-            .map_err(EcallError::from)?;
-        Ok(0)
+            .unshare_mem_region_begin(addr, len)
+            .map_err(EcallError::from)
     }
 
     fn allow_ext_interrupt(&self, id: i64, active_vcpu: &ActiveVmCpu<T>) -> EcallResult<u64> {

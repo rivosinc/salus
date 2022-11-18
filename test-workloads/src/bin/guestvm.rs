@@ -267,6 +267,58 @@ fn test_attestation() {
     );
 }
 
+fn test_memory_sharing() {
+    // Convert some of our memory to shared.
+    //
+    // Safety: We haven't touched this memory and we won't touch it until the call returns.
+    unsafe {
+        tee_guest::share_memory(
+            GUEST_SHARED_PAGES_START_ADDRESS,
+            NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+        )
+        .expect("GuestVm -- ShareMemory failed");
+    }
+    println!("Accessing shared page at 0x{GUEST_SHARED_PAGES_START_ADDRESS:x}     ");
+    // Safety: We are assuming that GUEST_SHARED_PAGES_START_ADDRESS is valid, and will be mapped
+    // in on a fault.
+    unsafe {
+        if core::ptr::read_volatile(GUEST_SHARED_PAGES_START_ADDRESS as *const u64)
+            == GUEST_SHARE_PING
+        {
+            // Write a known value for verification purposes
+            core::ptr::write_volatile(
+                GUEST_SHARED_PAGES_START_ADDRESS as *mut u64,
+                GUEST_SHARE_PONG,
+            );
+        }
+    }
+
+    // Now convert the page back to confidential and make sure we can fault it back in.
+    //
+    // Safety: We don't care about the contents of this memory and we won't touch it until the
+    // call returns.
+    unsafe {
+        tee_guest::unshare_memory(
+            GUEST_SHARED_PAGES_START_ADDRESS,
+            NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+        )
+        .expect("GuestVm -- UnshareMemory failed");
+    }
+    // Safety: We are assuming that the host will fault in GUEST_SHARED_PAGES_START_ADDRESS.
+    unsafe { core::ptr::write_volatile(GUEST_SHARED_PAGES_START_ADDRESS as *mut u64, 0xdeadbeef) };
+
+    // And share it again.
+    //
+    // Safety: We don't care about the contents of this memory and we won't touch it again.
+    unsafe {
+        tee_guest::share_memory(
+            GUEST_SHARED_PAGES_START_ADDRESS,
+            NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+        )
+        .expect("GuestVm -- ShareMemory failed");
+    }
+}
+
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
@@ -300,30 +352,7 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
         next_page += PAGE_SIZE_4K;
     }
 
-    // Convert some of our memory to shared.
-    //
-    // Safety: We haven't touched this memory and we won't touch it until the call returns.
-    unsafe {
-        tee_guest::share_memory(
-            GUEST_SHARED_PAGES_START_ADDRESS,
-            NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
-        )
-        .expect("GuestVm -- ShareMemory failed");
-    }
-    println!("Accessing shared page at 0x{GUEST_SHARED_PAGES_START_ADDRESS:x}     ");
-    // Safety: We are assuming that GUEST_SHARED_PAGES_START_ADDRESS is valid, and will be mapped
-    // in on a fault.
-    unsafe {
-        if core::ptr::read_volatile(GUEST_SHARED_PAGES_START_ADDRESS as *const u64)
-            == GUEST_SHARE_PING
-        {
-            // Write a known value for verification purposes
-            core::ptr::write_volatile(
-                GUEST_SHARED_PAGES_START_ADDRESS as *mut u64,
-                GUEST_SHARE_PONG,
-            );
-        }
-    }
+    test_memory_sharing();
 
     if vectors_enabled {
         test_vector();

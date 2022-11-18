@@ -333,6 +333,7 @@ fn check_vectors() {
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const NUM_TEE_PTE_PAGES: u64 = 10;
+    const NUM_CONVERTED_ZERO_PAGES: u64 = NUM_GUEST_ZERO_PAGES + NUM_GUEST_SHARED_PAGES;
 
     if hart_id != 0 {
         // TODO handle more than 1 cpu
@@ -503,15 +504,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     .expect("Tellus - TvmAddMeasuredPages returned error");
     next_page += PAGE_SIZE_4K * NUM_GUEST_DATA_PAGES;
 
-    // Convert the zero pages.
+    // Convert pages to handle confidential page faults.
     let zero_pages_base = next_page;
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
     // reclaimed.
     unsafe {
-        convert_pages(next_page, NUM_GUEST_ZERO_PAGES);
+        convert_pages(next_page, NUM_CONVERTED_ZERO_PAGES);
     }
 
-    next_page += NUM_GUEST_ZERO_PAGES * PAGE_SIZE_4K;
+    next_page += NUM_CONVERTED_ZERO_PAGES * PAGE_SIZE_4K;
     let shared_page_base = next_page;
 
     // Set the entry point.
@@ -554,7 +555,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     loop {
         // Safety: running a VM will only write the `TvmCpuSharedState` struct that was registered
         // with `add_vcpu()`.
-        tee_host::tvm_run(vmid, 0).expect("Could not run guest VM");
+        let blocked = tee_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
         let scause = vcpu.scause();
         if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
             use Exception::*;
@@ -583,10 +584,35 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     });
                                 }
                                 ShareMemory { addr, len } => {
+                                    if shared_mem_region.is_some() {
+                                        panic!("GuestVm already set a shared memory region");
+                                    }
                                     shared_mem_region = Some(Range {
                                         start: addr,
                                         end: addr + len,
                                     });
+
+                                    if blocked {
+                                        tee_host::tvm_run(vmid, 0).unwrap_err();
+                                        println!("Tellus - TVM fence on page sharing");
+                                        tee_host::tvm_initiate_fence(vmid).unwrap();
+                                    }
+                                }
+                                UnshareMemory { addr, len } => {
+                                    assert_eq!(
+                                        shared_mem_region,
+                                        Some(Range {
+                                            start: addr,
+                                            end: addr + len,
+                                        })
+                                    );
+                                    shared_mem_region = None;
+
+                                    if blocked {
+                                        tee_host::tvm_run(vmid, 0).unwrap_err();
+                                        println!("Tellus - TVM fence on page unsharing");
+                                        tee_host::tvm_initiate_fence(vmid).unwrap();
+                                    }
                                 }
                                 AllowExternalInterrupt { id } => {
                                     // Try to inject the allow-listed interrupt into the guest.
@@ -611,21 +637,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 GuestLoadPageFault | GuestStorePageFault => {
                     let fault_addr = (vcpu.htval() << 2) | (vcpu.stval() & 0x3);
                     match fault_addr {
-                        GUEST_ZERO_PAGES_START_ADDRESS..=GUEST_ZERO_PAGES_END_ADDRESS => {
-                            // Fault in the page.
-                            if zero_pages_added >= NUM_GUEST_ZERO_PAGES {
-                                panic!("Ran out of pages to fault in");
-                            }
-                            tee_host::add_zero_pages(
-                                vmid,
-                                zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
-                                sbi::TsmPageType::Page4k,
-                                1,
-                                fault_addr & !(PAGE_SIZE_4K - 1),
-                            )
-                            .expect("Tellus - TvmAddZeroPages failed");
-                            zero_pages_added += 1;
-                        }
                         addr if shared_mem_region
                             .as_ref()
                             .filter(|r| r.contains(&addr))
@@ -673,6 +684,21 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     return;
                                 }
                             }
+                        }
+                        addr if !blocked => {
+                            // Fault in the page.
+                            if zero_pages_added >= NUM_CONVERTED_ZERO_PAGES {
+                                panic!("Ran out of pages to fault in");
+                            }
+                            tee_host::add_zero_pages(
+                                vmid,
+                                zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
+                                sbi::TsmPageType::Page4k,
+                                1,
+                                addr & !(PAGE_SIZE_4K - 1),
+                            )
+                            .expect("Tellus - TvmAddZeroPages failed");
+                            zero_pages_added += 1;
                         }
                         _ => {
                             println!("Unhandled guest page fault at 0x{:x}", fault_addr);
@@ -727,7 +753,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Check that we can reclaim previously-converted pages and that they have been cleared.
     reclaim_pages(
         donated_pages_base,
-        NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES,
+        NUM_GUEST_DATA_PAGES + NUM_CONVERTED_ZERO_PAGES,
     );
     reclaim_pages(state_pages_base, tvm_create_pages);
     reclaim_pages(vcpu_pages_base, tsm_info.tvm_vcpu_state_pages);

@@ -11,7 +11,7 @@ use drivers::{
     CpuInfo,
 };
 use page_tracking::collections::PageBox;
-use page_tracking::{HypPageAlloc, LockedPageList, PageList, PageTracker};
+use page_tracking::{HypPageAlloc, LockedPageList, PageList, PageTracker, TlbVersion};
 use rice::x509::{request::CertReq, MAX_CSR_LEN};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
@@ -136,6 +136,8 @@ impl MmioOperation {
 pub enum VmExitCause {
     FatalEcall(SbiMessage),
     ResumableEcall(SbiMessage),
+    #[allow(dead_code)]
+    BlockingEcall(SbiMessage, TlbVersion),
     PageFault(Exception, GuestPageAddr),
     MmioFault(MmioOperation, GuestPhysAddr),
     Wfi(DecodedInstruction),
@@ -147,6 +149,12 @@ impl VmExitCause {
     pub fn is_fatal(&self) -> bool {
         use VmExitCause::*;
         matches!(self, FatalEcall(_) | UnhandledTrap(_))
+    }
+
+    // Returns if the vCPU can immediately resume execution from the exit.
+    fn is_resumable(&self) -> bool {
+        use VmExitCause::*;
+        !self.is_fatal() && !matches!(self, BlockingEcall(..))
     }
 }
 
@@ -455,9 +463,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .get_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?
             .status();
+        use VmCpuStatus::*;
         let status = match vcpu_status {
-            VmCpuStatus::Runnable | VmCpuStatus::Running => HartState::Started,
-            VmCpuStatus::PoweredOff => HartState::Stopped,
+            Runnable | Running | Blocked(_) => HartState::Started,
+            PoweredOff => HartState::Stopped,
         };
         Ok(status as u64)
     }
@@ -636,7 +645,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
         active_vcpu.exit(cause);
 
-        Ok(cause.is_fatal().into())
+        Ok(u64::from(!cause.is_resumable()))
     }
 
     /// Handles ecalls from the guest.

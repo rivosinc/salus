@@ -29,6 +29,7 @@ pub enum Error {
     VmCpuRunning,
     VmCpuOff,
     VmCpuAlreadyPowered,
+    VmCpuBlocked,
     WrongAddressSpace,
     InvalidSharedStatePtr,
     InsufficientSharedStatePages,
@@ -546,23 +547,28 @@ impl VmCpuArchState {
     }
 }
 
-// Sets the status on dropping depending on the state of power_off.
+// Sets the status on dropping depending on the state of next_status.
 // Used by ActiveVmCpu sto set the Vcpu's state on de-activation.
 struct StatusSet<'vcpu> {
     vcpu: &'vcpu VmCpu,
-    // True if this vCPU should be powered-off on drop().
-    power_off: bool,
+    next_status: VmCpuStatus,
+}
+
+impl<'vcpu> StatusSet<'vcpu> {
+    fn new(vcpu: &'vcpu VmCpu) -> Self {
+        // vCPUs return to the "Runnable" state by default.
+        Self {
+            vcpu,
+            next_status: VmCpuStatus::Runnable,
+        }
+    }
 }
 
 impl<'vcpu> Drop for StatusSet<'vcpu> {
     fn drop(&mut self) {
         let mut status = self.vcpu.status.write();
         assert_eq!(*status, VmCpuStatus::Running);
-        *status = if self.power_off {
-            VmCpuStatus::PoweredOff
-        } else {
-            VmCpuStatus::Runnable
-        };
+        *status = self.next_status;
     }
 }
 
@@ -611,10 +617,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             vm_pages,
             active_pages: None,
             parent_vcpu,
-            status_set: StatusSet {
-                vcpu,
-                power_off: false,
-            },
+            status_set: StatusSet::new(vcpu),
         };
         active_vcpu.restore();
 
@@ -764,7 +767,7 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
         use VmExitCause::*;
         match cause {
-            ResumableEcall(msg) | FatalEcall(msg) => {
+            ResumableEcall(msg) | FatalEcall(msg) | BlockingEcall(msg, _) => {
                 shared.update_with_ecall_exit(msg);
             }
             PageFault(exception, page_addr) => {
@@ -802,7 +805,11 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
         };
 
-        self.status_set.power_off = cause.is_fatal();
+        if cause.is_fatal() {
+            self.status_set.next_status = VmCpuStatus::PoweredOff;
+        } else if let BlockingEcall(_, tlb_version) = cause {
+            self.status_set.next_status = VmCpuStatus::Blocked(tlb_version);
+        }
     }
 
     /// Delivers the given exception to the vCPU, setting up its register state to handle the trap
@@ -1061,6 +1068,8 @@ pub enum VmCpuStatus {
     Runnable,
     /// The vCPU has been claimed exclusively for running on a (physical) CPU.
     Running,
+    /// The vCPU is blocked from running until the VM reaches the given TLB version.
+    Blocked(TlbVersion),
 }
 
 /// Represents a single virtual CPU of a VM.
@@ -1134,8 +1143,12 @@ impl VmCpu {
         parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
     ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'prev, T>> {
         let mut status = self.status.write();
+        use VmCpuStatus::*;
         match *status {
-            VmCpuStatus::Runnable => {
+            Blocked(tlb_version) if tlb_version > vm_pages.min_tlb_version() => {
+                Err(Error::VmCpuBlocked)
+            }
+            Runnable | Blocked(_) => {
                 if self.guest_id != vm_pages.page_owner_id() {
                     return Err(Error::WrongAddressSpace);
                 }
@@ -1148,11 +1161,11 @@ impl VmCpu {
                 }
 
                 let active_vcpu = ActiveVmCpu::restore_from(self, vm_pages, parent_vcpu)?;
-                *status = VmCpuStatus::Running;
+                *status = Running;
                 Ok(active_vcpu)
             }
-            VmCpuStatus::Running => Err(Error::VmCpuRunning),
-            VmCpuStatus::PoweredOff => Err(Error::VmCpuOff),
+            Running => Err(Error::VmCpuRunning),
+            PoweredOff => Err(Error::VmCpuOff),
         }
     }
 

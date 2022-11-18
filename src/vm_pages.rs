@@ -1310,6 +1310,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
+    /// Returns the oldest TLB version with active references in this address space.
+    pub fn min_tlb_version(&self) -> TlbVersion {
+        self.inner.tlb_tracker.min_version()
+    }
+
     /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.
     pub fn initiate_fence(&self) -> Result<()> {
         self.inner.tlb_tracker.increment()?;

@@ -818,12 +818,11 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         Ok(mapper)
     }
 
-    /// Verifies the entire virtual address range is mapped and that `pred` returns true for
-    /// each page, returning an iterator that yields the pages after invalidating them.
-    pub fn invalidate_range<F>(
+    fn do_invalidate_range<F>(
         &self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
+        sparse: bool,
         mut pred: F,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
     where
@@ -837,20 +836,62 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         // TODO: Support huge pages, making sure we're not invalidating pages that are partially
         // covered by the range.
         for va in vaddr.iter_from().take(num_pages as usize) {
-            let paddr = inner.get_mapped_4k_leaf(va)?.page_addr();
-            if !pred(paddr) {
-                return Err(Error::PredicateFailed);
+            use TableEntryType::*;
+            match inner.walk(va.into()) {
+                Leaf(pte) => {
+                    if !pte.level().is_leaf() {
+                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
+                    }
+                    if !pred(pte.page_addr()) {
+                        return Err(Error::PredicateFailed);
+                    }
+                }
+                Unused(_) if sparse => {
+                    continue;
+                }
+                _ => {
+                    return Err(Error::PageNotMapped);
+                }
             }
         }
 
-        Ok(vaddr.iter_from().take(num_pages as usize).map(move |va| {
-            // Unwrap ok: We checked that the entire range was mapped above.
-            inner
-                .get_mapped_4k_leaf(va)
-                .unwrap()
-                .invalidate()
-                .page_addr()
-        }))
+        Ok(vaddr
+            .iter_from()
+            .take(num_pages as usize)
+            .filter_map(move |va| {
+                // Skip over unmapped PTEs -- we verified there were no invalidated or locked PTEs
+                // above.
+                Some(inner.get_mapped_4k_leaf(va).ok()?.invalidate().page_addr())
+            }))
+    }
+
+    /// Verifies the entire virtual address range is mapped and that `pred` returns true for
+    /// each page, returning an iterator that yields the pages after invalidating them.
+    pub fn invalidate_range<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        len: u64,
+        pred: F,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    where
+        F: FnMut(SupervisorPageAddr) -> bool,
+    {
+        self.do_invalidate_range(vaddr, len, false, pred)
+    }
+
+    /// Like `invalidate_range()`, but the virtual address range need not be entirely populated
+    /// with mapped pages. Any holes in the address range must be completely unmapped, i.e. there
+    /// must not be invalidated or locked PTEs.
+    pub fn invalidate_range_sparse<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        len: u64,
+        pred: F,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    where
+        F: FnMut(SupervisorPageAddr) -> bool,
+    {
+        self.do_invalidate_range(vaddr, len, true, pred)
     }
 
     /// Verifies the entire virtual address range is invalidated (or unpopulated) and that `pred`

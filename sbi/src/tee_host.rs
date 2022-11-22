@@ -91,8 +91,6 @@ impl From<u32> for RegisterSetLocation {
 ///
 /// The TSM will read from these registers when:
 ///  - The vCPU takes a load guest page fault in an emulated MMIO region.
-///  - The host calls `TvmFinalize`, latching the entry point argument (stored in 'A1') for the
-///    TVM's boot vCPU.
 #[repr(C)]
 #[derive(Default)]
 pub struct Gprs(pub [u64; 32]);
@@ -101,8 +99,7 @@ pub struct Gprs(pub [u64; 32]);
 #[repr(C)]
 #[derive(Default)]
 pub struct SupervisorCsrs {
-    /// Initial SEPC value (entry point) of a TVM vCPU. Latched for the TVM's boot vCPU at
-    /// `TvmFinalzie`; ignored for all other vCPUs.
+    /// Not currently used.
     pub sepc: u64,
     /// SCAUSE value for the trap taken by the TVM vCPU. Written by the TSM upon return from
     /// `TvmCpuRun`.
@@ -285,12 +282,18 @@ pub enum TeeHostFunction {
         /// a1 = length of the `TvmCreateParams` structure in bytes
         len: u64,
     },
-    /// Moves a VM from the initializing state to the Runnable state
+    /// Moves a VM from the "Initializing" state to the "Runnable" state, finalizing the
+    /// measurement of the TVM's configuration and initial memory contents. Sets the initial
+    /// entry point (SEPC and opaque argument passed in A1) for the boot vCPU of the TVM.
     ///
     /// a6 = 6
     Finalize {
         /// a0 = guest id
         guest_id: u64,
+        /// a1 = entry SEPC
+        entry_sepc: u64,
+        /// a2 = entry argument (A1)
+        entry_arg: u64,
     },
     /// Message to destroy a TVM created with `TvmCreate`.
     ///
@@ -485,7 +488,11 @@ impl TeeHostFunction {
                 params_addr: args[0],
                 len: args[1],
             }),
-            6 => Ok(Finalize { guest_id: args[0] }),
+            6 => Ok(Finalize {
+                guest_id: args[0],
+                entry_sepc: args[1],
+                entry_arg: args[2],
+            }),
             7 => Ok(TvmDestroy { guest_id: args[0] }),
             8 => Ok(TvmAddMemoryRegion {
                 guest_id: args[0],
@@ -562,7 +569,11 @@ impl SbiFunction for TeeHostFunction {
                 params_addr: _,
                 len: _,
             } => 5,
-            Finalize { guest_id: _ } => 6,
+            Finalize {
+                guest_id: _,
+                entry_sepc: _,
+                entry_arg: _,
+            } => 6,
             TvmDestroy { guest_id: _ } => 7,
             TvmAddMemoryRegion {
                 guest_id: _,
@@ -635,7 +646,11 @@ impl SbiFunction for TeeHostFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *guest_id,
-            Finalize { guest_id } => *guest_id,
+            Finalize {
+                guest_id,
+                entry_sepc: _,
+                entry_arg: _,
+            } => *guest_id,
             TvmCpuRun {
                 guest_id,
                 vcpu_id: _,
@@ -701,6 +716,11 @@ impl SbiFunction for TeeHostFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_addr,
+            Finalize {
+                guest_id: _,
+                entry_sepc,
+                entry_arg: _,
+            } => *entry_sepc,
             TvmCpuRun {
                 guest_id: _,
                 vcpu_id,
@@ -760,6 +780,11 @@ impl SbiFunction for TeeHostFunction {
                 num_pages: _,
                 guest_addr: _,
             } => *page_type as u64,
+            Finalize {
+                guest_id: _,
+                entry_sepc: _,
+                entry_arg,
+            } => *entry_arg,
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id: _,

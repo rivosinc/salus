@@ -47,11 +47,13 @@ impl<T: GuestStagePagingMode> GuestVmInner<T> {
     }
 
     // Converts `self` from an initializing VM to a finalized VM.
-    fn finalize(&mut self) -> Result<()> {
+    fn finalize(&mut self, entry_sepc: u64, entry_arg: u64) -> Result<()> {
         if self.state != GuestState::Init {
             return Err(Error::GuestNotInitializing);
         }
-        self.vm.finalize().map_err(Error::VmFinalizeFailed)?;
+        self.vm
+            .finalize(entry_sepc, entry_arg)
+            .map_err(Error::VmFinalizeFailed)?;
         self.state = GuestState::Running;
         Ok(())
     }
@@ -138,13 +140,13 @@ impl<T: GuestStagePagingMode> GuestVm<T> {
     }
 
     /// Converts the guest from the initializing to the finalized state.
-    pub fn finalize(&self) -> Result<()> {
+    pub fn finalize(&self, entry_sepc: u64, entry_arg: u64) -> Result<()> {
         // Use try_write() here since there shouldn't be any outstanding references to a VM that
         // we're attempting to finalize. This prevents us from blocking on a potentially
         // long-running operation on a VM that isn't even in the proper state (e.g. a finalized
         // VM that's running a vCPU).
         let mut inner = self.inner.try_write().ok_or(Error::GuestInUse)?;
-        inner.finalize()
+        inner.finalize(entry_sepc, entry_arg)
     }
 }
 

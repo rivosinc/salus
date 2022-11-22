@@ -27,7 +27,7 @@ extern crate alloc;
 
 mod asm;
 mod guest_tracking;
-mod host_vm_loader;
+mod host_vm;
 mod hyp_map;
 mod smp;
 mod trap;
@@ -43,7 +43,7 @@ use drivers::{
     imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
     CpuId, CpuInfo,
 };
-use host_vm_loader::HostVmLoader;
+use host_vm::{HostVm, HostVmLoader};
 use hyp_alloc::HypAlloc;
 use hyp_map::HypMap;
 use page_tracking::*;
@@ -59,7 +59,6 @@ use s_mode_utils::print::*;
 use s_mode_utils::sbi_console::SbiConsoleV01;
 use smp::PerCpu;
 use spin::Once;
-use vm::HostVm;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {

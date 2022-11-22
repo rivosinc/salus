@@ -2,16 +2,12 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use alloc::vec::Vec;
 use attestation::{AttestationManager, Error as AttestationError};
-use core::{mem, num, ops::ControlFlow, slice};
+use core::{mem, ops::ControlFlow, slice};
 use der::Decode;
-use drivers::{
-    imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot, pmu::PmuInfo, CpuId,
-    CpuInfo,
-};
+use drivers::{imsic::*, pmu::PmuInfo};
 use page_tracking::collections::PageBox;
-use page_tracking::{HypPageAlloc, LockedPageList, PageList, PageTracker, TlbVersion};
+use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
 use rice::x509::{request::CertReq, MAX_CSR_LEN};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
@@ -19,11 +15,10 @@ use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::print::*;
 use sbi::{Error as SbiError, *};
 
-use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests, Result as GuestTrackingResult};
-use crate::smp;
+use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
 use crate::vm_cpu::{
-    ActiveVmCpu, VmCpu, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpuStatus,
-    VmCpuTrap, VmCpus, VM_CPUS_MAX, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
+    ActiveVmCpu, VmCpu, VmCpuSharedArea, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX,
+    VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -48,9 +43,6 @@ const SBI_IMPL_ID_SALUS: u64 = 7;
 // Report ourselves as being SBI v1.0 compliant.
 const SBI_SPEC_MAJOR_VERSION_SHIFT: u64 = 24;
 const SBI_SPEC_VERSION: u64 = 1 << SBI_SPEC_MAJOR_VERSION_SHIFT;
-
-// Pages used by the `PageVec` for the Host VM guest tracking.
-const HOSTVM_GUEST_TRACKING_PAGES: usize = 2;
 
 /// Possible MMIO instructions.
 #[derive(Clone, Copy, Debug)]
@@ -157,13 +149,16 @@ impl VmExitCause {
     }
 }
 
+/// Possible error conditions from handling an ECALL from a VM.
 #[derive(Clone, Copy, Debug)]
-enum EcallError {
+pub enum EcallError {
+    /// A standard SBI error.
     Sbi(SbiError),
+    /// The requested action would cause a page fault.
     PageFault(PageFaultType, Exception, GuestPhysAddr),
 }
 
-type EcallResult<T> = core::result::Result<T, EcallError>;
+pub type EcallResult<T> = core::result::Result<T, EcallError>;
 
 impl From<VmPagesError> for EcallError {
     fn from(error: VmPagesError) -> EcallError {
@@ -358,34 +353,34 @@ impl<'a, T: GuestStagePagingMode, S> VmRef<'a, T, S> {
         self.inner.vm()
     }
 
-    // Returns a `VmPagesRef` to this VM's `VmPages` in the same state as this VM.
-    fn vm_pages(&self) -> VmPagesRef<T, S> {
+    /// Returns a `VmPagesRef` to this VM's `VmPages` in the same state as this VM.
+    pub fn vm_pages(&self) -> VmPagesRef<T, S> {
         self.vm().vm_pages.as_ref()
     }
 
-    // Returns this VM's ID.
-    fn page_owner_id(&self) -> PageOwnerId {
+    /// Returns this VM's ID.
+    pub fn page_owner_id(&self) -> PageOwnerId {
         self.vm().page_owner_id()
     }
 
-    // Returns the `PageTracker` singleton.
-    fn page_tracker(&self) -> PageTracker {
+    /// Returns the `PageTracker` singleton.
+    pub fn page_tracker(&self) -> PageTracker {
         self.vm().page_tracker()
     }
 
-    // Returns a reference to this VM's `AttestationManager`.
-    fn attestation_mgr(&self) -> &AttestationSha384 {
+    /// Returns a reference to this VM's `AttestationManager`.
+    pub fn attestation_mgr(&self) -> &AttestationSha384 {
         &self.vm().attestation_mgr
     }
 
-    /// Convenience function to turn a raw u64 from an SBI call to a `GuestPageAddr`.
+    // Convenience function to turn a raw u64 from an SBI call to a `GuestPageAddr`.
     fn guest_addr_from_raw(&self, guest_addr: u64) -> EcallResult<GuestPageAddr> {
         PageAddr::new(RawAddr::guest(guest_addr, self.page_owner_id()))
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))
     }
 
-    // Gets the location of the specified vCPU's virtualized IMSIC.
-    fn get_vcpu_imsic_location(&self, vcpu_id: u64) -> EcallResult<ImsicLocation> {
+    /// Gets the location of the specified vCPU's virtualized IMSIC.
+    pub fn get_vcpu_imsic_location(&self, vcpu_id: u64) -> EcallResult<ImsicLocation> {
         let vcpu = self
             .vm()
             .vcpus
@@ -416,7 +411,7 @@ pub type InitializingVm<'a, T> = VmRef<'a, T, VmStateInitializing>;
 
 impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
     /// Adds a vCPU to this VM.
-    fn add_vcpu(&self, vcpu_box: PageBox<VmCpu>) -> EcallResult<()> {
+    pub fn add_vcpu(&self, vcpu_box: PageBox<VmCpu>) -> EcallResult<()> {
         self.vm()
             .vcpus
             .add_vcpu(vcpu_box)
@@ -424,7 +419,11 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
     }
 
     /// Sets the location of the specified vCPU's virtualized IMSIC.
-    fn set_vcpu_imsic_location(&self, vcpu_id: u64, location: ImsicLocation) -> EcallResult<()> {
+    pub fn set_vcpu_imsic_location(
+        &self,
+        vcpu_id: u64,
+        location: ImsicLocation,
+    ) -> EcallResult<()> {
         let geometry = self
             .vm_pages()
             .imsic_geometry()
@@ -445,7 +444,7 @@ pub enum VmStateFinalized {}
 pub type FinalizedVm<'a, T> = VmRef<'a, T, VmStateFinalized>;
 
 impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
-    /// Sets the entry point of the specified vCPU and makes it runnable.
+    // Sets the entry point of the specified vCPU and makes it runnable.
     fn start_vcpu(&self, vcpu_id: u64, start_addr: u64, opaque: u64) -> EcallResult<()> {
         self.vm()
             .vcpus
@@ -455,7 +454,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     }
 
     /// Gets the state of the specified vCPU.
-    fn get_vcpu_status(&self, vcpu_id: u64) -> EcallResult<u64> {
+    pub fn get_vcpu_status(&self, vcpu_id: u64) -> EcallResult<u64> {
         let vcpu_status = self
             .vm()
             .vcpus
@@ -502,8 +501,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
-    /// Run this guest until an unhandled exit is encountered.
-    fn run_vcpu(&self, vcpu_id: u64, parent_vcpu: Option<&mut ActiveVmCpu<T>>) -> EcallResult<u64> {
+    /// Run `vcpu_id` until an unhandled exit is encountered. If `parent_vcpu` is not `None`,
+    /// save/restore `parent_vcpu`'s state on entry/exit from the vCPU being run.
+    pub fn run_vcpu(
+        &self,
+        vcpu_id: u64,
+        parent_vcpu: Option<&mut ActiveVmCpu<T>>,
+    ) -> EcallResult<u64> {
         let vcpu = self
             .vm()
             .vcpus
@@ -1867,7 +1871,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    fn bind_vcpu_begin(&self, vcpu_id: u64, interrupt_file: ImsicFileId) -> EcallResult<()> {
+    /// Begins the process of binding `vcpu_id` to the given guest interrupt file on the current
+    /// CPU by initializing the interrupt file.
+    pub fn bind_vcpu_begin(&self, vcpu_id: u64, interrupt_file: ImsicFileId) -> EcallResult<()> {
         self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
@@ -1875,7 +1881,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 
-    fn bind_vcpu_end(&self, vcpu_id: u64) -> EcallResult<()> {
+    /// Completes the process of binding `vcpu_id` to a guest interrupt file by restoring interrupt
+    /// state from the vCPU's software interrupt file.
+    pub fn bind_vcpu_end(&self, vcpu_id: u64) -> EcallResult<()> {
         self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
@@ -2266,408 +2274,5 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
         .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         Ok(0)
-    }
-}
-
-/// Errors encountered during MMIO emulation.
-#[derive(Clone, Copy, Debug)]
-enum MmioEmulationError {
-    FailedDecode(u32),
-    InvalidInstruction(Instruction),
-    InvalidAddress(u64),
-}
-
-impl core::fmt::Display for MmioEmulationError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            MmioEmulationError::FailedDecode(i) => write!(f, "FailedDecode {i:x}"),
-            MmioEmulationError::InvalidInstruction(i) => write!(f, "InvalidInstruction {i:?}"),
-            MmioEmulationError::InvalidAddress(i) => write!(f, "InvalidAddress {i:x}"),
-        }
-    }
-}
-
-/// Represents the special VM that serves as the host for the system.
-pub struct HostVm<T: GuestStagePagingMode> {
-    inner: GuestVm<T>,
-    vcpu_shared: Vec<VmCpuSharedState>,
-}
-
-impl<T: GuestStagePagingMode> HostVm<T> {
-    /// Creates an initializing host VM with an expected guest physical address space size of
-    /// `host_gpa_size` from the hypervisor page allocator. Returns the remaining free pages
-    /// from the allocator, along with the newly constructed `HostVm`.
-    pub fn from_hyp_mem(
-        mut hyp_mem: HypPageAlloc,
-        host_gpa_size: u64,
-    ) -> (PageList<Page<ConvertedClean>>, Self) {
-        let root_table_pages =
-            hyp_mem.take_pages_for_host_state_with_alignment(4, T::TOP_LEVEL_ALIGN);
-        let num_pte_pages = T::max_pte_pages(host_gpa_size / PageSize::Size4k as u64);
-        let pte_pages = hyp_mem
-            .take_pages_for_host_state(num_pte_pages as usize)
-            .into_iter();
-        let vm_state_pages =
-            hyp_mem.take_pages_for_host_state(GuestVm::<T>::required_pages() as usize);
-        let guest_tracking_pages = hyp_mem.take_pages_for_host_state(HOSTVM_GUEST_TRACKING_PAGES);
-
-        // Pages for the array of vCPUs.
-        let num_cpus = CpuInfo::get().num_cpus();
-        let vcpu_required_state_pages = VmCpus::required_state_pages_per_vcpu();
-        let num_vcpu_pages = vcpu_required_state_pages * num_cpus as u64;
-        let vcpu_state_pages = hyp_mem.take_pages_for_host_state(num_vcpu_pages as usize);
-
-        let imsic_geometry = Imsic::get().host_vm_geometry();
-        // Reserve MSI page table pages if we have an IOMMU.
-        let msi_table_pages = Iommu::get().map(|_| {
-            let msi_table_size = MsiPageTable::required_table_size(&imsic_geometry);
-            hyp_mem.take_pages_for_host_state_with_alignment(
-                PageSize::num_4k_pages(msi_table_size) as usize,
-                msi_table_size,
-            )
-        });
-
-        let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
-        let root =
-            GuestStagePageTable::new(root_table_pages, PageOwnerId::host(), page_tracker.clone())
-                .unwrap();
-        let vm_pages = VmPages::new(root, 0);
-        let init_pages = vm_pages.as_ref();
-        init_pages.set_imsic_geometry(imsic_geometry).unwrap();
-        for p in pte_pages {
-            init_pages.add_pte_page(p).unwrap();
-        }
-        if let Some(pages) = msi_table_pages {
-            init_pages.add_iommu_context(pages).unwrap();
-        }
-
-        let vm = Vm::with_guest_tracking(
-            vm_pages,
-            VmCpus::new(),
-            Guests::new(guest_tracking_pages, page_tracker.clone()),
-        )
-        .unwrap();
-
-        // Unwrap okay, we allocated 'GuestVm::<T>::required_pages()` pages.
-        let inner = GuestVm::new(vm, vm_state_pages).unwrap();
-        let vcpu_shared = Vec::with_capacity(num_cpus);
-        let mut this = Self { inner, vcpu_shared };
-
-        {
-            let init_vm = this.inner.as_initializing_vm().unwrap();
-            let imsic = Imsic::get();
-            // Unwrap safe, `vcpu_required_state_pages` must not be zero.
-            let mut state_pages_iter = vcpu_state_pages
-                .into_chunks_iter(num::NonZeroU64::new(vcpu_required_state_pages).unwrap());
-            for i in 0..num_cpus {
-                this.vcpu_shared.push(VmCpuSharedState::default());
-                // Safety: This slot in vcpu_shared points to a valid VmCpuSharedState struct
-                // that is guaranteed to live as long as the containing HostVm structure.
-                let shared_area =
-                    unsafe { VmCpuSharedArea::new(&mut this.vcpu_shared[i]) }.unwrap();
-
-                // Allocate vCPU.
-                let vcpu = VmCpu::new(i as u64, PageOwnerId::host(), shared_area);
-                let vcpu_pages = state_pages_iter.next().unwrap();
-                let vcpu_box = PageBox::new_with(vcpu, vcpu_pages, page_tracker.clone());
-                init_vm.add_vcpu(vcpu_box).unwrap();
-
-                let imsic_loc = imsic
-                    .phys_file_location(CpuId::new(i), ImsicFileId::Supervisor)
-                    .unwrap();
-                init_vm
-                    .set_vcpu_imsic_location(i as u64, imsic_loc)
-                    .unwrap();
-            }
-        }
-        (host_pages, this)
-    }
-
-    // Returns a reference to the shared-state buffer for the given vCPU.
-    fn vcpu_state(&self, vcpu_id: u64) -> Option<VmCpuSharedStateRef> {
-        let ptr = self.vcpu_shared.get(vcpu_id as usize)? as *const _;
-        // Safety: ptr refers to a valid VmCpuSharedState struct with the same lifetime as `self`.
-        Some(unsafe { VmCpuSharedStateRef::new(ptr as *mut _) })
-    }
-
-    /// Adds a region of confidential memory to the host VM.
-    pub fn add_confidential_memory_region(&mut self, addr: GuestPageAddr, len: u64) {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        vm.vm_pages()
-            .add_confidential_memory_region(addr, len)
-            .unwrap();
-    }
-
-    /// Adds a PCI BAR memory region to the host VM.
-    pub fn add_pci_region(&mut self, addr: GuestPageAddr, len: u64) {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        vm.vm_pages().add_pci_region(addr, len).unwrap();
-    }
-
-    /// Adds data pages that are measured and mapped to the page tables for the host. Requires
-    /// that the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
-    pub fn add_measured_pages<I, S, M>(&mut self, to_addr: GuestPageAddr, pages: I)
-    where
-        I: ExactSizeIterator<Item = Page<S>>,
-        S: Assignable<M>,
-        M: MeasureRequirement,
-    {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        let page_tracker = vm.page_tracker();
-        // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
-        let mapper = vm
-            .vm_pages()
-            .map_measured_pages(to_addr, pages.len() as u64)
-            .unwrap();
-        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(page.size(), PageSize::Size4k);
-            assert_eq!(
-                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
-            );
-            let mappable = page_tracker
-                .assign_page_for_mapping(page, vm.page_owner_id())
-                .unwrap();
-            mapper
-                .map_page(vm_addr, mappable, vm.attestation_mgr())
-                .unwrap();
-        }
-    }
-
-    /// Adds the IMSIC pages for `cpu` to the host. The first page in `pages` is set as the
-    /// host's interrupt file for `cpu` while the remaining pages are added as guest interrupt
-    /// files for the host to assign.
-    pub fn add_imsic_pages<I>(&mut self, cpu: CpuId, pages: I)
-    where
-        I: ExactSizeIterator<Item = ImsicGuestPage<ConvertedClean>>,
-    {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        // We assigned an IMSIC geometry and vCPU IMSIC locations in `from_hyp_mem()`.
-        let location = vm.get_vcpu_imsic_location(cpu.raw() as u64).unwrap();
-        let to_addr = vm
-            .vm_pages()
-            .imsic_geometry()
-            .and_then(|g| g.location_to_addr(location))
-            .unwrap();
-        // Unwrap ok since we've donated sufficient PT pages to map the entire address space up
-        // front.
-        let mapper = vm
-            .vm_pages()
-            .map_imsic_pages(to_addr, pages.len() as u64)
-            .unwrap();
-        let page_tracker = vm.page_tracker();
-        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            // The first guest interrupt file will be the host's virtual supervisor interrupt file,
-            // with the remaining files serving as guest interrupt files for the host.
-            //
-            // TODO: This is sufficient for the host VM since vCPUs are never migrated, but in the
-            // event we need to support nested IMSIC virtualization for guest VMs we'll need to be
-            // able to bind a vCPU to multiple interrupt files.
-            let mappable = page_tracker
-                .assign_page_for_mapping(page, vm.page_owner_id())
-                .unwrap();
-            mapper.map_page(vm_addr, mappable).unwrap();
-        }
-    }
-
-    /// Add PCI BAR pages to the host page tables.
-    pub fn add_pci_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
-    where
-        I: ExactSizeIterator<Item = PciBarPage<ConvertedClean>>,
-    {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        let page_tracker = vm.page_tracker();
-        // Unwrap ok since we've donated sufficient PT pages to map the entire address space up
-        // front.
-        let mapper = vm
-            .vm_pages()
-            .map_pci_pages(to_addr, pages.len() as u64)
-            .unwrap();
-        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(page.size(), PageSize::Size4k);
-            let mappable = page_tracker
-                .assign_page_for_mapping(page, vm.page_owner_id())
-                .unwrap();
-            mapper.map_page(vm_addr, mappable).unwrap();
-        }
-    }
-
-    /// Attaches the given PCI device to the host VM.
-    pub fn attach_pci_device(&self, dev: &mut PciDevice) {
-        let vm = self.inner.as_initializing_vm().unwrap();
-        vm.vm_pages().attach_pci_device(dev).unwrap();
-    }
-
-    /// Completes intialization of the host VM, making it runnable.
-    pub fn finalize(
-        &self,
-        entry_addr: GuestPhysAddr,
-        fdt_addr: GuestPhysAddr,
-    ) -> GuestTrackingResult<()> {
-        self.inner.finalize(entry_addr.bits(), fdt_addr.bits())
-    }
-
-    /// Add zero pages to the host page tables. Requires that the GPA map the SPA in
-    /// T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
-    pub fn add_zero_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
-    where
-        I: ExactSizeIterator<Item = Page<ConvertedClean>>,
-    {
-        let vm = self.inner.as_finalized_vm().unwrap();
-        let page_tracker = vm.page_tracker();
-        // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
-        let mapper = vm
-            .vm_pages()
-            .map_zero_pages(to_addr, pages.len() as u64)
-            .unwrap();
-        for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
-            assert_eq!(page.size(), PageSize::Size4k);
-            assert_eq!(
-                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
-            );
-            let mappable = page_tracker
-                .assign_page_for_mapping(page, vm.page_owner_id())
-                .unwrap();
-            mapper.map_page(vm_addr, mappable).unwrap();
-        }
-    }
-
-    /// Adds an emulated MMIO region to the host VM.
-    pub fn add_mmio_region(&mut self, addr: GuestPageAddr, len: u64) {
-        let vm = self.inner.as_finalized_vm().unwrap();
-        vm.vm_pages().add_mmio_region(addr, len).unwrap();
-    }
-
-    // Bind `vcpu_id` to its virtual supervisor interrupt file.
-    fn bind_vcpu(&self, vcpu_id: u64) {
-        // vCPU ID == physical CPU ID for the host VM.
-        assert_eq!(smp::PerCpu::this_cpu().cpu_id().raw() as u64, vcpu_id);
-        let vm = self.inner.as_finalized_vm().unwrap();
-        // We always use the first (physical) guest interrupt file as the host's virtual supervisor
-        // interrupt file. The page for the interrupt file has already been mapped.
-        vm.bind_vcpu_begin(vcpu_id, ImsicFileId::guest(0)).unwrap();
-        vm.bind_vcpu_end(vcpu_id).unwrap();
-    }
-
-    /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.
-    pub fn run(&self, vcpu_id: u64) {
-        let vm = self.inner.as_finalized_vm().unwrap();
-        loop {
-            self.bind_vcpu(vcpu_id);
-
-            // Wait until this vCPU is ready to run.
-            while !self.vcpu_is_runnable(vcpu_id) {
-                smp::wfi();
-            }
-
-            // Unwrap ok: vcpu_id must exist if it's runnable.
-            let vcpu = self.vcpu_state(vcpu_id).unwrap();
-            // Run until we shut down, or this vCPU stops.
-            loop {
-                vm.run_vcpu(vcpu_id, None).unwrap();
-                let scause = vcpu.scause();
-                if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
-                    use Exception::*;
-                    match e {
-                        VirtualSupervisorEnvCall => {
-                            // Read the ECALL arguments written to the A* regs in shared memory.
-                            let mut a_regs = [0u64; 8];
-                            for (i, reg) in a_regs.iter_mut().enumerate() {
-                                // Unwrap ok: A0-A7 are valid GPR indices.
-                                let index =
-                                    GprIndex::from_raw(GprIndex::A0 as u32 + i as u32).unwrap();
-                                *reg = vcpu.gpr(index);
-                            }
-                            use SbiMessage::*;
-                            match SbiMessage::from_regs(&a_regs) {
-                                Ok(Reset(_)) => {
-                                    println!("Host VM requested shutdown");
-                                    return;
-                                }
-                                Ok(HartState(StateFunction::HartStart { hart_id, .. })) => {
-                                    smp::send_ipi(CpuId::new(hart_id as usize));
-                                }
-                                Ok(HartState(StateFunction::HartStop)) => {
-                                    break;
-                                }
-                                _ => {
-                                    println!("Unhandled ECALL from host");
-                                    return;
-                                }
-                            }
-                        }
-                        GuestLoadPageFault | GuestStorePageFault => {
-                            if let Err(err) = self.handle_page_fault(vcpu_id) {
-                                println!("Unhandled page fault: {}", err);
-                                return;
-                            }
-                        }
-                        _ => {
-                            println!("Unhandled host VM exception {:?}", e);
-                            return;
-                        }
-                    }
-                } else {
-                    println!("Unexpected host VM trap (SCAUSE = 0x{:x})", scause);
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Returns if the vCPU with `vcpu_id` is runnable.
-    fn vcpu_is_runnable(&self, vcpu_id: u64) -> bool {
-        let vm = self.inner.as_finalized_vm().unwrap();
-        vm.get_vcpu_status(vcpu_id)
-            .is_ok_and(|s| s == HartState::Started as u64)
-    }
-
-    // Handle a page fault for `vcpu_id`.
-    fn handle_page_fault(&self, vcpu_id: u64) -> core::result::Result<(), MmioEmulationError> {
-        // For now, the only thing we're expecting is MMIO emulation faults in PCI config space.
-        let vcpu = self.vcpu_state(vcpu_id).unwrap();
-        let addr = (vcpu.htval() << 2) | (vcpu.stval() & 0x3);
-        let pci = PcieRoot::get();
-        if addr < pci.config_space().base().bits() {
-            return Err(MmioEmulationError::InvalidAddress(addr));
-        }
-        let offset = addr - pci.config_space().base().bits();
-        if offset > pci.config_space().length_bytes() {
-            return Err(MmioEmulationError::InvalidAddress(addr));
-        }
-
-        // Figure out from HTINST what the MMIO operation was. We know the source/destination is
-        // always A0.
-        let raw_inst = vcpu.htinst() as u32;
-        let inst = DecodedInstruction::from_raw(raw_inst)
-            .map_err(|_| MmioEmulationError::FailedDecode(raw_inst))?;
-        use Instruction::*;
-        let (write, width) = match inst.instruction() {
-            Lb(_) | Lbu(_) => (false, 1),
-            Lh(_) | Lhu(_) => (false, 2),
-            Lw(_) | Lwu(_) => (false, 4),
-            Ld(_) => (false, 8),
-            Sb(_) => (true, 1),
-            Sh(_) => (true, 2),
-            Sw(_) => (true, 4),
-            Sd(_) => (true, 8),
-            i => {
-                return Err(MmioEmulationError::InvalidInstruction(i));
-            }
-        };
-
-        let vm = self.inner.as_finalized_vm().unwrap();
-        let page_tracker = vm.page_tracker();
-        let guest_id = vm.page_owner_id();
-        if write {
-            let val = vcpu.gpr(GprIndex::A0);
-            pci.emulate_config_write(offset, val, width, page_tracker, guest_id);
-        } else {
-            let val = pci.emulate_config_read(offset, width, page_tracker, guest_id);
-            vcpu.set_gpr(GprIndex::A0, val);
-        }
-
-        Ok(())
     }
 }

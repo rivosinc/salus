@@ -94,9 +94,13 @@ pub fn tvm_create(tvm_page_directory_addr: u64, tvm_state_addr: u64) -> Result<u
     Ok(vmid)
 }
 
-/// Finalizes the given TVM
-pub fn tvm_finalize(vmid: u64) -> Result<()> {
-    let msg = SbiMessage::TeeHost(Finalize { guest_id: vmid });
+/// Finalizes the given TVM, setting the initial entry point for the TVM's boot vCPU.
+pub fn tvm_finalize(vmid: u64, entry_sepc: u64, entry_arg: u64) -> Result<()> {
+    let msg = SbiMessage::TeeHost(Finalize {
+        guest_id: vmid,
+        entry_sepc,
+        entry_arg,
+    });
     // Safety: `Finalize` doesn't touch memory.
     unsafe { ecall_send(&msg) }?;
     Ok(())

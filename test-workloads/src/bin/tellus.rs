@@ -515,20 +515,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     next_page += NUM_CONVERTED_ZERO_PAGES * PAGE_SIZE_4K;
     let shared_page_base = next_page;
 
-    // Set the entry point.
-    vcpu.set_sepc(0x8020_0000);
-    // Set the kernel_init() parameter.
-    vcpu.set_gpr(
-        GprIndex::A1,
-        if vector_enabled {
-            BOOT_ARG_VECTORS_ENABLED
-        } else {
-            0
-        },
-    );
-
+    // Tell the guest if we have vector support via its boot argument.
+    let boot_arg = if vector_enabled {
+        BOOT_ARG_VECTORS_ENABLED
+    } else {
+        0
+    };
     // TODO test that access to pages crashes somehow
-    tee_host::tvm_finalize(vmid).expect("Tellus - Finalize returned error");
+    tee_host::tvm_finalize(vmid, 0x8020_0000, boot_arg).expect("Tellus - Finalize returned error");
 
     // Map a few zero pages up front. We'll fault the rest in as necessary.
     tee_host::add_zero_pages(

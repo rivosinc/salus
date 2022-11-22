@@ -308,20 +308,19 @@ impl<T: GuestStagePagingMode> Vm<T> {
         Ok(())
     }
 
-    /// Completes intialization of the `Vm`. The caller must ensure that it is currently in the
-    /// initializing state.
-    pub fn finalize(&mut self) -> Result<()> {
+    /// Completes intialization of the `Vm`, setting the entry point of the VM to `entry_sepc` and
+    /// and `entry_arg`. The caller must ensure that it is currently in the initializing state.
+    pub fn finalize(&mut self, entry_sepc: u64, entry_arg: u64) -> Result<()> {
         // Enable the boot vCPU; we assume this is always vCPU 0.
         //
         // TODO: Should we allow a non-0 boot vCPU to be specified when creating the TVM?
-        let (sepc, arg) = self
-            .vcpus
+        self.vcpus
             .get_vcpu(0)
-            .and_then(|v| v.power_on_and_latch_entry_args())
+            .and_then(|v| v.power_on(entry_sepc, entry_arg))
             .map_err(|_| Error::MissingBootCpu)?;
-        // Latch and measure the entry point of the boot vCPU.
-        self.attestation_mgr.set_epc(sepc);
-        self.attestation_mgr.set_arg(arg);
+        // Measure the entry point of the boot vCPU.
+        self.attestation_mgr.set_epc(entry_sepc);
+        self.attestation_mgr.set_arg(entry_arg);
         self.validate_imsic_addrs()?;
         self.attestation_mgr
             .finalize()
@@ -973,7 +972,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                     active_vcpu.active_pages(),
                 )
                 .into(),
-            Finalize { guest_id } => self.guest_finalize(guest_id).into(),
+            Finalize {
+                guest_id,
+                entry_sepc,
+                entry_arg,
+            } => self.guest_finalize(guest_id, entry_sepc, entry_arg).into(),
             TvmCpuRun { guest_id, vcpu_id } => {
                 self.guest_run_vcpu(guest_id, vcpu_id, active_vcpu).into()
             }
@@ -1185,11 +1188,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(guest)
     }
 
-    // converts the given guest from init to running
-    fn guest_finalize(&self, guest_id: u64) -> EcallResult<u64> {
+    // Converts the guest TVM from initializing to runnable, and sets the initial entry point for
+    // the TVM.
+    fn guest_finalize(&self, guest_id: u64, entry_sepc: u64, entry_arg: u64) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
         guest
-            .finalize()
+            .finalize(entry_sepc, entry_arg)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         Ok(0)
     }
@@ -2386,14 +2390,6 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         Some(unsafe { VmCpuSharedStateRef::new(ptr as *mut _) })
     }
 
-    /// Sets the launch arguments (entry point and FDT) for the host vCPU.
-    pub fn set_launch_args(&self, entry_addr: GuestPhysAddr, fdt_addr: GuestPhysAddr) {
-        // Unwrap ok: there must be a CPU 0.
-        let vcpu = self.vcpu_state(0).unwrap();
-        vcpu.set_sepc(entry_addr.bits());
-        vcpu.set_gpr(GprIndex::A1, fdt_addr.bits());
-    }
-
     /// Adds a region of confidential memory to the host VM.
     pub fn add_confidential_memory_region(&mut self, addr: GuestPageAddr, len: u64) {
         let vm = self.inner.as_initializing_vm().unwrap();
@@ -2503,8 +2499,12 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     }
 
     /// Completes intialization of the host VM, making it runnable.
-    pub fn finalize(&self) -> GuestTrackingResult<()> {
-        self.inner.finalize()
+    pub fn finalize(
+        &self,
+        entry_addr: GuestPhysAddr,
+        fdt_addr: GuestPhysAddr,
+    ) -> GuestTrackingResult<()> {
+        self.inner.finalize(entry_addr.bits(), fdt_addr.bits())
     }
 
     /// Add zero pages to the host page tables. Requires that the GPA map the SPA in

@@ -335,13 +335,14 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             .add_measured_pages(current_gpa, fdt_pages.into_iter());
         current_gpa = current_gpa.checked_add_pages(num_fdt_pages).unwrap();
 
-        self.vm.set_launch_args(
-            self.guest_ram_base
-                .checked_increment(KERNEL_OFFSET)
-                .unwrap(),
-            self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
-        );
-        self.vm.finalize().unwrap();
+        self.vm
+            .finalize(
+                self.guest_ram_base
+                    .checked_increment(KERNEL_OFFSET)
+                    .unwrap(),
+                self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
+            )
+            .unwrap();
 
         // Fill in the zero pages.
         for r in zero_ranges.iter() {

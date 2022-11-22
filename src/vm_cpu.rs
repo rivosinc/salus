@@ -1115,16 +1115,6 @@ impl VmCpu {
         Ok(())
     }
 
-    /// Powers on this vCPU, latching the entry point from its shared memory state area. Returns
-    /// the (SEPC, A1) pair on success.
-    pub fn power_on_and_latch_entry_args(&self) -> Result<(u64, u64)> {
-        let shared = self.shared_area.as_ref();
-        let sepc = shared.sepc();
-        let arg = shared.gpr(GprIndex::A1);
-        self.power_on(sepc, arg)?;
-        Ok((sepc, arg))
-    }
-
     /// Returns the ID of the vCPU in the guest.
     pub fn vcpu_id(&self) -> u64 {
         self.vcpu_id

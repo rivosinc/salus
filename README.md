@@ -34,7 +34,13 @@ Linux kernel:
 - Out-of-tree patches are required; see table below.
 - Build: `ARCH=riscv CROSS_COMPILE=riscv64-unknown-linux-gnu- make defconfig Image`
 - Set the `LINUX=` variable to point to the compiled Linux kernel tree when
-  using the `make run_linux` and `make run_debian` targets described below.
+  using linux related targets described below.
+
+Buildroot:
+- Out-of-tree patches are required; see table below.
+- Build: `make qemu_riscv64_virt_defconfig && make`
+- Set the `BUILDROOT=` variable to point to the buildroot source directory while
+  running `make run_buildroot` targets described below.
 
 Debian:
 - Download and extract a pre-baked `riscv64-virt` image from https://people.debian.org/~gio/dqib/.
@@ -47,6 +53,7 @@ Latest known-working branches:
 | ------- | ------ |
 | QEMU    | https://github.com/rivosinc/qemu/tree/salus-integration-10312022 |
 | Linux   | https://github.com/rivosinc/linux/tree/salus-integration-10312022 |
+| Buildroot| https://github.com/rivosinc/buildroot/tree/salus-integration-2022.08.2 |
 
 ### Linux VM
 
@@ -64,6 +71,19 @@ make run_debian \
     QEMU=<path-to-qemu-tree> \
     LINUX=<path-to-linux-tree> \
     DEBIAN=<path-to-pre-baked-image>
+```
+
+To boot a quick functional Linux VM with busybox based rootfs built from
+buildroot, use the `make run_buildroot` target. The above buildroot tree
+must be compiled to generate the rootfs with networking enabled.
+
+Example:
+
+```
+make run_buildroot \
+    QEMU=<path-to-qemu-tree> \
+    LINUX=<path-to-linux-tree> \
+    BUILDROOT=<path-to-buildroot repo>
 ```
 
 Once booted, the VM can be SSH'ed into with `root:root` at `localhost:7722`.

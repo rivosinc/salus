@@ -74,9 +74,6 @@ extern "C" {
 /// The allocator used for boot-time dynamic memory allocations.
 static HYPERVISOR_ALLOCATOR: Once<HypAlloc> = Once::new();
 
-/// The hypervisor page table root address and mode to load in satp on secondary CPUs
-static SATP_VAL: Once<u64> = Once::new();
-
 // Implementation of GlobalAlloc that forwards allocations to the boot-time allocator.
 struct GeneralGlobalAlloc;
 
@@ -264,13 +261,13 @@ fn hyp_map_region(
     }
 }
 
-// Creates the Sv48 page table based on the accessible regions of memory in the provided memory
-// map.
-fn setup_hyp_paging(mem_map: &mut HwMemMap) {
-    let num_pte_pages = pte_page_count(mem_map);
+/// Reserve pages for hypervisor PTEs mappings.
+pub fn reserve_hyp_paging(mem_map: &mut HwMemMap) -> impl Iterator<Item = Page<InternalClean>> {
+    let cpu_info = CpuInfo::get();
+    let num_pte_pages = pte_page_count(mem_map) * cpu_info.num_cpus() as u64;
     let pte_base = find_available_region(mem_map, num_pte_pages * PageSize::Size4k as u64)
         .expect("Not enough free memory for hypervisor Sv48 page table");
-    let mut pte_pages = mem_map
+    mem_map
         .reserve_and_take_pages(
             HwReservedMemType::HypervisorPtes,
             SupervisorPageAddr::new(RawAddr::from(pte_base)).unwrap(),
@@ -279,24 +276,29 @@ fn setup_hyp_paging(mem_map: &mut HwMemMap) {
         )
         .unwrap()
         .clean()
-        .into_iter();
+        .into_iter()
+}
+
+/// Creates a Sv48 page table based on the accessible regions of memory in the
+/// provided memory map.
+///
+/// Safety:
+/// get_pte_pages should contain enough pages to allocate PTEs for the hardware memory map.
+pub fn setup_hyp_paging(
+    mem_map: &HwMemMap,
+    get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
+) -> FirstStagePageTable<Sv48> {
     // Create empty sv48 page table
-    let root_page = pte_pages.next().unwrap();
+    // Unwrap okay: we should have reserved enough pages, and not much can be done if this fails.
+    let root_page = get_pte_page().unwrap();
     let sv48: FirstStagePageTable<Sv48> =
         FirstStagePageTable::new(root_page).expect("creating sv48");
 
     // Map all the regions in the memory map that the hypervisor could need.
     for (base, size, perms) in mem_map.regions().filter_map(hyp_map_params) {
-        hyp_map_region(&sv48, base, size, perms, &mut || pte_pages.next());
+        hyp_map_region(&sv48, base, size, perms, get_pte_page)
     }
-
-    // Install the page table in satp
-    let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
-    satp.set_from(&sv48, 0);
-    // Store the SATP value for other CPUs. They load from the global in start_secondary.
-    SATP_VAL.call_once(|| satp.get());
-    CSR.satp.set(satp.get());
-    tlb::sfence_vma(None, None);
+    sv48
 }
 
 /// Creates a heap from the given `mem_map`, marking the region occupied by the heap as reserved.
@@ -509,10 +511,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Probe for hardcoded reset device. Not really a probe.
     ResetDriver::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up Reset Device");
 
-    setup_hyp_paging(&mut mem_map);
-
-    // Set up per-CPU memory and boot the secondary CPUs.
+    // Set up per-CPU memory and per-CPU page tables.
     PerCpu::init(hart_id, &mut mem_map);
+    // Note: from now on we cannot modify the hardware memory map, as it is now reflected in paging.
+
+    // Install this page table in satp
+    let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
+    satp.set_from(PerCpu::this_cpu().rootpt(), 0);
+    CSR.satp.set(satp.get());
+    tlb::sfence_vma(None, None);
 
     println!("HW memory map:");
     for (i, r) in mem_map.regions().enumerate() {
@@ -587,7 +594,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 extern "C" fn secondary_init(_hart_id: u64) {
     setup_csrs();
 
-    CSR.satp.set(*SATP_VAL.get().unwrap());
+    let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
+    satp.set_from(PerCpu::this_cpu().rootpt(), 0);
+    CSR.satp.set(satp.get());
     tlb::sfence_vma(None, None);
 
     let cpu_info = CpuInfo::get();

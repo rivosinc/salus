@@ -6,6 +6,7 @@ use core::arch::asm;
 use core::cell::{RefCell, RefMut};
 use drivers::{imsic::Imsic, CpuId, CpuInfo};
 use page_tracking::{HwMemMap, HwMemRegionType, HwReservedMemType};
+use riscv_page_tables::{FirstStagePageTable, Sv48};
 use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
 use riscv_regs::{sstatus, ReadWriteable, CSR};
 use s_mode_utils::print::*;
@@ -13,6 +14,7 @@ use sbi::api::state;
 use spin::Once;
 
 use crate::vm_id::VmIdTracker;
+use crate::{reserve_hyp_paging, setup_hyp_paging};
 
 // The secondary CPU entry point, defined in start.S.
 extern "C" {
@@ -25,6 +27,7 @@ extern "C" {
 pub struct PerCpu {
     cpu_id: CpuId,
     vmid_tracker: RefCell<VmIdTracker>,
+    rootpt: FirstStagePageTable<Sv48>,
     online: Once<bool>,
 }
 
@@ -39,6 +42,9 @@ impl PerCpu {
     /// boot CPU's) per-CPU area is initialized and loaded into TP as well.
     pub fn init(boot_hart_id: u64, mem_map: &mut HwMemMap) {
         let cpu_info = CpuInfo::get();
+
+        // Reserve PTE Pages.
+        let mut pte_pages = reserve_hyp_paging(mem_map);
 
         // Find somewhere to put the per-CPU memory.
         let total_size = PER_CPU_PAGES * cpu_info.num_cpus() as u64 * PageSize::Size4k as u64;
@@ -56,12 +62,17 @@ impl PerCpu {
             .unwrap();
         PER_CPU_BASE.call_once(|| pcpu_base);
 
-        // Now initialize each PerCpu structure.
         for i in 0..cpu_info.num_cpus() {
             let cpu_id = CpuId::new(i);
+
+            // Initialize each cpu root pagetable.
+            let rootpt = setup_hyp_paging(mem_map, &mut || pte_pages.next());
+
+            // Now initialize each PerCpu structure.
             let ptr = Self::ptr_for_cpu(CpuId::new(i));
             let pcpu = PerCpu {
                 cpu_id,
+                rootpt,
                 vmid_tracker: RefCell::new(VmIdTracker::new()),
                 online: Once::new(),
             };
@@ -123,6 +134,10 @@ impl PerCpu {
     /// Returns a mutable reference to this CPU's VMID tracker.
     pub fn vmid_tracker_mut(&self) -> RefMut<VmIdTracker> {
         self.vmid_tracker.borrow_mut()
+    }
+
+    pub fn rootpt(&self) -> &FirstStagePageTable<Sv48> {
+        &self.rootpt
     }
 }
 

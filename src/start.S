@@ -14,18 +14,20 @@ _start:
 .option norelax
     la gp, _global_pointer
 .option pop
-    la sp, _stack_end
     csrw sstatus, zero
     csrw sie, zero
 
-    la t1, kernel_init
-    la ra, 1f
-    jr t1
-
-    j 1f
+    // Clear the BSS
+    la   a3, _bss_start
+    la   a4, _bss_end
 1:
-    wfi
-    j 1b
+    sd   zero, (a3)
+    addi a3, a3, 8
+    blt  a3, a4, 1b
+
+    la   sp, _stack_end
+    call kernel_init
+    j    wfi_loop
 
 // The entry point for secondary CPUs.
 .global _secondary_start
@@ -38,9 +40,9 @@ _secondary_start:
     csrw sstatus, zero
     csrw sie, zero
     // TP holds the address of our PerCpu struct, which is also the top of our stack.
-    mv sp, a1
-    mv tp, a1
-
-    la t1, secondary_init
-    la ra, 1b
-    jr t1
+    mv   sp, a1
+    mv   tp, a1
+    call secondary_init
+wfi_loop:
+    wfi
+    j    wfi_loop

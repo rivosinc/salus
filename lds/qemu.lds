@@ -43,7 +43,10 @@ SECTIONS
     } >ram AT>ram :data
 
     .bss : {
+        . = ALIGN(8);
+	PROVIDE(_bss_start = .);
         *(.sbss .sbss.*) *(.bss .bss.*)
+        . = ALIGN(8);
         PROVIDE(_bss_end = .);
     } >ram AT>ram :bss
 

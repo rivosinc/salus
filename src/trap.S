@@ -53,12 +53,9 @@ _trap_entry:
     sd   t2, ({tf_sepc})(sp)
 
     /* Now enter the rust trap handler. */
-    la   t3, handle_trap
-    la   ra, _trap_return
     move a0, sp
-    jr   t3
+    call handle_trap
 
-_trap_return:
     /* Restore state and sret. */
     ld   t0, ({tf_sstatus})(sp)
     csrw sstatus, t0

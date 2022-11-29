@@ -37,6 +37,10 @@ pub enum PageState {
     /// data structures or as a page-table page for the VM.
     VmState,
 
+    /// Page is used to store hypervisor-internal state for the hypervisor. These pages cannot be
+    /// reassigned.
+    HypState,
+
     /// Page has been invalidated and started the conversion operation at the given TLB version in
     /// the current owner's address space.
     Converting(TlbVersion),
@@ -170,6 +174,7 @@ impl PageInfo {
                     Err(PageTrackingError::RefCountUnderflow)
                 }
             }
+            HypState => Err(PageTrackingError::HypervisorStatePage),
             Reserved => Err(PageTrackingError::ReservedPage),
             Free => Err(PageTrackingError::UnownedPage),
         }
@@ -178,13 +183,13 @@ impl PageInfo {
     /// Assigns a "ConvertedLocked" page to `owner` with state `new_state`.
     pub fn assign(&mut self, owner: PageOwnerId, new_state: PageState) -> PageTrackingResult<()> {
         use PageState::*;
-        if !matches!(new_state, Mapped | VmState | Converted) {
-            // Going back to free/reserved isn't allowed, nor does it make sense for a page to
-            // immediately enter the "Converting" or "Unassigning" state.
-            return Err(PageTrackingError::InvalidStateTransition);
-        }
         match self.state {
             Free => {
+                if !matches!(new_state, ConvertedLocked | HypState) {
+                    // Free pages can either be assigned to 'ConvertedLocked', ready to be
+                    // reassigned, or to `HypState` for hypervisor allocation.
+                    return Err(PageTrackingError::InvalidStateTransition);
+                }
                 // We need not be "locked" here since Free is a startup-only state when the hypervisor
                 // has exclusive ownership over all memory.
                 if owner != PageOwnerId::hypervisor() {
@@ -195,9 +200,10 @@ impl PageInfo {
             }
             Converted => Err(PageTrackingError::PageNotLocked),
             ConvertedLocked => {
-                if matches!(new_state, Converted) {
-                    // A page converted by a VM can't immediately become a converted page in a child
-                    // VM.
+                if !matches!(new_state, Mapped | VmState) {
+                    // Going back to free/reserved or converted isn't allowed, nor does it make
+                    // sense for a page to immediately enter the "Converting" or "Unassigning"
+                    // state.
                     return Err(PageTrackingError::InvalidStateTransition);
                 }
                 self.owners
@@ -734,9 +740,8 @@ mod tests {
         let mut page = PageInfo::new();
         assert!(page.is_free());
         assert!(page
-            .assign(PageOwnerId::hypervisor(), PageState::Converted)
+            .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
             .is_ok());
-        assert!(page.lock_for_assignment().is_ok());
         assert!(page.assign(PageOwnerId::host(), PageState::Mapped).is_ok());
         assert_eq!(page.owner().unwrap(), PageOwnerId::host());
         let version = TlbVersion::new();
@@ -762,7 +767,7 @@ mod tests {
         let mut page = PageInfo::new_reserved();
         assert!(!page.is_free());
         assert!(page
-            .assign(PageOwnerId::hypervisor(), PageState::Converted)
+            .assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
             .is_err());
     }
 }

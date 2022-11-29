@@ -85,14 +85,14 @@ mod tests {
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
         let start_pa = RawAddr::supervisor(aligned_pointer as u64);
-        let hw_map = unsafe {
+        let mut hw_map = unsafe {
             // Not safe - just a test
             HwMemMapBuilder::new(Sv48x4::TOP_LEVEL_ALIGN)
                 .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
                 .unwrap()
                 .build()
         };
-        let mut hyp_mem = HypPageAlloc::new(hw_map);
+        let mut hyp_mem = HypPageAlloc::new(&mut hw_map);
         let root_pages =
             hyp_mem.take_pages_for_host_state_with_alignment(4, Sv48x4::TOP_LEVEL_ALIGN);
         let pte_pages = hyp_mem.take_pages_for_host_state(3);

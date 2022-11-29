@@ -422,7 +422,7 @@ pub struct PageMap {
 impl PageMap {
     /// Builds a new `PageMap` from a populated `HwMemMap`. It will track ownership information
     /// for each page in the system.
-    pub fn build_from(mut mem_map: HwMemMap) -> Self {
+    pub fn build_from(mem_map: &mut HwMemMap) -> Self {
         // Determine how many pages we'll need for the page map.
         let total_pages = mem_map
             .regions()
@@ -471,7 +471,7 @@ impl PageMap {
     /// Populates an already-constructed `PageMap` with the memory map information from the given
     /// `HwMemMap`. This `PageMap` must be empty and must have been constructed with enough space
     /// for all the pages in the `HwMemMap`.
-    fn populate_from(&mut self, mem_map: HwMemMap) {
+    fn populate_from(&mut self, mem_map: &HwMemMap) {
         // Populate the page map with the regions in the memory map.
         //
         // All pages in available RAM regions are initially free and will later become
@@ -646,7 +646,7 @@ mod tests {
                 .build()
         };
         let mut pages = PageMap::new(pages);
-        pages.populate_from(mem_map);
+        pages.populate_from(&mem_map);
 
         let before_addr = PageAddr::new(RawAddr::supervisor(base_addr.bits() - 4096)).unwrap();
         let last_addr = base_addr.checked_add_pages(num_pages - 1).unwrap();
@@ -689,7 +689,7 @@ mod tests {
             )
             .unwrap();
         let mut pages = PageMap::new(pages);
-        pages.populate_from(mem_map);
+        pages.populate_from(&mem_map);
 
         let free_addr = PageAddr::new(RawAddr::supervisor(0x1000_1000)).unwrap();
         let reserved_addr = PageAddr::new(RawAddr::supervisor(0x1000_4000)).unwrap();
@@ -720,7 +720,7 @@ mod tests {
                 .build()
         };
         let mut pages = PageMap::new(pages);
-        pages.populate_from(mem_map);
+        pages.populate_from(&mem_map);
 
         let base_addr = PageAddr::new(RawAddr::supervisor(0x1000_0000)).unwrap();
         let r0_addr = PageAddr::new(RawAddr::supervisor(0x1000_8000)).unwrap();

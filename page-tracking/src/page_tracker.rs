@@ -151,14 +151,14 @@ impl PageTracker {
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
         let start_pa = RawAddr::supervisor(aligned_pointer as u64);
-        let hw_map = unsafe {
+        let mut hw_map = unsafe {
             // Not safe - just a test
             HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypPageAlloc::new(hw_map);
+        let hyp_mem = HypPageAlloc::new(&mut hw_map);
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
@@ -506,7 +506,7 @@ pub struct HypPageAlloc {
 impl HypPageAlloc {
     /// Creates a new `HypPageAlloc`. The memory map passed in contains information about what
     /// physical memory can be used by the machine.
-    pub fn new(mem_map: HwMemMap) -> Self {
+    pub fn new(mem_map: &mut HwMemMap) -> Self {
         let first_page = mem_map.regions().next().unwrap().base();
         let mut hyp_pages = Self {
             next_page: None,
@@ -692,14 +692,14 @@ mod tests {
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
         let start_pa = RawAddr::supervisor(aligned_pointer as u64);
-        let hw_map = unsafe {
+        let mut hw_map = unsafe {
             // Not safe - just a test
             HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypPageAlloc::new(hw_map);
+        let hyp_mem = HypPageAlloc::new(&mut hw_map);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
         hyp_mem

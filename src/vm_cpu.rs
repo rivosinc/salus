@@ -49,10 +49,10 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// The maximum number of vCPUs supported by a VM.
 pub const VM_CPUS_MAX: usize = MAX_CPUS;
 
-/// Host GPR and CSR state which must be saved/restored when entering/exiting virtualization.
+/// Hypervisor GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
 #[repr(C)]
-struct HostCpuState {
+struct HypervisorCpuState {
     gprs: GeneralPurposeRegisters,
     sstatus: u64,
     hstatus: u64,
@@ -97,8 +97,8 @@ struct GuestVCpuState {
     vstimecmp: u64,
 }
 
-/// CSRs written on an exit from virtualization that are used by the host to determine the cause of
-/// the trap.
+/// CSRs written on an exit from virtualization that are used by the hypervisor to determine the cause
+/// of the trap.
 #[derive(Default, Clone)]
 #[repr(C)]
 pub struct VmCpuTrapState {
@@ -115,7 +115,7 @@ pub struct VmCpuTrapState {
 struct VmCpuRegisters {
     // CPU state that's shared between our's and the guest's execution environment. Saved/restored
     // when entering/exiting a VM.
-    host_regs: HostCpuState,
+    hyp_regs: HypervisorCpuState,
     guest_regs: GuestCpuState,
 
     // CPU state that only applies when V=1, e.g. the VS-level CSRs. Saved/restored on activation of
@@ -139,9 +139,9 @@ extern "C" {
 }
 
 #[allow(dead_code)]
-const fn host_gpr_offset(index: GprIndex) -> usize {
-    offset_of!(VmCpuRegisters, host_regs)
-        + offset_of!(HostCpuState, gprs)
+const fn hyp_gpr_offset(index: GprIndex) -> usize {
+    offset_of!(VmCpuRegisters, hyp_regs)
+        + offset_of!(HypervisorCpuState, gprs)
         + (index as usize) * size_of::<u64>()
 }
 
@@ -164,9 +164,9 @@ const fn guest_vpr_offset(index: usize) -> usize {
         + index * size_of::<riscv_regs::VectorRegister>()
 }
 
-macro_rules! host_csr_offset {
+macro_rules! hyp_csr_offset {
     ($reg:tt) => {
-        offset_of!(VmCpuRegisters, host_regs) + offset_of!(HostCpuState, $reg)
+        offset_of!(VmCpuRegisters, hyp_regs) + offset_of!(HypervisorCpuState, $reg)
     };
 }
 
@@ -178,34 +178,34 @@ macro_rules! guest_csr_offset {
 
 global_asm!(
     include_str!("guest.S"),
-    host_ra = const host_gpr_offset(GprIndex::RA),
-    host_gp = const host_gpr_offset(GprIndex::GP),
-    host_tp = const host_gpr_offset(GprIndex::TP),
-    host_s0 = const host_gpr_offset(GprIndex::S0),
-    host_s1 = const host_gpr_offset(GprIndex::S1),
-    host_a1 = const host_gpr_offset(GprIndex::A1),
-    host_a2 = const host_gpr_offset(GprIndex::A2),
-    host_a3 = const host_gpr_offset(GprIndex::A3),
-    host_a4 = const host_gpr_offset(GprIndex::A4),
-    host_a5 = const host_gpr_offset(GprIndex::A5),
-    host_a6 = const host_gpr_offset(GprIndex::A6),
-    host_a7 = const host_gpr_offset(GprIndex::A7),
-    host_s2 = const host_gpr_offset(GprIndex::S2),
-    host_s3 = const host_gpr_offset(GprIndex::S3),
-    host_s4 = const host_gpr_offset(GprIndex::S4),
-    host_s5 = const host_gpr_offset(GprIndex::S5),
-    host_s6 = const host_gpr_offset(GprIndex::S6),
-    host_s7 = const host_gpr_offset(GprIndex::S7),
-    host_s8 = const host_gpr_offset(GprIndex::S8),
-    host_s9 = const host_gpr_offset(GprIndex::S9),
-    host_s10 = const host_gpr_offset(GprIndex::S10),
-    host_s11 = const host_gpr_offset(GprIndex::S11),
-    host_sp = const host_gpr_offset(GprIndex::SP),
-    host_sstatus = const host_csr_offset!(sstatus),
-    host_hstatus = const host_csr_offset!(hstatus),
-    host_scounteren = const host_csr_offset!(scounteren),
-    host_stvec = const host_csr_offset!(stvec),
-    host_sscratch = const host_csr_offset!(sscratch),
+    hyp_ra = const hyp_gpr_offset(GprIndex::RA),
+    hyp_gp = const hyp_gpr_offset(GprIndex::GP),
+    hyp_tp = const hyp_gpr_offset(GprIndex::TP),
+    hyp_s0 = const hyp_gpr_offset(GprIndex::S0),
+    hyp_s1 = const hyp_gpr_offset(GprIndex::S1),
+    hyp_a1 = const hyp_gpr_offset(GprIndex::A1),
+    hyp_a2 = const hyp_gpr_offset(GprIndex::A2),
+    hyp_a3 = const hyp_gpr_offset(GprIndex::A3),
+    hyp_a4 = const hyp_gpr_offset(GprIndex::A4),
+    hyp_a5 = const hyp_gpr_offset(GprIndex::A5),
+    hyp_a6 = const hyp_gpr_offset(GprIndex::A6),
+    hyp_a7 = const hyp_gpr_offset(GprIndex::A7),
+    hyp_s2 = const hyp_gpr_offset(GprIndex::S2),
+    hyp_s3 = const hyp_gpr_offset(GprIndex::S3),
+    hyp_s4 = const hyp_gpr_offset(GprIndex::S4),
+    hyp_s5 = const hyp_gpr_offset(GprIndex::S5),
+    hyp_s6 = const hyp_gpr_offset(GprIndex::S6),
+    hyp_s7 = const hyp_gpr_offset(GprIndex::S7),
+    hyp_s8 = const hyp_gpr_offset(GprIndex::S8),
+    hyp_s9 = const hyp_gpr_offset(GprIndex::S9),
+    hyp_s10 = const hyp_gpr_offset(GprIndex::S10),
+    hyp_s11 = const hyp_gpr_offset(GprIndex::S11),
+    hyp_sp = const hyp_gpr_offset(GprIndex::SP),
+    hyp_sstatus = const hyp_csr_offset!(sstatus),
+    hyp_hstatus = const hyp_csr_offset!(hstatus),
+    hyp_scounteren = const hyp_csr_offset!(scounteren),
+    hyp_stvec = const hyp_csr_offset!(stvec),
+    hyp_sscratch = const hyp_csr_offset!(sscratch),
     guest_ra = const guest_gpr_offset(GprIndex::RA),
     guest_gp = const guest_gpr_offset(GprIndex::GP),
     guest_tp = const guest_gpr_offset(GprIndex::TP),

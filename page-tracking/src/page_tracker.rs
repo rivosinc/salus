@@ -25,6 +25,8 @@ pub enum Error {
     OwnerUnderflow,
     /// Attempt to pop the owner of an unowned page.
     UnownedPage,
+    /// Attempt to release an hypervisor internal page.
+    HypervisorStatePage,
     /// Attempt to modify the owner of a reserved page.
     ReservedPage,
     /// The page is not owned by the specified owner.
@@ -521,9 +523,8 @@ impl HypPageAlloc {
         let mut tail: Option<SupervisorPageAddr> = None;
         while let Some(next) = self.next_page {
             let info = self.pages.get_mut(next).unwrap();
-            info.assign(PageOwnerId::hypervisor(), PageState::Converted)
+            info.assign(PageOwnerId::hypervisor(), PageState::ConvertedLocked)
                 .unwrap();
-            info.lock_for_assignment().unwrap();
             // Safe to create this page as it was previously free and we just took ownership.
             let page: Page<ConvertedDirty> = unsafe { Page::new(next) };
             page.clean();
@@ -553,12 +554,17 @@ impl HypPageAlloc {
         }
     }
 
-    /// Takes and cleans `count` contiguous Pages with the requested alignment from the system map.
-    /// Sets the hypervisor as the owner of the pages, and any pages consumed up until that point,
-    /// in the system page map. Allows passing ranges of pages around without a mutable
-    /// reference to the global owners list. Panics if there are not `count` pages available. The
-    /// returned pages are eligible to be mapped into the host's address space.
-    pub fn take_pages(&mut self, count: usize, align: u64) -> SequentialPages<ConvertedClean> {
+    // Core allocator function. Finds `count` contiguous pages with the requested alignment from the
+    // system map. Sets the hypervisor as the owner and `page_state` as the state, for the returned
+    // pages and for any pages consumed for alignment purposes.
+    // Returns a pair of supervisor addresses containing the first and the last page address of the
+    // allocated range.
+    fn alloc_pages(
+        &mut self,
+        count: usize,
+        align: u64,
+        page_state: PageState,
+    ) -> SupervisorPageRange {
         // Helper to test whether a contiguous range of `count` pages is free and aligned.
         let range_is_free_and_aligned = |start: SupervisorPageAddr| {
             let end = start.checked_add_pages(count as u64).unwrap();
@@ -587,26 +593,38 @@ impl HypPageAlloc {
                     // OK to unwrap as this struct is new and must have space for one owner.
                     // Free pages can be assigned without locking
                     page_info
-                        .assign(PageOwnerId::hypervisor(), PageState::Converted)
+                        .assign(PageOwnerId::hypervisor(), page_state)
                         .unwrap();
-                    page_info.lock_for_assignment().unwrap();
                 }
             }
         }
-
         // Move self's next page past these taken pages.
         self.next_page = self.next_free_page(last_page);
+        SupervisorPageRange::new(first_page, count as u64)
+    }
 
+    /// Takes and cleans `count` contiguous Pages with the requested alignment from the system map.
+    /// Sets the hypervisor as the owner of the pages, and any pages consumed up until that point,
+    /// in the system page map. Allows passing ranges of pages around without a mutable
+    /// reference to the global owners list. Panics if there are not `count` pages available. The
+    /// returned pages are eligible to be mapped into the host's address space.
+    pub fn take_pages(&mut self, count: usize, align: u64) -> SequentialPages<ConvertedClean> {
+        let mem_range = self.alloc_pages(count, align, PageState::ConvertedLocked);
         let dirty_pages: SequentialPages<ConvertedDirty> = unsafe {
             // It's safe to create a page range of the memory that `self` forfeited ownership of
             // above and the new `SequentialPages` is now the unique owner. Ok to unwrap here simce
             // all pages are trivially aligned to 4kB.
-            SequentialPages::from_page_range(first_page, last_page, PageSize::Size4k).unwrap()
+            SequentialPages::from_mem_range(
+                mem_range.base(),
+                mem_range.page_size(),
+                mem_range.num_pages(),
+            )
+            .unwrap()
         };
         dirty_pages.clean()
     }
 
-    /// Same as above, but the returned pages are assigned for internal use.
+    /// Same as above, but the returned pages are assigned to the host for internal use.
     pub fn take_pages_for_host_state_with_alignment(
         &mut self,
         count: usize,
@@ -627,6 +645,23 @@ impl HypPageAlloc {
     /// Same as above, but with no alignment requirement.
     pub fn take_pages_for_host_state(&mut self, count: usize) -> SequentialPages<InternalClean> {
         self.take_pages_for_host_state_with_alignment(count, PageSize::Size4k as u64)
+    }
+
+    /// Same as above, but the returned pages are assigned to the hypervisor instead of the host.
+    pub fn take_pages_for_hyp_state(&mut self, count: usize) -> SequentialPages<InternalClean> {
+        let mem_range = self.alloc_pages(count, PageSize::Size4k as u64, PageState::HypState);
+        let dirty_pages: SequentialPages<InternalDirty> = unsafe {
+            // It's safe to create a page range of the memory that `self` forfeited ownership of
+            // above and the new `SequentialPages` is now the unique owner. Ok to unwrap here simce
+            // all pages are trivially aligned to 4kB.
+            SequentialPages::from_mem_range(
+                mem_range.base(),
+                mem_range.page_size(),
+                mem_range.num_pages(),
+            )
+            .unwrap()
+        };
+        dirty_pages.clean()
     }
 
     /// Returns the address of the next free page at or after `addr`, or `None` if there are no free

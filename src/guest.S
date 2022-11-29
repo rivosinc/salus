@@ -9,43 +9,43 @@
 _run_guest:
     /* Save hypervisor state */
 
-    /* Save Host GPRs (except T0-T6 and a0, which is GuestInfo and stashed in sscratch) */
-    sd   ra, ({host_ra})(a0)
-    sd   gp, ({host_gp})(a0)
-    sd   tp, ({host_tp})(a0)
-    sd   s0, ({host_s0})(a0)
-    sd   s1, ({host_s1})(a0)
-    sd   a1, ({host_a1})(a0)
-    sd   a2, ({host_a2})(a0)
-    sd   a3, ({host_a3})(a0)
-    sd   a4, ({host_a4})(a0)
-    sd   a5, ({host_a5})(a0)
-    sd   a6, ({host_a6})(a0)
-    sd   a7, ({host_a7})(a0)
-    sd   s2, ({host_s2})(a0)
-    sd   s3, ({host_s3})(a0)
-    sd   s4, ({host_s4})(a0)
-    sd   s5, ({host_s5})(a0)
-    sd   s6, ({host_s6})(a0)
-    sd   s7, ({host_s7})(a0)
-    sd   s8, ({host_s8})(a0)
-    sd   s9, ({host_s9})(a0)
-    sd   s10, ({host_s10})(a0)
-    sd   s11, ({host_s11})(a0)
-    sd   sp, ({host_sp})(a0)
+    /* Save hypervisor GPRs (except T0-T6 and a0, which is GuestInfo and stashed in sscratch) */
+    sd   ra, ({hyp_ra})(a0)
+    sd   gp, ({hyp_gp})(a0)
+    sd   tp, ({hyp_tp})(a0)
+    sd   s0, ({hyp_s0})(a0)
+    sd   s1, ({hyp_s1})(a0)
+    sd   a1, ({hyp_a1})(a0)
+    sd   a2, ({hyp_a2})(a0)
+    sd   a3, ({hyp_a3})(a0)
+    sd   a4, ({hyp_a4})(a0)
+    sd   a5, ({hyp_a5})(a0)
+    sd   a6, ({hyp_a6})(a0)
+    sd   a7, ({hyp_a7})(a0)
+    sd   s2, ({hyp_s2})(a0)
+    sd   s3, ({hyp_s3})(a0)
+    sd   s4, ({hyp_s4})(a0)
+    sd   s5, ({hyp_s5})(a0)
+    sd   s6, ({hyp_s6})(a0)
+    sd   s7, ({hyp_s7})(a0)
+    sd   s8, ({hyp_s8})(a0)
+    sd   s9, ({hyp_s9})(a0)
+    sd   s10, ({hyp_s10})(a0)
+    sd   s11, ({hyp_s11})(a0)
+    sd   sp, ({hyp_sp})(a0)
 
     /* Swap in guest CSRs. */
     ld    t1, ({guest_sstatus})(a0)
     csrrw t1, sstatus, t1
-    sd    t1, ({host_sstatus})(a0)
+    sd    t1, ({hyp_sstatus})(a0)
 
     ld    t1, ({guest_hstatus})(a0)
     csrrw t1, hstatus, t1
-    sd    t1, ({host_hstatus})(a0)
+    sd    t1, ({hyp_hstatus})(a0)
 
     ld    t1, ({guest_scounteren})(a0)
     csrrw t1, scounteren, t1
-    sd    t1, ({host_scounteren})(a0)
+    sd    t1, ({hyp_scounteren})(a0)
 
     ld    t1, ({guest_sepc})(a0)
     csrw  sepc, t1
@@ -53,11 +53,11 @@ _run_guest:
     /* Set stvec so that hypervisor resumes after the sret when the guest exits. */
     la    t1, _guest_exit
     csrrw t1, stvec, t1
-    sd    t1, ({host_stvec})(a0)
+    sd    t1, ({hyp_stvec})(a0)
 
     /* Save sscratch and replace with pointer to GuestInfo. */
     csrrw t1, sscratch, a0
-    sd    t1, ({host_sscratch})(a0)
+    sd    t1, ({hyp_sscratch})(a0)
 
     /* Restore the gprs from this GuestInfo */
     ld   ra, ({guest_ra})(a0)
@@ -136,23 +136,23 @@ _guest_exit:
     sd    t0, ({guest_a0})(a0)
 
 _restore_csrs:
-    /* Swap in host CSRs. */
-    ld    t1, ({host_sstatus})(a0)
+    /* Swap in hypervisor CSRs. */
+    ld    t1, ({hyp_sstatus})(a0)
     csrrw t1, sstatus, t1
     sd    t1, ({guest_sstatus})(a0)
 
-    ld    t1, ({host_hstatus})(a0)
+    ld    t1, ({hyp_hstatus})(a0)
     csrrw t1, hstatus, t1
     sd    t1, ({guest_hstatus})(a0)
 
-    ld    t1, ({host_scounteren})(a0)
+    ld    t1, ({hyp_scounteren})(a0)
     csrrw t1, scounteren, t1
     sd    t1, ({guest_scounteren})(a0)
 
-    ld    t1, ({host_stvec})(a0)
+    ld    t1, ({hyp_stvec})(a0)
     csrw  stvec, t1
 
-    ld    t1, ({host_sscratch})(a0)
+    ld    t1, ({hyp_sscratch})(a0)
     csrw  sscratch, t1
 
     /* Save guest EPC. */
@@ -160,29 +160,29 @@ _restore_csrs:
     sd    t1, ({guest_sepc})(a0)
 
     /* Restore hypervisor GPRs. */
-    ld   ra, ({host_ra})(a0)
-    ld   gp, ({host_gp})(a0)
-    ld   tp, ({host_tp})(a0)
-    ld   s0, ({host_s0})(a0)
-    ld   s1, ({host_s1})(a0)
-    ld   a1, ({host_a1})(a0)
-    ld   a2, ({host_a2})(a0)
-    ld   a3, ({host_a3})(a0)
-    ld   a4, ({host_a4})(a0)
-    ld   a5, ({host_a5})(a0)
-    ld   a6, ({host_a6})(a0)
-    ld   a7, ({host_a7})(a0)
-    ld   s2, ({host_s2})(a0)
-    ld   s3, ({host_s3})(a0)
-    ld   s4, ({host_s4})(a0)
-    ld   s5, ({host_s5})(a0)
-    ld   s6, ({host_s6})(a0)
-    ld   s7, ({host_s7})(a0)
-    ld   s8, ({host_s8})(a0)
-    ld   s9, ({host_s9})(a0)
-    ld   s10, ({host_s10})(a0)
-    ld   s11, ({host_s11})(a0)
-    ld   sp, ({host_sp})(a0)
+    ld   ra, ({hyp_ra})(a0)
+    ld   gp, ({hyp_gp})(a0)
+    ld   tp, ({hyp_tp})(a0)
+    ld   s0, ({hyp_s0})(a0)
+    ld   s1, ({hyp_s1})(a0)
+    ld   a1, ({hyp_a1})(a0)
+    ld   a2, ({hyp_a2})(a0)
+    ld   a3, ({hyp_a3})(a0)
+    ld   a4, ({hyp_a4})(a0)
+    ld   a5, ({hyp_a5})(a0)
+    ld   a6, ({hyp_a6})(a0)
+    ld   a7, ({hyp_a7})(a0)
+    ld   s2, ({hyp_s2})(a0)
+    ld   s3, ({hyp_s3})(a0)
+    ld   s4, ({hyp_s4})(a0)
+    ld   s5, ({hyp_s5})(a0)
+    ld   s6, ({hyp_s6})(a0)
+    ld   s7, ({hyp_s7})(a0)
+    ld   s8, ({hyp_s8})(a0)
+    ld   s9, ({hyp_s9})(a0)
+    ld   s10, ({hyp_s10})(a0)
+    ld   s11, ({hyp_s11})(a0)
+    ld   sp, ({hyp_sp})(a0)
 
     ret
 

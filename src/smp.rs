@@ -12,6 +12,7 @@ use s_mode_utils::print::*;
 use sbi::api::state;
 use spin::Once;
 
+use crate::hyp_map::HypPageTable;
 use crate::vm_id::VmIdTracker;
 
 // The secondary CPU entry point, defined in start.S.
@@ -25,6 +26,7 @@ extern "C" {
 pub struct PerCpu {
     cpu_id: CpuId,
     vmid_tracker: RefCell<VmIdTracker>,
+    page_table: Once<HypPageTable>,
     online: Once<bool>,
 }
 
@@ -59,10 +61,11 @@ impl PerCpu {
         // Now initialize each PerCpu structure.
         for i in 0..cpu_info.num_cpus() {
             let cpu_id = CpuId::new(i);
-            let ptr = Self::ptr_for_cpu(CpuId::new(i));
+            let ptr = Self::ptr_for_cpu(cpu_id);
             let pcpu = PerCpu {
                 cpu_id,
                 vmid_tracker: RefCell::new(VmIdTracker::new()),
+                page_table: Once::new(),
                 online: Once::new(),
             };
             // Safety: ptr is guaranteed to be properly aligned and point to valid memory owned by
@@ -110,6 +113,15 @@ impl PerCpu {
         pcpu
     }
 
+    /// Set the CPU pagetable (once). Must be called after `PerCpu::init()`.
+    pub fn set_cpu_page_table(cpu: CpuId, page_table: HypPageTable) {
+        let pcpu = Self::ptr_for_cpu(cpu);
+        // Safe since pcpu is set up to point to a valid PerCpu struct in init().
+        unsafe {
+            (*pcpu).page_table.call_once(|| page_table);
+        }
+    }
+
     /// Returns this CPU's ID.
     pub fn cpu_id(&self) -> CpuId {
         self.cpu_id
@@ -118,6 +130,13 @@ impl PerCpu {
     /// Marks this CPU as online.
     pub fn set_online(&self) {
         self.online.call_once(|| true);
+    }
+
+    /// Get the CPU page table. Must be called after `set_cpu_page_table` has been called for this
+    /// cpu.
+    pub fn page_table(&self) -> &HypPageTable {
+        // Unwrap okay: this is called after `set_cpu_page_table`
+        self.page_table.get().unwrap()
     }
 
     /// Returns a mutable reference to this CPU's VMID tracker.

@@ -41,7 +41,7 @@ mod vm_pmu;
 use device_tree::{DeviceTree, Fdt};
 use drivers::{
     imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
-    CpuInfo,
+    CpuId, CpuInfo,
 };
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
@@ -74,9 +74,6 @@ extern "C" {
 
 /// The allocator used for boot-time dynamic memory allocations.
 static HYPERVISOR_ALLOCATOR: Once<HypAlloc> = Once::new();
-
-/// The hypervisor page table root address and mode to load in satp on secondary CPUs
-static SATP_VAL: Once<u64> = Once::new();
 
 // Implementation of GlobalAlloc that forwards allocations to the boot-time allocator.
 struct GeneralGlobalAlloc;
@@ -204,12 +201,15 @@ fn find_available_region(mem_map: &HwMemMap, size: u64) -> Option<SupervisorPage
 // Creates the Sv48 page table based on the accessible regions of memory in the provided memory
 // map.
 fn setup_hyp_paging(hyp_map: HypMap, hyp_mem: &mut HypPageAlloc) {
-    let page_table = hyp_map.new_page_table(hyp_mem);
-    let satp = page_table.satp();
-    // Store the SATP value for other CPUs. They load from the global in start_secondary.
-    SATP_VAL.call_once(|| satp);
-    // Install the page table in satp
-    CSR.satp.set(satp);
+    // Create per-cpu page tables.
+    let cpu_info = CpuInfo::get();
+    for i in 0..cpu_info.num_cpus() {
+        let page_table = hyp_map.new_page_table(hyp_mem);
+        PerCpu::set_cpu_page_table(CpuId::new(i), page_table);
+    }
+    // Load the page-tables in this cpu.
+    let page_table = PerCpu::this_cpu().page_table();
+    CSR.satp.set(page_table.satp());
     tlb::sfence_vma(None, None);
 }
 
@@ -507,7 +507,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 extern "C" fn secondary_init(_hart_id: u64) {
     setup_csrs();
 
-    CSR.satp.set(*SATP_VAL.get().unwrap());
+    // Load the page-tables in the CPU.
+    let page_table = PerCpu::this_cpu().page_table();
+    CSR.satp.set(page_table.satp());
     tlb::sfence_vma(None, None);
 
     let cpu_info = CpuInfo::get();

@@ -76,7 +76,7 @@ mod tests {
                 .add(backing_mem.as_ptr().align_offset(MEM_ALIGN))
         };
         let start_pa = RawAddr::supervisor(aligned_pointer as u64);
-        let hw_map = unsafe {
+        let mut hw_map = unsafe {
             // Not safe - just a test
             HwMemMapBuilder::new(PageSize::Size4k as u64)
                 .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
@@ -89,7 +89,7 @@ mod tests {
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypPageAlloc::new(hw_map);
+        let hyp_mem = HypPageAlloc::new(&mut hw_map);
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);

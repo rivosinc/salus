@@ -191,14 +191,6 @@ fn build_memory_map<T: GuestStagePagingMode>(fdt: &Fdt) -> MemMapResult<HwMemMap
     Ok(builder.build())
 }
 
-// Returns the number of PTE pages needed to map all regions in the given memory map.
-// Slightly overestimates of number of pages needed as some regions will share PTE pages in reality.
-fn pte_page_count(mem_map: &HwMemMap) -> u64 {
-    mem_map.regions().fold(0, |acc, r| {
-        acc + Sv48::max_pte_pages(r.size() / PageSize::Size4k as u64)
-    })
-}
-
 // Returns the base address of the first available region in the memory map that is at least `size`
 // bytes long. Returns None if no region is big enough.
 fn find_available_region(mem_map: &HwMemMap, size: u64) -> Option<SupervisorPageAddr> {
@@ -266,28 +258,22 @@ fn hyp_map_region(
 
 // Creates the Sv48 page table based on the accessible regions of memory in the provided memory
 // map.
-fn setup_hyp_paging(mem_map: &mut HwMemMap) {
-    let num_pte_pages = pte_page_count(mem_map);
-    let pte_base = find_available_region(mem_map, num_pte_pages * PageSize::Size4k as u64)
-        .expect("Not enough free memory for hypervisor Sv48 page table");
-    let mut pte_pages = mem_map
-        .reserve_and_take_pages(
-            HwReservedMemType::HypervisorPtes,
-            SupervisorPageAddr::new(RawAddr::from(pte_base)).unwrap(),
-            PageSize::Size4k,
-            num_pte_pages,
-        )
-        .unwrap()
-        .clean()
-        .into_iter();
+fn setup_hyp_paging(mem_map: HwMemMap, hyp_mem: &mut HypPageAlloc) {
     // Create empty sv48 page table
-    let root_page = pte_pages.next().unwrap();
+    // Unwrap okay: we expect to have at least one page free.
+    let root_page = hyp_mem
+        .take_pages_for_hyp_state(1)
+        .into_iter()
+        .next()
+        .unwrap();
     let sv48: FirstStagePageTable<Sv48> =
         FirstStagePageTable::new(root_page).expect("creating sv48");
 
     // Map all the regions in the memory map that the hypervisor could need.
     for (base, size, perms) in mem_map.regions().filter_map(hyp_map_params) {
-        hyp_map_region(&sv48, base, size, perms, &mut || pte_pages.next());
+        hyp_map_region(&sv48, base, size, perms, &mut || {
+            hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
+        });
     }
 
     // Install the page table in satp
@@ -509,10 +495,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Probe for hardcoded reset device. Not really a probe.
     ResetDriver::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up Reset Device");
 
-    setup_hyp_paging(&mut mem_map);
-
     // Set up per-CPU memory and boot the secondary CPUs.
     PerCpu::init(hart_id, &mut mem_map);
+
+    // Create an allocator for the remaining pages. Anything that's left over will be mapped
+    // into the host VM.
+    let mut hyp_mem = HypPageAlloc::new(&mut mem_map);
+    // NOTE: Do not modify the hardware memory map from here on.
+    let mem_map = mem_map; // Remove mutability.
 
     println!("HW memory map:");
     for (i, r) in mem_map.regions().enumerate() {
@@ -541,9 +531,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let guest_phys_size = mem_map.regions().last().unwrap().end().bits()
         - mem_map.regions().next().unwrap().base().bits();
 
-    // Create an allocator for the remaining pages. Anything that's left over will be mapped
-    // into the host VM.
-    let mut hyp_mem = HypPageAlloc::new(mem_map);
+    // Setup paging structures.
+    setup_hyp_paging(mem_map, &mut hyp_mem);
 
     // Find and initialize the IOMMU.
     match Iommu::probe_from(PcieRoot::get(), &mut || {

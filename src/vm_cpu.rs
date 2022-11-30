@@ -574,7 +574,7 @@ impl<'vcpu> Drop for StatusSet<'vcpu> {
 }
 
 /// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
-pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> {
+pub struct ActiveVmCpu<'vcpu, 'pages, 'host, T: GuestStagePagingMode> {
     vcpu: &'vcpu VmCpu,
     // We hold a lock on vcpu.arch for the lifetime of this object to avoid having to
     // repeatedly acquire it for every register modification. Must be dropped before `status_set`,
@@ -583,20 +583,20 @@ pub struct ActiveVmCpu<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> {
     vm_pages: FinalizedVmPages<'pages, T>,
     // `None` if this vCPU is itself running a child vCPU. Restored when the child vCPU exits.
     active_pages: Option<ActiveVmPages<'pages, T>>,
-    // The parent vCPU which activated us.
-    parent_vcpu: Option<&'prev mut dyn VmCpuSaveState>,
+    // The context of the (v)CPU that is hosting this one.
+    host_context: &'host mut dyn HostCpuContext,
     // Important drop order, status_set must come _after_ `arch` to maintain lock ordering.
     // on drop StatusSet takes the status lock.
     status_set: StatusSet<'vcpu>,
 }
 
-impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, 'prev, T> {
+impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, 'host, T> {
     // Restores and activates the vCPU state from `vcpu`, with the VM address space represented by
     // `vm_pages`.
     fn restore_from(
         vcpu: &'vcpu VmCpu,
         vm_pages: FinalizedVmPages<'pages, T>,
-        parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
+        host_context: &'host mut dyn HostCpuContext,
     ) -> Result<Self> {
         let mut arch = vcpu.arch.lock();
         // If we're running on a new CPU, then any previous VMID or TLB version we used is inavlid.
@@ -604,20 +604,14 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             arch.prev_tlb = None;
         }
 
-        // We store the parent vCPU as a trait object as a means of type-erasure for ActiveVmCpu's
-        // inner lifetimes.
-        let mut parent_vcpu = parent_vcpu.map(|p| p as &mut dyn VmCpuSaveState);
-
-        // Save the state of the parent (if any) and swap in ours.
-        if let Some(ref mut p) = parent_vcpu {
-            p.save();
-        }
+        // Save the state of the host (if any) and swap in ours.
+        host_context.save();
         let mut active_vcpu = Self {
             vcpu,
             arch,
             vm_pages,
             active_pages: None,
-            parent_vcpu,
+            host_context,
             status_set: StatusSet::new(vcpu),
         };
         active_vcpu.restore();
@@ -1022,17 +1016,20 @@ impl<'vcpu, 'pages, 'prev, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     }
 }
 
-// Interface for vCPU state save/restore on context switch.
-trait VmCpuSaveState {
-    // Saves this `ActiveVmCpu`'s state, effectively de-activating it until a corresponding call to
-    // `restore()`.
+/// Interface to the host (v)CPU context of a `VmCpu`. Used to save/restore state that's shared
+/// between host and guest (v)CPUs.
+pub trait HostCpuContext {
+    /// Saves any host (v)CPU state that is shared with its guests. Called when activating a guest
+    /// `VmCpu`.
     fn save(&mut self);
 
-    // Re-activates this `ActiveVmCpu` by restoring the state that was saved with `save()`.
+    /// Restores any host (v)CPU state that is shared with its guests. Called when a guest `VmCpu`
+    /// is deactivated, i.e. when the `ActiveVmCpu` is dropped.
     fn restore(&mut self);
 }
 
-impl<T: GuestStagePagingMode> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
+// A VmCpu can host another VmCpu, in which case all VS-level state needs to be context-switched.
+impl<T: GuestStagePagingMode> HostCpuContext for ActiveVmCpu<'_, '_, '_, T> {
     fn save(&mut self) {
         self.active_pages = None;
         self.save_vcpu_csrs();
@@ -1048,11 +1045,9 @@ impl<T: GuestStagePagingMode> VmCpuSaveState for ActiveVmCpu<'_, '_, '_, T> {
 
 impl<T: GuestStagePagingMode> Drop for ActiveVmCpu<'_, '_, '_, T> {
     fn drop(&mut self) {
-        // Context-switch back to the parent vCPU.
+        // Context-switch back to the host (v)CPU.
         self.save();
-        if let Some(ref mut p) = self.parent_vcpu {
-            p.restore();
-        }
+        self.host_context.restore();
     }
 }
 
@@ -1126,13 +1121,13 @@ impl VmCpu {
     }
 
     /// Activates this vCPU, swapping in its register state. Takes exclusive ownership of the
-    /// ability to run this vCPU. If `parent_vcpu` is not `None`, its state is saved before this
-    /// vCPU is activated and is restored when the returned `ActiveVmCpu` is dropped.
-    pub fn activate<'vcpu, 'pages, 'prev: 'vcpu + 'pages, T: GuestStagePagingMode>(
+    /// ability to run this vCPU. `host_context` is saved before this vCPU is activated and is restored
+    /// when the returned `ActiveVmCpu` is dropped.
+    pub fn activate<'vcpu, 'pages, 'host: 'vcpu + 'pages, T: GuestStagePagingMode>(
         &'vcpu self,
         vm_pages: FinalizedVmPages<'pages, T>,
-        parent_vcpu: Option<&'prev mut ActiveVmCpu<T>>,
-    ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'prev, T>> {
+        host_context: &'host mut dyn HostCpuContext,
+    ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'host, T>> {
         let mut status = self.status.write();
         use VmCpuStatus::*;
         match *status {
@@ -1151,7 +1146,7 @@ impl VmCpu {
                     return Err(Error::VmCpuNotBound);
                 }
 
-                let active_vcpu = ActiveVmCpu::restore_from(self, vm_pages, parent_vcpu)?;
+                let active_vcpu = ActiveVmCpu::restore_from(self, vm_pages, host_context)?;
                 *status = Running;
                 Ok(active_vcpu)
             }

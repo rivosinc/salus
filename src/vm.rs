@@ -17,8 +17,8 @@ use sbi::{Error as SbiError, *};
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
 use crate::vm_cpu::{
-    ActiveVmCpu, VmCpu, VmCpuSharedArea, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX,
-    VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
+    ActiveVmCpu, HostCpuContext, VmCpu, VmCpuSharedArea, VmCpuStatus, VmCpuTrap, VmCpus,
+    VM_CPUS_MAX, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -501,12 +501,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
-    /// Run `vcpu_id` until an unhandled exit is encountered. If `parent_vcpu` is not `None`,
-    /// save/restore `parent_vcpu`'s state on entry/exit from the vCPU being run.
+    /// Run `vcpu_id` until an unhandled exit is encountered. Save/restore `host_context` on entry/exit
+    /// from the vCPU being run.
     pub fn run_vcpu(
         &self,
         vcpu_id: u64,
-        parent_vcpu: Option<&mut ActiveVmCpu<T>>,
+        host_context: &mut dyn HostCpuContext,
     ) -> EcallResult<u64> {
         let vcpu = self
             .vm()
@@ -515,7 +515,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         // Activate the vCPU, giving us exclusive ownership over the ability to run it.
         let mut active_vcpu = vcpu
-            .activate(self.vm_pages(), parent_vcpu)
+            .activate(self.vm_pages(), host_context)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         // Run until there's an exit we can't handle.
         let cause = loop {
@@ -1280,7 +1280,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let guest_vm = guest
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        guest_vm.run_vcpu(vcpu_id, Some(active_vcpu))
+        guest_vm.run_vcpu(vcpu_id, active_vcpu)
     }
 
     fn guest_add_page_table_pages(

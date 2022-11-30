@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 use arrayvec::{ArrayString, ArrayVec};
-use core::{fmt, num, slice};
+use core::{fmt, num, ops::ControlFlow, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
 use drivers::{imsic::*, iommu::*, pci::*, CpuId, CpuInfo};
 use page_tracking::collections::PageBox;
@@ -17,8 +17,10 @@ use sbi::{self, SbiMessage};
 
 use crate::guest_tracking::{GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
-use crate::vm::Vm;
-use crate::vm_cpu::{VmCpu, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpus};
+use crate::vm::{FinalizedVm, Vm};
+use crate::vm_cpu::{
+    HostCpuContext, VmCpu, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpus,
+};
 use crate::vm_pages::VmPages;
 
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
@@ -385,6 +387,126 @@ impl core::fmt::Display for MmioEmulationError {
     }
 }
 
+struct HostVmRunner {}
+
+impl HostVmRunner {
+    fn new() -> Self {
+        HostVmRunner {}
+    }
+
+    // Runs `vcpu_id` in `vm`.
+    fn run<T: GuestStagePagingMode>(
+        &mut self,
+        vm: FinalizedVm<T>,
+        vcpu_id: u64,
+        vcpu_state: VmCpuSharedStateRef,
+    ) -> ControlFlow<()> {
+        // Run until we shut down, or this vCPU stops.
+        loop {
+            vm.run_vcpu(vcpu_id, self).unwrap();
+            let scause = vcpu_state.scause();
+            if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
+                use Exception::*;
+                match e {
+                    VirtualSupervisorEnvCall => {
+                        // Read the ECALL arguments written to the A* regs in shared memory.
+                        let mut a_regs = [0u64; 8];
+                        for (i, reg) in a_regs.iter_mut().enumerate() {
+                            // Unwrap ok: A0-A7 are valid GPR indices.
+                            let index = GprIndex::from_raw(GprIndex::A0 as u32 + i as u32).unwrap();
+                            *reg = vcpu_state.gpr(index);
+                        }
+                        use SbiMessage::*;
+                        match SbiMessage::from_regs(&a_regs) {
+                            Ok(Reset(_)) => {
+                                println!("Host VM requested shutdown");
+                                return ControlFlow::Break(());
+                            }
+                            Ok(HartState(sbi::StateFunction::HartStart { hart_id, .. })) => {
+                                smp::send_ipi(CpuId::new(hart_id as usize));
+                            }
+                            Ok(HartState(sbi::StateFunction::HartStop)) => {
+                                return ControlFlow::Continue(())
+                            }
+                            _ => {
+                                println!("Unhandled ECALL from host");
+                                return ControlFlow::Break(());
+                            }
+                        }
+                    }
+                    GuestLoadPageFault | GuestStorePageFault => {
+                        if let Err(err) = self.handle_page_fault(&vcpu_state, vm.page_tracker()) {
+                            println!("Unhandled page fault: {}", err);
+                            return ControlFlow::Break(());
+                        }
+                    }
+                    _ => {
+                        println!("Unhandled host VM exception {:?}", e);
+                        return ControlFlow::Break(());
+                    }
+                }
+            } else {
+                println!("Unexpected host VM trap (SCAUSE = 0x{:x})", scause);
+                return ControlFlow::Break(());
+            }
+        }
+    }
+
+    fn handle_page_fault(
+        &self,
+        vcpu_state: &VmCpuSharedStateRef,
+        page_tracker: PageTracker,
+    ) -> core::result::Result<(), MmioEmulationError> {
+        // For now, the only thing we're expecting is MMIO emulation faults in PCI config space.
+        let addr = (vcpu_state.htval() << 2) | (vcpu_state.stval() & 0x3);
+        let pci = PcieRoot::get();
+        if addr < pci.config_space().base().bits() {
+            return Err(MmioEmulationError::InvalidAddress(addr));
+        }
+        let offset = addr - pci.config_space().base().bits();
+        if offset > pci.config_space().length_bytes() {
+            return Err(MmioEmulationError::InvalidAddress(addr));
+        }
+
+        // Figure out from HTINST what the MMIO operation was. We know the source/destination is
+        // always A0.
+        let raw_inst = vcpu_state.htinst() as u32;
+        let inst = DecodedInstruction::from_raw(raw_inst)
+            .map_err(|_| MmioEmulationError::FailedDecode(raw_inst))?;
+        use Instruction::*;
+        let (write, width) = match inst.instruction() {
+            Lb(_) | Lbu(_) => (false, 1),
+            Lh(_) | Lhu(_) => (false, 2),
+            Lw(_) | Lwu(_) => (false, 4),
+            Ld(_) => (false, 8),
+            Sb(_) => (true, 1),
+            Sh(_) => (true, 2),
+            Sw(_) => (true, 4),
+            Sd(_) => (true, 8),
+            i => {
+                return Err(MmioEmulationError::InvalidInstruction(i));
+            }
+        };
+
+        if write {
+            let val = vcpu_state.gpr(GprIndex::A0);
+            pci.emulate_config_write(offset, val, width, page_tracker, PageOwnerId::host());
+        } else {
+            let val = pci.emulate_config_read(offset, width, page_tracker, PageOwnerId::host());
+            vcpu_state.set_gpr(GprIndex::A0, val);
+        }
+
+        Ok(())
+    }
+}
+
+impl HostCpuContext for HostVmRunner {
+    // Nothing to save/restore here; ActiveVmCpu::run() takes care of saving/restoring state that's
+    // shared between HS and VS.
+    fn save(&mut self) {}
+    fn restore(&mut self) {}
+}
+
 // Pages used by the `PageVec` for the Host VM guest tracking.
 const HOSTVM_GUEST_TRACKING_PAGES: usize = 2;
 
@@ -653,68 +775,19 @@ impl<T: GuestStagePagingMode> HostVm<T> {
 
     /// Run the host VM's vCPU with ID `vcpu_id`. Does not return.
     pub fn run(&self, vcpu_id: u64) {
-        let vm = self.inner.as_finalized_vm().unwrap();
+        self.bind_vcpu(vcpu_id);
         loop {
-            self.bind_vcpu(vcpu_id);
-
             // Wait until this vCPU is ready to run.
             while !self.vcpu_is_runnable(vcpu_id) {
                 smp::wfi();
             }
 
+            let vm = self.inner.as_finalized_vm().unwrap();
             // Unwrap ok: vcpu_id must exist if it's runnable.
-            let vcpu = self.vcpu_state(vcpu_id).unwrap();
-            // Run until we shut down, or this vCPU stops.
-            loop {
-                vm.run_vcpu(vcpu_id, None).unwrap();
-                let scause = vcpu.scause();
-                if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
-                    use Exception::*;
-                    match e {
-                        VirtualSupervisorEnvCall => {
-                            // Read the ECALL arguments written to the A* regs in shared memory.
-                            let mut a_regs = [0u64; 8];
-                            for (i, reg) in a_regs.iter_mut().enumerate() {
-                                // Unwrap ok: A0-A7 are valid GPR indices.
-                                let index =
-                                    GprIndex::from_raw(GprIndex::A0 as u32 + i as u32).unwrap();
-                                *reg = vcpu.gpr(index);
-                            }
-                            use SbiMessage::*;
-                            match SbiMessage::from_regs(&a_regs) {
-                                Ok(Reset(_)) => {
-                                    println!("Host VM requested shutdown");
-                                    return;
-                                }
-                                Ok(HartState(sbi::StateFunction::HartStart {
-                                    hart_id, ..
-                                })) => {
-                                    smp::send_ipi(CpuId::new(hart_id as usize));
-                                }
-                                Ok(HartState(sbi::StateFunction::HartStop)) => {
-                                    break;
-                                }
-                                _ => {
-                                    println!("Unhandled ECALL from host");
-                                    return;
-                                }
-                            }
-                        }
-                        GuestLoadPageFault | GuestStorePageFault => {
-                            if let Err(err) = self.handle_page_fault(vcpu_id) {
-                                println!("Unhandled page fault: {}", err);
-                                return;
-                            }
-                        }
-                        _ => {
-                            println!("Unhandled host VM exception {:?}", e);
-                            return;
-                        }
-                    }
-                } else {
-                    println!("Unexpected host VM trap (SCAUSE = 0x{:x})", scause);
-                    return;
-                }
+            let vcpu_state = self.vcpu_state(vcpu_id).unwrap();
+            let mut runner = HostVmRunner::new();
+            if let ControlFlow::Break(_) = runner.run(vm, vcpu_id, vcpu_state) {
+                return;
             }
         }
     }
@@ -724,53 +797,5 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         let vm = self.inner.as_finalized_vm().unwrap();
         vm.get_vcpu_status(vcpu_id)
             .is_ok_and(|s| s == sbi::HartState::Started as u64)
-    }
-
-    // Handle a page fault for `vcpu_id`.
-    fn handle_page_fault(&self, vcpu_id: u64) -> core::result::Result<(), MmioEmulationError> {
-        // For now, the only thing we're expecting is MMIO emulation faults in PCI config space.
-        let vcpu = self.vcpu_state(vcpu_id).unwrap();
-        let addr = (vcpu.htval() << 2) | (vcpu.stval() & 0x3);
-        let pci = PcieRoot::get();
-        if addr < pci.config_space().base().bits() {
-            return Err(MmioEmulationError::InvalidAddress(addr));
-        }
-        let offset = addr - pci.config_space().base().bits();
-        if offset > pci.config_space().length_bytes() {
-            return Err(MmioEmulationError::InvalidAddress(addr));
-        }
-
-        // Figure out from HTINST what the MMIO operation was. We know the source/destination is
-        // always A0.
-        let raw_inst = vcpu.htinst() as u32;
-        let inst = DecodedInstruction::from_raw(raw_inst)
-            .map_err(|_| MmioEmulationError::FailedDecode(raw_inst))?;
-        use Instruction::*;
-        let (write, width) = match inst.instruction() {
-            Lb(_) | Lbu(_) => (false, 1),
-            Lh(_) | Lhu(_) => (false, 2),
-            Lw(_) | Lwu(_) => (false, 4),
-            Ld(_) => (false, 8),
-            Sb(_) => (true, 1),
-            Sh(_) => (true, 2),
-            Sw(_) => (true, 4),
-            Sd(_) => (true, 8),
-            i => {
-                return Err(MmioEmulationError::InvalidInstruction(i));
-            }
-        };
-
-        let vm = self.inner.as_finalized_vm().unwrap();
-        let page_tracker = vm.page_tracker();
-        let guest_id = vm.page_owner_id();
-        if write {
-            let val = vcpu.gpr(GprIndex::A0);
-            pci.emulate_config_write(offset, val, width, page_tracker, guest_id);
-        } else {
-            let val = pci.emulate_config_read(offset, width, page_tracker, guest_id);
-            vcpu.set_gpr(GprIndex::A0, val);
-        }
-
-        Ok(())
     }
 }

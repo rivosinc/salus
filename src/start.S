@@ -12,7 +12,7 @@ _start:
 
 .option push
 .option norelax
-    la gp, _global_pointer
+    la gp, __global_pointer$
 .option pop
     la sp, _stack_end
     csrw sstatus, zero
@@ -33,7 +33,7 @@ _secondary_start:
 
 .option push
 .option norelax
-    la gp, _global_pointer
+    la gp, __global_pointer$
 .option pop
     csrw sstatus, zero
     csrw sie, zero

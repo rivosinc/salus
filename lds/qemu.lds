@@ -24,22 +24,24 @@ SECTIONS
         *(.text.init) *(.text .text.*)
     } >ram AT>ram :text
 
-    PROVIDE(_global_pointer = .);
-
     .rodata : {
         *(.rodata .rodata.*)
     } >ram AT>ram :text
 
     .extable : {
         . = ALIGN(8);
-	PROVIDE(_extable_start = .);
-	KEEP(*(.extable))
-	PROVIDE(_extable_end = .);
+        PROVIDE(_extable_start = .);
+        KEEP(*(.extable))
+        PROVIDE(_extable_end = .);
     } >ram AT>ram :text
 
     .data : {
         . = ALIGN(4096);
-        *(.sdata .sdata.*) *(.data .data.*)
+        *(.data .data.*)
+
+        . = ALIGN(8);
+        PROVIDE(__global_pointer$ = . + 0x800);
+        *(.sdata .sdata.*)
     } >ram AT>ram :data
 
     .bss : {

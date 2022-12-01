@@ -28,6 +28,7 @@ extern crate alloc;
 mod asm;
 mod guest_tracking;
 mod host_vm_loader;
+mod hyp_map;
 mod smp;
 mod trap;
 mod vm;
@@ -44,14 +45,14 @@ use drivers::{
 };
 use host_vm_loader::HostVmLoader;
 use hyp_alloc::HypAlloc;
+use hyp_map::HypMap;
 use page_tracking::*;
 use riscv_page_tables::*;
 use riscv_pages::*;
-use riscv_regs::{hedeleg, henvcfg, hideleg, hie, satp, scounteren};
+use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
 use riscv_regs::{sstatus, vlenb, Readable, RiscvCsrInterface, MAX_VECTOR_REGISTER_LEN};
 use riscv_regs::{
-    Exception, Interrupt, LocalRegisterCopy, ReadWriteable, SatpHelpers, Writeable, CSR, CSR_CYCLE,
-    CSR_TIME,
+    Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR, CSR_CYCLE, CSR_TIME,
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
@@ -200,88 +201,15 @@ fn find_available_region(mem_map: &HwMemMap, size: u64) -> Option<SupervisorPage
         .map(|r| r.base())
 }
 
-// Returns the base, size, and permission pair for the given region if that region type should be
-// mapped in the hypervisor's virtual address space.
-fn hyp_map_params(r: &HwMemRegion) -> Option<(PageAddr<SupervisorPhys>, u64, PteLeafPerms)> {
-    match r.region_type() {
-        HwMemRegionType::Available => {
-            // map available memory as rwx - unser what it'll be used for.
-            Some((r.base(), r.size(), PteLeafPerms::RWX))
-        }
-        HwMemRegionType::Reserved(HwReservedMemType::FirmwareReserved) => {
-            // No need to map regions reserved for firmware use
-            None
-        }
-        HwMemRegionType::Reserved(HwReservedMemType::HypervisorImage)
-        | HwMemRegionType::Reserved(HwReservedMemType::HostKernelImage)
-        | HwMemRegionType::Reserved(HwReservedMemType::HostInitramfsImage) => {
-            Some((r.base(), r.size(), PteLeafPerms::RWX))
-        }
-        HwMemRegionType::Reserved(HwReservedMemType::HypervisorHeap)
-        | HwMemRegionType::Reserved(HwReservedMemType::HypervisorPerCpu)
-        | HwMemRegionType::Reserved(HwReservedMemType::HypervisorPtes)
-        | HwMemRegionType::Reserved(HwReservedMemType::PageMap) => {
-            Some((r.base(), r.size(), PteLeafPerms::RW))
-        }
-        HwMemRegionType::Mmio(_) => Some((r.base(), r.size(), PteLeafPerms::RW)),
-    }
-}
-
-// Adds an identity mapping to the given Sv48 table for the specified address range.
-fn hyp_map_region(
-    sv48: &FirstStagePageTable<Sv48>,
-    base: PageAddr<SupervisorPhys>,
-    size: u64,
-    perms: PteLeafPerms,
-    get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
-) {
-    let region_page_count = PageSize::Size4k.round_up(size) / PageSize::Size4k as u64;
-    // Pass through mappings, vaddr=paddr.
-    let vaddr = PageAddr::new(RawAddr::supervisor_virt(base.bits())).unwrap();
-    // Add mapping for this region to the page table
-    let mapper = sv48
-        .map_range(vaddr, PageSize::Size4k, region_page_count, get_pte_page)
-        .unwrap();
-    let pte_fields = PteFieldBits::leaf_with_perms(perms);
-    for (virt, phys) in vaddr
-        .iter_from()
-        .zip(base.iter_from())
-        .take(region_page_count as usize)
-    {
-        // Safe as we will create exactly one mapping to each page and will switch to
-        // using that mapping exclusively.
-        unsafe {
-            mapper.map_addr(virt, phys, pte_fields).unwrap();
-        }
-    }
-}
-
 // Creates the Sv48 page table based on the accessible regions of memory in the provided memory
 // map.
-fn setup_hyp_paging(mem_map: HwMemMap, hyp_mem: &mut HypPageAlloc) {
-    // Create empty sv48 page table
-    // Unwrap okay: we expect to have at least one page free.
-    let root_page = hyp_mem
-        .take_pages_for_hyp_state(1)
-        .into_iter()
-        .next()
-        .unwrap();
-    let sv48: FirstStagePageTable<Sv48> =
-        FirstStagePageTable::new(root_page).expect("creating sv48");
-
-    // Map all the regions in the memory map that the hypervisor could need.
-    for (base, size, perms) in mem_map.regions().filter_map(hyp_map_params) {
-        hyp_map_region(&sv48, base, size, perms, &mut || {
-            hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
-        });
-    }
-
-    // Install the page table in satp
-    let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
-    satp.set_from(&sv48, 0);
+fn setup_hyp_paging(hyp_map: HypMap, hyp_mem: &mut HypPageAlloc) {
+    let page_table = hyp_map.new_page_table(hyp_mem);
+    let satp = page_table.satp();
     // Store the SATP value for other CPUs. They load from the global in start_secondary.
-    SATP_VAL.call_once(|| satp.get());
-    CSR.satp.set(satp.get());
+    SATP_VAL.call_once(|| satp);
+    // Install the page table in satp
+    CSR.satp.set(satp);
     tlb::sfence_vma(None, None);
 }
 
@@ -531,8 +459,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let guest_phys_size = mem_map.regions().last().unwrap().end().bits()
         - mem_map.regions().next().unwrap().base().bits();
 
-    // Setup paging structures.
-    setup_hyp_paging(mem_map, &mut hyp_mem);
+    // Create the hypervisor mapping starting from the hardware memory map.
+    let hyp_map = HypMap::new(mem_map);
+
+    // The hypervisor mapping is complete. Can setup paging structures now.
+    setup_hyp_paging(hyp_map, &mut hyp_mem);
 
     // Find and initialize the IOMMU.
     match Iommu::probe_from(PcieRoot::get(), &mut || {

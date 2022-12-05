@@ -661,7 +661,7 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
         let mut hgatp = LocalRegisterCopy::<u64, hgatp::Register>::new(0);
         hgatp.modify(hgatp::vmid.val(vmid.vmid()));
         hgatp.modify(hgatp::ppn.val(Pfn::from(vm_pages.root_address()).bits()));
-        hgatp.modify(hgatp::mode.val(T::HGATP_VALUE));
+        hgatp.modify(hgatp::mode.val(T::HGATP_MODE));
         CSR.hgatp.set(hgatp.get());
 
         let tlb_version = vm_pages.inner.tlb_tracker.get_version();

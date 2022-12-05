@@ -207,7 +207,7 @@ impl SatpHelpers for LocalRegisterCopy<u64, satp::Register> {
     fn set_from<T: FirstStagePagingMode>(&mut self, pt: &FirstStagePageTable<T>, asid: u64) {
         self.modify(satp::asid.val(asid));
         self.modify(satp::ppn.val(Pfn::from(pt.get_root_address()).bits()));
-        self.modify(satp::mode.val(T::SATP_VALUE));
+        self.modify(satp::mode.val(T::SATP_MODE));
     }
 }
 
@@ -429,7 +429,7 @@ impl HgatpHelpers for LocalRegisterCopy<u64, hgatp::Register> {
     fn set_from<T: GuestStagePagingMode>(&mut self, pt: &GuestStagePageTable<T>, vmid: u64) {
         self.modify(hgatp::vmid.val(vmid));
         self.modify(hgatp::ppn.val(Pfn::from(pt.get_root_address()).bits()));
-        self.modify(hgatp::mode.val(T::HGATP_VALUE));
+        self.modify(hgatp::mode.val(T::HGATP_MODE));
     }
 }
 

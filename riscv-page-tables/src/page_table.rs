@@ -473,15 +473,15 @@ pub trait PagingMode {
 /// A page table for a S or U mode. It's enabled by storing its root address in `satp`.
 /// Examples include `Sv39`, `Sv48`, or `Sv57`
 pub trait FirstStagePagingMode: PagingMode<MappedAddressSpace = SupervisorVirt> {
-    /// `SATP_VALUE` must be set to the paging mode stored in register satp.
-    const SATP_VALUE: u64;
+    /// `SATP_MODE` must be set to the paging mode stored in register satp.
+    const SATP_MODE: u64;
 }
 
 /// A page table for a VM. It's enabled by storing its root address in `hgatp`.
 /// Examples include `Sv39x4`, `Sv48x4`, or `Sv57x4`
 pub trait GuestStagePagingMode: PagingMode<MappedAddressSpace = GuestPhys> {
-    /// `HGATP_VALUE` must be set to the paging mode stored in register hgatp.
-    const HGATP_VALUE: u64;
+    /// `HGATP_MODE` must be set to the paging mode stored in register hgatp.
+    const HGATP_MODE: u64;
 }
 
 /// The internal state of a paging hierarchy.

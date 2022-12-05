@@ -137,7 +137,7 @@ impl DeviceContext {
         const HGATP_MODE_SHIFT: u64 = 60;
         self.iohgatp = pt.get_root_address().pfn().bits()
             | ((gscid.bits() as u64) << GSCID_SHIFT)
-            | (T::HGATP_VALUE << HGATP_MODE_SHIFT);
+            | (T::HGATP_MODE << HGATP_MODE_SHIFT);
 
         // Ensure the writes to the other context fields are visible before we mark the context
         // as valid.

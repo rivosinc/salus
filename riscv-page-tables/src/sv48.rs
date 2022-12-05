@@ -59,7 +59,7 @@ impl PageTableLevel for Sv48Level {
 pub enum Sv48 {}
 
 impl FirstStagePagingMode for Sv48 {
-    const SATP_VALUE: u64 = 9;
+    const SATP_MODE: u64 = 9;
 }
 
 impl PagingMode for Sv48 {

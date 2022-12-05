@@ -74,7 +74,7 @@ impl PageTableLevel for Sv48x4Level {
 pub enum Sv48x4 {}
 
 impl GuestStagePagingMode for Sv48x4 {
-    const HGATP_VALUE: u64 = 9;
+    const HGATP_MODE: u64 = 9;
 }
 
 impl PagingMode for Sv48x4 {

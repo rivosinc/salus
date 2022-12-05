@@ -10,6 +10,7 @@ use crate::smp::PerCpu;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     BindingImsic(ImsicError),
+    RebindingImsic(ImsicError),
     UnbindingImsic(ImsicError),
     WrongBindStatus,
     WrongPhysicalCpu,
@@ -24,6 +25,8 @@ pub type Result<T> = core::result::Result<T, Error>;
 enum BindStatus {
     Binding(CpuId, ImsicFileId),
     Bound(CpuId, ImsicFileId),
+    Rebinding(CpuId, ImsicFileId, CpuId, ImsicFileId),
+    Cloned(CpuId, ImsicFileId),
     Unbinding(CpuId, ImsicFileId),
     Unbound,
 }
@@ -111,11 +114,9 @@ impl VmCpuExtInterrupts {
         }
 
         // Initialize the guest IMSIC file we're getting bound to.
-        let imsic = Imsic::get();
-        imsic
-            .restore_guest_file_prepare(interrupt_file, &mut self.sw_file)
+        Imsic::get()
+            .clear_guest_file(interrupt_file)
             .map_err(Error::BindingImsic)?;
-
         self.bind_status = BindStatus::Binding(PerCpu::this_cpu().cpu_id(), interrupt_file);
         Ok(())
     }
@@ -136,9 +137,95 @@ impl VmCpuExtInterrupts {
         // Finish restoring state from the SW interrupt file.
         let imsic = Imsic::get();
         imsic
-            .restore_guest_file_finish(interrupt_file, &mut self.sw_file)
+            .restore_guest_file(interrupt_file, &mut self.sw_file)
             .map_err(Error::BindingImsic)?;
         self.bind_status = BindStatus::Bound(cpu, interrupt_file);
+        Ok(interrupt_file)
+    }
+
+    /// Prepares to rebind this vCPU to `interrupt_file` on the current physical CPU.
+    pub fn rebind_imsic_prepare(&mut self, interrupt_file: ImsicFileId) -> Result<()> {
+        // The vCPU must be bound to an other IMSIC file.
+        let (cpu, old_interrupt_file) = match self.bind_status {
+            BindStatus::Bound(cpu, old_interrupt_file) => (cpu, old_interrupt_file),
+            _ => return Err(Error::WrongBindStatus),
+        };
+
+        // Initialize the guest IMSIC file we're getting bound to.
+        Imsic::get()
+            .clear_guest_file(interrupt_file)
+            .map_err(Error::BindingImsic)?;
+        self.bind_status = BindStatus::Rebinding(
+            cpu,
+            old_interrupt_file,
+            PerCpu::this_cpu().cpu_id(),
+            interrupt_file,
+        );
+        Ok(())
+    }
+
+    /// Copies the guest interrupt file over to sw file.
+    pub fn rebind_imsic_clone(&mut self) -> Result<()> {
+        // Make sure there's a rebind operation in progress and we are on old CPU right now.
+        let (cpu, interrupt_file, new_cpu, new_file) = match self.bind_status {
+            BindStatus::Rebinding(cpu, interrupt_file, new_cpu, new_file) => {
+                (cpu, interrupt_file, new_cpu, new_file)
+            }
+            _ => return Err(Error::WrongBindStatus),
+        };
+
+        if cpu != PerCpu::this_cpu().cpu_id() {
+            return Err(Error::WrongPhysicalCpu);
+        }
+
+        // Copy and then clear the guest interrupt file.
+        let imsic = Imsic::get();
+        imsic
+            .save_guest_file_prepare(interrupt_file, &mut self.sw_file)
+            .map_err(Error::BindingImsic)?;
+        imsic
+            .save_guest_file_finish(interrupt_file, &mut self.sw_file)
+            .map_err(Error::RebindingImsic)?;
+        self.bind_status = BindStatus::Cloned(new_cpu, new_file);
+        Ok(())
+    }
+
+    /// Get the previous guest interrupt file's location.
+    pub fn prev_imsic_location(&self) -> Result<ImsicLocation> {
+        // Make sure we are in the rebinding state.
+        let (cpu, interrupt_file) = match self.bind_status {
+            BindStatus::Rebinding(cpu, interrupt_file, _, _) => (cpu, interrupt_file),
+            _ => {
+                return Err(Error::WrongBindStatus);
+            }
+        };
+
+        let prev_loc = Imsic::get()
+            .phys_file_location(cpu, interrupt_file)
+            .map_err(Error::RebindingImsic)?;
+        Ok(prev_loc)
+    }
+
+    /// Completes the IMSIC rebind operation started in `rebind_imsic_prepare()`.
+    pub fn rebind_imsic_finish(&mut self) -> Result<ImsicFileId> {
+        // Make sure there's a rebind operation was started on this CPU.
+        let (cpu, interrupt_file) = match self.bind_status {
+            BindStatus::Cloned(cpu, interrupt_file) => (cpu, interrupt_file),
+            _ => {
+                return Err(Error::WrongBindStatus);
+            }
+        };
+
+        if cpu != PerCpu::this_cpu().cpu_id() {
+            return Err(Error::WrongPhysicalCpu);
+        }
+
+        // Finish restoring state from the SW interrupt file.
+        Imsic::get()
+            .restore_guest_file(interrupt_file, &mut self.sw_file)
+            .map_err(Error::RebindingImsic)?;
+        self.bind_status = BindStatus::Bound(cpu, interrupt_file);
+
         Ok(interrupt_file)
     }
 

@@ -98,3 +98,37 @@ pub fn inject_external_interrupt(tvm_id: u64, vcpu_id: u64, interrupt_id: u64) -
     unsafe { ecall_send(&msg) }?;
     Ok(())
 }
+
+/// Begins the rebinding process for the specified vCPU to this physical CPU and the specified
+/// confidential guest interrupt file. The host must complete a TLB invalidation sequence
+/// for the TVM before cloning old interrupt file state using `rebind_vcpu_imsic_clone`. Once cloned
+/// the old file will be restored to new guest interrupt file on `rebind_vcpu_imsic_end` invocation.
+pub fn rebind_vcpu_imsic_begin(tvm_id: u64, vcpu_id: u64, imsic_mask: u64) -> Result<()> {
+    let msg = SbiMessage::TeeInterrupt(TvmCpuRebindImsicBegin {
+        tvm_id,
+        vcpu_id,
+        imsic_mask,
+    });
+    // Safety: The specified guest interrupt files must have already been inaccessible.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}
+
+/// Clones the old guest interrupt file of the specified vCPU. Caller must make sure to call this from
+/// old physical CPU. The guest interrupt file after this is free to be reclaimed or bound to another
+/// vCPU.
+pub fn rebind_vcpu_imsic_clone(tvm_id: u64, vcpu_id: u64) -> Result<()> {
+    let msg = SbiMessage::TeeInterrupt(TvmCpuRebindImsicClone { tvm_id, vcpu_id });
+    // Safety: Does not access host memory.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}
+
+/// Completes the rebind process for the specified vCPU from this physical CPU and its guest
+/// interrupt files. Must be called from the same physical CPU as `rebind_vcpu_imsic_begin`.
+pub fn rebind_vcpu_imsic_end(tvm_id: u64, vcpu_id: u64) -> Result<()> {
+    let msg = SbiMessage::TeeInterrupt(TvmCpuRebindImsicEnd { tvm_id, vcpu_id });
+    // Safety: Does not access host memory.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}

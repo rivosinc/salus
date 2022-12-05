@@ -654,32 +654,26 @@ impl Imsic {
         Ok(())
     }
 
-    /// Prepares `guest_file` for being restored from `sw_file`.
-    pub fn restore_guest_file_prepare(
-        &self,
-        guest_file: ImsicFileId,
-        sw_file: &mut SwFile,
-    ) -> Result<()> {
+    /// Clears the `guest_file`.
+    pub fn clear_guest_file(&self, guest_file: ImsicFileId) -> Result<()> {
         let csrs = self.get_guest_csrs(guest_file)?;
-        csrs.write(ImsicRegister::Eidelivery, 0);
         for i in 0..self.num_ei_regs() {
             csrs.write(ImsicRegister::Eip(i), 0);
-            csrs.write(ImsicRegister::Eie(i), sw_file.eie(i));
+            csrs.write(ImsicRegister::Eie(i), 0);
         }
+        csrs.write(ImsicRegister::Eithreshold, 0);
+        csrs.write(ImsicRegister::Eidelivery, 0);
         Ok(())
     }
 
-    /// Completes restoring of `guest_file` from `sw_file`. If `sw_file` is an MRIF mapped into an
-    /// MSI page table then the caller must ensure that any translations for `sw_file` have been
+    /// Restores `guest_file` from `sw_file`. If `sw_file` is an MRIF mapped into an MSI
+    /// page table then the caller must ensure that any translations for `sw_file` have been
     /// flushed. Interrupt delivery from `guest_file` is enabled upon return.
-    pub fn restore_guest_file_finish(
-        &self,
-        guest_file: ImsicFileId,
-        sw_file: &mut SwFile,
-    ) -> Result<()> {
+    pub fn restore_guest_file(&self, guest_file: ImsicFileId, sw_file: &mut SwFile) -> Result<()> {
         let csrs = self.get_guest_csrs(guest_file)?;
         for i in 0..self.num_ei_regs() {
             csrs.set_bits(ImsicRegister::Eip(i), sw_file.eip(i));
+            csrs.write(ImsicRegister::Eie(i), sw_file.eie(i));
         }
         csrs.write(ImsicRegister::Eithreshold, sw_file.eithreshold());
         csrs.write(ImsicRegister::Eidelivery, sw_file.eidelivery());

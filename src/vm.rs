@@ -1761,6 +1761,19 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             } => self
                 .guest_inject_ext_interrupt(tvm_id, vcpu_id, interrupt_id)
                 .into(),
+            TvmCpuRebindImsicBegin {
+                tvm_id,
+                vcpu_id,
+                imsic_mask,
+            } => self
+                .guest_rebind_vcpu_begin(tvm_id, vcpu_id, imsic_mask, active_vcpu)
+                .into(),
+            TvmCpuRebindImsicClone { tvm_id, vcpu_id } => {
+                self.guest_rebind_vcpu_clone(tvm_id, vcpu_id).into()
+            }
+            TvmCpuRebindImsicEnd { tvm_id, vcpu_id } => {
+                self.guest_rebind_vcpu_end(tvm_id, vcpu_id).into()
+            }
         }
     }
 
@@ -1938,6 +1951,152 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         // Unwrap ok: we know the vCPU is already in the "binding" state.
         guest_vm.bind_vcpu_end(vcpu_id).unwrap();
 
+        Ok(0)
+    }
+
+    fn rebind_vcpu_begin(&self, vcpu_id: u64, interrupt_file: ImsicFileId) -> EcallResult<()> {
+        self.vm()
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .and_then(|vcpu| vcpu.rebind_imsic_prepare(interrupt_file))
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
+    }
+
+    fn guest_rebind_vcpu_begin(
+        &self,
+        guest_id: u64,
+        vcpu_id: u64,
+        imsic_mask: u64,
+        active_vcpu: &ActiveVmCpu<T>,
+    ) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+
+        // imsic_mask is in the same format as HGEIE, where bits [1:N] specify the guest interrupt
+        // files. We only support binding a single interrupt file for now.
+        if imsic_mask.count_ones() != 1 {
+            return Err(EcallError::Sbi(SbiError::InvalidParam))?;
+        }
+        let imsic_index = imsic_mask
+            .trailing_zeros()
+            .checked_sub(1)
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+
+        // Get the IMSIC page that we're going to assign.
+        let base_location = active_vcpu
+            .get_imsic_location()
+            .ok_or(EcallError::Sbi(SbiError::NotSupported))?;
+        let src_location = ImsicLocation::new(
+            base_location.group(),
+            base_location.hart(),
+            ImsicFileId::guest(imsic_index),
+        );
+        let from_page_addr = self
+            .vm_pages()
+            .imsic_geometry()
+            .and_then(|g| g.location_to_addr(src_location))
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let imsic_pages = self
+            .vm_pages()
+            .get_converted_imsic(from_page_addr)
+            .map_err(EcallError::from)?;
+
+        // to_page_addr contains the virtual address set by host. it's where guest vcpu views
+        // its interrupt file.
+        let to_page_addr = guest_vm.get_vcpu_imsic_addr(vcpu_id)?;
+        let mapper = guest_vm
+            .vm_pages()
+            .remap_imsic_pages(to_page_addr, 1)
+            .map_err(EcallError::from)?;
+
+        // Get the destination interrupt file.
+        //
+        // Unwrap ok: imsic_pages is exactly one page long and its location must be valid.
+        let interrupt_file = Imsic::get()
+            .phys_geometry()
+            .addr_to_location(imsic_pages.peek().unwrap())
+            .unwrap()
+            .file();
+
+        // Clears the new guest interrupt file and sets the state to Rebinding.
+        guest_vm.rebind_vcpu_begin(vcpu_id, interrupt_file)?;
+
+        for (page, addr) in imsic_pages.zip(to_page_addr.iter_from()) {
+            // Unwrap ok: we have an exclusive reference to the converted page, so it must be
+            // assignable.
+            let page = self
+                .page_tracker()
+                .assign_page_for_mapping(page, guest_vm.page_owner_id())
+                .unwrap();
+            // Unwrap ok: the address is in the range and mapper validated that address is remappable.
+            let prev_addr = mapper.remap_page(addr, page).unwrap();
+            // Safety: We've verified the typing of the page and we must have unique
+            // ownership since the page was mapped before it was replaced.
+            let prev_page: ImsicGuestPage<Invalidated> = unsafe { ImsicGuestPage::new(prev_addr) };
+            // Unwrap ok: Page was mapped and has just been invalidated.
+            guest_vm
+                .vm_pages()
+                .unassign_imsic_page_begin(prev_page)
+                .unwrap();
+        }
+
+        Ok(0)
+    }
+
+    fn rebind_vcpu_clone(&self, vcpu_id: u64) -> EcallResult<()> {
+        self.vm()
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .and_then(|vcpu| vcpu.rebind_imsic_clone())
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
+    }
+
+    fn guest_rebind_vcpu_clone(&self, guest_id: u64, vcpu_id: u64) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+
+        let prev_imisc_loc = guest_vm
+            .vm()
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .and_then(|vcpu| vcpu.prev_imsic_location())
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+        // Unwrap ok: prev_imisc_loc must've been a valid location given it was bound to the vCPU.
+        let prev_imsic_addr = Imsic::get()
+            .phys_geometry()
+            .location_to_addr(prev_imisc_loc)
+            .unwrap();
+
+        // Makes sure the TLB flush has been completed and unassigns the previous imsic page from
+        // page_tracker.
+        guest_vm
+            .vm_pages()
+            .unassign_imsic_page_end(prev_imsic_addr)
+            .map_err(EcallError::from)?;
+
+        // Saves the previous guest interrupt file's state.
+        guest_vm.rebind_vcpu_clone(vcpu_id)?;
+        Ok(0)
+    }
+
+    fn rebind_vcpu_end(&self, vcpu_id: u64) -> EcallResult<()> {
+        self.vm()
+            .vcpus
+            .get_vcpu(vcpu_id)
+            .and_then(|vcpu| vcpu.rebind_imsic_finish())
+            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
+    }
+
+    fn guest_rebind_vcpu_end(&self, guest_id: u64, vcpu_id: u64) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        guest_vm.rebind_vcpu_end(vcpu_id)?;
         Ok(0)
     }
 

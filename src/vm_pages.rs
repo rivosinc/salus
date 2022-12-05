@@ -7,7 +7,9 @@ use attestation::AttestationManager;
 use core::arch::global_asm;
 use core::marker::PhantomData;
 use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
-use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion, MAX_PAGE_OWNERS};
+use page_tracking::{
+    LockedPageList, PageList, PageTracker, PageTrackingError, TlbVersion, MAX_PAGE_OWNERS,
+};
 use riscv_page_tables::{
     tlb, GuestStageMapper, GuestStagePageTable, GuestStagePagingMode, PageTableError,
 };
@@ -47,6 +49,7 @@ pub enum Error {
     InvalidImsicLocation,
     MsiTableMapping(IommuError),
     AttachingDevice(IommuError),
+    PageTracker(PageTrackingError),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -1553,6 +1556,34 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 )
                 .unwrap();
         }
+        Ok(())
+    }
+
+    // Begins unassignment of the `page`. Unlike `unassign_imsic_begin()`, this method does not
+    // invalidate the address. It's only responsible for removing the page from page_tracker.
+    // For now we only use it for remapping purpose where the leaf entry is still valid but
+    // the underlying address has been replaced.
+    pub fn unassign_imsic_page_begin(&self, page: ImsicGuestPage<Invalidated>) -> Result<()> {
+        self.inner
+            .page_tracker
+            .unassign_page_begin(page, self.inner.tlb_tracker.current_version())
+            .map_err(Error::PageTracker)?;
+        Ok(())
+    }
+
+    /// Verifies that the TLB flush for the IMSIC interrupt file that was mapped at `imsic_addr`
+    /// has been completed and completes unassignment of the page.
+    pub fn unassign_imsic_page_end(&self, imsic_addr: SupervisorPageAddr) -> Result<()> {
+        let version = self.inner.tlb_tracker.min_version();
+        self.inner
+            .page_tracker
+            .unassign_page_complete(
+                imsic_addr,
+                self.inner.page_owner_id,
+                MemType::Mmio(DeviceMemType::Imsic),
+                version,
+            )
+            .map_err(Error::PageTracker)?;
         Ok(())
     }
 

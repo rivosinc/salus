@@ -163,6 +163,47 @@ pub enum TeeInterruptFunction {
         /// a2 = interrupt ID
         interrupt_id: u64,
     },
+    /// Begins the rebinding process for the specified vCPU to this physical CPU and the specified
+    /// confidential guest interrupt file. The host must complete a TLB invalidation sequence
+    /// for the TVM before cloning old interrupt file state using `rebind_vcpu_imsic_clone`. Once cloned
+    /// the old file will be restored to new guest interrupt file on `rebind_vcpu_imsic_end` invocation.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 8
+    TvmCpuRebindImsicBegin {
+        /// a0 = TVM ID
+        tvm_id: u64,
+        /// a1 = vCPU ID
+        vcpu_id: u64,
+        /// a2 = bit mask of interrupt files to be bound
+        imsic_mask: u64,
+    },
+    /// Clones the old guest interrupt file of the specified vCPU. Caller must make sure to invoke this from
+    /// old physical CPU. The guest interrupt file after this is free to be reclaimed or bound to another
+    /// vCPU.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 9
+    TvmCpuRebindImsicClone {
+        /// a0 = TVM ID
+        tvm_id: u64,
+        /// a1 = vCPU ID
+        vcpu_id: u64,
+    },
+    /// Completes the rebind process for the specified vCPU from this physical CPU and its guest
+    /// interrupt files. Must be called from the same physical CPU as `rebind_vcpu_imsic_begin`.
+    ///
+    /// Returns 0 on success.
+    ///
+    /// a6 = 10
+    TvmCpuRebindImsicEnd {
+        /// a0 = TVM ID
+        tvm_id: u64,
+        /// a1 = vCPU ID
+        vcpu_id: u64,
+    },
 }
 
 impl TeeInterruptFunction {
@@ -204,6 +245,19 @@ impl TeeInterruptFunction {
                 vcpu_id: args[1],
                 interrupt_id: args[2],
             }),
+            8 => Ok(TvmCpuRebindImsicBegin {
+                tvm_id: args[0],
+                vcpu_id: args[1],
+                imsic_mask: args[2],
+            }),
+            9 => Ok(TvmCpuRebindImsicEnd {
+                tvm_id: args[0],
+                vcpu_id: args[1],
+            }),
+            10 => Ok(TvmCpuRebindImsicClone {
+                tvm_id: args[0],
+                vcpu_id: args[1],
+            }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -221,6 +275,9 @@ impl SbiFunction for TeeInterruptFunction {
             TvmCpuUnbindImsicBegin { .. } => 5,
             TvmCpuUnbindImsicEnd { .. } => 6,
             TvmCpuInjectExternalInterrupt { .. } => 7,
+            TvmCpuRebindImsicBegin { .. } => 8,
+            TvmCpuRebindImsicEnd { .. } => 9,
+            TvmCpuRebindImsicClone { .. } => 10,
         }
     }
 
@@ -251,6 +308,13 @@ impl SbiFunction for TeeInterruptFunction {
                 vcpu_id: _,
                 interrupt_id: _,
             } => *tvm_id,
+            TvmCpuRebindImsicBegin {
+                tvm_id,
+                vcpu_id: _,
+                imsic_mask: _,
+            } => *tvm_id,
+            TvmCpuRebindImsicEnd { tvm_id, vcpu_id: _ } => *tvm_id,
+            TvmCpuRebindImsicClone { tvm_id, vcpu_id: _ } => *tvm_id,
         }
     }
 
@@ -279,6 +343,13 @@ impl SbiFunction for TeeInterruptFunction {
                 vcpu_id,
                 interrupt_id: _,
             } => *vcpu_id,
+            TvmCpuRebindImsicBegin {
+                tvm_id: _,
+                vcpu_id,
+                imsic_mask: _,
+            } => *vcpu_id,
+            TvmCpuRebindImsicEnd { tvm_id: _, vcpu_id } => *vcpu_id,
+            TvmCpuRebindImsicClone { tvm_id: _, vcpu_id } => *vcpu_id,
             _ => 0,
         }
     }
@@ -306,6 +377,11 @@ impl SbiFunction for TeeInterruptFunction {
                 vcpu_id: _,
                 interrupt_id,
             } => *interrupt_id,
+            TvmCpuRebindImsicBegin {
+                tvm_id: _,
+                vcpu_id: _,
+                imsic_mask,
+            } => *imsic_mask,
             _ => 0,
         }
     }

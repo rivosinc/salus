@@ -37,6 +37,7 @@ pub enum Error {
     ImsicLocationAlreadySet,
     VmCpuNotBound,
     Binding(vm_interrupts::Error),
+    Rebinding(vm_interrupts::Error),
     Unbinding(vm_interrupts::Error),
     AllowingInterrupt(vm_interrupts::Error),
     DenyingInterrupt(vm_interrupts::Error),
@@ -1211,6 +1212,51 @@ impl VmCpu {
             .lock()
             .bind_imsic_finish()
             .map_err(Error::Binding)?;
+
+        // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
+        let mut arch = self.arch.lock();
+        let mut hstatus =
+            LocalRegisterCopy::<u64, hstatus::Register>::new(arch.regs.guest_regs.hstatus);
+        hstatus.modify(hstatus::vgein.val(interrupt_file.bits() as u64));
+        arch.regs.guest_regs.hstatus = hstatus.get();
+        Ok(())
+    }
+
+    /// Prepares to rebind this vCPU to `interrupt_file` on the current physical CPU.
+    pub fn rebind_imsic_prepare(&self, interrupt_file: ImsicFileId) -> Result<()> {
+        self.ext_interrupts()?
+            .lock()
+            .rebind_imsic_prepare(interrupt_file)
+            .map_err(Error::Rebinding)?;
+        Ok(())
+    }
+
+    /// Copies the guest interrupt file state on the previous CPU.
+    pub fn rebind_imsic_clone(&self) -> Result<()> {
+        self.ext_interrupts()?
+            .lock()
+            .rebind_imsic_clone()
+            .map_err(Error::Rebinding)?;
+        Ok(())
+    }
+
+    /// Get the previous guest interrupt file's location.
+    pub fn prev_imsic_location(&self) -> Result<ImsicLocation> {
+        let prev_imsic_loc = self
+            .ext_interrupts()?
+            .lock()
+            .prev_imsic_location()
+            .map_err(Error::Rebinding)?;
+        Ok(prev_imsic_loc)
+    }
+
+    /// Completes the IMSIC rebind operation started in `rebind_imsic_prepare()`.
+    pub fn rebind_imsic_finish(&self) -> Result<()> {
+        let interrupt_file = self
+            .ext_interrupts()?
+            .lock()
+            .rebind_imsic_finish()
+            .map_err(Error::Rebinding)?;
 
         // Update VGEIN so that the selected interrupt file gets used next time the vCPU is run.
         let mut arch = self.arch.lock();

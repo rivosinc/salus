@@ -178,6 +178,35 @@ impl MsiPageTable {
         Ok(())
     }
 
+    /// Remaps the IMSIC location `src` in guest physical address space to the new physical IMSIC
+    /// file identified by `dest`. `src` must be currently mapped and `dest` must be owned by
+    /// the owner of this `MsiPageTable`.
+    pub fn remap(&self, src: ImsicLocation, dest: ImsicLocation) -> Result<()> {
+        let mut inner = self.inner.lock();
+        // Make sure we own the IMSIC page referenced by `dest`.
+        let dest_addr = inner
+            .dest_geometry
+            .location_to_addr(dest)
+            .ok_or(Error::InvalidImsicLocation(dest))?;
+        if !inner.page_tracker.is_mapped_page(
+            dest_addr,
+            inner.owner,
+            MemType::Mmio(DeviceMemType::Imsic),
+        ) {
+            return Err(Error::MsiPageNotOwned(dest_addr));
+        }
+
+        let entry = MsiPageTableIndex::from(&inner.src_geometry, src)
+            .and_then(|index| inner.entry_for_index(index))
+            .ok_or(Error::InvalidImsicLocation(src))?;
+        if !entry.valid() {
+            return Err(Error::MsiNotMapped(src));
+        }
+        entry.set(dest_addr.pfn());
+
+        Ok(())
+    }
+
     /// Removes the mapping for the specified IMSIC location in guest physical address space.
     pub fn unmap(&self, location: ImsicLocation) -> Result<()> {
         let mut inner = self.inner.lock();

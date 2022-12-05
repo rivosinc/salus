@@ -458,7 +458,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         tee_interrupt::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000)
             .expect("Tellus - TvmCpuSetImsicAddr failed");
 
-        // Try to convert a guest interfupt file.
+        // Try to convert a guest interrupt file.
         //
         // Safety: We trust that the IMSIC is actually at IMSIC_START_ADDRESS, and we aren't
         // touching this page at all in this program.
@@ -548,6 +548,32 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Bind to a guest interrupt file if AIA is enabled.
     if has_aia {
         tee_interrupt::bind_vcpu_imsic(vmid, 0, 1 << 1).expect("Tellus - TvmCpuBindImsic failed");
+    }
+
+    // For now we run on a single CPU so try to exercise the rebinding interface
+    // on the same PCPU.
+    // CPU0, guest interrupt file 2.
+    let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K * 2;
+    if has_aia {
+        // Try to convert a guest interrupt file.
+        //
+        // Safety: We trust that the IMSIC is actually at IMSIC_START_ADDRESS, and we aren't
+        // touching this page at all in this program.
+        unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
+            .expect("Tellus - TsmConvertImsic failed");
+        tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
+
+        tee_interrupt::rebind_vcpu_imsic_begin(vmid, 0, 1 << 2)
+            .expect("Tellus - TvmCpuRebindImsicBegin failed");
+        tee_host::tvm_initiate_fence(vmid).expect("Tellus - TvmInitiateFence failed");
+        tee_interrupt::rebind_vcpu_imsic_clone(vmid, 0)
+            .expect("Tellus - TvmCpuRebindImsicClone failed");
+        tee_interrupt::rebind_vcpu_imsic_end(vmid, 0)
+            .expect("Tellus - TvmCpuRebindImsicEnd failed");
+
+        // Reclaim previous imsic file address.
+        tee_interrupt::reclaim_imsic(IMSIC_START_ADDRESS + PAGE_SIZE_4K)
+            .expect("Tellus - TsmReclaimImsic failed");
     }
 
     let mut shared_mem_region: Option<Range<u64>> = None;

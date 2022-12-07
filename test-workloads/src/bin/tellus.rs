@@ -18,10 +18,9 @@ extern crate test_workloads;
 
 mod consts;
 
-use arrayvec::ArrayVec;
 use consts::*;
 use core::arch::asm;
-use core::{ops::Range, ptr};
+use core::ops::Range;
 use device_tree::Fdt;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap, CSR, CSR_CYCLE};
 use s_mode_utils::abort::abort;
@@ -59,104 +58,6 @@ pub fn poweroff() -> ! {
     reset::shutdown().unwrap();
 
     abort()
-}
-
-// Maximum number of register sets we support in the shared-memory area.
-const MAX_REGISTER_SETS: usize = 8;
-
-// Wrapper for a vCPU shared-memory state area with a layout provided by the TSM.
-//
-// TODO: Is there a way to unify this and VmCpuSharedStateRef?
-struct TvmCpuSharedMem {
-    addr: u64,
-    layout: ArrayVec<sbi::RegisterSetLocation, MAX_REGISTER_SETS>,
-}
-
-macro_rules! define_accessors {
-    ($regset:ident, $field:ident, $get:ident, $set:ident) => {
-        #[allow(dead_code)]
-        pub fn $get(&self) -> u64 {
-            // Safety: The caller guaranteed at construction that `self.adddr` points to a valid
-            // shared-memory state area for the layout provided by the TSM.
-            unsafe { ptr::addr_of!((*self.$regset()).$field).read_volatile() }
-        }
-
-        #[allow(dead_code)]
-        pub fn $set(&self, val: u64) {
-            // Safety: The caller guaranteed at construction that `self.adddr` points to a valid
-            // shared-memory state area for the layout provided by the TSM.
-            unsafe { ptr::addr_of_mut!((*self.$regset()).$field).write_volatile(val) };
-        }
-    };
-}
-
-impl TvmCpuSharedMem {
-    // Creates a new `TvmCpuSharedMem` starting at `addr` using the specified `layout`.
-    //
-    // Safety: `addr` must be aligned and point to a sufficiently large contiguous range of pages
-    // to hold the structure described by `layout`. This memory must remain valid and not be
-    // accessed for any other purpose for the lifetime of this structure.
-    unsafe fn new(
-        addr: u64,
-        layout: ArrayVec<sbi::RegisterSetLocation, MAX_REGISTER_SETS>,
-    ) -> Self {
-        Self { addr, layout }
-    }
-
-    // Returns the address of the given register set.
-    fn register_set_addr(&self, id: sbi::RegisterSetId) -> u64 {
-        let offset = self
-            .layout
-            .iter()
-            .find(|e| e.id == id as u16)
-            .map(|e| e.offset)
-            .expect("Failed to find register set");
-        self.addr + offset as u64
-    }
-
-    fn s_csrs(&self) -> *mut sbi::SupervisorCsrs {
-        self.register_set_addr(sbi::RegisterSetId::SupervisorCsrs) as *mut _
-    }
-
-    define_accessors! {s_csrs, sepc, sepc, set_sepc}
-    define_accessors! {s_csrs, scause, scause, set_scause}
-    define_accessors! {s_csrs, stval, stval, set_stval}
-
-    fn hs_csrs(&self) -> *mut sbi::HypervisorCsrs {
-        self.register_set_addr(sbi::RegisterSetId::HypervisorCsrs) as *mut _
-    }
-
-    define_accessors! {hs_csrs, htval, htval, set_htval}
-    define_accessors! {hs_csrs, htinst, htinst, set_htinst}
-
-    fn gprs(&self) -> *mut sbi::Gprs {
-        self.register_set_addr(sbi::RegisterSetId::Gprs) as *mut _
-    }
-
-    // Gets the general purpose register at `index`.
-    fn gpr(&self, index: GprIndex) -> u64 {
-        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
-        // construction that `self.addr` points to a valid shared-memory state area for the
-        // layout provided by the TSM.
-        unsafe { ptr::addr_of!((*self.gprs()).0[index as usize]).read_volatile() }
-    }
-
-    // Sets the general purpose register at `index`.
-    fn set_gpr(&self, index: GprIndex, val: u64) {
-        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
-        // construction that `self.addr` points to a valid shared-memory state area for the
-        // layout provided by the TSM.
-        unsafe { ptr::addr_of_mut!((*self.gprs()).0[index as usize]).write_volatile(val) };
-    }
-
-    // Returns the number of pages required for a shared-memory state area with the given layout.
-    fn required_pages(layout: &[sbi::RegisterSetLocation]) -> u64 {
-        let bytes = layout.iter().fold(0, |acc, e| {
-            let id = sbi::RegisterSetId::from_raw(e.id).expect("Invalid RegisterSetId");
-            acc + id.struct_size() as u64
-        });
-        (bytes + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K
-    }
 }
 
 // Safety: addr must point to `num_pages` of memory that isn't currently used by this program. This
@@ -410,18 +311,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         .expect("Tellus - AddPageTablePages returned error");
     next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
 
-    // Get the layout of the shared-memory state area.
-    let mut vcpu_mem_layout = ArrayVec::new();
-    let num_regsets =
-        tee_host::num_vcpu_register_sets(vmid).expect("Tellus - TvmCpuNumRegisterSets failed");
-    assert!(num_regsets <= MAX_REGISTER_SETS as u64);
-    for i in 0..num_regsets {
-        let regset =
-            tee_host::get_vcpu_register_set(vmid, i).expect("Tellus - TvmCpuGetRegisterSet");
-        vcpu_mem_layout.push(regset);
-    }
-    let num_vcpu_shared_pages = TvmCpuSharedMem::required_pages(&vcpu_mem_layout);
-
     // Add vCPU0.
 
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
@@ -432,14 +321,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     }
     next_page += PAGE_SIZE_4K * tsm_info.tvm_vcpu_state_pages;
 
-    let vcpu_state_addr = next_page;
+    // Set aside pages for the shared mem area.
+    let num_vcpu_shared_pages =
+        (core::mem::size_of::<sbi::TvmCpuSharedState>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    let vcpu_shared_addr = next_page;
     next_page += num_vcpu_shared_pages * PAGE_SIZE_4K;
-    // Safety: We own `vcpu_state_addr` and will only access it through volatile reads/writes.
-    unsafe { tee_host::add_vcpu(vmid, 0, vcpu_pages_base, vcpu_state_addr) }
+    // Safety: We own `vcpu_shared_addr` and will only access it through volatile reads/writes.
+    unsafe { tee_host::add_vcpu(vmid, 0, vcpu_pages_base, vcpu_shared_addr) }
         .expect("Tellus - TvmCpuCreate returned error");
-    // Safety: `vcpu_state_addr` points to a sufficient number of pages to hold the requested layout
+    // Safety: `vcpu_shared_addr` points to a sufficient number of pages to hold a TvmCpuSharedState
     // and will not be used for any other purpose for the duration of `kernel_init()`.
-    let vcpu = unsafe { TvmCpuSharedMem::new(vcpu_state_addr, vcpu_mem_layout) };
+    let vcpu = unsafe { tee_host::TvmCpuSharedStateRef::new(vcpu_shared_addr as *mut _) };
 
     let has_aia = base::probe_sbi_extension(EXT_TEE_INTERRUPT).is_ok();
     // CPU0, guest interrupt file 0.
@@ -584,9 +476,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     // Read the ECALL arguments written to the A* regs in shared memory.
                     let mut a_regs = [0u64; 8];
                     for (i, reg) in a_regs.iter_mut().enumerate() {
-                        // Unwrap ok: A[0-7] are valid GPR indices.
-                        let index = GprIndex::from_raw(GprIndex::A0 as u32 + i as u32).unwrap();
-                        *reg = vcpu.gpr(index);
+                        *reg = vcpu.gpr(GprIndex::A0 as usize + i);
                     }
                     use SbiMessage::*;
                     match SbiMessage::from_regs(&a_regs) {
@@ -693,10 +583,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             use Instruction::*;
                             match inst {
                                 Lb(_) | Lbu(_) | Lh(_) | Lhu(_) | Lw(_) | Lwu(_) | Ld(_) => {
-                                    vcpu.set_gpr(GprIndex::A0, 0x42);
+                                    vcpu.set_gpr(GprIndex::A0 as usize, 0x42);
                                 }
                                 Sb(_) | Sh(_) | Sw(_) | Sd(_) => {
-                                    let val = vcpu.gpr(GprIndex::A0);
+                                    let val = vcpu.gpr(GprIndex::A0 as usize);
                                     println!("Guest says: 0x{:x} at 0x{:x}", val, fault_addr);
                                 }
                                 _ => {

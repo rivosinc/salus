@@ -2,9 +2,75 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use core::{marker::PhantomData, ptr};
+
 use crate::TeeHostFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};
-use crate::{RegisterSetLocation, TsmInfo, TsmPageType, TvmCreateParams};
+use crate::{TsmInfo, TsmPageType, TvmCpuSharedState, TvmCreateParams};
+
+/// Provides volatile accessors to a `TvmCpuSharedState`.
+pub struct TvmCpuSharedStateRef<'a> {
+    ptr: *mut TvmCpuSharedState,
+    _lifetime: PhantomData<&'a TvmCpuSharedState>,
+}
+
+// Defines volatile accessors to idividual fields in `TvmCpuSharedState`.
+macro_rules! define_accessors {
+    ($field:ident, $get:ident, $set:ident) => {
+        /// Gets $field in the shared-memory state area.
+        #[allow(dead_code)]
+        pub fn $get(&self) -> u64 {
+            // Safety: The caller guaranteed at construction that `ptr` points to a valid
+            // TvmCpuSharedState.
+            unsafe { ptr::addr_of!((*self.ptr).$field).read_volatile() }
+        }
+
+        /// Sets $field in the shared-memory state area.
+        #[allow(dead_code)]
+        pub fn $set(&self, val: u64) {
+            // Safety: The caller guaranteed at construction that `ptr` points to a valid
+            // TvmCpuSharedState.
+            unsafe { ptr::addr_of_mut!((*self.ptr).$field).write_volatile(val) };
+        }
+    };
+}
+
+impl<'a> TvmCpuSharedStateRef<'a> {
+    /// Creates a new `TvmCpuSharedStateRef` from a raw pointer to a `TvmCpuSharedState`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `ptr` is suitably aligned and points to a `TvmCpuSharedState`
+    /// structure that is valid for the lifetime `'a`.
+    pub unsafe fn new(ptr: *mut TvmCpuSharedState) -> Self {
+        Self {
+            ptr,
+            _lifetime: PhantomData,
+        }
+    }
+
+    define_accessors! {scause, scause, set_scause}
+    define_accessors! {stval, stval, set_stval}
+    define_accessors! {htval, htval, set_htval}
+    define_accessors! {htinst, htinst, set_htinst}
+    define_accessors! {vstimecmp, vstimecmp, set_vstimecmp}
+
+    /// Reads the general purpose register at `index`, which must be a valid GPR number.
+    pub fn gpr(&self, index: usize) -> u64 {
+        assert!(index < 32);
+        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
+        // construction that `ptr` points to a valid `TvmCpuSharedState`.
+        unsafe { ptr::addr_of!((*self.ptr).gprs[index]).read_volatile() }
+    }
+
+    /// Writes the general purpose register at `index`, which must be a valid GPR number.
+    pub fn set_gpr(&self, index: usize, val: u64) {
+        assert!(index < 32);
+        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
+        // construction that `ptr` points to a valid `TvmCpuSharedState`.
+        unsafe { ptr::addr_of_mut!((*self.ptr).gprs[index]).write_volatile(val) };
+    }
+}
 
 /// Initiates a TSM fence on this CPU.
 pub fn tsm_initiate_fence() -> Result<()> {
@@ -137,25 +203,6 @@ pub fn add_page_table_pages(vmid: u64, page_addr: u64, num_pages: u64) -> Result
     Ok(())
 }
 
-/// Returns the number of register sets in the vCPU shared-memory state area for vCPUs of `vmid`.
-pub fn num_vcpu_register_sets(vmid: u64) -> Result<u64> {
-    let msg = SbiMessage::TeeHost(TvmCpuNumRegisterSets { guest_id: vmid });
-    // Safety: TvmCpuNumRegisterSets does not access host memory.
-    unsafe { ecall_send(&msg) }
-}
-
-/// Returns the location of the register set at `index` in the vCPU shared-memory state area for
-/// vCPUs of `vmid`.
-pub fn get_vcpu_register_set(vmid: u64, index: u64) -> Result<RegisterSetLocation> {
-    let msg = SbiMessage::TeeHost(TvmCpuGetRegisterSet {
-        guest_id: vmid,
-        index,
-    });
-    // Safety: TvmCpuGetRegisterSet does not access host memory.
-    let raw = unsafe { ecall_send(&msg) }?;
-    Ok(RegisterSetLocation::from(raw as u32))
-}
-
 /// Adds a vCPU with ID `vcpu_id` to the guest `vmid`, using 'state_page_addr' to hold the vCPU state and
 /// registering `shared_page_addr` as the location of the vCPU's shared-memory state area.
 ///
@@ -165,9 +212,9 @@ pub fn get_vcpu_register_set(vmid: u64, index: u64) -> Result<RegisterSetLocatio
 /// # Safety
 ///
 /// The caller must own the pages referenced by `shared_page_addr`, for the number of pages
-/// sufficient to hold the structure layout returned from `get_vcpu_mem_layout()`. Since memory
-/// within the shared-memory state area may be read or written by the TSM at any time, the caller
-/// must treat the memory as volatile for the lifetime of the TVM.
+/// sufficient to hold the `TvmCpuSharedState` structure. Since memory within the shared-memory state
+/// area may be read or written by the TSM at any time, the caller must treat the memory as volatile
+/// for the lifetime of the TVM.
 pub unsafe fn add_vcpu(
     vmid: u64,
     vcpu_id: u64,

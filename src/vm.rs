@@ -18,7 +18,7 @@ use sbi::{Error as SbiError, *};
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
 use crate::vm_cpu::{
     ActiveVmCpu, HostCpuContext, VmCpu, VmCpuSharedArea, VmCpuStatus, VmCpuTrap, VmCpus,
-    VM_CPUS_MAX, VM_CPU_SHARED_LAYOUT, VM_CPU_SHARED_PAGES,
+    VM_CPUS_MAX, VM_CPU_SHARED_PAGES,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -984,12 +984,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TvmCpuRun { guest_id, vcpu_id } => {
                 self.guest_run_vcpu(guest_id, vcpu_id, active_vcpu).into()
             }
-            TvmCpuNumRegisterSets { guest_id } => {
-                self.guest_num_vcpu_register_sets(guest_id).into()
-            }
-            TvmCpuGetRegisterSet { guest_id, index } => {
-                self.guest_get_vcpu_register_set(guest_id, index).into()
-            }
             TvmCpuCreate {
                 guest_id,
                 vcpu_id,
@@ -1200,25 +1194,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .finalize(entry_sepc, entry_arg)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
         Ok(0)
-    }
-
-    // Returns the number of register sets in the vCPU shared-memory state area for `guest_id`.
-    fn guest_num_vcpu_register_sets(&self, guest_id: u64) -> EcallResult<u64> {
-        // All guests have the same layout since we don't support customization of virtualized
-        // features currently, but make sure that the specified guest_id is at least valid.
-        self.guest_by_id(guest_id)?;
-        Ok(VM_CPU_SHARED_LAYOUT.len() as u64)
-    }
-
-    // Get the location of the register set at `index` in the vCPU shared-memory state area for
-    // `guest_id`.
-    fn guest_get_vcpu_register_set(&self, guest_id: u64, index: u64) -> EcallResult<u64> {
-        // As above, make sure the `guest_id` is valid even though the layout is uniform (for now).
-        self.guest_by_id(guest_id)?;
-        let regset = VM_CPU_SHARED_LAYOUT
-            .get(index as usize)
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        Ok(u32::from(*regset) as u64)
     }
 
     // Adds a vCPU with `vcpu_id` to a guest VM with a shared-memory state area at

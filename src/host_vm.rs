@@ -13,14 +13,12 @@ use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
 use s_mode_utils::print::*;
-use sbi::{self, SbiMessage};
+use sbi::{self, api::tee_host::TvmCpuSharedStateRef, SbiMessage};
 
 use crate::guest_tracking::{GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm::{FinalizedVm, Vm};
-use crate::vm_cpu::{
-    HostCpuContext, VmCpu, VmCpuSharedArea, VmCpuSharedState, VmCpuSharedStateRef, VmCpus,
-};
+use crate::vm_cpu::{HostCpuContext, VmCpu, VmCpuSharedArea, VmCpus};
 use crate::vm_pages::VmPages;
 
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
@@ -399,7 +397,7 @@ impl HostVmRunner {
         &mut self,
         vm: FinalizedVm<T>,
         vcpu_id: u64,
-        vcpu_state: VmCpuSharedStateRef,
+        vcpu_state: TvmCpuSharedStateRef,
     ) -> ControlFlow<()> {
         // Run until we shut down, or this vCPU stops.
         loop {
@@ -412,9 +410,7 @@ impl HostVmRunner {
                         // Read the ECALL arguments written to the A* regs in shared memory.
                         let mut a_regs = [0u64; 8];
                         for (i, reg) in a_regs.iter_mut().enumerate() {
-                            // Unwrap ok: A0-A7 are valid GPR indices.
-                            let index = GprIndex::from_raw(GprIndex::A0 as u32 + i as u32).unwrap();
-                            *reg = vcpu_state.gpr(index);
+                            *reg = vcpu_state.gpr(GprIndex::A0 as usize + i);
                         }
                         use SbiMessage::*;
                         match SbiMessage::from_regs(&a_regs) {
@@ -454,7 +450,7 @@ impl HostVmRunner {
 
     fn handle_page_fault(
         &self,
-        vcpu_state: &VmCpuSharedStateRef,
+        vcpu_state: &TvmCpuSharedStateRef,
         page_tracker: PageTracker,
     ) -> core::result::Result<(), MmioEmulationError> {
         // For now, the only thing we're expecting is MMIO emulation faults in PCI config space.
@@ -489,11 +485,11 @@ impl HostVmRunner {
         };
 
         if write {
-            let val = vcpu_state.gpr(GprIndex::A0);
+            let val = vcpu_state.gpr(GprIndex::A0 as usize);
             pci.emulate_config_write(offset, val, width, page_tracker, PageOwnerId::host());
         } else {
             let val = pci.emulate_config_read(offset, width, page_tracker, PageOwnerId::host());
-            vcpu_state.set_gpr(GprIndex::A0, val);
+            vcpu_state.set_gpr(GprIndex::A0 as usize, val);
         }
 
         Ok(())
@@ -513,7 +509,7 @@ const HOSTVM_GUEST_TRACKING_PAGES: usize = 2;
 /// Represents the special VM that serves as the host for the system.
 pub struct HostVm<T: GuestStagePagingMode> {
     inner: GuestVm<T>,
-    vcpu_shared: Vec<VmCpuSharedState>,
+    vcpu_shared: Vec<sbi::TvmCpuSharedState>,
 }
 
 impl<T: GuestStagePagingMode> HostVm<T> {
@@ -583,7 +579,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             let mut state_pages_iter = vcpu_state_pages
                 .into_chunks_iter(num::NonZeroU64::new(vcpu_required_state_pages).unwrap());
             for i in 0..num_cpus {
-                this.vcpu_shared.push(VmCpuSharedState::default());
+                this.vcpu_shared.push(sbi::TvmCpuSharedState::default());
                 // Safety: This slot in vcpu_shared points to a valid VmCpuSharedState struct
                 // that is guaranteed to live as long as the containing HostVm structure.
                 let shared_area =
@@ -607,10 +603,10 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     }
 
     // Returns a reference to the shared-state buffer for the given vCPU.
-    fn vcpu_state(&self, vcpu_id: u64) -> Option<VmCpuSharedStateRef> {
+    fn vcpu_state(&self, vcpu_id: u64) -> Option<TvmCpuSharedStateRef> {
         let ptr = self.vcpu_shared.get(vcpu_id as usize)? as *const _;
         // Safety: ptr refers to a valid VmCpuSharedState struct with the same lifetime as `self`.
-        Some(unsafe { VmCpuSharedStateRef::new(ptr as *mut _) })
+        Some(unsafe { TvmCpuSharedStateRef::new(ptr as *mut _) })
     }
 
     // Adds a region of confidential memory to the host VM.

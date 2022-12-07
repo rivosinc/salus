@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::global_asm;
-use core::{marker::PhantomData, mem::size_of, ptr, ptr::NonNull};
+use core::{mem::size_of, ptr::NonNull};
 use drivers::{imsic::*, CpuId, CpuInfo, MAX_CPUS};
 use memoffset::offset_of;
 use page_tracking::collections::PageBox;
@@ -11,7 +11,7 @@ use page_tracking::TlbVersion;
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, PageSize, RawAddr};
 use riscv_regs::*;
-use sbi::{self, SbiMessage, SbiReturnType};
+use sbi::{self, api::tee_host::TvmCpuSharedStateRef, SbiMessage, SbiReturnType};
 use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::smp::PerCpu;
@@ -286,118 +286,27 @@ global_asm!(
     sstatus_vs_enable = const sstatus::vs::Initial.value,
 );
 
-/// Defines the structure of the vCPU shared-memory state area.
-#[derive(Default)]
-pub struct VmCpuSharedState {
-    gprs: sbi::Gprs,
-    s_csrs: sbi::SupervisorCsrs,
-    hs_csrs: sbi::HypervisorCsrs,
-    sstc_csrs: sbi::SstcCsrs,
-}
-
-/// Defines the layout of `VmCpuSharedState` in terms of `RegisterSetLocation`s.
-pub const VM_CPU_SHARED_LAYOUT: &[sbi::RegisterSetLocation] = &[
-    sbi::RegisterSetLocation {
-        id: sbi::RegisterSetId::Gprs as u16,
-        offset: offset_of!(VmCpuSharedState, gprs) as u16,
-    },
-    sbi::RegisterSetLocation {
-        id: sbi::RegisterSetId::SupervisorCsrs as u16,
-        offset: offset_of!(VmCpuSharedState, s_csrs) as u16,
-    },
-    sbi::RegisterSetLocation {
-        id: sbi::RegisterSetId::HypervisorCsrs as u16,
-        offset: offset_of!(VmCpuSharedState, hs_csrs) as u16,
-    },
-    sbi::RegisterSetLocation {
-        id: sbi::RegisterSetId::SstcCsrs as u16,
-        offset: offset_of!(VmCpuSharedState, sstc_csrs) as u16,
-    },
-];
-
-/// The number of pages required for `VmCpuSharedState`.
-pub const VM_CPU_SHARED_PAGES: u64 = PageSize::num_4k_pages(size_of::<VmCpuSharedState>() as u64);
-
-/// Provides volatile accessors to a `VmCpuSharedState`.
-pub struct VmCpuSharedStateRef<'a> {
-    ptr: *mut VmCpuSharedState,
-    _lifetime: PhantomData<&'a VmCpuSharedState>,
-}
-
-// Defines volatile accessors to idividual fields in `VmCpuSharedState`.
-macro_rules! define_accessors {
-    ($regset:ident, $field:ident, $get:ident, $set:ident) => {
-        /// Gets $field in the shared-memory state area.
-        #[allow(dead_code)]
-        pub fn $get(&self) -> u64 {
-            // Safety: The caller guaranteed at construction that `ptr` points to a valid
-            // VmCpuSharedState.
-            unsafe { ptr::addr_of!((*self.ptr).$regset.$field).read_volatile() }
-        }
-
-        /// Sets $field in the shared-memory state area.
-        #[allow(dead_code)]
-        pub fn $set(&self, val: u64) {
-            // Safety: The caller guaranteed at construction that `ptr` points to a valid
-            // VmCpuSharedState.
-            unsafe { ptr::addr_of_mut!((*self.ptr).$regset.$field).write_volatile(val) };
-        }
-    };
-}
-
-impl<'a> VmCpuSharedStateRef<'a> {
-    /// Creates a new `VvmCpuSharedStateRef` from a raw pointer to a `VmCpuSharedState`.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that `ptr` is suitably aligned and points to a `TvmCpuSharedState`
-    /// structure that is valid for the lifetime `'a`.
-    pub unsafe fn new(ptr: *mut VmCpuSharedState) -> Self {
-        Self {
-            ptr,
-            _lifetime: PhantomData,
-        }
-    }
-
-    define_accessors! {s_csrs, sepc, sepc, set_sepc}
-    define_accessors! {s_csrs, scause, scause, set_scause}
-    define_accessors! {s_csrs, stval, stval, set_stval}
-    define_accessors! {hs_csrs, htval, htval, set_htval}
-    define_accessors! {hs_csrs, htinst, htinst, set_htinst}
-    define_accessors! {sstc_csrs, vstimecmp, vstimecmp, set_vstimecmp}
-
-    /// Reads the general purpose register at `index`.
-    pub fn gpr(&self, index: GprIndex) -> u64 {
-        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
-        // construction that `ptr` points to a valid `VmCpuSharedState`.
-        unsafe { ptr::addr_of!((*self.ptr).gprs.0[index as usize]).read_volatile() }
-    }
-
-    /// Writes the general purpose register at `index`.
-    pub fn set_gpr(&self, index: GprIndex, val: u64) {
-        // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
-        // construction that `ptr` points to a valid `VmCpuSharedState`.
-        unsafe { ptr::addr_of_mut!((*self.ptr).gprs.0[index as usize]).write_volatile(val) };
-    }
-}
+/// The number of pages required for `TvmCpuSharedState`.
+pub const VM_CPU_SHARED_PAGES: u64 =
+    PageSize::num_4k_pages(size_of::<sbi::TvmCpuSharedState>() as u64);
 
 /// Wrapper for the shared-memory state area used to communicate vCPU state with the host.
 pub struct VmCpuSharedArea {
-    ptr: NonNull<VmCpuSharedState>,
+    ptr: NonNull<sbi::TvmCpuSharedState>,
     // Optional since we might be sharing with the hypervisor in the host VM case.
     _pin: Option<PinnedPages>,
 }
 
 impl VmCpuSharedArea {
-    /// Creates a new `VmCpuSharedArea` using the `VmCpuSharedState` struct referred to by `ptr`.
+    /// Creates a new `VmCpuSharedArea` using the `TvmCpuSharedState` struct referred to by `ptr`.
     ///
     /// # Safety
     ///
     /// The caller must guarantee that `ptr` is suitably aligned, points to an allocated block of
-    /// memory that is at least as large as `VmCpuSharedState`, and is valid for reads and writes
+    /// memory that is at least as large as `TvmCpuSharedState`, and is valid for reads and writes
     /// for the lifetime of this structure. The caller must only access the memory referred to
     /// by `ptr` using volatile accessors.
-    pub unsafe fn new(ptr: *mut VmCpuSharedState) -> Result<Self> {
+    pub unsafe fn new(ptr: *mut sbi::TvmCpuSharedState) -> Result<Self> {
         Ok(Self {
             ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
             _pin: None,
@@ -410,7 +319,7 @@ impl VmCpuSharedArea {
         if pages.range().num_pages() < VM_CPU_SHARED_PAGES {
             return Err(Error::InsufficientSharedStatePages);
         }
-        let ptr = pages.range().base().bits() as *mut VmCpuSharedState;
+        let ptr = pages.range().base().bits() as *mut sbi::TvmCpuSharedState;
         Ok(Self {
             ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
             _pin: Some(pages),
@@ -420,14 +329,14 @@ impl VmCpuSharedArea {
     // Updates the shared state buffer for an ECALL exit from the given SBI message.
     fn update_with_ecall_exit(&self, msg: SbiMessage) {
         let shared = self.as_ref();
-        shared.set_gpr(GprIndex::A0, msg.a0());
-        shared.set_gpr(GprIndex::A1, msg.a1());
-        shared.set_gpr(GprIndex::A2, msg.a2());
-        shared.set_gpr(GprIndex::A3, msg.a3());
-        shared.set_gpr(GprIndex::A4, msg.a4());
-        shared.set_gpr(GprIndex::A5, msg.a5());
-        shared.set_gpr(GprIndex::A6, msg.a6());
-        shared.set_gpr(GprIndex::A7, msg.a7());
+        shared.set_gpr(GprIndex::A0 as usize, msg.a0());
+        shared.set_gpr(GprIndex::A1 as usize, msg.a1());
+        shared.set_gpr(GprIndex::A2 as usize, msg.a2());
+        shared.set_gpr(GprIndex::A3 as usize, msg.a3());
+        shared.set_gpr(GprIndex::A4 as usize, msg.a4());
+        shared.set_gpr(GprIndex::A5 as usize, msg.a5());
+        shared.set_gpr(GprIndex::A6 as usize, msg.a6());
+        shared.set_gpr(GprIndex::A7 as usize, msg.a7());
         shared.set_stval(0);
         shared.set_htval(0);
         shared.set_htinst(0);
@@ -464,11 +373,11 @@ impl VmCpuSharedArea {
         shared.set_scause(scause);
     }
 
-    // Returns the wrapped shared state buffer as a `VmCpuSharedRef`.
-    fn as_ref(&self) -> VmCpuSharedStateRef {
+    // Returns the wrapped shared state buffer as a `TvmCpuSharedStateRef`
+    fn as_ref(&self) -> TvmCpuSharedStateRef {
         // Safety: We've validated at construction that self.ptr points to a valid
-        // `VmCpuSharedState`.
-        unsafe { VmCpuSharedStateRef::new(self.ptr.as_ptr()) }
+        // `TvmCpuSharedState`.
+        unsafe { TvmCpuSharedStateRef::new(self.ptr.as_ptr()) }
     }
 }
 
@@ -787,7 +696,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     _ => 0,
                 };
                 shared.as_ref().set_htinst(Self::mmio_op_to_htinst(mmio_op));
-                shared.as_ref().set_gpr(GprIndex::A0, val);
+                shared.as_ref().set_gpr(GprIndex::A0 as usize, val);
 
                 // We'll complete a load instruction the next time this vCPU is run.
                 self.arch.pending_mmio_op = Some(mmio_op);
@@ -921,7 +830,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         // Complete any pending load operations. The host is expected to have written the value
         // to complete the load to A0.
         if let Some(mmio_op) = self.arch.pending_mmio_op {
-            let val = self.vcpu.shared_area.as_ref().gpr(GprIndex::A0);
+            let val = self.vcpu.shared_area.as_ref().gpr(GprIndex::A0 as usize);
             use MmioOpcode::*;
             // Write the value to the actual destination register.
             match mmio_op.opcode() {
@@ -950,7 +859,10 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             };
 
             self.arch.pending_mmio_op = None;
-            self.vcpu.shared_area.as_ref().set_gpr(GprIndex::A0, 0);
+            self.vcpu
+                .shared_area
+                .as_ref()
+                .set_gpr(GprIndex::A0 as usize, 0);
 
             // Advance SEPC past the faulting instruction.
             self.inc_sepc(mmio_op.len() as u64);

@@ -35,7 +35,7 @@ impl SwFile {
     /// Creates an empty `SwFile`.
     pub fn new() -> Self {
         Self {
-            entries: [SwFileEntry::default(); 32],
+            entries: [SwFileEntry::default(); SW_FILE_ENTRIES],
             eidelivery: 0,
             eithreshold: 0,
         }

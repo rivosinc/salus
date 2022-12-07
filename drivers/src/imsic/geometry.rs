@@ -27,7 +27,7 @@ impl ImsicGroupId {
 pub struct ImsicHartId(u64);
 
 impl ImsicHartId {
-    /// Creates a new `ImsicGroupId` from `id`.
+    /// Creates a new `ImsicHartId` from `id`.
     pub fn new(id: u64) -> Self {
         Self(id)
     }

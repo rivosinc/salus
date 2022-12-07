@@ -26,7 +26,6 @@ fn hyp_map_params(r: &HwMemRegion) -> Option<(PageAddr<SupervisorPhys>, u64, Pte
         }
         HwMemRegionType::Reserved(HwReservedMemType::HypervisorHeap)
         | HwMemRegionType::Reserved(HwReservedMemType::HypervisorPerCpu)
-        | HwMemRegionType::Reserved(HwReservedMemType::HypervisorPtes)
         | HwMemRegionType::Reserved(HwReservedMemType::PageMap) => {
             Some((r.base(), r.size(), PteLeafPerms::RW))
         }

@@ -253,7 +253,7 @@ sequenceDiagram
         S->>S: Add pages to guest's PT page pool
     end
     loop For each confidential memory region
-        H->>S: TvmAddConfidentialMemoryRegion
+        H->>S: TvmAddMemoryRegion
         S->>S: Mark region in guest address space as confidential
         H->>S: TvmAddMeasuredPages
         S->>S: Copy, measure, assign, and map pages into guest VM

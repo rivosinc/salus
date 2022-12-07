@@ -232,6 +232,7 @@ type AttestationSha384 = AttestationManager<sha2::Sha384>;
 pub struct Vm<T: GuestStagePagingMode> {
     vcpus: VmCpus,
     vm_pages: VmPages<T>,
+    // Only used by Host VM to track guest VMs.
     guests: Option<Guests<T>>,
     attestation_mgr: AttestationSha384,
 }
@@ -1954,7 +1955,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
 
-        // Make sure we're in the proper to state to unbind the vCPU before we go unmapping
+        // Make sure we're in the proper state to unbind the vCPU before we go unmapping
         // the page.
         let guest_addr = guest_vm.get_vcpu_imsic_addr(vcpu_id)?;
         guest_vm.unbind_vcpu_begin(vcpu_id)?;

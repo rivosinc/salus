@@ -79,6 +79,8 @@ impl AllowList {
 /// Virtual external interrupt state for a vCPU.
 pub struct VmCpuExtInterrupts {
     bind_status: BindStatus,
+    // This is the virtual location where we want the guest VCPU to see the interrupt file.
+    // Physical location information is part of the bind_status in form of CpuId and ImsicFileId.
     imsic_location: ImsicLocation,
     sw_file: SwFile,
     allowed_ids: AllowList,

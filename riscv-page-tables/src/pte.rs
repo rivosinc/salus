@@ -81,7 +81,12 @@ pub(crate) struct Pte(u64);
 impl Pte {
     /// Writes the mapping for the given page with that config bits in `status` and marks the entry
     /// as valid.
-    pub fn set(&mut self, pfn: SupervisorPfn, status: &PteFieldBits) {
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `pfn` references a page that is uniquely owned and doesn't
+    /// create an alias.
+    pub unsafe fn set(&mut self, pfn: SupervisorPfn, status: &PteFieldBits) {
         self.0 = (pfn.bits() << PFN_SHIFT) | status.bits | PteFieldBit::Valid.mask();
     }
 

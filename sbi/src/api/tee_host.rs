@@ -6,22 +6,22 @@ use core::{marker::PhantomData, ptr};
 
 use crate::TeeHostFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};
-use crate::{TsmInfo, TsmPageType, TvmCpuSharedState, TvmCreateParams};
+use crate::{TsmInfo, TsmPageType, TsmShmemArea, TvmCreateParams};
 
-/// Provides volatile accessors to a `TvmCpuSharedState`.
-pub struct TvmCpuSharedStateRef<'a> {
-    ptr: *mut TvmCpuSharedState,
-    _lifetime: PhantomData<&'a TvmCpuSharedState>,
+/// Provides volatile accessors to a `TsmShmemArea`.
+pub struct TsmShmemAreaRef<'a> {
+    ptr: *mut TsmShmemArea,
+    _lifetime: PhantomData<&'a TsmShmemArea>,
 }
 
-// Defines volatile accessors to idividual fields in `TvmCpuSharedState`.
+// Defines volatile accessors to idividual fields in `TsmShmemArea`.
 macro_rules! define_accessors {
     ($field:ident, $get:ident, $set:ident) => {
         /// Gets $field in the shared-memory state area.
         #[allow(dead_code)]
         pub fn $get(&self) -> u64 {
             // Safety: The caller guaranteed at construction that `ptr` points to a valid
-            // TvmCpuSharedState.
+            // TsmShmemArea.
             unsafe { ptr::addr_of!((*self.ptr).$field).read_volatile() }
         }
 
@@ -29,20 +29,20 @@ macro_rules! define_accessors {
         #[allow(dead_code)]
         pub fn $set(&self, val: u64) {
             // Safety: The caller guaranteed at construction that `ptr` points to a valid
-            // TvmCpuSharedState.
+            // TsmShmemArea.
             unsafe { ptr::addr_of_mut!((*self.ptr).$field).write_volatile(val) };
         }
     };
 }
 
-impl<'a> TvmCpuSharedStateRef<'a> {
-    /// Creates a new `TvmCpuSharedStateRef` from a raw pointer to a `TvmCpuSharedState`.
+impl<'a> TsmShmemAreaRef<'a> {
+    /// Creates a new `TsmShmemAreaRef` from a raw pointer to a `TsmShmemArea`.
     ///
     /// # Safety
     ///
-    /// The caller must guarantee that `ptr` is suitably aligned and points to a `TvmCpuSharedState`
+    /// The caller must guarantee that `ptr` is suitably aligned and points to a `TsmShmemArea`
     /// structure that is valid for the lifetime `'a`.
-    pub unsafe fn new(ptr: *mut TvmCpuSharedState) -> Self {
+    pub unsafe fn new(ptr: *mut TsmShmemArea) -> Self {
         Self {
             ptr,
             _lifetime: PhantomData,
@@ -59,7 +59,7 @@ impl<'a> TvmCpuSharedStateRef<'a> {
     pub fn gpr(&self, index: usize) -> u64 {
         assert!(index < 32);
         // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
-        // construction that `ptr` points to a valid `TvmCpuSharedState`.
+        // construction that `ptr` points to a valid `TsmShmemArea`.
         unsafe { ptr::addr_of!((*self.ptr).gprs[index]).read_volatile() }
     }
 
@@ -67,7 +67,7 @@ impl<'a> TvmCpuSharedStateRef<'a> {
     pub fn set_gpr(&self, index: usize, val: u64) {
         assert!(index < 32);
         // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
-        // construction that `ptr` points to a valid `TvmCpuSharedState`.
+        // construction that `ptr` points to a valid `TsmShmemArea`.
         unsafe { ptr::addr_of_mut!((*self.ptr).gprs[index]).write_volatile(val) };
     }
 }
@@ -104,6 +104,33 @@ pub fn get_info() -> Result<TsmInfo> {
     }
 
     Ok(tsm_info)
+}
+
+/// Registers the host <-> TSM shared memory area for the calling CPU. `shmem_page_addr` must
+/// be page-aligned and refer to a sufficient number of contiguous non-confidential pages to
+/// hold a `TsmShmemArea` struct. The pages are "pinned" in the non-confidential state until
+/// the shared-memory area is unregistered by calling `unregister_shmem()`.
+///
+/// # Safety
+///
+/// The caller must own the pages referenced by `shared_page_addr`, for the number of pages
+/// sufficient to hold the `TsmShmemArea` structure. Since memory within the shared-memory
+/// communication area may be read or written by the TSM at any time, the caller must treat the
+/// memory as volatile until it is unregistered.
+pub unsafe fn register_shmem(shmem_page_addr: u64) -> Result<()> {
+    let msg = SbiMessage::TeeHost(TsmSetShmem { shmem_page_addr });
+    ecall_send(&msg)?;
+    Ok(())
+}
+
+/// Unregisters the host <-> TSM shared memory area for the calling CPU.
+pub fn unregister_shmem() -> Result<()> {
+    let msg = SbiMessage::TeeHost(TsmSetShmem {
+        shmem_page_addr: u64::MAX,
+    });
+    // Safety: Doesn't access host memory.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
 }
 
 /// Converts the given page range to confidential memory for use in creating or filling pages of a
@@ -203,31 +230,20 @@ pub fn add_page_table_pages(vmid: u64, page_addr: u64, num_pages: u64) -> Result
     Ok(())
 }
 
-/// Adds a vCPU with ID `vcpu_id` to the guest `vmid`, using 'state_page_addr' to hold the vCPU state and
-/// registering `shared_page_addr` as the location of the vCPU's shared-memory state area.
+/// Adds a vCPU with ID `vcpu_id` to the guest `vmid`, using 'state_page_addr' to hold the vCPU's
+/// internal state.
 ///
 /// The address `state_page_addr` must reference confidential memory pages. The caller must provide
 /// `TsmInfo::tvm_vcpu_state_pages` pages.
-///
-/// # Safety
-///
-/// The caller must own the pages referenced by `shared_page_addr`, for the number of pages
-/// sufficient to hold the `TvmCpuSharedState` structure. Since memory within the shared-memory state
-/// area may be read or written by the TSM at any time, the caller must treat the memory as volatile
-/// for the lifetime of the TVM.
-pub unsafe fn add_vcpu(
-    vmid: u64,
-    vcpu_id: u64,
-    state_page_addr: u64,
-    shared_page_addr: u64,
-) -> Result<()> {
+pub fn add_vcpu(vmid: u64, vcpu_id: u64, state_page_addr: u64) -> Result<()> {
     let msg = SbiMessage::TeeHost(TvmCpuCreate {
         guest_id: vmid,
         vcpu_id,
         state_page_addr,
-        shared_page_addr,
     });
-    ecall_send(&msg)?;
+    // Safety: TvmCpuCreate only accesses pages that have been converted and thus must already be
+    // inaccessible to the calling program.
+    unsafe { ecall_send(&msg) }?;
     Ok(())
 }
 

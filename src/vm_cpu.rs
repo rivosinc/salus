@@ -9,9 +9,9 @@ use memoffset::offset_of;
 use page_tracking::collections::PageBox;
 use page_tracking::TlbVersion;
 use riscv_page_tables::GuestStagePagingMode;
-use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, PageSize, RawAddr};
+use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, RawAddr};
 use riscv_regs::*;
-use sbi::{self, api::tee_host::TvmCpuSharedStateRef, SbiMessage, SbiReturnType};
+use sbi::{self, api::tee_host::TsmShmemAreaRef, SbiMessage, SbiReturnType};
 use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::smp::PerCpu;
@@ -286,98 +286,31 @@ global_asm!(
     sstatus_vs_enable = const sstatus::vs::Initial.value,
 );
 
-/// The number of pages required for `TvmCpuSharedState`.
-pub const VM_CPU_SHARED_PAGES: u64 =
-    PageSize::num_4k_pages(size_of::<sbi::TvmCpuSharedState>() as u64);
-
-/// Wrapper for the shared-memory state area used to communicate vCPU state with the host.
-pub struct VmCpuSharedArea {
-    ptr: NonNull<sbi::TvmCpuSharedState>,
+// Wrapper for a `TsmShmemArea` struct pinned in host shared memory.
+struct PinnedTsmShmemArea {
+    ptr: NonNull<sbi::TsmShmemArea>,
     // Optional since we might be sharing with the hypervisor in the host VM case.
     _pin: Option<PinnedPages>,
 }
 
-impl VmCpuSharedArea {
-    /// Creates a new `VmCpuSharedArea` using the `TvmCpuSharedState` struct referred to by `ptr`.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that `ptr` is suitably aligned, points to an allocated block of
-    /// memory that is at least as large as `TvmCpuSharedState`, and is valid for reads and writes
-    /// for the lifetime of this structure. The caller must only access the memory referred to
-    /// by `ptr` using volatile accessors.
-    pub unsafe fn new(ptr: *mut sbi::TvmCpuSharedState) -> Result<Self> {
-        Ok(Self {
-            ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
-            _pin: None,
-        })
-    }
-
-    /// Creates a new `VmCpuSharedArea` using the pinned pages referred to by `pages`.
-    pub fn from_pinned_pages(pages: PinnedPages) -> Result<Self> {
+impl PinnedTsmShmemArea {
+    // Creates a new `PinnedTsmShmemArea` from a set of pinned shared pages.
+    fn new(pages: PinnedPages) -> Result<Self> {
         // Make sure the pin actually covers the size of the structure.
-        if pages.range().num_pages() < VM_CPU_SHARED_PAGES {
+        if pages.range().length_bytes() < size_of::<sbi::TsmShmemArea>() as u64 {
             return Err(Error::InsufficientSharedStatePages);
         }
-        let ptr = pages.range().base().bits() as *mut sbi::TvmCpuSharedState;
+        let ptr = pages.range().base().bits() as *mut sbi::TsmShmemArea;
         Ok(Self {
             ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
             _pin: Some(pages),
         })
     }
 
-    // Updates the shared state buffer for an ECALL exit from the given SBI message.
-    fn update_with_ecall_exit(&self, msg: SbiMessage) {
-        let shared = self.as_ref();
-        shared.set_gpr(GprIndex::A0 as usize, msg.a0());
-        shared.set_gpr(GprIndex::A1 as usize, msg.a1());
-        shared.set_gpr(GprIndex::A2 as usize, msg.a2());
-        shared.set_gpr(GprIndex::A3 as usize, msg.a3());
-        shared.set_gpr(GprIndex::A4 as usize, msg.a4());
-        shared.set_gpr(GprIndex::A5 as usize, msg.a5());
-        shared.set_gpr(GprIndex::A6 as usize, msg.a6());
-        shared.set_gpr(GprIndex::A7 as usize, msg.a7());
-        shared.set_stval(0);
-        shared.set_htval(0);
-        shared.set_htinst(0);
-        shared.set_scause(Exception::VirtualSupervisorEnvCall as u64);
-    }
-
-    // Updates the shared state buffer for a guest page fault exit at the given address.
-    fn update_with_pf_exit(&self, exception: Exception, addr: GuestPhysAddr) {
-        let shared = self.as_ref();
-        shared.set_stval(addr.bits() & 0x3);
-        shared.set_htval(addr.bits() >> 2);
-        shared.set_htinst(0);
-        shared.set_scause(exception as u64);
-    }
-
-    // Updates the shared state buffer for a virtual instruction exception caused by the given
-    // instruction.
-    fn update_with_vi_exit(&self, inst: u64) {
-        let shared = self.as_ref();
-        // Note that this is technically not spec-compliant as the privileged spec only states
-        // that illegal instruction exceptions may write the faulting instruction to *TVAL CSRs.
-        shared.set_stval(inst);
-        shared.set_htval(0);
-        shared.set_htinst(0);
-        shared.set_scause(Exception::VirtualInstruction as u64);
-    }
-
-    // Updates the shared state buffer for an unhandled exit due to `scause`.
-    fn update_with_unhandled_exit(&self, scause: u64) {
-        let shared = self.as_ref();
-        shared.set_stval(0);
-        shared.set_htval(0);
-        shared.set_htinst(0);
-        shared.set_scause(scause);
-    }
-
-    // Returns the wrapped shared state buffer as a `TvmCpuSharedStateRef`
-    fn as_ref(&self) -> TvmCpuSharedStateRef {
-        // Safety: We've validated at construction that self.ptr points to a valid
-        // `TvmCpuSharedState`.
-        unsafe { TvmCpuSharedStateRef::new(self.ptr.as_ptr()) }
+    // Returns the wrapped shared state buffer as a `TsmShmemAreaRef`.
+    fn as_ref(&self) -> TsmShmemAreaRef {
+        // Safety: We've validated at construction that self.ptr points to a valid `TsmShmemArea`.
+        unsafe { TsmShmemAreaRef::new(self.ptr.as_ptr()) }
     }
 }
 
@@ -417,6 +350,7 @@ struct VmCpuArchState {
     pmu: VmPmuState,
     prev_tlb: Option<PrevTlb>,
     pending_mmio_op: Option<MmioOperation>,
+    shmem_area: Option<PinnedTsmShmemArea>,
 }
 
 impl VmCpuArchState {
@@ -453,6 +387,7 @@ impl VmCpuArchState {
             pmu: VmPmuState::default(),
             prev_tlb: None,
             pending_mmio_op: None,
+            shmem_area: None,
         }
     }
 }
@@ -662,20 +597,60 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         htinst as u64
     }
 
-    /// Sets up the shared-memory state for reporting an exit due to `cause` back to the host and
-    /// deactivates this vCPU. The vCPU is either returned to the `Available` or `PoweredOff`
-    /// state, depending on if the exit cause is resumable.
+    fn report_ecall_exit(&mut self, msg: SbiMessage) {
+        self.host_context.set_guest_gpr(GprIndex::A0, msg.a0());
+        self.host_context.set_guest_gpr(GprIndex::A1, msg.a1());
+        self.host_context.set_guest_gpr(GprIndex::A2, msg.a2());
+        self.host_context.set_guest_gpr(GprIndex::A3, msg.a3());
+        self.host_context.set_guest_gpr(GprIndex::A4, msg.a4());
+        self.host_context.set_guest_gpr(GprIndex::A5, msg.a5());
+        self.host_context.set_guest_gpr(GprIndex::A6, msg.a6());
+        self.host_context.set_guest_gpr(GprIndex::A7, msg.a7());
+        self.host_context.set_csr(CSR_STVAL, 0);
+        self.host_context.set_csr(CSR_HTVAL, 0);
+        self.host_context.set_csr(CSR_HTINST, 0);
+        self.host_context
+            .set_csr(CSR_SCAUSE, Exception::VirtualSupervisorEnvCall as u64);
+    }
+
+    fn report_pf_exit(&mut self, exception: Exception, addr: GuestPhysAddr) {
+        self.host_context.set_csr(CSR_STVAL, addr.bits() & 0x3);
+        self.host_context.set_csr(CSR_HTVAL, addr.bits() >> 2);
+        self.host_context.set_csr(CSR_HTINST, 0);
+        self.host_context.set_csr(CSR_SCAUSE, exception as u64);
+    }
+
+    fn report_vi_exit(&mut self, inst: u64) {
+        // Note that this is technically not spec-compliant as the privileged spec only states
+        // that illegal instruction exceptions may write the faulting instruction to *TVAL CSRs.
+        self.host_context.set_csr(CSR_STVAL, inst);
+        self.host_context.set_csr(CSR_HTVAL, 0);
+        self.host_context.set_csr(CSR_HTINST, 0);
+        self.host_context
+            .set_csr(CSR_SCAUSE, Exception::VirtualInstruction as u64);
+    }
+
+    fn report_unhandled_exit(&mut self, scause: u64) {
+        self.host_context.set_csr(CSR_STVAL, 0);
+        self.host_context.set_csr(CSR_HTVAL, 0);
+        self.host_context.set_csr(CSR_HTINST, 0);
+        self.host_context.set_csr(CSR_SCAUSE, scause);
+    }
+
+    /// Reports the exit cause in `cause` back to the host and deactivates this vCPU. The vCPU is
+    /// either returned to the `Available` or `PoweredOff` state, depending on if the exit cause is
+    /// resumable.
     pub fn exit(mut self, cause: VmExitCause) {
-        let shared = &self.vcpu.shared_area;
-        shared.as_ref().set_vstimecmp(CSR.vstimecmp.get());
+        self.host_context
+            .set_csr(CSR_VSTIMECMP, CSR.vstimecmp.get());
 
         use VmExitCause::*;
         match cause {
             ResumableEcall(msg) | FatalEcall(msg) | BlockingEcall(msg, _) => {
-                shared.update_with_ecall_exit(msg);
+                self.report_ecall_exit(msg);
             }
             PageFault(exception, page_addr) => {
-                shared.update_with_pf_exit(exception, page_addr.into());
+                self.report_pf_exit(exception, page_addr.into());
             }
             MmioFault(mmio_op, addr) => {
                 let exception = if mmio_op.opcode().is_load() {
@@ -683,7 +658,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 } else {
                     Exception::GuestStorePageFault
                 };
-                shared.update_with_pf_exit(exception, addr);
+                self.report_pf_exit(exception, addr);
 
                 // The MMIO instruction is transformed as an ordinary load/store to/from A0, so
                 // update A0 with the value the vCPU wants to store.
@@ -695,17 +670,18 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     Store64 => self.get_gpr(mmio_op.register()),
                     _ => 0,
                 };
-                shared.as_ref().set_htinst(Self::mmio_op_to_htinst(mmio_op));
-                shared.as_ref().set_gpr(GprIndex::A0 as usize, val);
+                self.host_context
+                    .set_csr(CSR_HTINST, Self::mmio_op_to_htinst(mmio_op));
+                self.host_context.set_guest_gpr(GprIndex::A0, val);
 
                 // We'll complete a load instruction the next time this vCPU is run.
                 self.arch.pending_mmio_op = Some(mmio_op);
             }
             Wfi(inst) => {
-                shared.update_with_vi_exit(inst.raw() as u64);
+                self.report_vi_exit(inst.raw() as u64);
             }
             UnhandledTrap(scause) => {
-                shared.update_with_unhandled_exit(scause);
+                self.report_unhandled_exit(scause);
             }
         };
 
@@ -825,12 +801,23 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         Ok(())
     }
 
+    /// Registers `pages` as the host <-> TSM shared-memory communication area for this vCPU.
+    pub fn register_shmem_area(&mut self, pages: PinnedPages) -> Result<()> {
+        self.arch.shmem_area = Some(PinnedTsmShmemArea::new(pages)?);
+        Ok(())
+    }
+
+    /// Unregisters this vCPU's host <-> TSM shared-memory communication area.
+    pub fn unregister_shmem_area(&mut self) {
+        self.arch.shmem_area = None;
+    }
+
     // Completes any pending MMIO operation for this CPU.
     fn complete_pending_mmio_op(&mut self) {
         // Complete any pending load operations. The host is expected to have written the value
         // to complete the load to A0.
         if let Some(mmio_op) = self.arch.pending_mmio_op {
-            let val = self.vcpu.shared_area.as_ref().gpr(GprIndex::A0 as usize);
+            let val = self.host_context.guest_gpr(GprIndex::A0);
             use MmioOpcode::*;
             // Write the value to the actual destination register.
             match mmio_op.opcode() {
@@ -859,10 +846,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             };
 
             self.arch.pending_mmio_op = None;
-            self.vcpu
-                .shared_area
-                .as_ref()
-                .set_gpr(GprIndex::A0 as usize, 0);
+            self.host_context.set_guest_gpr(GprIndex::A0, 0);
 
             // Advance SEPC past the faulting instruction.
             self.inc_sepc(mmio_op.len() as u64);
@@ -938,6 +922,15 @@ pub trait HostCpuContext {
     /// Restores any host (v)CPU state that is shared with its guests. Called when a guest `VmCpu`
     /// is deactivated, i.e. when the `ActiveVmCpu` is dropped.
     fn restore(&mut self);
+
+    /// Sets a CSR for the host (v)CPU.
+    fn set_csr(&mut self, csr_num: u16, val: u64);
+
+    /// Sets a guest GPR value for the host (v)CPU.
+    fn set_guest_gpr(&mut self, index: GprIndex, val: u64);
+
+    /// Gets a guest GPR value from the host (v)CPU.
+    fn guest_gpr(&self, index: GprIndex) -> u64;
 }
 
 // A VmCpu can host another VmCpu, in which case all VS-level state needs to be context-switched.
@@ -952,6 +945,43 @@ impl<T: GuestStagePagingMode> HostCpuContext for ActiveVmCpu<'_, '_, '_, T> {
         self.restore_vcpu_csrs();
         self.restore_vm_pages();
         self.pmu().restore_counters();
+    }
+
+    fn set_csr(&mut self, csr_num: u16, val: u64) {
+        if let Some(shmem) = self.arch.shmem_area.as_ref().map(|s| s.as_ref()) {
+            match csr_num {
+                CSR_SCAUSE => {
+                    shmem.set_scause(val);
+                }
+                CSR_STVAL => {
+                    shmem.set_stval(val);
+                }
+                CSR_HTVAL => {
+                    shmem.set_htval(val);
+                }
+                CSR_HTINST => {
+                    shmem.set_htinst(val);
+                }
+                CSR_VSTIMECMP => {
+                    shmem.set_vstimecmp(val);
+                }
+                _ => (),
+            }
+        }
+    }
+
+    fn set_guest_gpr(&mut self, index: GprIndex, val: u64) {
+        if let Some(shmem) = self.arch.shmem_area.as_ref().map(|s| s.as_ref()) {
+            shmem.set_gpr(index as usize, val);
+        }
+    }
+
+    fn guest_gpr(&self, index: GprIndex) -> u64 {
+        self.arch
+            .shmem_area
+            .as_ref()
+            .map(|s| s.as_ref().gpr(index as usize))
+            .unwrap_or(0)
     }
 }
 
@@ -986,20 +1016,17 @@ pub struct VmCpu {
     status: RwLock<VmCpuStatus>,
     arch: Mutex<VmCpuArchState>,
     ext_interrupts: Once<Mutex<VmCpuExtInterrupts>>,
-    shared_area: VmCpuSharedArea,
     guest_id: PageOwnerId,
     vcpu_id: u64,
 }
 
 impl VmCpu {
-    /// Creates a new `VmCpu` with ID `vcpu_id` using `shared_area` for the vCPU's shared memory
-    /// state area. The returned `VmCpu` is initially powered off.
-    pub fn new(vcpu_id: u64, guest_id: PageOwnerId, shared_area: VmCpuSharedArea) -> VmCpu {
+    /// Creates a new `VmCpu` with ID `vcpu_id`. The returned `VmCpu` is initially powered off.
+    pub fn new(vcpu_id: u64, guest_id: PageOwnerId) -> VmCpu {
         VmCpu {
             status: RwLock::new(VmCpuStatus::PoweredOff),
             arch: Mutex::new(VmCpuArchState::new(guest_id)),
             ext_interrupts: Once::new(),
-            shared_area,
             guest_id,
             vcpu_id,
         }

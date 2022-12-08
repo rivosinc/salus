@@ -301,6 +301,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");
     next_page += PAGE_SIZE_4K * tvm_create_pages;
 
+    // Set aside pages for the shared mem area.
+    let num_shmem_pages =
+        (core::mem::size_of::<sbi::TsmShmemArea>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    let shmem_addr = next_page;
+    next_page += num_shmem_pages * PAGE_SIZE_4K;
+    // Safety: We own `shmem_addr` and will only access it through volatile reads/writes.
+    unsafe { tee_host::register_shmem(shmem_addr).expect("TsmSetShmem failed") };
+    // Safety: `shmem_addr` points to a sufficient number of pages to hold a TsmShmemArea struct
+    // and will not be used for any other purpose for the duration of `kernel_init()`.
+    let shmem = unsafe { tee_host::TsmShmemAreaRef::new(shmem_addr as *mut _) };
+
     // Add pages for the page table
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
     // reclaimed.
@@ -320,18 +331,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         convert_pages(vcpu_pages_base, tsm_info.tvm_vcpu_state_pages);
     }
     next_page += PAGE_SIZE_4K * tsm_info.tvm_vcpu_state_pages;
-
-    // Set aside pages for the shared mem area.
-    let num_vcpu_shared_pages =
-        (core::mem::size_of::<sbi::TvmCpuSharedState>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
-    let vcpu_shared_addr = next_page;
-    next_page += num_vcpu_shared_pages * PAGE_SIZE_4K;
-    // Safety: We own `vcpu_shared_addr` and will only access it through volatile reads/writes.
-    unsafe { tee_host::add_vcpu(vmid, 0, vcpu_pages_base, vcpu_shared_addr) }
-        .expect("Tellus - TvmCpuCreate returned error");
-    // Safety: `vcpu_shared_addr` points to a sufficient number of pages to hold a TvmCpuSharedState
-    // and will not be used for any other purpose for the duration of `kernel_init()`.
-    let vcpu = unsafe { tee_host::TvmCpuSharedStateRef::new(vcpu_shared_addr as *mut _) };
+    tee_host::add_vcpu(vmid, 0, vcpu_pages_base).expect("Tellus - TvmCpuCreate returned error");
 
     let has_aia = base::probe_sbi_extension(EXT_TEE_INTERRUPT).is_ok();
     // CPU0, guest interrupt file 0.
@@ -465,18 +465,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let mut shared_mem_region: Option<Range<u64>> = None;
     let mut mmio_region: Option<Range<u64>> = None;
     loop {
-        // Safety: running a VM will only write the `TvmCpuSharedState` struct that was registered
-        // with `add_vcpu()`.
+        // Safety: running a VM will only write the `TsmShmemArea` struct that was registered
+        // with `register_shmem()`.
         let blocked = tee_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
-        let scause = vcpu.scause();
-        if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
+        if let Ok(Trap::Exception(e)) = Trap::from_scause(shmem.scause()) {
             use Exception::*;
             match e {
                 VirtualSupervisorEnvCall => {
                     // Read the ECALL arguments written to the A* regs in shared memory.
                     let mut a_regs = [0u64; 8];
                     for (i, reg) in a_regs.iter_mut().enumerate() {
-                        *reg = vcpu.gpr(GprIndex::A0 as usize + i);
+                        *reg = shmem.gpr(GprIndex::A0 as usize + i);
                     }
                     use SbiMessage::*;
                     match SbiMessage::from_regs(&a_regs) {
@@ -545,7 +544,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     }
                 }
                 GuestLoadPageFault | GuestStorePageFault => {
-                    let fault_addr = (vcpu.htval() << 2) | (vcpu.stval() & 0x3);
+                    let fault_addr = (shmem.htval() << 2) | (shmem.stval() & 0x3);
                     match fault_addr {
                         addr if shared_mem_region
                             .as_ref()
@@ -576,17 +575,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             }
                         }
                         addr if mmio_region.as_ref().filter(|r| r.contains(&addr)).is_some() => {
-                            let inst = DecodedInstruction::from_raw(vcpu.htinst() as u32)
+                            let inst = DecodedInstruction::from_raw(shmem.htinst() as u32)
                                 .expect("Failed to decode faulting MMIO instruction")
                                 .instruction();
                             // Handle the load or store; the source/dest register is always A0.
                             use Instruction::*;
                             match inst {
                                 Lb(_) | Lbu(_) | Lh(_) | Lhu(_) | Lw(_) | Lwu(_) | Ld(_) => {
-                                    vcpu.set_gpr(GprIndex::A0 as usize, 0x42);
+                                    shmem.set_gpr(GprIndex::A0 as usize, 0x42);
                                 }
                                 Sb(_) | Sh(_) | Sw(_) | Sd(_) => {
-                                    let val = vcpu.gpr(GprIndex::A0 as usize);
+                                    let val = shmem.gpr(GprIndex::A0 as usize);
                                     println!("Guest says: 0x{:x} at 0x{:x}", val, fault_addr);
                                 }
                                 _ => {
@@ -617,7 +616,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     }
                 }
                 VirtualInstruction => {
-                    let inst = DecodedInstruction::from_raw(vcpu.stval() as u32)
+                    let inst = DecodedInstruction::from_raw(shmem.stval() as u32)
                         .expect("Failed to decode faulting virtual instruction")
                         .instruction();
                     use Instruction::*;
@@ -636,7 +635,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 }
             }
         } else {
-            println!("Guest VM terminated with unexpected cause 0x{:x}", scause);
+            println!(
+                "Guest VM terminated with unexpected cause 0x{:x}",
+                shmem.scause()
+            );
         }
     }
 
@@ -671,6 +673,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         tee_interrupt::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
     }
     exercise_pmu_functionality();
+    tee_host::unregister_shmem().expect("TsmSetShmem failed");
     println!("Tellus - All OK");
     poweroff();
 }

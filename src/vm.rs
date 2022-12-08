@@ -17,8 +17,7 @@ use sbi::{Error as SbiError, *};
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
 use crate::vm_cpu::{
-    ActiveVmCpu, HostCpuContext, VmCpu, VmCpuSharedArea, VmCpuStatus, VmCpuTrap, VmCpus,
-    VM_CPUS_MAX, VM_CPU_SHARED_PAGES,
+    ActiveVmCpu, HostCpuContext, VmCpu, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX,
 };
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -43,6 +42,10 @@ const SBI_IMPL_ID_SALUS: u64 = 7;
 // Report ourselves as being SBI v1.0 compliant.
 const SBI_SPEC_MAJOR_VERSION_SHIFT: u64 = 24;
 const SBI_SPEC_VERSION: u64 = 1 << SBI_SPEC_MAJOR_VERSION_SHIFT;
+
+// The number of pages required for `TsmShmemArea`.
+const TSM_SHMEM_AREA_PAGES: u64 =
+    PageSize::num_4k_pages(core::mem::size_of::<sbi::TsmShmemArea>() as u64);
 
 /// Possible MMIO instructions.
 #[derive(Clone, Copy, Debug)]
@@ -921,6 +924,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TsmGetInfo { dest_addr, len } => self
                 .get_tsm_info(dest_addr, len, active_vcpu.active_pages())
                 .into(),
+            TsmSetShmem { shmem_page_addr } => {
+                self.set_shmem_area(shmem_page_addr, active_vcpu).into()
+            }
             TvmCreate { params_addr, len } => self
                 .add_guest(params_addr, len, active_vcpu.active_pages())
                 .into(),
@@ -988,9 +994,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 guest_id,
                 vcpu_id,
                 state_page_addr,
-                shared_page_addr,
             } => self
-                .guest_add_vcpu(guest_id, vcpu_id, state_page_addr, shared_page_addr)
+                .guest_add_vcpu(guest_id, vcpu_id, state_page_addr)
                 .into(),
             TvmAddSharedPages {
                 guest_id,
@@ -1032,6 +1037,27 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .copy_to_guest(dest_addr, tsm_info_bytes)
             .map_err(EcallError::from)?;
         Ok(len as u64)
+    }
+
+    fn set_shmem_area(
+        &self,
+        shared_page_addr: u64,
+        active_vcpu: &mut ActiveVmCpu<T>,
+    ) -> EcallResult<u64> {
+        if shared_page_addr != u64::MAX {
+            // Pin the pages that the VM wants to use for the shared state buffer.
+            let shared_page_addr = self.guest_addr_from_raw(shared_page_addr)?;
+            let pin = self
+                .vm_pages()
+                .pin_shared_pages(shared_page_addr, TSM_SHMEM_AREA_PAGES)
+                .map_err(EcallError::from)?;
+            active_vcpu
+                .register_shmem_area(pin)
+                .map_err(|_| EcallError::Sbi(SbiError::InvalidAddress))?;
+        } else {
+            active_vcpu.unregister_shmem_area();
+        }
+        Ok(0)
     }
 
     /// Converts `num_pages` of 4kB page-size starting at guest physical address `page_addr` to confidential memory.
@@ -1196,28 +1222,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    // Adds a vCPU with `vcpu_id` to a guest VM with a shared-memory state area at
-    // `shared_page_addr`.
+    // Adds a vCPU with `vcpu_id` to a guest VM.
     fn guest_add_vcpu(
         &self,
         guest_id: u64,
         vcpu_id: u64,
         state_page_addr: u64,
-        shared_page_addr: u64,
     ) -> EcallResult<u64> {
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
             .as_initializing_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-
-        // Pin the pages that the VM wants to use for the shared state buffer.
-        let shared_page_addr = self.guest_addr_from_raw(shared_page_addr)?;
-        let pin = self
-            .vm_pages()
-            .pin_shared_pages(shared_page_addr, VM_CPU_SHARED_PAGES)
-            .map_err(EcallError::from)?;
-        let shared_area = VmCpuSharedArea::from_pinned_pages(pin)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidAddress))?;
 
         // Get the converted pages that will be used to hold the private vCPU state. These pages
         // must be physically contiguous.
@@ -1235,7 +1250,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             SequentialPages::from_pages(Self::assign_pages(pages, guest_vm.page_owner_id()))
                 .unwrap();
         let vcpu_box = PageBox::new_with(
-            VmCpu::new(vcpu_id, guest_vm.page_owner_id(), shared_area),
+            VmCpu::new(vcpu_id, guest_vm.page_owner_id()),
             vcpu_pages,
             self.page_tracker(),
         );

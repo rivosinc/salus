@@ -10,15 +10,6 @@ use crate::function::*;
 #[repr(C)]
 #[derive(Default)]
 pub struct TsmShmemArea {
-    /// SCAUSE value for the trap taken by the TVM vCPU. Written by the TSM upon return from
-    /// `TvmCpuRun`.
-    pub scause: u64,
-    /// STVAL value for guest page faults or virtual instruction exceptions taken by the TVM vCPU.
-    /// Written by the TSM upon return from `TvmCpuRun`.
-    ///
-    /// Note that guest virtual addresses are not exposed by the TSM, so only the 2 LSBs will
-    /// ever be non-zero for guest page fault exceptions.
-    pub stval: u64,
     /// HTVAL value for guest page faults taken by the TVM vCPU. Written by the TSM upon return
     /// from `TvmCpuRun`.
     pub htval: u64,
@@ -326,7 +317,9 @@ pub enum TeeHostFunction {
     /// Runs the given vCPU in the TVM
     ///
     /// Returns 0 if the vCPU can be resumed via a subsequent call to `TvmCpuRun`, or a value other
-    /// than 0 if the vCPU was terminated and is no longer runnable.
+    /// than 0 if the vCPU was terminated and is no longer runnable. Writes SCAUSE with the exit cause
+    /// of the vCPU. STVAL, and fields within the currently registered `TsmShmemArea` may also be
+    /// written depending on the specific exit cause.
     ///
     /// Returns an error if:
     ///   - the specified TVM or vCPU does not exist

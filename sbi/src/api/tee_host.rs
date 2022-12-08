@@ -49,8 +49,6 @@ impl<'a> TsmShmemAreaRef<'a> {
         }
     }
 
-    define_accessors! {scause, scause, set_scause}
-    define_accessors! {stval, stval, set_stval}
     define_accessors! {htval, htval, set_htval}
     define_accessors! {htinst, htinst, set_htinst}
     define_accessors! {vstimecmp, vstimecmp, set_vstimecmp}

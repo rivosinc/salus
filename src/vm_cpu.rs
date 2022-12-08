@@ -948,24 +948,30 @@ impl<T: GuestStagePagingMode> HostCpuContext for ActiveVmCpu<'_, '_, '_, T> {
     }
 
     fn set_csr(&mut self, csr_num: u16, val: u64) {
-        if let Some(shmem) = self.arch.shmem_area.as_ref().map(|s| s.as_ref()) {
-            match csr_num {
-                CSR_SCAUSE => {
-                    shmem.set_scause(val);
+        // Supervisor CSRs get written directly to their VS-level equivalent, while HS and VS CSRs
+        // are written to the shared memory area.
+        match csr_num {
+            CSR_SCAUSE => {
+                self.arch.regs.guest_vcpu_csrs.vscause = val;
+            }
+            CSR_STVAL => {
+                self.arch.regs.guest_vcpu_csrs.vstval = val;
+            }
+            _ => {
+                if let Some(shmem) = self.arch.shmem_area.as_ref().map(|s| s.as_ref()) {
+                    match csr_num {
+                        CSR_HTVAL => {
+                            shmem.set_htval(val);
+                        }
+                        CSR_HTINST => {
+                            shmem.set_htinst(val);
+                        }
+                        CSR_VSTIMECMP => {
+                            shmem.set_vstimecmp(val);
+                        }
+                        _ => (),
+                    }
                 }
-                CSR_STVAL => {
-                    shmem.set_stval(val);
-                }
-                CSR_HTVAL => {
-                    shmem.set_htval(val);
-                }
-                CSR_HTINST => {
-                    shmem.set_htinst(val);
-                }
-                CSR_VSTIMECMP => {
-                    shmem.set_vstimecmp(val);
-                }
-                _ => (),
             }
         }
     }

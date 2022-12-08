@@ -29,7 +29,7 @@ DEBUG_BINS := target/riscv64gc-unknown-none-elf/debug/
 
 KERNEL_ADDR := 0xc0200000
 INITRD_ADDR := 0xc2200000
-BOOTARGS := keep_bootcon earlycon=sbi
+BOOTARGS := console=hvc0 earlycon=sbi
 IOMMU_ARGS := -device x-riscv-iommu-pci
 NETWORK_ARGS := -netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7722-0.0.0.0:22 -device e1000e,netdev=usernet
 NVME_DEVICE_ARGS := -device nvme,serial=deadbeef,drive=hd

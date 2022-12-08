@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use alloc::vec::Vec;
 use arrayvec::{ArrayString, ArrayVec};
 use core::{fmt, num, ops::ControlFlow, slice};
 use device_tree::{DeviceTree, DeviceTreeResult, DeviceTreeSerializer};
@@ -11,14 +10,17 @@ use page_tracking::collections::PageBox;
 use page_tracking::{HwMemRegion, HypPageAlloc, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
-use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
+use riscv_regs::{
+    DecodedInstruction, Exception, GeneralPurposeRegisters, GprIndex, Instruction, Trap,
+    CSR_HTINST, CSR_HTVAL, CSR_SCAUSE, CSR_STVAL,
+};
 use s_mode_utils::print::*;
-use sbi::{self, api::tee_host::TvmCpuSharedStateRef, SbiMessage};
+use sbi::{self, SbiMessage};
 
 use crate::guest_tracking::{GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm::{FinalizedVm, Vm};
-use crate::vm_cpu::{HostCpuContext, VmCpu, VmCpuSharedArea, VmCpus};
+use crate::vm_cpu::{HostCpuContext, VmCpu, VmCpus};
 use crate::vm_pages::VmPages;
 
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
@@ -385,11 +387,18 @@ impl core::fmt::Display for MmioEmulationError {
     }
 }
 
-struct HostVmRunner {}
+#[derive(Default)]
+struct HostVmRunner {
+    scause: u64,
+    stval: u64,
+    htval: u64,
+    htinst: u64,
+    gprs: GeneralPurposeRegisters,
+}
 
 impl HostVmRunner {
     fn new() -> Self {
-        HostVmRunner {}
+        HostVmRunner::default()
     }
 
     // Runs `vcpu_id` in `vm`.
@@ -397,23 +406,17 @@ impl HostVmRunner {
         &mut self,
         vm: FinalizedVm<T>,
         vcpu_id: u64,
-        vcpu_state: TvmCpuSharedStateRef,
     ) -> ControlFlow<()> {
         // Run until we shut down, or this vCPU stops.
         loop {
             vm.run_vcpu(vcpu_id, self).unwrap();
-            let scause = vcpu_state.scause();
-            if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
+            if let Ok(Trap::Exception(e)) = Trap::from_scause(self.scause) {
                 use Exception::*;
                 match e {
                     VirtualSupervisorEnvCall => {
                         // Read the ECALL arguments written to the A* regs in shared memory.
-                        let mut a_regs = [0u64; 8];
-                        for (i, reg) in a_regs.iter_mut().enumerate() {
-                            *reg = vcpu_state.gpr(GprIndex::A0 as usize + i);
-                        }
                         use SbiMessage::*;
-                        match SbiMessage::from_regs(&a_regs) {
+                        match SbiMessage::from_regs(self.gprs.a_regs()) {
                             Ok(Reset(_)) => {
                                 println!("Host VM requested shutdown");
                                 return ControlFlow::Break(());
@@ -431,7 +434,7 @@ impl HostVmRunner {
                         }
                     }
                     GuestLoadPageFault | GuestStorePageFault => {
-                        if let Err(err) = self.handle_page_fault(&vcpu_state, vm.page_tracker()) {
+                        if let Err(err) = self.handle_page_fault(vm.page_tracker()) {
                             println!("Unhandled page fault: {}", err);
                             return ControlFlow::Break(());
                         }
@@ -442,19 +445,18 @@ impl HostVmRunner {
                     }
                 }
             } else {
-                println!("Unexpected host VM trap (SCAUSE = 0x{:x})", scause);
+                println!("Unexpected host VM trap (SCAUSE = 0x{:x})", self.scause);
                 return ControlFlow::Break(());
             }
         }
     }
 
     fn handle_page_fault(
-        &self,
-        vcpu_state: &TvmCpuSharedStateRef,
+        &mut self,
         page_tracker: PageTracker,
     ) -> core::result::Result<(), MmioEmulationError> {
         // For now, the only thing we're expecting is MMIO emulation faults in PCI config space.
-        let addr = (vcpu_state.htval() << 2) | (vcpu_state.stval() & 0x3);
+        let addr = (self.htval << 2) | (self.stval & 0x3);
         let pci = PcieRoot::get();
         if addr < pci.config_space().base().bits() {
             return Err(MmioEmulationError::InvalidAddress(addr));
@@ -466,7 +468,7 @@ impl HostVmRunner {
 
         // Figure out from HTINST what the MMIO operation was. We know the source/destination is
         // always A0.
-        let raw_inst = vcpu_state.htinst() as u32;
+        let raw_inst = self.htinst as u32;
         let inst = DecodedInstruction::from_raw(raw_inst)
             .map_err(|_| MmioEmulationError::FailedDecode(raw_inst))?;
         use Instruction::*;
@@ -485,11 +487,11 @@ impl HostVmRunner {
         };
 
         if write {
-            let val = vcpu_state.gpr(GprIndex::A0 as usize);
+            let val = self.gprs.reg(GprIndex::A0);
             pci.emulate_config_write(offset, val, width, page_tracker, PageOwnerId::host());
         } else {
             let val = pci.emulate_config_read(offset, width, page_tracker, PageOwnerId::host());
-            vcpu_state.set_gpr(GprIndex::A0 as usize, val);
+            self.gprs.set_reg(GprIndex::A0, val);
         }
 
         Ok(())
@@ -501,6 +503,34 @@ impl HostCpuContext for HostVmRunner {
     // shared between HS and VS.
     fn save(&mut self) {}
     fn restore(&mut self) {}
+
+    fn set_csr(&mut self, csr_num: u16, val: u64) {
+        // We could use the actual CSRs here, but if we have the values already sticking them in
+        // memory is probably faster.
+        match csr_num {
+            CSR_SCAUSE => {
+                self.scause = val;
+            }
+            CSR_STVAL => {
+                self.stval = val;
+            }
+            CSR_HTVAL => {
+                self.htval = val;
+            }
+            CSR_HTINST => {
+                self.htinst = val;
+            }
+            _ => (),
+        }
+    }
+
+    fn set_guest_gpr(&mut self, index: GprIndex, val: u64) {
+        self.gprs.set_reg(index, val);
+    }
+
+    fn guest_gpr(&self, index: GprIndex) -> u64 {
+        self.gprs.reg(index)
+    }
 }
 
 // Pages used by the `PageVec` for the Host VM guest tracking.
@@ -509,7 +539,6 @@ const HOSTVM_GUEST_TRACKING_PAGES: usize = 2;
 /// Represents the special VM that serves as the host for the system.
 pub struct HostVm<T: GuestStagePagingMode> {
     inner: GuestVm<T>,
-    vcpu_shared: Vec<sbi::TvmCpuSharedState>,
 }
 
 impl<T: GuestStagePagingMode> HostVm<T> {
@@ -569,8 +598,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
 
         // Unwrap okay, we allocated 'GuestVm::<T>::required_pages()` pages.
         let inner = GuestVm::new(vm, vm_state_pages).unwrap();
-        let vcpu_shared = Vec::with_capacity(num_cpus);
-        let mut this = Self { inner, vcpu_shared };
+        let this = Self { inner };
 
         {
             let init_vm = this.inner.as_initializing_vm().unwrap();
@@ -579,14 +607,8 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             let mut state_pages_iter = vcpu_state_pages
                 .into_chunks_iter(num::NonZeroU64::new(vcpu_required_state_pages).unwrap());
             for i in 0..num_cpus {
-                this.vcpu_shared.push(sbi::TvmCpuSharedState::default());
-                // Safety: This slot in vcpu_shared points to a valid VmCpuSharedState struct
-                // that is guaranteed to live as long as the containing HostVm structure.
-                let shared_area =
-                    unsafe { VmCpuSharedArea::new(&mut this.vcpu_shared[i]) }.unwrap();
-
                 // Allocate vCPU.
-                let vcpu = VmCpu::new(i as u64, PageOwnerId::host(), shared_area);
+                let vcpu = VmCpu::new(i as u64, PageOwnerId::host());
                 let vcpu_pages = state_pages_iter.next().unwrap();
                 let vcpu_box = PageBox::new_with(vcpu, vcpu_pages, page_tracker.clone());
                 init_vm.add_vcpu(vcpu_box).unwrap();
@@ -600,13 +622,6 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             }
         }
         (host_pages, this)
-    }
-
-    // Returns a reference to the shared-state buffer for the given vCPU.
-    fn vcpu_state(&self, vcpu_id: u64) -> Option<TvmCpuSharedStateRef> {
-        let ptr = self.vcpu_shared.get(vcpu_id as usize)? as *const _;
-        // Safety: ptr refers to a valid VmCpuSharedState struct with the same lifetime as `self`.
-        Some(unsafe { TvmCpuSharedStateRef::new(ptr as *mut _) })
     }
 
     // Adds a region of confidential memory to the host VM.
@@ -779,10 +794,8 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             }
 
             let vm = self.inner.as_finalized_vm().unwrap();
-            // Unwrap ok: vcpu_id must exist if it's runnable.
-            let vcpu_state = self.vcpu_state(vcpu_id).unwrap();
             let mut runner = HostVmRunner::new();
-            if let ControlFlow::Break(_) = runner.run(vm, vcpu_id, vcpu_state) {
+            if let ControlFlow::Break(_) = runner.run(vm, vcpu_id) {
                 return;
             }
         }

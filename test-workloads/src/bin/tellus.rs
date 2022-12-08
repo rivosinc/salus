@@ -22,7 +22,9 @@ use consts::*;
 use core::arch::asm;
 use core::ops::Range;
 use device_tree::Fdt;
-use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap, CSR, CSR_CYCLE};
+use riscv_regs::{
+    DecodedInstruction, Exception, GprIndex, Instruction, Readable, Trap, CSR, CSR_CYCLE,
+};
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
@@ -468,7 +470,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // Safety: running a VM will only write the `TsmShmemArea` struct that was registered
         // with `register_shmem()`.
         let blocked = tee_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
-        if let Ok(Trap::Exception(e)) = Trap::from_scause(shmem.scause()) {
+        let scause = CSR.scause.get();
+        if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
             use Exception::*;
             match e {
                 VirtualSupervisorEnvCall => {
@@ -544,7 +547,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     }
                 }
                 GuestLoadPageFault | GuestStorePageFault => {
-                    let fault_addr = (shmem.htval() << 2) | (shmem.stval() & 0x3);
+                    let fault_addr = (shmem.htval() << 2) | (CSR.stval.get() & 0x3);
                     match fault_addr {
                         addr if shared_mem_region
                             .as_ref()
@@ -616,7 +619,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     }
                 }
                 VirtualInstruction => {
-                    let inst = DecodedInstruction::from_raw(shmem.stval() as u32)
+                    let inst = DecodedInstruction::from_raw(CSR.stval.get() as u32)
                         .expect("Failed to decode faulting virtual instruction")
                         .instruction();
                     use Instruction::*;
@@ -635,10 +638,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 }
             }
         } else {
-            println!(
-                "Guest VM terminated with unexpected cause 0x{:x}",
-                shmem.scause()
-            );
+            println!("Guest VM terminated with unexpected cause 0x{:x}", scause,);
         }
     }
 

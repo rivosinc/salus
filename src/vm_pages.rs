@@ -515,6 +515,33 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
         })
     }
 
+    // Creates a new `VmPagesMapper` for remapping `num_pages` starting at `page_addr`, which must lie
+    // within a region of type `region_type` and should have been already mapped.
+    fn new_in_region_mapped(
+        vm_pages: &'a VmPages<T>,
+        page_addr: GuestPageAddr,
+        num_pages: u64,
+        region_type: VmRegionType,
+    ) -> Result<Self> {
+        let end = page_addr
+            .checked_add_pages(num_pages)
+            .ok_or(Error::AddressOverflow)?;
+        let regions = vm_pages.regions.read();
+        if !regions.contains(page_addr, end, region_type) {
+            return Err(Error::InvalidMapRegion);
+        }
+        let mapper = vm_pages
+            .root
+            .remap_range(page_addr, PageSize::Size4k, num_pages)
+            .map_err(Error::Paging)?;
+        Ok(Self {
+            vm_pages,
+            mapper,
+            _region_guard: regions,
+            _mapper_type: PhantomData,
+        })
+    }
+
     // Maps `page` at `to_addr`.
     fn do_map_page<P, MR>(&self, to_addr: GuestPageAddr, page: P) -> Result<()>
     where
@@ -522,6 +549,15 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
         MR: MeasureRequirement,
     {
         self.mapper.map_page(to_addr, page).map_err(Error::Paging)
+    }
+
+    // Remaps `page` at `to_addr` and returns previous SupervisorPageAddr address.
+    fn do_remap_page<P, MR>(&self, to_addr: GuestPageAddr, page: P) -> Result<SupervisorPageAddr>
+    where
+        P: MappablePhysPage<MR>,
+        MR: MeasureRequirement,
+    {
+        self.mapper.remap_page(to_addr, page).map_err(Error::Paging)
     }
 }
 
@@ -597,6 +633,28 @@ impl<'a, T: GuestStagePagingMode> ImsicPagesMapper<'a, T> {
                 .map_err(Error::MsiTableMapping)?;
         }
         Ok(())
+    }
+
+    /// Remaps an IMSIC page into the guest's address space, also updating the MSI page tables if
+    /// necessary.
+    pub fn remap_page(
+        &self,
+        to_addr: GuestPageAddr,
+        page: ImsicGuestPage<MappableClean>,
+    ) -> Result<SupervisorPageAddr> {
+        let dest_location = page.location();
+        let prev_addr = self.do_remap_page(to_addr, page)?;
+        if let Some(geometry) = self.vm_pages.imsic_geometry.get() &&
+            let Some(iommu_context) = self.vm_pages.iommu_context.get()
+        {
+            let src_location = geometry
+                .addr_to_location(to_addr)
+                .ok_or(Error::InvalidImsicLocation)?;
+            iommu_context.msi_page_table
+                .remap(src_location, dest_location)
+                .map_err(Error::MsiTableMapping)?;
+        }
+        Ok(prev_addr)
     }
 }
 
@@ -982,6 +1040,18 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         VmPagesMapper::new_in_region(self.inner, page_addr, count, region_type)
     }
 
+    fn do_remap_pages<M>(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+        region_type: VmRegionType,
+    ) -> Result<VmPagesMapper<'a, T, M>> {
+        if count == 0 {
+            return Err(Error::EmptyPageRange);
+        }
+        VmPagesMapper::new_in_region_mapped(self.inner, page_addr, count, region_type)
+    }
+
     /// Same as `map_zero_pages()`, but for IMSIC guest interrupt file pages.
     pub fn map_imsic_pages(
         &self,
@@ -989,6 +1059,16 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         count: u64,
     ) -> Result<ImsicPagesMapper<'a, T>> {
         self.do_map_pages(page_addr, count, VmRegionType::Imsic)
+    }
+
+    /// Same as `map_imsic_pages()`, but for remapping the virtual address to a different
+    /// physical address.
+    pub fn remap_imsic_pages(
+        &self,
+        page_addr: GuestPageAddr,
+        count: u64,
+    ) -> Result<ImsicPagesMapper<'a, T>> {
+        self.do_remap_pages(page_addr, count, VmRegionType::Imsic)
     }
 
     /// Same as `map_zero_pages()`, but for PCI BAR memory pages.

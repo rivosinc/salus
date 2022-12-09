@@ -90,6 +90,19 @@ impl Pte {
         self.0 = (pfn.bits() << PFN_SHIFT) | status.bits | PteFieldBit::Valid.mask();
     }
 
+    /// Updates the pfn part of the entry, keeping everything else same. Returns the old pfn value.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `pfn` references a page that is uniquely owned and doesn't
+    /// create an alias. Old SupervisorPageAddr is returned and the caller must make sure
+    /// to remove it from `GuestStagePageTable::page_tracker`.
+    pub unsafe fn update_pfn(&mut self, pfn: SupervisorPfn) -> SupervisorPfn {
+        let prev = Pfn::supervisor((self.0 >> PFN_SHIFT) & PFN_MASK);
+        self.0 = (self.0 & !(PFN_MASK << PFN_SHIFT)) | (pfn.bits() << PFN_SHIFT);
+        prev
+    }
+
     /// Returns the raw bits the make up the PTE.
     pub fn bits(&self) -> u64 {
         self.0

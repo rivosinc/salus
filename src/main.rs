@@ -47,6 +47,7 @@ use host_vm::{HostVm, HostVmLoader};
 use hyp_alloc::HypAlloc;
 use hyp_map::HypMap;
 use page_tracking::*;
+use riscv_elf::ElfMap;
 use riscv_page_tables::*;
 use riscv_pages::*;
 use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
@@ -431,17 +432,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // NOTE: Do not modify the hardware memory map from here on.
     let mem_map = mem_map; // Remove mutability.
 
-    println!("HW memory map:");
-    for (i, r) in mem_map.regions().enumerate() {
-        println!(
-            "[{}] region: 0x{:x} -> 0x{:x}, {}",
-            i,
-            r.base().bits(),
-            r.end().bits() - 1,
-            r.region_type()
-        );
-    }
-
     // We start RAM in the host address space at the same location as it is in the supervisor
     // address space.
     //
@@ -458,8 +448,34 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let guest_phys_size = mem_map.regions().last().unwrap().end().bits()
         - mem_map.regions().next().unwrap().base().bits();
 
+    // Parse the user-mode ELF containing the user-mode task.
+    let user_elf = include_bytes!("../target/riscv64gc-unknown-none-elf/release/umode");
+    let user_map = ElfMap::new(user_elf).expect("Cannot load user-mode ELF");
+
+    println!("HW memory map:");
+    for (i, r) in mem_map.regions().enumerate() {
+        println!(
+            "[{:02}] region: 0x{:016x} -> 0x{:016x}, {}",
+            i,
+            r.base().bits(),
+            r.end().bits() - 1,
+            r.region_type()
+        );
+    }
+
+    println!("USER memory map:");
+    for (i, s) in user_map.segments().enumerate() {
+        println!(
+            "[{:02}] region: 0x{:016x} -> 0x{:016x}, {}",
+            i,
+            s.vaddr(),
+            s.vaddr() + s.size() as u64,
+            s.perms()
+        );
+    }
+
     // Create the hypervisor mapping starting from the hardware memory map.
-    let hyp_map = HypMap::new(mem_map);
+    let hyp_map = HypMap::new(mem_map, user_map);
 
     // The hypervisor mapping is complete. Can setup paging structures now.
     setup_hyp_paging(hyp_map, &mut hyp_mem);

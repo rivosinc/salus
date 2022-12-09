@@ -34,6 +34,7 @@ s_mode_utils = { path = "./s-mode-utils" }
 sbi = { path = "./sbi" }
 spin = { version = "*", default-features = false }
 sha2 = {version = "0.10", default-features = false }
+riscv_elf = { path = "./riscv-elf" }
 
 [workspace]
 

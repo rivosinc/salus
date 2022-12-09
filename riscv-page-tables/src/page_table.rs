@@ -88,10 +88,13 @@ enum UnusedEntry {}
 enum InvalidatedEntry {}
 
 /// An invalid page table entry that has been locked in prepartion for mapping.
-enum LockedEntry {}
+enum LockedUnmappedEntry {}
 
 /// A valid page table entry that provides translation for a page of memory.
 enum LeafEntry {}
+
+/// A valid page table entry that has been locked in prepartion for remapping.
+enum LockedMappedEntry {}
 
 /// A valid page table entry that points to a next level page table.
 enum NextTableEntry {}
@@ -99,15 +102,17 @@ enum NextTableEntry {}
 // Convenience aliases for the various types of PTEs.
 type UnusedPte<'a, T> = TableEntryMut<'a, T, UnusedEntry>;
 type InvalidatedPte<'a, T> = TableEntryMut<'a, T, InvalidatedEntry>;
-type LockedPte<'a, T> = TableEntryMut<'a, T, LockedEntry>;
+type LockedUnmappedPte<'a, T> = TableEntryMut<'a, T, LockedUnmappedEntry>;
 type LeafPte<'a, T> = TableEntryMut<'a, T, LeafEntry>;
+type LockedMappedPte<'a, T> = TableEntryMut<'a, T, LockedMappedEntry>;
 type PageTablePte<'a, T> = TableEntryMut<'a, T, NextTableEntry>;
 
 enum TableEntryType<'a, T: PagingMode> {
     Unused(UnusedPte<'a, T>),
     Invalidated(InvalidatedPte<'a, T>),
-    Locked(LockedPte<'a, T>),
+    LockedUnmapped(LockedUnmappedPte<'a, T>),
     Leaf(LeafPte<'a, T>),
+    LockedMapped(LockedMappedPte<'a, T>),
     Table(PageTablePte<'a, T>),
 }
 
@@ -117,7 +122,7 @@ impl<'a, T: PagingMode> TableEntryType<'a, T> {
         use TableEntryType::*;
         if !pte.valid() {
             if pte.locked() {
-                Locked(LockedPte::new(pte, level))
+                LockedUnmapped(LockedUnmappedPte::new(pte, level))
             } else if pte.pfn().bits() != 0 {
                 Invalidated(InvalidatedPte::new(pte, level))
             } else {
@@ -125,6 +130,8 @@ impl<'a, T: PagingMode> TableEntryType<'a, T> {
             }
         } else if !pte.leaf() {
             Table(PageTablePte::new(pte, level))
+        } else if pte.locked() {
+            LockedMapped(LockedMappedPte::new(pte, level))
         } else {
             Leaf(LeafPte::new(pte, level))
         }
@@ -168,9 +175,9 @@ impl<'a, T: PagingMode> UnusedPte<'a, T> {
     }
 
     /// Locks the PTE for mapping.
-    fn lock(self) -> LockedPte<'a, T> {
+    fn lock(self) -> LockedUnmappedPte<'a, T> {
         self.pte.lock();
-        LockedPte::new(self.pte, self.level)
+        LockedUnmappedPte::new(self.pte, self.level)
     }
 }
 
@@ -183,9 +190,9 @@ impl<'a, T: PagingMode> InvalidatedPte<'a, T> {
     }
 
     /// Locks the PTE for mapping.
-    fn lock(self) -> LockedPte<'a, T> {
+    fn lock(self) -> LockedUnmappedPte<'a, T> {
         self.pte.lock();
-        LockedPte::new(self.pte, self.level)
+        LockedUnmappedPte::new(self.pte, self.level)
     }
 
     /// Clears the PTE.
@@ -194,7 +201,7 @@ impl<'a, T: PagingMode> InvalidatedPte<'a, T> {
     }
 }
 
-impl<'a, T: PagingMode> LockedPte<'a, T> {
+impl<'a, T: PagingMode> LockedUnmappedPte<'a, T> {
     /// Marks this PTE as valid and maps it to `paddr` with the specified permissions. Returns this
     /// entry as a valid leaf entry.
     ///
@@ -202,10 +209,16 @@ impl<'a, T: PagingMode> LockedPte<'a, T> {
     ///
     /// The caller must guarantee that `paddr` references a page uniquely owned by the root
     /// `GuestStagePageTable`.
-    unsafe fn map_leaf(self, paddr: SupervisorPageAddr, perms: PteFieldBits) -> LeafPte<'a, T> {
-        assert!(paddr.is_aligned(self.level.leaf_page_size()));
+    unsafe fn map_leaf(
+        self,
+        paddr: SupervisorPageAddr,
+        perms: PteFieldBits,
+    ) -> Result<LeafPte<'a, T>> {
+        if !paddr.is_aligned(self.level.leaf_page_size()) {
+            return Err(Error::AddressMisaligned(paddr.bits()));
+        }
         self.pte.set(paddr.pfn(), &perms);
-        LeafPte::new(self.pte, self.level)
+        Ok(LeafPte::new(self.pte, self.level))
     }
 
     /// Unlocks this PTE, returning it to either an unused (zero) PTE, or invalidated PTE.
@@ -220,6 +233,30 @@ impl<'a, T: PagingMode> LockedPte<'a, T> {
     }
 }
 
+impl<'a, T: PagingMode> LockedMappedPte<'a, T> {
+    /// Updates the physical address of the page this PTE maps.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `paddr` references a page uniquely owned by the root
+    /// `GuestStagePageTable`. Old SupervisorPageAddr is returned and caller must make sure
+    /// to remove it from `GuestStagePageTable::page_tracker`.
+    unsafe fn update_page_addr(&mut self, paddr: SupervisorPageAddr) -> Result<SupervisorPageAddr> {
+        if !paddr.is_aligned(self.level.leaf_page_size()) {
+            return Err(Error::AddressMisaligned(paddr.bits()));
+        }
+        let prev_pfn = self.pte.update_pfn(paddr.pfn());
+        // Unwrap ok since a valid PTE must contain a valid PFN for this level.
+        Ok(PageAddr::from_pfn(prev_pfn, self.level.leaf_page_size()).unwrap())
+    }
+
+    /// Unlocks this PTE, returning it to Leaf PTE state.
+    fn unlock(self) -> TableEntryType<'a, T> {
+        self.pte.unlock();
+        TableEntryType::Leaf(LeafPte::new(self.pte, self.level))
+    }
+}
+
 impl<'a, T: PagingMode> LeafPte<'a, T> {
     /// Returns the physical address of the page this PTE maps.
     fn page_addr(&self) -> SupervisorPageAddr {
@@ -231,6 +268,12 @@ impl<'a, T: PagingMode> LeafPte<'a, T> {
     fn invalidate(self) -> InvalidatedPte<'a, T> {
         self.pte.invalidate();
         InvalidatedPte::new(self.pte, self.level)
+    }
+
+    /// Locks the PTE for remapping.
+    fn lock(self) -> LockedMappedPte<'a, T> {
+        self.pte.lock();
+        LockedMappedPte::new(self.pte, self.level)
     }
 }
 
@@ -538,18 +581,47 @@ impl<T: PagingMode> PageTableInner<T> {
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
         match entry {
-            Locked(l) => {
+            LockedUnmapped(l) => {
                 if l.level().leaf_page_size() != page_size {
                     return Err(Error::PageSizeMismatch(
                         page_size,
                         l.level().leaf_page_size(),
                     ));
                 }
-                l.map_leaf(paddr, perms);
-                Ok(())
+                l.map_leaf(paddr, perms).map(|_| ())
             }
             Unused(_) | Invalidated(_) => Err(Error::PteNotLocked),
-            Leaf(_) => Err(Error::MappingExists),
+            LockedMapped(_) | Leaf(_) => Err(Error::MappingExists),
+            Table(_) => unreachable!(),
+        }
+    }
+
+    /// Updates the `vaddr` mapping to now point to `paddr` and returns old SupervisorPageAddr.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `paddr` references a page uniquely owned by the root
+    /// `GuestStagePageTable`.
+    unsafe fn remap_leaf(
+        &mut self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        paddr: SupervisorPageAddr,
+        page_size: PageSize,
+    ) -> Result<SupervisorPageAddr> {
+        let entry = self.walk(RawAddr::from(vaddr));
+        use TableEntryType::*;
+        match entry {
+            LockedUnmapped(_) | Unused(_) | Invalidated(_) => Err(Error::PageNotMapped),
+            LockedMapped(mut l) => {
+                if l.level().leaf_page_size() != page_size {
+                    return Err(Error::PageSizeMismatch(
+                        page_size,
+                        l.level().leaf_page_size(),
+                    ));
+                }
+                l.update_page_addr(paddr)
+            }
+            Leaf(_) => Err(Error::PteNotLocked),
             Table(_) => unreachable!(),
         }
     }
@@ -578,8 +650,23 @@ impl<T: PagingMode> PageTableInner<T> {
                 u.lock();
                 Ok(())
             }
-            Locked(_) => Err(Error::PteLocked),
+            LockedMapped(_) | LockedUnmapped(_) => Err(Error::PteLocked),
             Leaf(_) => Err(Error::MappingExists),
+            Table(_) => Err(Error::TableEntryNotLeaf),
+        }
+    }
+
+    /// Locks an existing leaf PTE mapping of `vaddr` for remapping.
+    fn lock_leaf_for_remapping(&mut self, vaddr: PageAddr<T::MappedAddressSpace>) -> Result<()> {
+        let entry = self.walk(RawAddr::from(vaddr));
+        use TableEntryType::*;
+        match entry {
+            Invalidated(_) | Unused(_) => Err(Error::PageNotMapped),
+            LockedMapped(_) | LockedUnmapped(_) => Err(Error::PteLocked),
+            Leaf(l) => {
+                l.lock();
+                Ok(())
+            }
             Table(_) => Err(Error::TableEntryNotLeaf),
         }
     }
@@ -589,7 +676,11 @@ impl<T: PagingMode> PageTableInner<T> {
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
         match entry {
-            Locked(l) => {
+            LockedUnmapped(l) => {
+                l.unlock();
+                Ok(())
+            }
+            LockedMapped(l) => {
                 l.unlock();
                 Ok(())
             }
@@ -812,6 +903,30 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         let mut inner = self.inner.lock();
         for a in addr.iter_from().take(num_pages as usize) {
             inner.lock_leaf_for_mapping(a, page_size, get_pte_page)?;
+            mapper.num_pages += 1;
+        }
+
+        Ok(mapper)
+    }
+
+    /// Prepares for remapping `num_pages` pages of size `page_size` starting at `addr` in the mapped
+    /// address space. Upon success, returns a `GuestStageMapper` that is guaranteed to be able to map
+    /// the specified range.
+    pub fn remap_range(
+        &self,
+        addr: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
+        num_pages: u64,
+    ) -> Result<GuestStageMapper<T>> {
+        if page_size.is_huge() {
+            return Err(Error::PageSizeNotSupported(page_size));
+        }
+
+        let mut mapper = GuestStageMapper::new(self, addr, 0);
+        let mut inner = self.inner.lock();
+        for a in addr.iter_from().take(num_pages as usize) {
+            // The address must be already mapped.
+            inner.lock_leaf_for_remapping(a)?;
             mapper.num_pages += 1;
         }
 
@@ -1082,7 +1197,29 @@ impl<'a, T: PagingMode> GuestStageMapper<'a, T> {
         let pte_fields = PteFieldBits::user_leaf_with_perms(PteLeafPerms::RWX);
         unsafe {
             // Safe since we uniquely own page_to_map.
-            inner.map_leaf(vaddr, page_to_map.addr(), PageSize::Size4k, pte_fields)
+            inner.map_leaf(vaddr, page_to_map.addr(), page_to_map.size(), pte_fields)
+        }
+    }
+
+    /// Remaps `vaddr` to `page_to_map`, consuming `page_to_map` and returns the old SupervisorPageAddr
+    /// address.
+    pub fn remap_page<P: MappablePhysPage<M>, M: MeasureRequirement>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        page_to_map: P,
+    ) -> Result<SupervisorPageAddr> {
+        if page_to_map.size().is_huge() {
+            return Err(Error::PageSizeNotSupported(page_to_map.size()));
+        }
+        let end_vaddr = self.vaddr.checked_add_pages(self.num_pages).unwrap();
+        if vaddr < self.vaddr || vaddr >= end_vaddr {
+            return Err(Error::OutOfMapRange);
+        }
+
+        let mut inner = self.owner.inner.lock();
+        unsafe {
+            // Safe since we uniquely own page_to_map.
+            inner.remap_leaf(vaddr, page_to_map.addr(), page_to_map.size())
         }
     }
 }

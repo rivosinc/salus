@@ -959,18 +959,7 @@ impl<T: GuestStagePagingMode> HostCpuContext for ActiveVmCpu<'_, '_, '_, T> {
             }
             _ => {
                 if let Some(shmem) = self.arch.shmem_area.as_ref().map(|s| s.as_ref()) {
-                    match csr_num {
-                        CSR_HTVAL => {
-                            shmem.set_htval(val);
-                        }
-                        CSR_HTINST => {
-                            shmem.set_htinst(val);
-                        }
-                        CSR_VSTIMECMP => {
-                            shmem.set_vstimecmp(val);
-                        }
-                        _ => (),
-                    }
+                    shmem.set_csr(csr_num, val);
                 }
             }
         }

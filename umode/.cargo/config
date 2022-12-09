@@ -1,0 +1,12 @@
+[net]
+git-fetch-with-cli = true
+
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    '-Clink-arg=-Tlds/salus.lds',
+    # new in 1.60 and generates false positives
+    "-Aclippy::only_used_in_recursion",
+]

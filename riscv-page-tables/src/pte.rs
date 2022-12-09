@@ -68,6 +68,14 @@ pub enum PteLeafPerms {
     /// Read/Write/Execute
     RWX = (PteFieldBit::Read.mask() | PteFieldBit::Write.mask() | PteFieldBit::Execute.mask())
         as isize,
+    /// User Read/Execute
+    URX = (PteFieldBit::User.mask() | PteFieldBit::Read.mask() | PteFieldBit::Execute.mask())
+        as isize,
+    /// User Read Only
+    UR = (PteFieldBit::User.mask() | PteFieldBit::Read.mask()) as isize,
+    /// User Read/Write
+    URW =
+        (PteFieldBit::User.mask() | PteFieldBit::Read.mask() | PteFieldBit::Write.mask()) as isize,
 }
 
 const MASK_RWX: u64 = (1 << PteFieldBit::Read.shift())

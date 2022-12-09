@@ -38,5 +38,7 @@ sha2 = {version = "0.10", default-features = false }
 [workspace]
 
 members = [
+	"libuser",
+	"umode",
         "test-workloads",
 ]

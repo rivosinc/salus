@@ -7,26 +7,14 @@ use crate::function::*;
 
 /// Layout of the per-CPU host <-> TSM shared-memory communication area. Used to communicate a TVM's
 /// exit status to the host.
+///
+/// The layout of this structure follows that of the proposed nested acceleration ("NACL") SBI
+/// extension. While the structure is the same, the two are not interchangeable: the AP-TEE extension
+/// defines a different layout for the scratch area and applies different rules for the reading
+/// and writing of CSRs.
 #[repr(C)]
-#[derive(Default)]
 pub struct TsmShmemArea {
-    /// HTVAL value for guest page faults taken by the TVM vCPU. Written by the TSM upon return
-    /// from `TvmCpuRun`.
-    pub htval: u64,
-    /// HTINST value for guest page faults or virtual instruction exceptions taken by the TVM vCPU.
-    /// Written (in certain circumstances) by the TSM upon return from `TvmCpuRun`.
-    ///
-    /// The TSM will only write `htinst` in the following cases:
-    ///  - MMIO load page faults. The value written to the register in `gprs` corresponding to the
-    ///    'rd' register in the instruction will be used to complete the load upon the next call to
-    ///    `TvmCpuRun` for this vCPU.
-    ///  - MMIO store page faults. The TSM will write the value to be stored by the vCPU to the
-    ///    register in `gprs` corresponding to the 'rs2' register in the instruction upon return
-    ///    from `TvmCpuRun`.
-    pub htinst: u64,
-    /// VS-level `stimecmp` CSR for a TVM vCPU. Written by the TSM upon return from `TvmCpuRun`.
-    pub vstimecmp: u64,
-    /// General purpose registers
+    /// General purpose registers for a TVM guest.
     ///
     /// The TSM will always read or write the minimum number of registers in this set to complete
     /// the requested action, in order to avoid leaking information from the TVM.
@@ -37,7 +25,50 @@ pub struct TsmShmemArea {
     ///
     /// The TSM will read from these registers when:
     ///  - The vCPU takes a load guest page fault in an emulated MMIO region.
-    pub gprs: [u64; 32],
+    pub guest_gprs: [u64; 32],
+    /// Scratch space. Currently unused and will not be read or written by the TSM.
+    pub scratch: [u64; 224],
+    _reserved: [u64; 240],
+    /// Bitmap indicating which CSRs in `csrs` the host wishes to sync. Currently unused and will not
+    /// be read or written by the TSM.
+    pub dirty_bitmap: [u64; 16],
+    /// Hypervisor and virtual-supervisor CSRs. The 12-bit CSR number is transformed into a 10-bit
+    /// index by extracting bits `{csr[11:10], csr[8:0]}` since `csr[9:8]` is always 2'b10 for HS
+    /// and VS CSRs.
+    ///
+    /// The TSM will only access a subset of these registers:
+    ///  - HTVAL is written on guest page faults taken by a TVM vCPU. If the fault is serviceable
+    ///    by the host HTVAL is written with bits 63:2 of the faulting guest physical address,
+    ///    otherwise 0 is written.
+    ///  - HTINST is written on guest page faults taken by a TVM vCPU. If the fault is in an emulated
+    ///    MMIO region HTINST is written with a (transformed version of) the faulting load/store
+    ///    instruction made by the TVM, otherwise 0 is written. If the faulting instruction is a
+    ///    a store, the TSM will also write the value stored by the TVM to the register in
+    ///    `guest_gprs` corresponding to the `rs2` register in the instruction. If the faulting
+    ///    instruction is a load, the TSM will read from the register in `guest_gprs` corresponding
+    ///    to the `rd` register in the instruction and use it to complete the load the next time the
+    ///    TVM vCPU is run.
+    ///  - VSTIMECMP is always written by the TSM upon return from `TvmCpuRun`.
+    pub csrs: [u64; 1024],
+}
+
+impl TsmShmemArea {
+    /// Returns the index in `csrs` of the HS or VS CSR at `csr_num`.
+    pub fn csr_index(csr_num: u16) -> usize {
+        (((csr_num & 0xc00) >> 2) | (csr_num & 0xff)) as usize
+    }
+}
+
+impl Default for TsmShmemArea {
+    fn default() -> Self {
+        Self {
+            guest_gprs: [0; 32],
+            scratch: [0; 224],
+            _reserved: [0; 240],
+            dirty_bitmap: [0; 16],
+            csrs: [0; 1024],
+        }
+    }
 }
 
 /// Provides the state of the confidential VM supervisor.

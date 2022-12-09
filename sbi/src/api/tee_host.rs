@@ -14,27 +14,6 @@ pub struct TsmShmemAreaRef<'a> {
     _lifetime: PhantomData<&'a TsmShmemArea>,
 }
 
-// Defines volatile accessors to idividual fields in `TsmShmemArea`.
-macro_rules! define_accessors {
-    ($field:ident, $get:ident, $set:ident) => {
-        /// Gets $field in the shared-memory state area.
-        #[allow(dead_code)]
-        pub fn $get(&self) -> u64 {
-            // Safety: The caller guaranteed at construction that `ptr` points to a valid
-            // TsmShmemArea.
-            unsafe { ptr::addr_of!((*self.ptr).$field).read_volatile() }
-        }
-
-        /// Sets $field in the shared-memory state area.
-        #[allow(dead_code)]
-        pub fn $set(&self, val: u64) {
-            // Safety: The caller guaranteed at construction that `ptr` points to a valid
-            // TsmShmemArea.
-            unsafe { ptr::addr_of_mut!((*self.ptr).$field).write_volatile(val) };
-        }
-    };
-}
-
 impl<'a> TsmShmemAreaRef<'a> {
     /// Creates a new `TsmShmemAreaRef` from a raw pointer to a `TsmShmemArea`.
     ///
@@ -49,16 +28,28 @@ impl<'a> TsmShmemAreaRef<'a> {
         }
     }
 
-    define_accessors! {htval, htval, set_htval}
-    define_accessors! {htinst, htinst, set_htinst}
-    define_accessors! {vstimecmp, vstimecmp, set_vstimecmp}
+    /// Reads the HS or VS CSR at `csr_num`.
+    pub fn csr(&self, csr_num: u16) -> u64 {
+        let index = TsmShmemArea::csr_index(csr_num);
+        // Safety: `index` is guaranteed to be a valid index into `csrs` and the caller guaranteed
+        // at construction that `ptr` points to a valid `TsmShmemArea`.
+        unsafe { ptr::addr_of!((*self.ptr).csrs[index]).read_volatile() }
+    }
+
+    /// Writes the HS or VS CSR at `csr_num`.
+    pub fn set_csr(&self, csr_num: u16, val: u64) {
+        let index = TsmShmemArea::csr_index(csr_num);
+        // Safety: `index` is guaranteed to be a valid index into `csrs` and the caller guaranteed
+        // at construction that `ptr` points to a valid `TsmShmemArea`.
+        unsafe { ptr::addr_of_mut!((*self.ptr).csrs[index]).write_volatile(val) }
+    }
 
     /// Reads the general purpose register at `index`, which must be a valid GPR number.
     pub fn gpr(&self, index: usize) -> u64 {
         assert!(index < 32);
         // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
         // construction that `ptr` points to a valid `TsmShmemArea`.
-        unsafe { ptr::addr_of!((*self.ptr).gprs[index]).read_volatile() }
+        unsafe { ptr::addr_of!((*self.ptr).guest_gprs[index]).read_volatile() }
     }
 
     /// Writes the general purpose register at `index`, which must be a valid GPR number.
@@ -66,7 +57,7 @@ impl<'a> TsmShmemAreaRef<'a> {
         assert!(index < 32);
         // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
         // construction that `ptr` points to a valid `TsmShmemArea`.
-        unsafe { ptr::addr_of_mut!((*self.ptr).gprs[index]).write_volatile(val) };
+        unsafe { ptr::addr_of_mut!((*self.ptr).guest_gprs[index]).write_volatile(val) };
     }
 }
 

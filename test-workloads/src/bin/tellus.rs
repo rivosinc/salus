@@ -24,6 +24,7 @@ use core::ops::Range;
 use device_tree::Fdt;
 use riscv_regs::{
     DecodedInstruction, Exception, GprIndex, Instruction, Readable, Trap, CSR, CSR_CYCLE,
+    CSR_HTINST, CSR_HTVAL,
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
@@ -547,7 +548,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                     }
                 }
                 GuestLoadPageFault | GuestStorePageFault => {
-                    let fault_addr = (shmem.htval() << 2) | (CSR.stval.get() & 0x3);
+                    let fault_addr = (shmem.csr(CSR_HTVAL) << 2) | (CSR.stval.get() & 0x3);
                     match fault_addr {
                         addr if shared_mem_region
                             .as_ref()
@@ -578,7 +579,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             }
                         }
                         addr if mmio_region.as_ref().filter(|r| r.contains(&addr)).is_some() => {
-                            let inst = DecodedInstruction::from_raw(shmem.htinst() as u32)
+                            let inst = DecodedInstruction::from_raw(shmem.csr(CSR_HTINST) as u32)
                                 .expect("Failed to decode faulting MMIO instruction")
                                 .instruction();
                             // Handle the load or store; the source/dest register is always A0.

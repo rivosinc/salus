@@ -23,8 +23,8 @@ use core::arch::asm;
 use core::ops::Range;
 use device_tree::Fdt;
 use riscv_regs::{
-    DecodedInstruction, Exception, GprIndex, Instruction, Readable, Trap, CSR, CSR_CYCLE,
-    CSR_HTINST, CSR_HTVAL,
+    sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Readable,
+    RiscvCsrInterface, Trap, Writeable, CSR, CSR_CYCLE, CSR_HTINST, CSR_HTVAL,
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
@@ -465,6 +465,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             .expect("Tellus - TsmReclaimImsic failed");
     }
 
+    // Test that a pending timer causes us to exit the guest.
+    CSR.stimecmp.set(0);
+    CSR.sie.read_and_set_field(sie::stimer);
+
     let mut shared_mem_region: Option<Range<u64>> = None;
     let mut mmio_region: Option<Range<u64>> = None;
     loop {
@@ -472,10 +476,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // with `register_shmem()`.
         let blocked = tee_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
         let scause = CSR.scause.get();
-        if let Ok(Trap::Exception(e)) = Trap::from_scause(scause) {
+        if let Ok(t) = Trap::from_scause(scause) {
             use Exception::*;
-            match e {
-                VirtualSupervisorEnvCall => {
+            use Interrupt::*;
+            match t {
+                Trap::Exception(VirtualSupervisorEnvCall) => {
                     // Read the ECALL arguments written to the A* regs in shared memory.
                     let mut a_regs = [0u64; 8];
                     for (i, reg) in a_regs.iter_mut().enumerate() {
@@ -547,7 +552,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         }
                     }
                 }
-                GuestLoadPageFault | GuestStorePageFault => {
+                Trap::Exception(GuestLoadPageFault) | Trap::Exception(GuestStorePageFault) => {
                     let fault_addr = (shmem.csr(CSR_HTVAL) << 2) | (CSR.stval.get() & 0x3);
                     match fault_addr {
                         addr if shared_mem_region
@@ -619,7 +624,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         }
                     }
                 }
-                VirtualInstruction => {
+                Trap::Exception(VirtualInstruction) => {
                     let inst = DecodedInstruction::from_raw(CSR.stval.get() as u32)
                         .expect("Failed to decode faulting virtual instruction")
                         .instruction();
@@ -633,8 +638,16 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         }
                     }
                 }
-                _ => {
+                Trap::Exception(e) => {
                     println!("Guest VM terminated with exception {:?}", e);
+                    break;
+                }
+                Trap::Interrupt(SupervisorTimer) => {
+                    println!("Got our timer; turning it off now");
+                    CSR.sie.read_and_clear_field(sie::stimer);
+                }
+                Trap::Interrupt(i) => {
+                    println!("Unexpected interrupt {:?}", i);
                     break;
                 }
             }

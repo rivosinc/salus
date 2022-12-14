@@ -98,6 +98,15 @@ pub struct GuestVsCsrs {
     vstimecmp: u64,
 }
 
+/// Virtualized HS-level CSRs that are used to emulate (part of) the hypervisor extension for the
+/// guest.
+#[derive(Default)]
+#[repr(C)]
+pub struct GuestVirtualHsCsrs {
+    hie: u64,
+    hgeie: u64,
+}
+
 /// CSRs written on an exit from virtualization that are used by the hypervisor to determine the cause
 /// of the trap.
 #[derive(Default, Clone)]
@@ -122,6 +131,9 @@ struct VmCpuRegisters {
     // CPU state that only applies when V=1, e.g. the VS-level CSRs. Saved/restored on activation of
     // the vCPU.
     vs_csrs: GuestVsCsrs,
+
+    // Virtualized HS-level CPU state.
+    virtual_hs_csrs: GuestVirtualHsCsrs,
 
     // Read on VM exit.
     trap_csrs: VmCpuTrapState,
@@ -447,6 +459,9 @@ pub trait HostVmCpu: VmCpuExitReporting {
 
     /// Returns a reference to the vCPU's VS-level CSRs.
     fn vs_csrs(&self) -> &GuestVsCsrs;
+
+    /// Returns the guest interrupt file to which the vCPU is currently bound.
+    fn bound_interrupt_file(&self) -> Option<ImsicFileId>;
 }
 
 /// The parent (host) context of a `VmCpu`.
@@ -532,27 +547,15 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     pub fn run(&mut self) -> VmCpuTrap {
         self.complete_pending_mmio_op();
 
-        // Set up our host's timer at HS level so that we trap if our host's timer expires.
+        // Make sure we trap if the host has timer interrupts enabled.
         if let VmCpuParent::HostVm(ref host_vcpu) = self.host_context {
             let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
             if host_sie.read(sie::stimer) != 0 {
-                CSR.stimecmp.set(
-                    host_vcpu
-                        .vs_csrs()
-                        .vstimecmp
-                        .wrapping_add(host_vcpu.vs_csrs().htimedelta),
-                );
                 CSR.sie.read_and_set_field(sie::stimer);
             }
         }
 
-        // TODO, HGEIE programinng:
-        //  - Track which guests the host wants interrupts from (by trapping HGEIE accesses from
-        //    VS level) and update HGEIE[2:] appropriately.
-        //  - If this is the host: clear HGEIE[1] on entry; inject SGEI into host VM if we receive
-        //    any SGEI at HS level.
-        //  - If this is a guest: set HGEIE[1] on entry; switch to the host VM for any SGEI that
-        //    occur, injecting an SEI for the host interrupts and SGEI for guest VM interrupts.
+        // TODO: Inject an SG_EXT interrupt using HVICTL if we have one pending.
 
         let has_vector = CpuInfo::get().has_vector();
         let guest_id = self.vcpu.guest_id;
@@ -832,14 +835,76 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     /// Emulates a CSR read-modify-write operation taken from a virtual instruction trap. Returns
     /// the previous value of the (virtual) CSR.
-    pub fn virtual_csr_rmw(&mut self, csr_num: u16, _value: u64, mask: u64) -> Result<u64> {
-        // We only support reading PMU CSRs for now.
-        match csr_num {
-            CSR_CYCLE..=CSR_HPMCOUNTER31 if mask == 0 => self
-                .pmu()
+    pub fn virtual_csr_rmw(&mut self, csr_num: u16, value: u64, mask: u64) -> Result<u64> {
+        if (CSR_CYCLE..=CSR_HPMCOUNTER31).contains(&csr_num) && mask == 0 {
+            self.pmu()
                 .get_cached_csr_value(csr_num.into())
-                .map_err(|_| Error::InvalidCsrAccess),
-            _ => Err(Error::InvalidCsrAccess),
+                .map_err(|_| Error::InvalidCsrAccess)
+        } else if self.vcpu.guest_id.is_host() {
+            // We emulate a subset of the H-CSRs for the host VM.
+            match csr_num {
+                CSR_HIE => {
+                    let prev = self.arch.regs.virtual_hs_csrs.hie;
+                    let mut valid = LocalRegisterCopy::new(0);
+                    valid.modify(hie::vssoft.val(1));
+                    valid.modify(hie::vstimer.val(1));
+                    valid.modify(hie::vsext.val(1));
+                    valid.modify(hie::sgext.val(1));
+                    // Salus isn't interruptible (for now), so we don't set HIE.SG_EXT until we run
+                    // the vCPU to avoid trapping within Salus unnecessarily, e.g. if we're running
+                    // a U-mode task.
+                    self.arch.regs.virtual_hs_csrs.hie =
+                        (prev & !mask) | (valid.get() & mask & value);
+                    Ok(prev)
+                }
+                CSR_HIP => {
+                    // Only report SG_EXT. We can use the bit in HIP directly since we keep HGEIE
+                    // programmed with the bits the host VM requested.
+                    //
+                    // We forcibly delegate VS_TIMER/VS_EXT and do not attempt to emulate them for
+                    // the host VM; VS_SOFT is unused.
+                    let mut valid = LocalRegisterCopy::new(0);
+                    valid.write(hip::sgext.val(1));
+                    Ok(CSR.hip.get() & valid.get())
+                }
+                CSR_HGEIE => {
+                    if let Ok(ext_interrupts) = self.vcpu.ext_interrupts() {
+                        let prev = self.arch.regs.virtual_hs_csrs.hgeie;
+                        let valid = ((1 << ext_interrupts.lock().num_guests()) - 1) << 1;
+                        let vhgeie = (prev & !mask) | (valid & mask & value);
+                        self.arch.regs.virtual_hs_csrs.hgeie = vhgeie;
+
+                        // Now update the real HGEIE. We assume our guests are the interrupt files
+                        // immediately following ours. If we were to support another level of
+                        // nesting, we'd need to instead remap based on the interrupt files that
+                        // our host assigned us.
+                        //
+                        // Unwrap ok: We must be bound to have been activated with external interrupts.
+                        let vgein = self.bound_interrupt_file().unwrap().bits();
+                        CSR.hgeie.set((vhgeie << (vgein + 1)) >> 1);
+                        Ok(prev)
+                    } else {
+                        Ok(0)
+                    }
+                }
+                CSR_HGEIP if mask == 0 => {
+                    if let Ok(ext_interrupts) = self.vcpu.ext_interrupts() {
+                        let valid = ((1 << ext_interrupts.lock().num_guests()) - 1) << 1;
+                        // As above, we assume our guests will be immediately following our bit in
+                        // HGEIP.
+                        //
+                        // Unwrap ok: We must be bound to have been activated with external interrupts.
+                        let vgein = self.bound_interrupt_file().unwrap().bits();
+                        let vhgeip = (CSR.hgeip.get() >> (vgein + 1)) << 1;
+                        Ok(vhgeip & valid)
+                    } else {
+                        Ok(0)
+                    }
+                }
+                _ => Err(Error::InvalidCsrAccess),
+            }
+        } else {
+            Err(Error::InvalidCsrAccess)
         }
     }
 
@@ -978,6 +1043,35 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         self.restore_vs_csrs();
         self.restore_vm_pages();
         self.pmu().restore_counters();
+
+        match self.host_context {
+            VmCpuParent::HostVm(ref host_vcpu) => {
+                // Set our host's timer to the HS-level STIMECMP so that we'll trap if the host's
+                // timer expires.
+                CSR.stimecmp.set(
+                    host_vcpu
+                        .vs_csrs()
+                        .vstimecmp
+                        .wrapping_add(host_vcpu.vs_csrs().htimedelta),
+                );
+
+                // If our host has external interrupts enabled, set the bit for their interrupt file
+                // in HGEIE so that we trap on any external interrupts they receive.
+                let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
+                if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits()) &&
+                    host_sie.read(sie::sext) != 0
+                {
+                    CSR.hgeie.read_and_set_bits(1 << host_vgein);
+                }
+            }
+            VmCpuParent::Tsm(_) => {
+                // Clear the bit in HGEIE for our own interrupt file to prevent trapping back into
+                // the TSM for own VS external interrupts.
+                if let Some(vgein) = self.bound_interrupt_file().map(|f| f.bits()) {
+                    CSR.hgeie.read_and_clear_bits(1 << vgein);
+                }
+            }
+        }
     }
 
     // Restores the VS-level CSRs.
@@ -1069,6 +1163,18 @@ impl<T: GuestStagePagingMode> HostVmCpu for ActiveVmCpu<'_, '_, '_, T> {
 
     fn vs_csrs(&self) -> &GuestVsCsrs {
         &self.arch.regs.vs_csrs
+    }
+
+    fn bound_interrupt_file(&self) -> Option<ImsicFileId> {
+        // Read VGEIN from HSTATUS instead of bouncing off the ext_interrupts lock. We must be
+        // bound to that interrupt file if we're active.
+        let hstatus = LocalRegisterCopy::new(self.arch.regs.guest_regs.hstatus);
+        let vgein = hstatus.read(hstatus::vgein) as u32;
+        if vgein != 0 {
+            Some(ImsicFileId::from_index(vgein))
+        } else {
+            None
+        }
     }
 }
 
@@ -1185,9 +1291,13 @@ impl VmCpu {
 
     /// Enables IMSIC virtualization for this vCPU, setting the location of the virtualized ISMIC
     /// in guest physical address space.
-    pub fn enable_imsic_virtualization(&self, imsic_location: ImsicLocation) -> Result<()> {
+    pub fn enable_imsic_virtualization(
+        &self,
+        imsic_location: ImsicLocation,
+        num_guests: usize,
+    ) -> Result<()> {
         self.ext_interrupts
-            .call_once(|| Mutex::new(VmCpuExtInterrupts::new(imsic_location)));
+            .call_once(|| Mutex::new(VmCpuExtInterrupts::new(imsic_location, num_guests)));
         if self.ext_interrupts.get().unwrap().lock().imsic_location() != imsic_location {
             return Err(Error::ImsicLocationAlreadySet);
         }

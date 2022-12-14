@@ -436,7 +436,7 @@ impl<'a, T: GuestStagePagingMode> InitializingVm<'a, T> {
         self.vm()
             .vcpus
             .get_vcpu(vcpu_id)
-            .and_then(|v| v.enable_imsic_virtualization(location))
+            .and_then(|v| v.enable_imsic_virtualization(location, geometry.guests_per_hart()))
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))
     }
 }

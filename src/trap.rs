@@ -205,13 +205,6 @@ extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
         tf.gprs.reg(T0)
     );
     println!(
-        "S9: 0x{:08x}, S10: 0x{:08x}, S11: 0x{:08x}, T0: 0x{:08x}",
-        tf.gprs.reg(S9),
-        tf.gprs.reg(S10),
-        tf.gprs.reg(S11),
-        tf.gprs.reg(T0)
-    );
-    println!(
         "T1: 0x{:08x}, T2: 0x{:08x}, T3: 0x{:08x}, T4: 0x{:08x}",
         tf.gprs.reg(T1),
         tf.gprs.reg(T2),

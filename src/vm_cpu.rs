@@ -417,6 +417,63 @@ impl<'vcpu> Drop for StatusSet<'vcpu> {
     }
 }
 
+/// Interface for reporting the exit status of `VmCpu` to its host.
+pub trait VmCpuExitReporting {
+    /// Sets a CSR for the host (v)CPU.
+    fn set_csr(&mut self, csr_num: u16, val: u64);
+
+    /// Sets a guest GPR value for the host (v)CPU.
+    fn set_guest_gpr(&mut self, index: GprIndex, val: u64);
+
+    /// Gets a guest GPR value from the host (v)CPU.
+    fn guest_gpr(&self, index: GprIndex) -> u64;
+}
+
+/// Interface to the host vCPU context when a `VmCpu` is being hosted by another `VmCpu`. Used to
+/// save/restore state that's shared between host and guest vCPUs, e.g. VS-level CSRs.
+///
+/// Note that a trait is used here to avoid the lifetime recursion when holding an `ActiveVmCpu`
+/// within another `ActiveVmCpu`.
+pub trait HostVmCpu: VmCpuExitReporting {
+    /// Saves host vCPU state. Called when the host activates a guest `VmCpu`.
+    fn save(&mut self);
+
+    /// Restores host vCPU state. Called when a guest `VmCpu` is deactivated, i.e. when the
+    /// `ActiveVmCpu` is dropped.
+    fn restore(&mut self);
+}
+
+/// The parent (host) context of a `VmCpu`.
+pub enum VmCpuParent<'host> {
+    /// The `VmCpu` is hosted by the TSM itself. This is the case for vCPUs of the host VM.
+    Tsm(&'host mut dyn VmCpuExitReporting),
+    /// The `VmCpu` is hosted by a vCPU of the host VM.
+    HostVm(&'host mut dyn HostVmCpu),
+}
+
+impl VmCpuParent<'_> {
+    fn set_csr(&mut self, csr_num: u16, val: u64) {
+        match self {
+            VmCpuParent::Tsm(host_runner) => host_runner.set_csr(csr_num, val),
+            VmCpuParent::HostVm(host_vcpu) => host_vcpu.set_csr(csr_num, val),
+        }
+    }
+
+    fn set_guest_gpr(&mut self, index: GprIndex, val: u64) {
+        match self {
+            VmCpuParent::Tsm(host_runner) => host_runner.set_guest_gpr(index, val),
+            VmCpuParent::HostVm(host_vcpu) => host_vcpu.set_guest_gpr(index, val),
+        }
+    }
+
+    fn guest_gpr(&self, index: GprIndex) -> u64 {
+        match self {
+            VmCpuParent::Tsm(host_runner) => host_runner.guest_gpr(index),
+            VmCpuParent::HostVm(host_vcpu) => host_vcpu.guest_gpr(index),
+        }
+    }
+}
+
 /// An activated vCPU. A vCPU in this state has entered the VM's address space and is ready to run.
 pub struct ActiveVmCpu<'vcpu, 'pages, 'host, T: GuestStagePagingMode> {
     vcpu: &'vcpu VmCpu,
@@ -428,7 +485,7 @@ pub struct ActiveVmCpu<'vcpu, 'pages, 'host, T: GuestStagePagingMode> {
     // `None` if this vCPU is itself running a child vCPU. Restored when the child vCPU exits.
     active_pages: Option<ActiveVmPages<'pages, T>>,
     // The context of the (v)CPU that is hosting this one.
-    host_context: &'host mut dyn HostCpuContext,
+    host_context: VmCpuParent<'host>,
     // Important drop order, status_set must come _after_ `arch` to maintain lock ordering.
     // on drop StatusSet takes the status lock.
     status_set: StatusSet<'vcpu>,
@@ -440,7 +497,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     fn restore_from(
         vcpu: &'vcpu VmCpu,
         vm_pages: FinalizedVmPages<'pages, T>,
-        host_context: &'host mut dyn HostCpuContext,
+        mut host_context: VmCpuParent<'host>,
     ) -> Result<Self> {
         let mut arch = vcpu.arch.lock();
         // If we're running on a new CPU, then any previous VMID or TLB version we used is inavlid.
@@ -448,8 +505,10 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             arch.prev_tlb = None;
         }
 
-        // Save the state of the host (if any) and swap in ours.
-        host_context.save();
+        // Save the state of the host vCPU (if any) and swap in ours.
+        if let VmCpuParent::HostVm(ref mut host_vcpu) = host_context {
+            host_vcpu.save();
+        }
         let mut active_vcpu = Self {
             vcpu,
             arch,
@@ -853,6 +912,12 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         }
     }
 
+    fn save(&mut self) {
+        self.active_pages = None;
+        self.save_vcpu_csrs();
+        self.pmu().save_counters();
+    }
+
     // Saves the VS-level CSRs.
     fn save_vcpu_csrs(&mut self) {
         let vcpu_csrs = &mut self.arch.regs.guest_vcpu_csrs;
@@ -866,6 +931,12 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         vcpu_csrs.vstval = CSR.vstval.get();
         vcpu_csrs.vsatp = CSR.vsatp.get();
         vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
+    }
+
+    fn restore(&mut self) {
+        self.restore_vcpu_csrs();
+        self.restore_vm_pages();
+        self.pmu().restore_counters();
     }
 
     // Restores the VS-level CSRs.
@@ -912,41 +983,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     }
 }
 
-/// Interface to the host (v)CPU context of a `VmCpu`. Used to save/restore state that's shared
-/// between host and guest (v)CPUs.
-pub trait HostCpuContext {
-    /// Saves any host (v)CPU state that is shared with its guests. Called when activating a guest
-    /// `VmCpu`.
-    fn save(&mut self);
-
-    /// Restores any host (v)CPU state that is shared with its guests. Called when a guest `VmCpu`
-    /// is deactivated, i.e. when the `ActiveVmCpu` is dropped.
-    fn restore(&mut self);
-
-    /// Sets a CSR for the host (v)CPU.
-    fn set_csr(&mut self, csr_num: u16, val: u64);
-
-    /// Sets a guest GPR value for the host (v)CPU.
-    fn set_guest_gpr(&mut self, index: GprIndex, val: u64);
-
-    /// Gets a guest GPR value from the host (v)CPU.
-    fn guest_gpr(&self, index: GprIndex) -> u64;
-}
-
-// A VmCpu can host another VmCpu, in which case all VS-level state needs to be context-switched.
-impl<T: GuestStagePagingMode> HostCpuContext for ActiveVmCpu<'_, '_, '_, T> {
-    fn save(&mut self) {
-        self.active_pages = None;
-        self.save_vcpu_csrs();
-        self.pmu().save_counters();
-    }
-
-    fn restore(&mut self) {
-        self.restore_vcpu_csrs();
-        self.restore_vm_pages();
-        self.pmu().restore_counters();
-    }
-
+impl<T: GuestStagePagingMode> VmCpuExitReporting for ActiveVmCpu<'_, '_, '_, T> {
     fn set_csr(&mut self, csr_num: u16, val: u64) {
         // Supervisor CSRs get written directly to their VS-level equivalent, while HS and VS CSRs
         // are written to the shared memory area.
@@ -980,11 +1017,23 @@ impl<T: GuestStagePagingMode> HostCpuContext for ActiveVmCpu<'_, '_, '_, T> {
     }
 }
 
+impl<T: GuestStagePagingMode> HostVmCpu for ActiveVmCpu<'_, '_, '_, T> {
+    fn save(&mut self) {
+        self.save();
+    }
+
+    fn restore(&mut self) {
+        self.restore();
+    }
+}
+
 impl<T: GuestStagePagingMode> Drop for ActiveVmCpu<'_, '_, '_, T> {
     fn drop(&mut self) {
         // Context-switch back to the host (v)CPU.
         self.save();
-        self.host_context.restore();
+        if let VmCpuParent::HostVm(ref mut host_vcpu) = self.host_context {
+            host_vcpu.restore();
+        }
     }
 }
 
@@ -1060,7 +1109,7 @@ impl VmCpu {
     pub fn activate<'vcpu, 'pages, 'host: 'vcpu + 'pages, T: GuestStagePagingMode>(
         &'vcpu self,
         vm_pages: FinalizedVmPages<'pages, T>,
-        host_context: &'host mut dyn HostCpuContext,
+        host_context: VmCpuParent<'host>,
     ) -> Result<ActiveVmCpu<'vcpu, 'pages, 'host, T>> {
         let mut status = self.status.write();
         use VmCpuStatus::*;

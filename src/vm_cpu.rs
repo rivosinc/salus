@@ -84,7 +84,7 @@ struct GuestCpuState {
 /// restored whenever we switch between VMs.
 #[derive(Default)]
 #[repr(C)]
-struct GuestVCpuState {
+pub struct GuestVCpuState {
     htimedelta: u64,
     vsstatus: u64,
     vsie: u64,
@@ -332,8 +332,10 @@ pub enum VmCpuTrap {
     },
     /// An exception which we expected to handle directly at VS, but trapped to HS instead.
     DelegatedException { exception: Exception, stval: u64 },
+    /// An interrupt taken to HS-level.
+    SupervisorInterrupt(Interrupt),
     /// Everything else that we currently don't or can't handle.
-    Other(VmCpuTrapState),
+    OtherException(VmCpuTrapState),
     // TODO: Add other exit causes as needed.
 }
 
@@ -441,6 +443,9 @@ pub trait HostVmCpu: VmCpuExitReporting {
     /// Restores host vCPU state. Called when a guest `VmCpu` is deactivated, i.e. when the
     /// `ActiveVmCpu` is dropped.
     fn restore(&mut self);
+
+    /// Returns a reference to the vCPU's VS-level CSRs.
+    fn vs_csrs(&self) -> &GuestVCpuState;
 }
 
 /// The parent (host) context of a `VmCpu`.
@@ -526,6 +531,20 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     pub fn run(&mut self) -> VmCpuTrap {
         self.complete_pending_mmio_op();
 
+        // Set up our host's timer at HS level so that we trap if our host's timer expires.
+        if let VmCpuParent::HostVm(ref host_vcpu) = self.host_context {
+            let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
+            if host_sie.read(sie::stimer) != 0 {
+                CSR.stimecmp.set(
+                    host_vcpu
+                        .vs_csrs()
+                        .vstimecmp
+                        .wrapping_add(host_vcpu.vs_csrs().htimedelta),
+                );
+                CSR.sie.read_and_set_field(sie::stimer);
+            }
+        }
+
         // TODO, HGEIE programinng:
         //  - Track which guests the host wants interrupts from (by trapping HGEIE accesses from
         //    VS level) and update HGEIE[2:] appropriately.
@@ -559,6 +578,8 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         regs.trap_csrs.stval = CSR.stval.get();
         regs.trap_csrs.htval = CSR.htval.get();
         regs.trap_csrs.htinst = CSR.htinst.get();
+
+        CSR.sie.read_and_clear_field(sie::stimer);
 
         // Check if FPU state needs to be saved.
         let mut sstatus = LocalRegisterCopy::new(regs.guest_regs.sstatus);
@@ -622,10 +643,10 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                         stval: regs.trap_csrs.stval,
                     }
                 } else {
-                    VmCpuTrap::Other(regs.trap_csrs.clone())
+                    VmCpuTrap::OtherException(regs.trap_csrs.clone())
                 }
             }
-            _ => VmCpuTrap::Other(regs.trap_csrs.clone()),
+            Trap::Interrupt(i) => VmCpuTrap::SupervisorInterrupt(i),
         }
     }
 
@@ -741,6 +762,12 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
             UnhandledTrap(scause) => {
                 self.report_unhandled_exit(scause);
+            }
+            HostInterrupt(i) => {
+                // Just set up SCAUSE on an interrupt. The interrupt will pend (and trap, if
+                // necessary) when the host is swapped in.
+                self.host_context
+                    .set_csr(CSR_SCAUSE, Trap::Interrupt(i).to_scause());
             }
         };
 
@@ -1024,6 +1051,10 @@ impl<T: GuestStagePagingMode> HostVmCpu for ActiveVmCpu<'_, '_, '_, T> {
 
     fn restore(&mut self) {
         self.restore();
+    }
+
+    fn vs_csrs(&self) -> &GuestVCpuState {
+        &self.arch.regs.guest_vcpu_csrs
     }
 }
 

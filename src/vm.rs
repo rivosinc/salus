@@ -16,9 +16,7 @@ use s_mode_utils::print::*;
 use sbi::{Error as SbiError, *};
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
-use crate::vm_cpu::{
-    ActiveVmCpu, HostCpuContext, VmCpu, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX,
-};
+use crate::vm_cpu::{ActiveVmCpu, VmCpu, VmCpuParent, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
     ActiveVmPages, AnyVmPages, InstructionFetchError, PageFaultType, VmPages, VmPagesRef,
@@ -506,11 +504,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
     /// Run `vcpu_id` until an unhandled exit is encountered. Save/restore `host_context` on entry/exit
     /// from the vCPU being run.
-    pub fn run_vcpu(
-        &self,
-        vcpu_id: u64,
-        host_context: &mut dyn HostCpuContext,
-    ) -> EcallResult<u64> {
+    pub fn run_vcpu(&self, vcpu_id: u64, host_context: VmCpuParent) -> EcallResult<u64> {
         let vcpu = self
             .vm()
             .vcpus
@@ -1270,7 +1264,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let guest_vm = guest
             .as_finalized_vm()
             .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        guest_vm.run_vcpu(vcpu_id, active_vcpu)
+        guest_vm.run_vcpu(vcpu_id, VmCpuParent::HostVm(active_vcpu))
     }
 
     fn guest_add_page_table_pages(

@@ -20,7 +20,7 @@ use sbi::{self, SbiMessage};
 use crate::guest_tracking::{GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
 use crate::vm::{FinalizedVm, Vm};
-use crate::vm_cpu::{HostCpuContext, VmCpu, VmCpus};
+use crate::vm_cpu::{VmCpu, VmCpuExitReporting, VmCpuParent, VmCpus};
 use crate::vm_pages::VmPages;
 
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
@@ -409,7 +409,7 @@ impl HostVmRunner {
     ) -> ControlFlow<()> {
         // Run until we shut down, or this vCPU stops.
         loop {
-            vm.run_vcpu(vcpu_id, self).unwrap();
+            vm.run_vcpu(vcpu_id, VmCpuParent::Tsm(self)).unwrap();
             if let Ok(Trap::Exception(e)) = Trap::from_scause(self.scause) {
                 use Exception::*;
                 match e {
@@ -498,12 +498,7 @@ impl HostVmRunner {
     }
 }
 
-impl HostCpuContext for HostVmRunner {
-    // Nothing to save/restore here; ActiveVmCpu::run() takes care of saving/restoring state that's
-    // shared between HS and VS.
-    fn save(&mut self) {}
-    fn restore(&mut self) {}
-
+impl VmCpuExitReporting for HostVmRunner {
     fn set_csr(&mut self, csr_num: u16, val: u64) {
         // We could use the actual CSRs here, but if we have the values already sticking them in
         // memory is probably faster.

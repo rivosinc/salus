@@ -85,7 +85,7 @@ struct GuestCpuState {
 /// restored whenever we switch between VMs.
 #[derive(Default)]
 #[repr(C)]
-pub struct GuestVCpuState {
+pub struct GuestVsCsrs {
     htimedelta: u64,
     vsstatus: u64,
     vsie: u64,
@@ -121,7 +121,7 @@ struct VmCpuRegisters {
 
     // CPU state that only applies when V=1, e.g. the VS-level CSRs. Saved/restored on activation of
     // the vCPU.
-    guest_vcpu_csrs: GuestVCpuState,
+    vs_csrs: GuestVsCsrs,
 
     // Read on VM exit.
     trap_csrs: VmCpuTrapState,
@@ -446,7 +446,7 @@ pub trait HostVmCpu: VmCpuExitReporting {
     fn restore(&mut self);
 
     /// Returns a reference to the vCPU's VS-level CSRs.
-    fn vs_csrs(&self) -> &GuestVCpuState;
+    fn vs_csrs(&self) -> &GuestVsCsrs;
 }
 
 /// The parent (host) context of a `VmCpu`.
@@ -955,45 +955,45 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     fn save(&mut self) {
         self.active_pages = None;
-        self.save_vcpu_csrs();
+        self.save_vs_csrs();
         self.pmu().save_counters();
     }
 
     // Saves the VS-level CSRs.
-    fn save_vcpu_csrs(&mut self) {
-        let vcpu_csrs = &mut self.arch.regs.guest_vcpu_csrs;
-        vcpu_csrs.htimedelta = CSR.htimedelta.get();
-        vcpu_csrs.vsstatus = CSR.vsstatus.get();
-        vcpu_csrs.vsie = CSR.vsie.get();
-        vcpu_csrs.vstvec = CSR.vstvec.get();
-        vcpu_csrs.vsscratch = CSR.vsscratch.get();
-        vcpu_csrs.vsepc = CSR.vsepc.get();
-        vcpu_csrs.vscause = CSR.vscause.get();
-        vcpu_csrs.vstval = CSR.vstval.get();
-        vcpu_csrs.vsatp = CSR.vsatp.get();
-        vcpu_csrs.vstimecmp = CSR.vstimecmp.get();
+    fn save_vs_csrs(&mut self) {
+        let vs_csrs = &mut self.arch.regs.vs_csrs;
+        vs_csrs.htimedelta = CSR.htimedelta.get();
+        vs_csrs.vsstatus = CSR.vsstatus.get();
+        vs_csrs.vsie = CSR.vsie.get();
+        vs_csrs.vstvec = CSR.vstvec.get();
+        vs_csrs.vsscratch = CSR.vsscratch.get();
+        vs_csrs.vsepc = CSR.vsepc.get();
+        vs_csrs.vscause = CSR.vscause.get();
+        vs_csrs.vstval = CSR.vstval.get();
+        vs_csrs.vsatp = CSR.vsatp.get();
+        vs_csrs.vstimecmp = CSR.vstimecmp.get();
     }
 
     fn restore(&mut self) {
-        self.restore_vcpu_csrs();
+        self.restore_vs_csrs();
         self.restore_vm_pages();
         self.pmu().restore_counters();
     }
 
     // Restores the VS-level CSRs.
-    fn restore_vcpu_csrs(&mut self) {
-        let vcpu_csrs = &self.arch.regs.guest_vcpu_csrs;
+    fn restore_vs_csrs(&mut self) {
+        let vs_csrs = &self.arch.regs.vs_csrs;
         // Safe as these don't take effect until V=1.
-        CSR.htimedelta.set(vcpu_csrs.htimedelta);
-        CSR.vsstatus.set(vcpu_csrs.vsstatus);
-        CSR.vsie.set(vcpu_csrs.vsie);
-        CSR.vstvec.set(vcpu_csrs.vstvec);
-        CSR.vsscratch.set(vcpu_csrs.vsscratch);
-        CSR.vsepc.set(vcpu_csrs.vsepc);
-        CSR.vscause.set(vcpu_csrs.vscause);
-        CSR.vstval.set(vcpu_csrs.vstval);
-        CSR.vsatp.set(vcpu_csrs.vsatp);
-        CSR.vstimecmp.set(vcpu_csrs.vstimecmp);
+        CSR.htimedelta.set(vs_csrs.htimedelta);
+        CSR.vsstatus.set(vs_csrs.vsstatus);
+        CSR.vsie.set(vs_csrs.vsie);
+        CSR.vstvec.set(vs_csrs.vstvec);
+        CSR.vsscratch.set(vs_csrs.vsscratch);
+        CSR.vsepc.set(vs_csrs.vsepc);
+        CSR.vscause.set(vs_csrs.vscause);
+        CSR.vstval.set(vs_csrs.vstval);
+        CSR.vsatp.set(vs_csrs.vsatp);
+        CSR.vstimecmp.set(vs_csrs.vstimecmp);
     }
 
     // Restores the VM's address space.
@@ -1030,10 +1030,10 @@ impl<T: GuestStagePagingMode> VmCpuExitReporting for ActiveVmCpu<'_, '_, '_, T> 
         // are written to the shared memory area.
         match csr_num {
             CSR_SCAUSE => {
-                self.arch.regs.guest_vcpu_csrs.vscause = val;
+                self.arch.regs.vs_csrs.vscause = val;
             }
             CSR_STVAL => {
-                self.arch.regs.guest_vcpu_csrs.vstval = val;
+                self.arch.regs.vs_csrs.vstval = val;
             }
             _ => {
                 if let Some(shmem) = self.arch.shmem_area.as_ref().map(|s| s.as_ref()) {
@@ -1067,8 +1067,8 @@ impl<T: GuestStagePagingMode> HostVmCpu for ActiveVmCpu<'_, '_, '_, T> {
         self.restore();
     }
 
-    fn vs_csrs(&self) -> &GuestVCpuState {
-        &self.arch.regs.guest_vcpu_csrs
+    fn vs_csrs(&self) -> &GuestVsCsrs {
+        &self.arch.regs.vs_csrs
     }
 }
 

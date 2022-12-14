@@ -241,6 +241,7 @@ impl<'elf> ElfSegment<'elf> {
 
 /// A structure that checks and prepares and ELF for loading into memory.
 pub struct ElfMap<'elf> {
+    entry: u64,
     segments: ArrayVec<ElfSegment<'elf>, ELF_SEGMENTS_MAX>,
 }
 
@@ -323,7 +324,15 @@ impl<'elf> ElfMap<'elf> {
             let segment = ElfSegment::new(data, vaddr, size, flags)?;
             segments.push(segment);
         }
-        Ok(Self { segments })
+        Ok(Self {
+            entry: header.e_entry,
+            segments,
+        })
+    }
+
+    /// Return the entry of this executable.
+    pub fn entry(&self) -> u64 {
+        self.entry
     }
 
     /// Return an iterator containings loadable segments of this ELF file.

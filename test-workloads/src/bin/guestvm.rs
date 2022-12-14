@@ -23,6 +23,7 @@ use rice::x509::{
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
     MAX_CSR_LEN,
 };
+use riscv_regs::{sie, stopi, Interrupt, Readable, RiscvCsrInterface, Writeable, CSR};
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::{attestation, base, reset, tee_guest};
@@ -319,6 +320,41 @@ fn test_memory_sharing() {
     }
 }
 
+fn test_interrupts() {
+    const INTERRUPT_ID: u64 = 3;
+
+    // Make sure we return from WFI.
+    //
+    // Safety: WFI behavior is well-defined.
+    unsafe { asm!("wfi", options(nomem, nostack)) };
+
+    // Enable external interrupt signalling so that we can check for them in SIP (and that the
+    // host sees them in HGEIP), but leave SSTATUS.SIE unset so that we don't trap.
+    //
+    // TODO: Set up and interrupt handler and enable interrupts so that we can receive injected
+    // interrupts.
+    CSR.sie.read_and_set_field(sie::sext);
+
+    // EIDELIVERY = 1
+    CSR.siselect.set(0x70);
+    CSR.sireg.set(1);
+    // EITHRESHOLD = 0
+    CSR.siselect.set(0x72);
+    CSR.sireg.set(0);
+    // EIE0[3] = 1
+    CSR.siselect.set(0xc0 + (INTERRUPT_ID / 64));
+    CSR.sireg.read_and_set_bits(1 << (INTERRUPT_ID % 64));
+
+    tee_guest::allow_external_interrupt(3).expect("GuestVm - AllowExternalInterrupt failed");
+
+    // VSIP implementation is buggy in QEMU; use VSTOPI to check that we got the interrupt instead.
+    if CSR.stopi.read(stopi::interrupt_id) == Interrupt::SupervisorExternal as u64 {
+        println!("External interrupt pending in GuestVm");
+    } else {
+        println!("External interrupt NOT pending in GuestVm");
+    }
+}
+
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
@@ -371,14 +407,7 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
     let val = unsafe { core::ptr::read_volatile(read_ptr) };
     println!("Host says: 0x{:x}", val);
 
-    // Make sure we return from WFI.
-    //
-    // Safety: WFI behavior is well-defined.
-    unsafe { asm!("wfi", options(nomem, nostack)) };
-
-    // TODO: Set up and interrupt handler and enable interrupts so that we can receive injected
-    // interrupts.
-    tee_guest::allow_external_interrupt(3).expect("GuestVm - AllowExternalInterrupt failed");
+    test_interrupts();
 
     println!("Exiting guest");
     println!("*****************************************");

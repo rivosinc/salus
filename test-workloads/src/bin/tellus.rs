@@ -23,7 +23,7 @@ use core::arch::asm;
 use core::ops::Range;
 use device_tree::Fdt;
 use riscv_regs::{
-    sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Readable,
+    hip, sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Readable,
     RiscvCsrInterface, Trap, Writeable, CSR, CSR_CYCLE, CSR_HTINST, CSR_HTVAL,
 };
 use s_mode_utils::abort::abort;
@@ -340,6 +340,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // CPU0, guest interrupt file 0.
     let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K;
     if has_aia {
+        // Check HGEIE to see how many guests we have.
+        CSR.hgeie.set(!0u64);
+        let hgeie = CSR.hgeie.atomic_replace(0);
+        println!("Found {:} guest interrupt files", hgeie.count_ones());
+
         // Set the IMSIC params for the TVM.
         let aia_params = sbi::TvmAiaParams {
             imsic_base_addr: 0x2800_0000,
@@ -442,7 +447,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // For now we run on a single CPU so try to exercise the rebinding interface
     // on the same PCPU.
     // CPU0, guest interrupt file 2.
-    let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K * 2;
+    let imsic_file_num = 2;
+    let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K * imsic_file_num;
     if has_aia {
         // Try to convert a guest interrupt file.
         //
@@ -452,7 +458,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             .expect("Tellus - TsmConvertImsic failed");
         tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
 
-        tee_interrupt::rebind_vcpu_imsic_begin(vmid, 0, 1 << 2)
+        tee_interrupt::rebind_vcpu_imsic_begin(vmid, 0, 1 << imsic_file_num)
             .expect("Tellus - TvmCpuRebindImsicBegin failed");
         tee_host::tvm_initiate_fence(vmid).expect("Tellus - TvmInitiateFence failed");
         tee_interrupt::rebind_vcpu_imsic_clone(vmid, 0)
@@ -463,6 +469,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // Reclaim previous imsic file address.
         tee_interrupt::reclaim_imsic(IMSIC_START_ADDRESS + PAGE_SIZE_4K)
             .expect("Tellus - TsmReclaimImsic failed");
+
+        CSR.hgeie.set(1 << imsic_file_num);
     }
 
     // Test that a pending timer causes us to exit the guest.
@@ -540,6 +548,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     println!("Injecting interrupt {id} into guest");
                                     tee_interrupt::inject_external_interrupt(vmid, 0, id)
                                         .expect("Tellus - InjectExternalInterrupt failed");
+
+                                    // Check that we see the external interrupt pending in HGEIP/HIP.
+                                    if (CSR.hgeip.get() & (1 << imsic_file_num)) == 0 {
+                                        panic!("Injected interrupt, but no HGEI pending.");
+                                    }
+                                    if CSR.hip.read(hip::sgext) == 0 {
+                                        panic!("Injected interrupt, but no SG_EXT pending.");
+                                    }
                                 }
                                 _ => {
                                     continue;

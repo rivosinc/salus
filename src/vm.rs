@@ -11,7 +11,7 @@ use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
 use rice::x509::{request::CertReq, MAX_CSR_LEN};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
-use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Trap};
+use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Trap};
 use s_mode_utils::print::*;
 use sbi::{Error as SbiError, *};
 
@@ -133,6 +133,7 @@ pub enum VmExitCause {
     PageFault(Exception, GuestPageAddr),
     MmioFault(MmioOperation, GuestPhysAddr),
     Wfi(DecodedInstruction),
+    HostInterrupt(Interrupt),
     UnhandledTrap(u64),
 }
 
@@ -636,7 +637,18 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 VmCpuTrap::DelegatedException { exception, stval } => {
                     active_vcpu.inject_exception(exception, stval);
                 }
-                VmCpuTrap::Other(ref trap_csrs) => {
+                VmCpuTrap::SupervisorInterrupt(i) => {
+                    // All vCPU interrupts taken at HS are intended for the vCPU's host since Salus
+                    // itself doesn't expect any interrupts. At the moment, the only such interrupts
+                    // we expect are timers.
+                    if matches!(i, Interrupt::SupervisorTimer) {
+                        break VmExitCause::HostInterrupt(i);
+                    } else {
+                        println!("Unexpected guest interrupt {:?}", i);
+                        break VmExitCause::UnhandledTrap(Trap::Interrupt(i).to_scause());
+                    }
+                }
+                VmCpuTrap::OtherException(ref trap_csrs) => {
                     println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
                     break VmExitCause::UnhandledTrap(trap_csrs.scause);
                 }

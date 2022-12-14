@@ -87,17 +87,20 @@ pub struct VmCpuExtInterrupts {
     imsic_location: ImsicLocation,
     sw_file: SwFile,
     allowed_ids: AllowList,
+    num_guests: usize,
 }
 
 impl VmCpuExtInterrupts {
     /// Creates a new `VmCpuExtInterrupts` to track the external interrupt state of a vCPU with
-    /// `imsic_location` as the location of the vCPU's virtualized IMSIC.
-    pub fn new(imsic_location: ImsicLocation) -> Self {
+    /// `imsic_location` as the location of the vCPU's virtualized IMSIC and `num_guests` as the
+    /// number of virtualized guest interrupt files.
+    pub fn new(imsic_location: ImsicLocation, num_guests: usize) -> Self {
         Self {
             bind_status: BindStatus::Unbound,
             imsic_location,
             sw_file: SwFile::new(),
             allowed_ids: AllowList::new(Imsic::get().interrupt_ids()),
+            num_guests,
         }
     }
 
@@ -315,5 +318,10 @@ impl VmCpuExtInterrupts {
             }
         }
         Ok(())
+    }
+
+    /// Returns the number of guest interrupt files this vCPU has.
+    pub fn num_guests(&self) -> usize {
+        self.num_guests
     }
 }

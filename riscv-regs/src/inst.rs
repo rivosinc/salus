@@ -2598,6 +2598,7 @@ pub const CSR_HIE: u16 = 0x604;
 pub const CSR_HTIMEDELTA: u16 = 0x605;
 pub const CSR_HCOUNTEREN: u16 = 0x606;
 pub const CSR_HGEIE: u16 = 0x607;
+pub const CSR_HVICTL: u16 = 0x609;
 pub const CSR_HENVCFG: u16 = 0x60a;
 pub const CSR_HTVAL: u16 = 0x643;
 pub const CSR_HIP: u16 = 0x644;

@@ -306,6 +306,16 @@ register_bitfields![u64,
     ]
 ];
 
+// Hypervisor virtual interrupt control
+register_bitfields![u64,
+    pub hvictl [
+        iprio OFFSET(0) NUMBITS(8) [],
+        ipriom OFFSET(8) NUMBITS(1) [],
+        iid OFFSET(16) NUMBITS(12) [],
+        vti OFFSET(30) NUMBITS(1) [],
+    ]
+];
+
 // Faulting guest phsyical address.
 register_bitfields![u64,
     pub htval [

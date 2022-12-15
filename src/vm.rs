@@ -605,20 +605,22 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 VmCpuTrap::DelegatedException { exception, stval } => {
                     active_vcpu.inject_exception(exception, stval);
                 }
-                VmCpuTrap::SupervisorInterrupt(i) => {
-                    // All vCPU interrupts taken at HS are intended for the vCPU's host since Salus
-                    // itself doesn't expect any interrupts. At the moment, the only such interrupts
-                    // we expect are timers.
-                    if matches!(i, Interrupt::SupervisorTimer) {
-                        break VmExitCause::HostInterrupt(i);
-                    } else {
-                        println!("Unexpected guest interrupt {:?}", i);
-                        break VmExitCause::UnhandledTrap(Trap::Interrupt(i).to_scause());
-                    }
-                }
                 VmCpuTrap::OtherException(ref trap_csrs) => {
                     println!("Unhandled guest exit, SCAUSE = 0x{:08x}", trap_csrs.scause);
                     break VmExitCause::UnhandledTrap(trap_csrs.scause);
+                }
+                VmCpuTrap::HostInterrupt(i) => {
+                    break VmExitCause::HostInterrupt(i);
+                }
+                VmCpuTrap::InterruptEmulation => {
+                    // Need to re-run the vCPU to inject the interrupt.
+                    continue;
+                }
+                VmCpuTrap::OtherInterrupt(i) => {
+                    // We don't expect Salus to take external interrupt itself, so everything else
+                    // is considered unexpected.
+                    println!("Unexpected guest interrupt {:?}", i);
+                    break VmExitCause::UnhandledTrap(Trap::Interrupt(i).to_scause());
                 }
             }
         };

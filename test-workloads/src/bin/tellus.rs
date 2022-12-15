@@ -23,8 +23,9 @@ use core::arch::asm;
 use core::ops::Range;
 use device_tree::Fdt;
 use riscv_regs::{
-    hip, sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Readable,
-    RiscvCsrInterface, Trap, Writeable, CSR, CSR_CYCLE, CSR_HTINST, CSR_HTVAL,
+    hie, hip, sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt,
+    LocalRegisterCopy, Readable, RiscvCsrInterface, Trap, Writeable, CSR, CSR_CYCLE, CSR_HTINST,
+    CSR_HTVAL,
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
@@ -473,9 +474,24 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         CSR.hgeie.set(1 << imsic_file_num);
     }
 
-    // Test that a pending timer causes us to exit the guest.
+    // Test that a pending timer or external interruptcauses us to exit the guest.
     CSR.stimecmp.set(0);
-    CSR.sie.read_and_set_field(sie::stimer);
+    // EIDELIVERY = 1
+    CSR.siselect.set(0x70);
+    CSR.sireg.set(1);
+    // EITHRESHOLD = 0
+    CSR.siselect.set(0x72);
+    CSR.sireg.set(0);
+    // EIE0[1] = 1
+    CSR.siselect.set(0xc0);
+    CSR.sireg.read_and_set_bits(1 << 1);
+    // EIP0[1] = 1
+    CSR.siselect.set(0x80);
+    CSR.sireg.read_and_set_bits(1 << 1);
+    let mut sie = LocalRegisterCopy::new(0);
+    sie.modify(sie::stimer.val(1));
+    sie.modify(sie::sext.val(1));
+    CSR.sie.set(sie.get());
 
     let mut shared_mem_region: Option<Range<u64>> = None;
     let mut mmio_region: Option<Range<u64>> = None;
@@ -556,6 +572,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     if CSR.hip.read(hip::sgext) == 0 {
                                         panic!("Injected interrupt, but no SG_EXT pending.");
                                     }
+
+                                    // Now check if we can get an SG_EXT.
+                                    CSR.hie.read_and_set_field(hie::sgext);
                                 }
                                 _ => {
                                     continue;
@@ -661,6 +680,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 Trap::Interrupt(SupervisorTimer) => {
                     println!("Got our timer; turning it off now");
                     CSR.sie.read_and_clear_field(sie::stimer);
+                }
+                Trap::Interrupt(SupervisorExternal) => {
+                    println!("Got our external interrupt; turning it off now");
+                    CSR.sie.read_and_clear_field(sie::sext);
+                }
+                Trap::Interrupt(SupervisorGuestExternal) => {
+                    println!("Got a supervisor guest external interrupt; turning it off now");
+                    CSR.hie.read_and_clear_field(hie::sgext);
                 }
                 Trap::Interrupt(i) => {
                     println!("Unexpected interrupt {:?}", i);

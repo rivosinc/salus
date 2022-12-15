@@ -345,10 +345,15 @@ pub enum VmCpuTrap {
     },
     /// An exception which we expected to handle directly at VS, but trapped to HS instead.
     DelegatedException { exception: Exception, stval: u64 },
-    /// An interrupt taken to HS-level.
-    SupervisorInterrupt(Interrupt),
-    /// Everything else that we currently don't or can't handle.
+    /// Everything other exception that we currently don't or can't handle.
     OtherException(VmCpuTrapState),
+    /// An interrupt intended for the vCPU's host.
+    HostInterrupt(Interrupt),
+    /// An interrupt for the running vCPU that can't be delegated and must be injected. The
+    /// interrupt is injected the vCPU is run.
+    InterruptEmulation,
+    /// Unknown / unexpected interupt.
+    OtherInterrupt(Interrupt),
     // TODO: Add other exit causes as needed.
 }
 
@@ -460,6 +465,9 @@ pub trait HostVmCpu: VmCpuExitReporting {
     /// Returns a reference to the vCPU's VS-level CSRs.
     fn vs_csrs(&self) -> &GuestVsCsrs;
 
+    /// Returns a reference to the vCPU's virtual HS-level CSRs.
+    fn virtual_hs_csrs(&self) -> &GuestVirtualHsCsrs;
+
     /// Returns the guest interrupt file to which the vCPU is currently bound.
     fn bound_interrupt_file(&self) -> Option<ImsicFileId>;
 }
@@ -547,15 +555,42 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     pub fn run(&mut self) -> VmCpuTrap {
         self.complete_pending_mmio_op();
 
-        // Make sure we trap if the host has timer interrupts enabled.
-        if let VmCpuParent::HostVm(ref host_vcpu) = self.host_context {
-            let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
-            if host_sie.read(sie::stimer) != 0 {
-                CSR.sie.read_and_set_field(sie::stimer);
+        match self.host_context {
+            VmCpuParent::HostVm(ref host_vcpu) => {
+                // TODO: Consider bailing out early if any of the below host interrupts are pending.
+
+                // Make sure we trap if the host has timer interrupts enabled.
+                let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
+                if host_sie.read(sie::stimer) != 0 {
+                    CSR.sie.read_and_set_field(sie::stimer);
+                }
+                // Also trap if the host has external or guest external interrupts enabled.
+                // Both cases will trap as SG_EXT. We'll disambiguate later.
+                let host_hie = LocalRegisterCopy::new(host_vcpu.virtual_hs_csrs().hie);
+                if host_hie.read(hie::sgext) != 0 || host_sie.read(sie::sext) != 0 {
+                    CSR.hie.read_and_set_field(hie::sgext);
+                }
+            }
+            VmCpuParent::Tsm(_) => {
+                let hie = LocalRegisterCopy::new(self.arch.regs.virtual_hs_csrs.hie);
+                if hie.read(hie::sgext) != 0 {
+                    if CSR.hip.read(hip::sgext) != 0 {
+                        // SG_EXT is pending; inject it with HVICTL. Leave it disabled in HIE to avoid
+                        // trapping immediately once we enter the host VM.
+                        let mut hvictl = LocalRegisterCopy::new(0);
+                        hvictl.modify(hvictl::iid.val(Interrupt::SupervisorGuestExternal as u64));
+                        // We need VTI=1 to inject major interrupts, which in this case means we
+                        // may get some unnecessary traps.
+                        hvictl.modify(hvictl::vti.val(1));
+                        // Set IPRIOM=1 and IPRIO=0 to get the default priority.
+                        hvictl.modify(hvictl::ipriom.val(1));
+                        CSR.hvictl.set(hvictl.get());
+                    } else {
+                        CSR.hie.read_and_set_field(hie::sgext);
+                    }
+                }
             }
         }
-
-        // TODO: Inject an SG_EXT interrupt using HVICTL if we have one pending.
 
         let has_vector = CpuInfo::get().has_vector();
         let guest_id = self.vcpu.guest_id;
@@ -584,6 +619,8 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         regs.trap_csrs.htinst = CSR.htinst.get();
 
         CSR.sie.read_and_clear_field(sie::stimer);
+        CSR.hie.read_and_clear_field(hie::sgext);
+        CSR.hvictl.set(0);
 
         // Check if FPU state needs to be saved.
         let mut sstatus = LocalRegisterCopy::new(regs.guest_regs.sstatus);
@@ -604,6 +641,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
         // Determine the exit cause from the trap CSRs.
         use Exception::*;
+        use Interrupt::*;
         match Trap::from_scause(regs.trap_csrs.scause).unwrap() {
             Trap::Exception(VirtualSupervisorEnvCall) => {
                 let sbi_msg = SbiMessage::from_regs(regs.guest_regs.gprs.a_regs()).ok();
@@ -650,7 +688,26 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     VmCpuTrap::OtherException(regs.trap_csrs.clone())
                 }
             }
-            Trap::Interrupt(i) => VmCpuTrap::SupervisorInterrupt(i),
+            Trap::Interrupt(SupervisorTimer) => VmCpuTrap::HostInterrupt(SupervisorTimer),
+            Trap::Interrupt(SupervisorGuestExternal) => {
+                if let VmCpuParent::HostVm(ref host_vcpu) = self.host_context {
+                    // We may have gotten an SG_EXT because of an external interrupt directed at
+                    // our host VM. If so, that takes priority.
+                    let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
+                    if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits()) &&
+                        host_sie.read(sie::sext) != 0 &&
+                        (CSR.hgeip.get() & (1 << host_vgein)) != 0
+                    {
+                        VmCpuTrap::HostInterrupt(SupervisorExternal)
+                    } else {
+                        VmCpuTrap::HostInterrupt(SupervisorGuestExternal)
+                    }
+                } else {
+                    // We trapped because we need to emulate an SG_EXT for the host VM.
+                    VmCpuTrap::InterruptEmulation
+                }
+            }
+            Trap::Interrupt(i) => VmCpuTrap::OtherInterrupt(i),
         }
     }
 
@@ -900,6 +957,23 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     } else {
                         Ok(0)
                     }
+                }
+                // If the vCPU is getting an interrupt injected via HVICTL, we'll trap on accesses to
+                // SIE, SIP, and STIMECMP. Just forward the access to the appropriate VS-level CSR.
+                CSR_SIE => {
+                    let sie = CSR.vsie.get();
+                    CSR.vsie.set((sie & !mask) | (value & mask));
+                    Ok(sie)
+                }
+                CSR_SIP => {
+                    let sip = CSR.vsip.get();
+                    CSR.vsip.set((sip & !mask) | (value & mask));
+                    Ok(sip)
+                }
+                CSR_STIMECMP => {
+                    let stimecmp = CSR.vstimecmp.get();
+                    CSR.vstimecmp.set((stimecmp & !mask) | (value & mask));
+                    Ok(stimecmp)
                 }
                 _ => Err(Error::InvalidCsrAccess),
             }
@@ -1163,6 +1237,10 @@ impl<T: GuestStagePagingMode> HostVmCpu for ActiveVmCpu<'_, '_, '_, T> {
 
     fn vs_csrs(&self) -> &GuestVsCsrs {
         &self.arch.regs.vs_csrs
+    }
+
+    fn virtual_hs_csrs(&self) -> &GuestVirtualHsCsrs {
+        &self.arch.regs.virtual_hs_csrs
     }
 
     fn bound_interrupt_file(&self) -> Option<ImsicFileId> {

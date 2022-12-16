@@ -449,8 +449,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         - mem_map.regions().next().unwrap().base().bits();
 
     // Parse the user-mode ELF containing the user-mode task.
-    let user_elf = include_bytes!("../target/riscv64gc-unknown-none-elf/release/umode");
-    let user_map = ElfMap::new(user_elf).expect("Cannot load user-mode ELF");
+    let umode_bytes = include_bytes!("../target/riscv64gc-unknown-none-elf/release/umode");
+    let umode_elf = ElfMap::new(umode_bytes).expect("Cannot load user-mode ELF");
 
     println!("HW memory map:");
     for (i, r) in mem_map.regions().enumerate() {
@@ -463,8 +463,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         );
     }
 
-    println!("USER memory map:");
-    for (i, s) in user_map.segments().enumerate() {
+    println!("umode memory map:");
+    for (i, s) in umode_elf.segments().enumerate() {
         println!(
             "[{:02}] region: 0x{:016x} -> 0x{:016x}, {}",
             i,
@@ -474,8 +474,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         );
     }
 
-    // Create the hypervisor mapping starting from the hardware memory map.
-    let hyp_map = HypMap::new(mem_map, user_map);
+    // Create the hypervisor mapping from the hardware memory map and the U-mode ELF.
+    let hyp_map = HypMap::new(mem_map, umode_elf);
 
     // The hypervisor mapping is complete. Can setup paging structures now.
     setup_hyp_paging(hyp_map, &mut hyp_mem);

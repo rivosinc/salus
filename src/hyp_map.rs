@@ -11,21 +11,26 @@ use riscv_pages::{
 };
 use riscv_regs::{satp, LocalRegisterCopy, SatpHelpers};
 
-/// Maximum number of supervisor regions.
-const MAX_HYPMAP_SUPERVISOR_REGIONS: usize = 32;
-/// Maximum number of user regions.
-const MAX_HYPMAP_USER_REGIONS: usize = 32;
+// Maximum number of regions unique to every pagetable (private).
+const MAX_PRIVATE_REGIONS: usize = 32;
+// Maximum number of regions shared across all pagetables.
+const MAX_SHARED_REGIONS: usize = 32;
 
-/// Represents a virtual address region of the hypervisor with a fixed VA->PA Mapping.
-pub struct HypMapFixedRegion {
+// Private regions vector.
+type PrivateRegionsVec = ArrayVec<PrivateRegion, MAX_PRIVATE_REGIONS>;
+// Shared regions vector.
+type SharedRegionsVec = ArrayVec<SharedRegion, MAX_SHARED_REGIONS>;
+
+// Represents a virtual address region of the hypervisor that will be the same in all pagetables.
+struct SharedRegion {
     vaddr: PageAddr<SupervisorVirt>,
     paddr: PageAddr<SupervisorPhys>,
     page_count: usize,
     pte_fields: PteFieldBits,
 }
 
-impl HypMapFixedRegion {
-    // Create a supervisor VA region from a Hw Memory Map entry.
+impl SharedRegion {
+    // Create a shared region from a Hw Memory Map entry.
     fn from_hw_mem_region(r: &HwMemRegion) -> Option<Self> {
         let perms = match r.region_type() {
             HwMemRegionType::Available => {
@@ -87,8 +92,8 @@ impl HypMapFixedRegion {
             .zip(self.paddr.iter_from())
             .take(self.page_count)
         {
-            // Safe as we will create exactly one mapping to each page and will switch to
-            // using that mapping exclusively.
+            // Safety: all shared regions come from the HW memory map. we will create exactly one
+            // mapping for each page and will switch to using that mapping exclusively.
             unsafe {
                 mapper.map_addr(virt, phys, self.pte_fields).unwrap();
             }
@@ -96,8 +101,8 @@ impl HypMapFixedRegion {
     }
 }
 
-/// Represents a virtual address region that must be allocated and populated to be mapped.
-struct HypMapPopulatedRegion {
+// Represents a virtual address region that will point to different physical page on each pagetable.
+struct PrivateRegion {
     // The address space where this region starts.
     vaddr: PageAddr<SupervisorVirt>,
     // Number of bytes of the VA area
@@ -108,14 +113,14 @@ struct HypMapPopulatedRegion {
     data: Option<&'static [u8]>,
 }
 
-impl HypMapPopulatedRegion {
-    // Creates an user space virtual address region from a ELF segment.
-    fn from_user_elf_segment(seg: &ElfSegment<'static>) -> Option<Self> {
-        // Sanity Check for segment alignments.
+impl PrivateRegion {
+    // Creates a per-pagetable region from an U-mode ELF segment.
+    fn from_umode_elf_segment(seg: &ElfSegment<'static>) -> Option<Self> {
+        // Sanity check for segment alignments.
         //
         // In general ELF might have segments overlapping in the same page, possibly with different
         // permissions. In order to maintain separation and expected permissions on every page, the
-        // linker script for user ELF creates different segments at different pages. Failure to do so
+        // linker script for umode ELF creates different segments at different pages. Failure to do so
         // would make `map_range()` in `map()` fail.
         //
         // The following check enforces that the segment starts at a 4k page aligned address. Unless
@@ -131,7 +136,7 @@ impl HypMapPopulatedRegion {
         // Unwrap okay. `seg.vaddr()` has been checked to be 4k aligned.
         let vaddr = PageAddr::new(RawAddr::supervisor_virt(seg.vaddr())).unwrap();
         let pte_fields = PteFieldBits::leaf_with_perms(pte_perms);
-        Some(HypMapPopulatedRegion {
+        Some(Self {
             vaddr,
             size: seg.size(),
             pte_fields,
@@ -165,8 +170,9 @@ impl HypMapPopulatedRegion {
             .zip(pages.base().iter_from())
             .take(page_count as usize)
         {
-            // Safe because these pages are mapped into user mode and will not be accessed in
-            // supervisor mode.
+            // Safety: all per-pagetable regions are user mappings. User mappings are not considered
+            // aliases because they cannot be accessed by supervisor mode directly (sstatus.SUM needs
+            // to be 1).
             unsafe {
                 mapper.map_addr(virt, phys, self.pte_fields).unwrap();
             }
@@ -190,33 +196,33 @@ impl HypPageTable {
 
 /// A set of global mappings of the hypervisor that can be used to create page tables.
 pub struct HypMap {
-    supervisor_regions: ArrayVec<HypMapFixedRegion, MAX_HYPMAP_SUPERVISOR_REGIONS>,
-    user_regions: ArrayVec<HypMapPopulatedRegion, MAX_HYPMAP_USER_REGIONS>,
+    shared_regions: SharedRegionsVec,
+    private_regions: PrivateRegionsVec,
 }
 
 impl HypMap {
-    /// Create a new hypervisor map from a hardware memory mem map.
-    pub fn new(mem_map: HwMemMap, user_map: ElfMap<'static>) -> HypMap {
-        // All supervisor regions comes from the HW memory map.
-        let supervisor_regions = mem_map
+    /// Create a new hypervisor map from a hardware memory mem map and a umode ELF.
+    pub fn new(mem_map: HwMemMap, umode_elf: ElfMap<'static>) -> HypMap {
+        // All shared mappings come from the HW Memory Map.
+        let shared_regions = mem_map
             .regions()
-            .filter_map(HypMapFixedRegion::from_hw_mem_region)
+            .filter_map(SharedRegion::from_hw_mem_region)
             .collect();
-        // All user regions come from the ELF segment.
-        let user_regions = user_map
+        // All private mappings come from the U-mode ELF.
+        let private_regions = umode_elf
             .segments()
-            .filter_map(HypMapPopulatedRegion::from_user_elf_segment)
+            .filter_map(PrivateRegion::from_umode_elf_segment)
             .collect();
         HypMap {
-            supervisor_regions,
-            user_regions,
+            shared_regions,
+            private_regions,
         }
     }
 
     /// Create a new page table based on this memory map.
     pub fn new_page_table(&self, hyp_mem: &mut HypPageAlloc) -> HypPageTable {
         // Create empty sv48 page table
-        // Unwrap okay: we expect to have at least one page free or not much will happen anyway.
+        // Unwrap okay: we expect to have at least one page free.
         let root_page = hyp_mem
             .take_pages_for_hyp_state(1)
             .into_iter()
@@ -224,15 +230,14 @@ impl HypMap {
             .unwrap();
         let sv48: FirstStagePageTable<Sv48> =
             FirstStagePageTable::new(root_page).expect("creating first sv48");
-
-        // Map supervisor regions
-        for r in &self.supervisor_regions {
+        // Map regions shared across all pagetables.
+        for r in &self.shared_regions {
             r.map(&sv48, &mut || {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             });
         }
-        // Map user regions.
-        for r in &self.user_regions {
+        // Map regions unique to a pagetable.
+        for r in &self.private_regions {
             r.map(&sv48, hyp_mem);
         }
         HypPageTable { inner: sv48 }

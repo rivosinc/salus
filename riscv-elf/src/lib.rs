@@ -311,18 +311,20 @@ impl<'elf> ElfMap<'elf> {
             if ph.p_type != PT_LOAD {
                 continue;
             }
-            // Create a segment from the PH.
-            let data_size = ph.p_filesz as usize;
-            let data = if data_size > 0 {
-                Some(slice_get_range(bytes, ph.p_offset, data_size).ok_or(Error::BadOffset)?)
-            } else {
-                None
-            };
-            let vaddr = ph.p_vaddr;
-            let size = ph.p_memsz as usize;
-            let flags = ph.p_flags;
-            let segment = ElfSegment::new(data, vaddr, size, flags)?;
-            segments.push(segment);
+            if ph.p_memsz != 0 {
+                // Create a segment from the PH.
+                let data_size = ph.p_filesz as usize;
+                let data = if data_size > 0 {
+                    Some(slice_get_range(bytes, ph.p_offset, data_size).ok_or(Error::BadOffset)?)
+                } else {
+                    None
+                };
+                let vaddr = ph.p_vaddr;
+                let size = ph.p_memsz as usize;
+                let flags = ph.p_flags;
+                let segment = ElfSegment::new(data, vaddr, size, flags)?;
+                segments.push(segment);
+            }
         }
         Ok(Self {
             entry: header.e_entry,
@@ -370,7 +372,13 @@ mod tests {
         }
     }
 
-    fn build_ph(p_type: u32, p_flags: u32, p_offset: usize, p_filesz: u64) -> ElfProgramHeader64 {
+    fn build_ph(
+        p_type: u32,
+        p_flags: u32,
+        p_offset: usize,
+        p_filesz: u64,
+        p_memsz: u64,
+    ) -> ElfProgramHeader64 {
         ElfProgramHeader64 {
             p_type,
             p_flags,
@@ -378,7 +386,7 @@ mod tests {
             p_vaddr: 0,
             p_paddr: 0,
             p_filesz,
-            p_memsz: 0,
+            p_memsz,
             p_align: 0,
         }
     }
@@ -423,7 +431,7 @@ mod tests {
         }
         {
             // Create an elf with a non-loadable PH.
-            let ph = build_ph(0 /* PT_NULL */, 0, HEADER_SIZE + PH_SIZE, 10);
+            let ph = build_ph(0 /* PT_NULL */, 0, HEADER_SIZE + PH_SIZE, 10, 10);
             let mut header = build_header();
             // add a PH, right after header.
             header.e_phnum = 1;
@@ -437,8 +445,23 @@ mod tests {
             assert!(map.segments().next().is_none());
         }
         {
+            // Create an elf with a PH with an zero-sized segment.
+            let ph = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE, 0, 0);
+            let mut header = build_header();
+            // add a PH, right after header.
+            header.e_phnum = 1;
+            header.e_phoff = ElfOffset64::from(HEADER_SIZE);
+            set_header(&mut bytes, &header);
+            set_ph(&mut bytes, HEADER_SIZE, &ph);
+            let rc = ElfMap::new(&bytes);
+            // This should succeed and there should be no segment.
+            assert!(rc.is_ok());
+            let map = rc.unwrap();
+            assert!(map.segments().next().is_none());
+        }
+        {
             // Create an elf with a PH with no data.
-            let ph = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE, 0);
+            let ph = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE, 0, 10);
             let mut header = build_header();
             // add a PH, right after header.
             header.e_phnum = 1;
@@ -456,8 +479,8 @@ mod tests {
         }
         {
             // Create an elf with one non-loadable PH and one loadable.
-            let ph1 = build_ph(0 /* PT_NULL */, 0, HEADER_SIZE + PH_SIZE * 2, 9);
-            let ph2 = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE * 2 + 9, 11);
+            let ph1 = build_ph(0 /* PT_NULL */, 0, HEADER_SIZE + PH_SIZE * 2, 9, 9);
+            let ph2 = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE * 2 + 9, 11, 11);
             let mut header = build_header();
             // add PHs, right after header.
             header.e_phnum = 2;
@@ -477,8 +500,8 @@ mod tests {
         }
         {
             // Create an elf with two loadable segments.
-            let ph1 = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE * 2, 9);
-            let ph2 = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE * 2 + 9, 11);
+            let ph1 = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE * 2, 9, 9);
+            let ph2 = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE * 2 + 9, 11, 11);
             let mut header = build_header();
             // add PHs, right after header.
             header.e_phnum = 2;
@@ -501,7 +524,7 @@ mod tests {
         }
         {
             // Create an elf with a single PH with an offset outside the file.
-            let ph = build_ph(PT_LOAD, PF_R, bytes.len(), 10);
+            let ph = build_ph(PT_LOAD, PF_R, bytes.len(), 10, 10);
             let mut header = build_header();
             // add a PH, right after header.
             header.e_phnum = 1;
@@ -514,7 +537,13 @@ mod tests {
         }
         {
             // Create an elf with a single PH with a size that goes over the end of file.
-            let ph = build_ph(PT_LOAD, PF_R, HEADER_SIZE + PH_SIZE, bytes.len() as u64);
+            let ph = build_ph(
+                PT_LOAD,
+                PF_R,
+                HEADER_SIZE + PH_SIZE,
+                bytes.len() as u64,
+                bytes.len() as u64,
+            );
             let mut header = build_header();
             // add a PH, right after header.
             header.e_phnum = 1;

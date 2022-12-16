@@ -6,7 +6,7 @@ A micro hypervisor for RISC-V systems.
 
 ```
 rustup target add riscv64gc-unknown-none-elf
-cargo build
+make salus
 ```
 
 Note that Salus relies on unstable features from the nightly toolchain so there
@@ -15,7 +15,7 @@ should you run into build failures.
 
 ## Running
 
-There is a `Makefile` provided with targets for running various hosts in QEMU.
+The `Makefile` provides targets for running various hosts in QEMU.
 
 ### Prerequisites
 
@@ -104,7 +104,7 @@ make run_debian ... \
 
 A pair of test VMs are located in `test-workloads`.
 
-`tellus` is a target build with `cargo build --bin=tellus` that runs in VS mode
+`tellus` is a target build with `make tellus` that runs in VS mode
 and provides the ability to send test API calls to `salus` running in HS mode.
 
 `guestvm` is a test confidential guest. It is started by `tellus` and used for

@@ -232,7 +232,7 @@ pub struct HypMap {
 
 impl HypMap {
     // Create a new hypervisor map from a hardware memory mem map and a umode ELF.
-    pub fn new(mem_map: HwMemMap, umode_elf: ElfMap<'static>) -> Result<HypMap, Error> {
+    pub fn new(mem_map: HwMemMap, umode_elf: &ElfMap<'static>) -> Result<HypMap, Error> {
         // All shared mappings come from the HW Memory Map.
         let shared_regions = mem_map
             .regions()

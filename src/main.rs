@@ -31,6 +31,7 @@ mod host_vm;
 mod hyp_map;
 mod smp;
 mod trap;
+mod umode;
 mod vm;
 mod vm_cpu;
 mod vm_id;
@@ -60,6 +61,7 @@ use s_mode_utils::print::*;
 use s_mode_utils::sbi_console::SbiConsoleV01;
 use smp::PerCpu;
 use spin::Once;
+use umode::UmodeTask;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -475,7 +477,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     }
 
     // Create the hypervisor mapping from the hardware memory map and the U-mode ELF.
-    let hyp_map = HypMap::new(mem_map, umode_elf).expect("Cannot create Hypervisor map.");
+    let hyp_map = HypMap::new(mem_map, &umode_elf).expect("Cannot create Hypervisor map.");
 
     // The hypervisor mapping is complete. Can setup paging structures now.
     setup_hyp_paging(hyp_map, &mut hyp_mem);
@@ -494,6 +496,18 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             println!("Failed to probe IOMMU: {:?}", e);
         }
     };
+
+    // Initialize global Umode state.
+    UmodeTask::init(umode_elf);
+    // Setup U-mode task for this CPU.
+    UmodeTask::setup_this_cpu();
+
+    // Simple test: run U-mode until the first `ecall`.
+    UmodeTask::get()
+        .activate()
+        .expect("Could not activate U-mode")
+        .run()
+        .unwrap();
 
     // Now load the host VM.
     let host = HostVmLoader::new(
@@ -535,6 +549,15 @@ extern "C" fn secondary_init(_hart_id: u64) {
 
     let me = PerCpu::this_cpu();
     me.set_online();
+
+    // Setup U-mode task for this CPU.
+    UmodeTask::setup_this_cpu();
+    // Simple test: run U-mode until the first `ecall`.
+    UmodeTask::get()
+        .activate()
+        .expect("Could not activate U-mode")
+        .run()
+        .unwrap();
 
     HOST_VM.wait().run(me.cpu_id().raw() as u64);
     poweroff();

@@ -21,6 +21,15 @@ type PrivateRegionsVec = ArrayVec<PrivateRegion, MAX_PRIVATE_REGIONS>;
 // Shared regions vector.
 type SharedRegionsVec = ArrayVec<SharedRegion, MAX_SHARED_REGIONS>;
 
+/// Errors returned by HypMap.
+#[derive(Debug)]
+pub enum Error {
+    /// U-mode ELF segment is not page aligned.
+    ElfUnalignedSegment,
+    /// U-mode ELF segment is not in U-mode VA area.
+    ElfInvalidAddress,
+}
+
 // Represents a virtual address region of the hypervisor that will be the same in all pagetables.
 struct SharedRegion {
     vaddr: PageAddr<SupervisorVirt>,
@@ -101,6 +110,23 @@ impl SharedRegion {
     }
 }
 
+// U-mode mappings start here.
+const UMODE_VA_START: u64 = 0xffffffff00000000;
+// Size in bytes of the U-mode VA area.
+const UMODE_VA_SIZE: u64 = 128 * 1024 * 1024;
+// U-mode mappings end here.
+const UMODE_VA_END: u64 = UMODE_VA_START + UMODE_VA_SIZE;
+
+// Returns true if `addr` is contained in the U-mode VA area.
+fn is_umode_addr(addr: u64) -> bool {
+    (UMODE_VA_START..UMODE_VA_END).contains(&addr)
+}
+
+// Returns true if (`addr`, `addr` + `len`) is a valid non-empty range in the VA area.
+fn is_valid_umode_range(addr: u64, len: usize) -> bool {
+    len != 0 && is_umode_addr(addr) && is_umode_addr(addr + len as u64 - 1)
+}
+
 // Represents a virtual address region that will point to different physical page on each pagetable.
 struct PrivateRegion {
     // The address space where this region starts.
@@ -115,7 +141,7 @@ struct PrivateRegion {
 
 impl PrivateRegion {
     // Creates a per-pagetable region from an U-mode ELF segment.
-    fn from_umode_elf_segment(seg: &ElfSegment<'static>) -> Option<Self> {
+    fn from_umode_elf_segment(seg: &ElfSegment<'static>) -> Result<Self, Error> {
         // Sanity check for segment alignments.
         //
         // In general ELF might have segments overlapping in the same page, possibly with different
@@ -125,9 +151,13 @@ impl PrivateRegion {
         //
         // The following check enforces that the segment starts at a 4k page aligned address. Unless
         // the linking is completely corrupt, this also means that it starts at a different page.
-        // Assert is okay. This is a build error.
-        assert!(PageSize::Size4k.is_aligned(seg.vaddr()));
-
+        if !PageSize::Size4k.is_aligned(seg.vaddr()) {
+            return Err(Error::ElfUnalignedSegment);
+        }
+        // Sanity check for VA area of the segment.
+        if !is_valid_umode_range(seg.vaddr(), seg.size()) {
+            return Err(Error::ElfInvalidAddress);
+        }
         let pte_perms = match seg.perms() {
             ElfSegmentPerms::ReadOnly => PteLeafPerms::UR,
             ElfSegmentPerms::ReadWrite => PteLeafPerms::URW,
@@ -136,7 +166,7 @@ impl PrivateRegion {
         // Unwrap okay. `seg.vaddr()` has been checked to be 4k aligned.
         let vaddr = PageAddr::new(RawAddr::supervisor_virt(seg.vaddr())).unwrap();
         let pte_fields = PteFieldBits::leaf_with_perms(pte_perms);
-        Some(Self {
+        Ok(Self {
             vaddr,
             size: seg.size(),
             pte_fields,
@@ -201,8 +231,8 @@ pub struct HypMap {
 }
 
 impl HypMap {
-    /// Create a new hypervisor map from a hardware memory mem map and a umode ELF.
-    pub fn new(mem_map: HwMemMap, umode_elf: ElfMap<'static>) -> HypMap {
+    // Create a new hypervisor map from a hardware memory mem map and a umode ELF.
+    pub fn new(mem_map: HwMemMap, umode_elf: ElfMap<'static>) -> Result<HypMap, Error> {
         // All shared mappings come from the HW Memory Map.
         let shared_regions = mem_map
             .regions()
@@ -211,12 +241,12 @@ impl HypMap {
         // All private mappings come from the U-mode ELF.
         let private_regions = umode_elf
             .segments()
-            .filter_map(PrivateRegion::from_umode_elf_segment)
-            .collect();
-        HypMap {
+            .map(PrivateRegion::from_umode_elf_segment)
+            .collect::<Result<_, _>>()?;
+        Ok(HypMap {
             shared_regions,
             private_regions,
-        }
+        })
     }
 
     /// Create a new page table based on this memory map.

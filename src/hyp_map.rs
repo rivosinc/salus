@@ -10,6 +10,7 @@ use riscv_pages::{
     InternalClean, Page, PageAddr, PageSize, RawAddr, SupervisorPhys, SupervisorVirt,
 };
 use riscv_regs::{satp, LocalRegisterCopy, SatpHelpers};
+use spin::Once;
 
 // Maximum number of regions unique to every pagetable (private).
 const MAX_PRIVATE_REGIONS: usize = 32;
@@ -224,6 +225,9 @@ impl HypPageTable {
     }
 }
 
+// Global reference to the Hypervisor Map.
+static HYPMAP: Once<HypMap> = Once::new();
+
 /// A set of global mappings of the hypervisor that can be used to create page tables.
 pub struct HypMap {
     shared_regions: SharedRegionsVec,
@@ -232,7 +236,7 @@ pub struct HypMap {
 
 impl HypMap {
     // Create a new hypervisor map from a hardware memory mem map and a umode ELF.
-    pub fn new(mem_map: HwMemMap, umode_elf: &ElfMap<'static>) -> Result<HypMap, Error> {
+    pub fn init(mem_map: HwMemMap, umode_elf: &ElfMap<'static>) -> Result<(), Error> {
         // All shared mappings come from the HW Memory Map.
         let shared_regions = mem_map
             .regions()
@@ -243,10 +247,18 @@ impl HypMap {
             .segments()
             .map(PrivateRegion::from_umode_elf_segment)
             .collect::<Result<_, _>>()?;
-        Ok(HypMap {
+        let hypmap = HypMap {
             shared_regions,
             private_regions,
-        })
+        };
+        HYPMAP.call_once(|| hypmap);
+        Ok(())
+    }
+
+    /// Get the global reference to the Hypervisor Map.
+    pub fn get() -> &'static HypMap {
+        // Unwrap okay. This must be called after `init`.
+        HYPMAP.get().unwrap()
     }
 
     /// Create a new page table based on this memory map.

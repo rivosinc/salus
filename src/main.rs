@@ -200,21 +200,6 @@ fn find_available_region(mem_map: &HwMemMap, size: u64) -> Option<SupervisorPage
         .map(|r| r.base())
 }
 
-// Creates the Sv48 page table based on the accessible regions of memory in the provided memory
-// map.
-fn setup_hyp_paging(hyp_map: HypMap, hyp_mem: &mut HypPageAlloc) {
-    // Create per-cpu page tables.
-    let cpu_info = CpuInfo::get();
-    for i in 0..cpu_info.num_cpus() {
-        let page_table = hyp_map.new_page_table(hyp_mem);
-        PerCpu::set_cpu_page_table(CpuId::new(i), page_table);
-    }
-    // Load the page-tables in this cpu.
-    let page_table = PerCpu::this_cpu().page_table();
-    CSR.satp.set(page_table.satp());
-    tlb::sfence_vma(None, None);
-}
-
 /// Creates a heap from the given `mem_map`, marking the region occupied by the heap as reserved.
 fn create_heap(mem_map: &mut HwMemMap) {
     const HEAP_SIZE: u64 = 16 * 1024 * 1024;
@@ -477,10 +462,19 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     }
 
     // Create the hypervisor mapping from the hardware memory map and the U-mode ELF.
-    let hyp_map = HypMap::new(mem_map, &umode_elf).expect("Cannot create Hypervisor map.");
+    HypMap::init(mem_map, &umode_elf).expect("Cannot create Hypervisor map.");
 
-    // The hypervisor mapping is complete. Can setup paging structures now.
-    setup_hyp_paging(hyp_map, &mut hyp_mem);
+    // Create per-cpu page tables.
+    let cpu_info = CpuInfo::get();
+    for i in 0..cpu_info.num_cpus() {
+        let page_table = HypMap::get().new_page_table(&mut hyp_mem);
+        PerCpu::set_cpu_page_table(CpuId::new(i), page_table);
+    }
+
+    // Load the page-tables in this cpu.
+    let page_table = PerCpu::this_cpu().page_table();
+    CSR.satp.set(page_table.satp());
+    tlb::sfence_vma(None, None);
 
     // Find and initialize the IOMMU.
     match Iommu::probe_from(PcieRoot::get(), &mut || {

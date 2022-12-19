@@ -330,16 +330,30 @@ impl DeviceTreeNode {
         self.children.retain(|&i| i != child);
     }
 
-    fn fmt_in(&self, tree: &DeviceTree, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        // TODO: Use identation to make this prettier.
+    fn fmt_indent(f: &mut fmt::Formatter, indent: usize) -> result::Result<(), fmt::Error> {
+        for _ in 0..indent {
+            write!(f, "  ")?;
+        }
+        Ok(())
+    }
+
+    fn fmt_in(
+        &self,
+        tree: &DeviceTree,
+        f: &mut fmt::Formatter,
+        indent: usize,
+    ) -> result::Result<(), fmt::Error> {
+        Self::fmt_indent(f, indent)?;
         writeln!(f, "{} {{", self.name())?;
         for p in self.props() {
+            Self::fmt_indent(f, indent + 1)?;
             writeln!(f, "{p}")?;
         }
         for &n in self.children() {
             let node = tree.get_node(n).unwrap();
-            node.fmt_in(tree, f)?;
+            node.fmt_in(tree, f, indent + 1)?;
         }
+        Self::fmt_indent(f, indent)?;
         writeln!(f, "}}")
     }
 }
@@ -551,7 +565,7 @@ impl fmt::Display for DeviceTree {
             Some(r) => {
                 let node = self.get_node(r).unwrap();
                 write!(f, "\\")?;
-                node.fmt_in(self, f)
+                node.fmt_in(self, f, 0)
             }
             None => write!(f, "empty"),
         }

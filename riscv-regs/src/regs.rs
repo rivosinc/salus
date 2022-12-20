@@ -113,6 +113,11 @@ impl GeneralPurposeRegisters {
     pub fn a_regs(&self) -> &[u64] {
         &self.0[GprIndex::A0 as usize..=GprIndex::A7 as usize]
     }
+
+    /// Returns the arguments register as a mutable.
+    pub fn a_regs_mut(&mut self) -> &mut [u64] {
+        &mut self.0[GprIndex::A0 as usize..=GprIndex::A7 as usize]
+    }
 }
 
 /// The (double-precision) floating point register file. We don't expect to directly interact

@@ -287,6 +287,8 @@ pub enum PmuEventType {
     Hardware(PmuHardware),
     /// Represents the hardware cache events (type #1) in the SBI documentation.
     Cache(PmuHwCacheParams),
+    /// Represents a raw event (type #2) in the SBI documentation
+    RawEvent,
     /// Represents the firmware events (type #15) in the SBI documentation.
     Firmware(PmuFirmware),
 }
@@ -302,11 +304,13 @@ impl PmuEventType {
     /// Returns the encoded representation of the type.
     pub fn raw(&self) -> u64 {
         const HARDWARE_CACHE_EVENT_TYPE: u64 = 1;
+        const HARDWARE_RAW_EVENT_TYPE: u64 = 2;
         const FIRMWARE_EVENT_TYPE: u64 = 0xF;
         use PmuEventType::*;
         match self {
             Hardware(p) => *p as u64,
             Cache(p) => p.raw() | (HARDWARE_CACHE_EVENT_TYPE << EVENT_TYPE_SHIFT),
+            RawEvent => HARDWARE_RAW_EVENT_TYPE << EVENT_TYPE_SHIFT,
             Firmware(p) => *p as u64 | (FIRMWARE_EVENT_TYPE << EVENT_TYPE_SHIFT),
         }
     }
@@ -322,6 +326,7 @@ impl PmuEventType {
             1 => Ok(Cache(PmuHwCacheParams::from_raw_value(
                 value & EVENT_TYPE_INVERSE_MASK,
             )?)),
+            2 if (value & EVENT_TYPE_INVERSE_MASK) == 0 => Ok(RawEvent),
             0xF => Ok(Firmware(PmuFirmware::from_raw_value(
                 value & EVENT_TYPE_INVERSE_MASK,
             )?)),

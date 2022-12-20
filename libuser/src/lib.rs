@@ -6,7 +6,7 @@
 
 use core::arch::{asm, global_asm};
 
-global_asm!(include_str!("task_start.S"));
+global_asm!(include_str!("start.S"));
 
 // Loop making ecalls as the kernel will kill the task on an ecall (the only syscall supported is
 // `exit`).

@@ -31,6 +31,7 @@ riscv_page_tables = { path = "./riscv-page-tables" }
 riscv_pages = { path = "./riscv-pages" }
 riscv_regs = { path = "./riscv-regs" }
 s_mode_utils = { path = "./s-mode-utils" }
+u_mode_api = { path = "./u-mode-api" }
 sbi = { path = "./sbi" }
 spin = { version = "*", default-features = false }
 sha2 = {version = "0.10", default-features = false }

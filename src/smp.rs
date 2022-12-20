@@ -28,7 +28,7 @@ pub struct PerCpu {
     cpu_id: CpuId,
     vmid_tracker: RefCell<VmIdTracker>,
     page_table: Once<HypPageTable>,
-    umode_task: Once<UmodeTask>,
+    umode_task: Once<RefCell<UmodeTask>>,
     online: Once<bool>,
 }
 
@@ -137,7 +137,7 @@ impl PerCpu {
 
     /// Set the CPU umode task (once). Must be called after `PerCpu::init()`.
     pub fn set_umode_task(&self, umode_task: UmodeTask) {
-        self.umode_task.call_once(|| umode_task);
+        self.umode_task.call_once(|| RefCell::new(umode_task));
     }
 
     /// Get the CPU page table. Must be called after `set_cpu_page_table` has been called for this
@@ -149,9 +149,9 @@ impl PerCpu {
 
     /// Get the  CPU umode structure. Must be  called after `set_umode_task` has been  called for this
     /// cpu.
-    pub fn umode_task(&self) -> &UmodeTask {
+    pub fn umode_task_mut(&self) -> RefMut<UmodeTask> {
         // Unwrap okay: this is called after `set_umode_task`
-        self.umode_task.get().unwrap()
+        self.umode_task.get().unwrap().borrow_mut()
     }
 
     /// Returns a mutable reference to this CPU's VMID tracker.

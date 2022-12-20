@@ -5,15 +5,16 @@
 use crate::smp::PerCpu;
 
 use core::arch::global_asm;
-use core::cell::{RefCell, RefMut};
 use core::fmt;
 use core::mem::size_of;
+use core::ops::ControlFlow;
 use memoffset::offset_of;
 use riscv_elf::ElfMap;
 use riscv_regs::Exception::UserEnvCall;
 use riscv_regs::{GeneralPurposeRegisters, GprIndex, Readable, Trap, CSR};
 use s_mode_utils::print::*;
 use spin::Once;
+use u_mode_api::{Error as UmodeApiError, HypCall, TryIntoRegisters, UmodeRequest};
 
 /// Host GPR and which must be saved/restored when entering/exiting U-mode.
 #[derive(Default)]
@@ -231,81 +232,111 @@ global_asm!(
 pub enum Error {
     /// Received an unexpected trap while running Umode.
     UnexpectedTrap,
-    /// Task already active.
-    TaskBusy,
+    /// Umode called panic.
+    Panic,
+    /// Error in umode.
+    Umode(UmodeApiError),
 }
 
 // Entry for umode task.
 static UMODE_ENTRY: Once<u64> = Once::new();
 
-/// Represents a U-mode state with its running context.
+/// Represents a per-CPU U-mode task.
 pub struct UmodeTask {
-    arch: RefCell<UmodeCpuArchState>,
+    arch: UmodeCpuArchState,
 }
 
 impl UmodeTask {
-    /// Initialize U-mode tasks. Must be called once bofore `setup_this_cpu()`.
+    /// Initialize U-mode tasks. Must be called once before `setup_this_cpu()`.
     pub fn init(umode_elf: ElfMap) {
         UMODE_ENTRY.call_once(|| umode_elf.entry());
         // Consumes the ElfMap.
     }
 
-    /// Initialize a new U-mode task. Must be called once on each physical CPU.
-    pub fn setup_this_cpu() {
+    /// Initialize this CPU's U-mode task. Must be called once on each physical CPU.
+    pub fn setup_this_cpu() -> Result<(), Error> {
+        let this_cpu = PerCpu::this_cpu();
+        // Initialize umode CPU state to run at ELF entry.
         let mut arch = UmodeCpuArchState::default();
-        // sstatus set to 0 (by default) is actually okay.
         // Unwrap okay: this is called after `Self::init()`.
         arch.umode_regs.sepc = *UMODE_ENTRY.get().unwrap();
-        let task = UmodeTask {
-            arch: RefCell::new(arch),
-        };
-        // Install umode in the current cpu.
+        // Set cpu id as a0.
+        arch.umode_regs
+            .gprs
+            .set_reg(GprIndex::A0, this_cpu.cpu_id().raw() as u64);
+        // sstatus set to 0 (by default) is actually okay.
+        let mut task = UmodeTask { arch };
+        // Run task until it initializes itself and calls HypCall::NextOp().
+        task.run()?;
+        // Install umode cpu state in the current cpu.
         PerCpu::this_cpu().set_umode_task(task);
+        Ok(())
     }
 
-    /// Return this CPU's task. Must be call after `Self::setup_this_cpu()`.
-    pub fn get() -> &'static UmodeTask {
-        PerCpu::this_cpu().umode_task()
+    /// Send a request and execute U-mode until an error is returned.
+    pub fn send_req(req: UmodeRequest) -> Result<(), Error> {
+        let mut task = PerCpu::this_cpu().umode_task_mut();
+        req.to_registers(task.arch.umode_regs.gprs.a_regs_mut());
+        task.run()
+        // TODO: In case of `Panic` or `UnexpectedTrap`, the u-mode
+        // process is to be considered in an unrecoverable
+        // state. Restore memory and re-initialize it here. Then
+        // return the error.
     }
 
-    /// Activate this umode in order to run it.
-    pub fn activate(&self) -> Result<ActiveUmodeTask, Error> {
-        let arch = self.arch.try_borrow_mut().map_err(|_| Error::TaskBusy)?;
-        Ok(ActiveUmodeTask { arch })
-    }
-}
-
-/// Represents a U-mode that is running or runnable. Not at initial state.
-pub struct ActiveUmodeTask<'act> {
-    arch: RefMut<'act, UmodeCpuArchState>,
-}
-
-impl<'act> ActiveUmodeTask<'act> {
-    /// Run `umode` until completion or error.
-    pub fn run(&mut self) -> Result<(), Error> {
-        self.run_to_exit();
-        match Trap::from_scause(self.arch.trap_csrs.scause).unwrap() {
-            Trap::Exception(UserEnvCall) => {
-                // Exit on ecall.
-                println!("U-mode ecall!");
-                println!("{}", self.arch);
-                Ok(())
+    fn handle_ecall(&mut self) -> ControlFlow<Result<(), Error>> {
+        let regs = self.arch.umode_regs.gprs.a_regs();
+        let cflow = match HypCall::try_from_registers(regs) {
+            Ok(hypercall) => match hypercall {
+                HypCall::Panic => {
+                    println!("U-mode panic!");
+                    println!("{}", self.arch);
+                    ControlFlow::Break(Err(Error::Panic))
+                }
+                HypCall::PutChar(byte) => {
+                    if let Some(c) = char::from_u32(byte as u32) {
+                        print!("{}", c);
+                    }
+                    // No return. Leave umode registers untouched and return.
+                    ControlFlow::Continue(())
+                }
+                HypCall::NextOp(result) => ControlFlow::Break(result.map_err(Error::Umode)),
+            },
+            Err(err) => {
+                // Hypervisor could not parse the hypercall. Stop running umode and return error.
+                ControlFlow::Break(Err(Error::Umode(err)))
             }
-            _ => {
-                println!("{}", self.arch);
-                Err(Error::UnexpectedTrap)
-            }
-        }
+        };
+        // Increase SEPC to skip ecall on entry.
+        self.arch.umode_regs.sepc += 4;
+        cflow
     }
 
     /// Run until it exits
     fn run_to_exit(&mut self) {
         unsafe {
             // Safe to run umode code as it only touches memory assigned to it through umode mappings.
-            _run_umode(&mut *self.arch as *mut UmodeCpuArchState);
+            _run_umode(&mut self.arch as *mut UmodeCpuArchState);
         }
         // Save off the trap information.
         self.arch.trap_csrs.scause = CSR.scause.get();
         self.arch.trap_csrs.stval = CSR.stval.get();
+    }
+
+    // Run `umode` until result is returned.
+    fn run(&mut self) -> Result<(), Error> {
+        loop {
+            self.run_to_exit();
+            match Trap::from_scause(self.arch.trap_csrs.scause).unwrap() {
+                Trap::Exception(UserEnvCall) => match self.handle_ecall() {
+                    ControlFlow::Continue(_) => continue,
+                    ControlFlow::Break(res) => break res,
+                },
+                _ => {
+                    println!("{}", self.arch);
+                    break Err(Error::UnexpectedTrap);
+                }
+            }
+        }
     }
 }

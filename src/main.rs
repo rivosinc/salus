@@ -500,14 +500,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Initialize global Umode state.
     UmodeTask::init(umode_elf);
     // Setup U-mode task for this CPU.
-    UmodeTask::setup_this_cpu();
-
-    // Simple test: run U-mode until the first `ecall`.
-    UmodeTask::get()
-        .activate()
-        .expect("Could not activate U-mode")
-        .run()
-        .unwrap();
+    UmodeTask::setup_this_cpu().expect("Could not setup umode");
+    // Simple test: do a NOP request to the U-mode task.
+    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).unwrap();
+    UmodeTask::send_req(u_mode_api::UmodeRequest::hello()).unwrap();
+    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).unwrap();
 
     // Now load the host VM.
     let host = HostVmLoader::new(
@@ -551,13 +548,9 @@ extern "C" fn secondary_init(_hart_id: u64) {
     me.set_online();
 
     // Setup U-mode task for this CPU.
-    UmodeTask::setup_this_cpu();
+    UmodeTask::setup_this_cpu().expect("Could not setup umode");
     // Simple test: run U-mode until the first `ecall`.
-    UmodeTask::get()
-        .activate()
-        .expect("Could not activate U-mode")
-        .run()
-        .unwrap();
+    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).unwrap();
 
     HOST_VM.wait().run(me.cpu_id().raw() as u64);
     poweroff();

@@ -43,7 +43,6 @@
 //! The user mode process expect to be run from the entry point
 //! specified in the ELF file with register `A0` containing a unique
 //! u64 ID (the CPU ID).
-//!
 
 /// The Error type returned returned from this library.
 #[derive(Debug, Clone, Copy)]

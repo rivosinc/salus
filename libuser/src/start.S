@@ -16,8 +16,10 @@ _start:
 .option pop
     la sp, _stack_end
 
+    // a0 contains cpu id
     call task_main
 
-    // ecall to exit
+    // ecall to panic
+    li a7, 0
     ecall
 

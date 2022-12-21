@@ -11,6 +11,9 @@ pub mod reset;
 /// Host interfaces for hart state management.
 pub mod state;
 
+/// Host interfaces for nested virtualization acceleration.
+pub mod nacl;
+
 /// Host interfaces for confidential computing.
 pub mod tee_host;
 

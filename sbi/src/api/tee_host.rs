@@ -2,35 +2,45 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use assertions::const_assert;
 use core::{marker::PhantomData, ptr};
 
 use crate::TeeHostFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};
-use crate::{TsmInfo, TsmPageType, TsmShmemArea, TvmCreateParams};
+use crate::{
+    NaclShmem, TsmInfo, TsmPageType, TsmShmemScratch, TvmCreateParams, NACL_SCRATCH_BYTES,
+};
 
-/// Provides volatile accessors to a `TsmShmemArea`.
+/// Provides volatile accessors to a TEE `NaclShmem` area.
 pub struct TsmShmemAreaRef<'a> {
-    ptr: *mut TsmShmemArea,
-    _lifetime: PhantomData<&'a TsmShmemArea>,
+    ptr: *mut NaclShmem,
+    _lifetime: PhantomData<&'a NaclShmem>,
 }
 
 impl<'a> TsmShmemAreaRef<'a> {
-    /// Creates a new `TsmShmemAreaRef` from a raw pointer to a `TsmShmemArea`.
+    /// Creates a new `TsmShmemAreaRef` from a raw pointer to a `NaclShmem`.
     ///
     /// # Safety
     ///
-    /// The caller must guarantee that `ptr` is suitably aligned and points to a `TsmShmemArea`
+    /// The caller must guarantee that `ptr` is suitably aligned and points to a `NaclShmem`
     /// structure that is valid for the lifetime `'a`.
-    pub unsafe fn new(ptr: *mut TsmShmemArea) -> Self {
+    pub unsafe fn new(ptr: *mut NaclShmem) -> Self {
         Self {
             ptr,
             _lifetime: PhantomData,
         }
     }
 
+    fn shmem_scratch_ptr(&self) -> *mut TsmShmemScratch {
+        // Safety: We're only dereferencing here to get the address of the `scratch` field. Further,
+        // it is safe to cast the `scratch field to a `TsmShmemScratch` struct since it has the same
+        // size & alignemnt of the `scratch` field and both are POD structs.
+        unsafe { ptr::addr_of_mut!((*self.ptr).scratch) as *mut _ }
+    }
+
     /// Reads the HS or VS CSR at `csr_num`.
     pub fn csr(&self, csr_num: u16) -> u64 {
-        let index = TsmShmemArea::csr_index(csr_num);
+        let index = NaclShmem::csr_index(csr_num);
         // Safety: `index` is guaranteed to be a valid index into `csrs` and the caller guaranteed
         // at construction that `ptr` points to a valid `TsmShmemArea`.
         unsafe { ptr::addr_of!((*self.ptr).csrs[index]).read_volatile() }
@@ -38,7 +48,7 @@ impl<'a> TsmShmemAreaRef<'a> {
 
     /// Writes the HS or VS CSR at `csr_num`.
     pub fn set_csr(&self, csr_num: u16, val: u64) {
-        let index = TsmShmemArea::csr_index(csr_num);
+        let index = NaclShmem::csr_index(csr_num);
         // Safety: `index` is guaranteed to be a valid index into `csrs` and the caller guaranteed
         // at construction that `ptr` points to a valid `TsmShmemArea`.
         unsafe { ptr::addr_of_mut!((*self.ptr).csrs[index]).write_volatile(val) }
@@ -49,7 +59,7 @@ impl<'a> TsmShmemAreaRef<'a> {
         assert!(index < 32);
         // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
         // construction that `ptr` points to a valid `TsmShmemArea`.
-        unsafe { ptr::addr_of!((*self.ptr).guest_gprs[index]).read_volatile() }
+        unsafe { ptr::addr_of!((*self.shmem_scratch_ptr()).guest_gprs[index]).read_volatile() }
     }
 
     /// Writes the general purpose register at `index`, which must be a valid GPR number.
@@ -57,8 +67,14 @@ impl<'a> TsmShmemAreaRef<'a> {
         assert!(index < 32);
         // Safety: `index` is guaranteed to be a valid GPR index and the caller guaranteed at
         // construction that `ptr` points to a valid `TsmShmemArea`.
-        unsafe { ptr::addr_of_mut!((*self.ptr).guest_gprs[index]).write_volatile(val) };
+        unsafe {
+            ptr::addr_of_mut!((*self.shmem_scratch_ptr()).guest_gprs[index]).write_volatile(val)
+        };
     }
+}
+
+fn _assert_scratch_size() {
+    const_assert!(core::mem::size_of::<TsmShmemScratch>() == NACL_SCRATCH_BYTES);
 }
 
 /// Initiates a TSM fence on this CPU.
@@ -93,33 +109,6 @@ pub fn get_info() -> Result<TsmInfo> {
     }
 
     Ok(tsm_info)
-}
-
-/// Registers the host <-> TSM shared memory area for the calling CPU. `shmem_page_addr` must
-/// be page-aligned and refer to a sufficient number of contiguous non-confidential pages to
-/// hold a `TsmShmemArea` struct. The pages are "pinned" in the non-confidential state until
-/// the shared-memory area is unregistered by calling `unregister_shmem()`.
-///
-/// # Safety
-///
-/// The caller must own the pages referenced by `shared_page_addr`, for the number of pages
-/// sufficient to hold the `TsmShmemArea` structure. Since memory within the shared-memory
-/// communication area may be read or written by the TSM at any time, the caller must treat the
-/// memory as volatile until it is unregistered.
-pub unsafe fn register_shmem(shmem_page_addr: u64) -> Result<()> {
-    let msg = SbiMessage::TeeHost(TsmSetShmem { shmem_page_addr });
-    ecall_send(&msg)?;
-    Ok(())
-}
-
-/// Unregisters the host <-> TSM shared memory area for the calling CPU.
-pub fn unregister_shmem() -> Result<()> {
-    let msg = SbiMessage::TeeHost(TsmSetShmem {
-        shmem_page_addr: u64::MAX,
-    });
-    // Safety: Doesn't access host memory.
-    unsafe { ecall_send(&msg) }?;
-    Ok(())
 }
 
 /// Converts the given page range to confidential memory for use in creating or filling pages of a

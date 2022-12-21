@@ -299,9 +299,9 @@ global_asm!(
     sstatus_vs_enable = const sstatus::vs::Initial.value,
 );
 
-// Wrapper for a `TsmShmemArea` struct pinned in host shared memory.
+// Wrapper for a `NaclShmem` struct pinned in host shared memory.
 struct PinnedTsmShmemArea {
-    ptr: NonNull<sbi::TsmShmemArea>,
+    ptr: NonNull<sbi::NaclShmem>,
     // Optional since we might be sharing with the hypervisor in the host VM case.
     _pin: Option<PinnedPages>,
 }
@@ -310,10 +310,10 @@ impl PinnedTsmShmemArea {
     // Creates a new `PinnedTsmShmemArea` from a set of pinned shared pages.
     fn new(pages: PinnedPages) -> Result<Self> {
         // Make sure the pin actually covers the size of the structure.
-        if pages.range().length_bytes() < size_of::<sbi::TsmShmemArea>() as u64 {
+        if pages.range().length_bytes() < size_of::<sbi::NaclShmem>() as u64 {
             return Err(Error::InsufficientSharedStatePages);
         }
-        let ptr = pages.range().base().bits() as *mut sbi::TsmShmemArea;
+        let ptr = pages.range().base().bits() as *mut sbi::NaclShmem;
         Ok(Self {
             ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
             _pin: Some(pages),

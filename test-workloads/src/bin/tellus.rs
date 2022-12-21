@@ -30,7 +30,7 @@ use riscv_regs::{
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::{base, pmu, reset, tee_host, tee_interrupt};
+use sbi::api::{base, nacl, pmu, reset, tee_host, tee_interrupt};
 use sbi::{
     PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
     PmuHardware, SbiMessage, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
@@ -307,14 +307,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Set aside pages for the shared mem area.
     let num_shmem_pages =
-        (core::mem::size_of::<sbi::TsmShmemArea>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
-    let shmem_addr = next_page;
+        (core::mem::size_of::<sbi::NaclShmem>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    let shmem_ptr = next_page as *mut sbi::NaclShmem;
     next_page += num_shmem_pages * PAGE_SIZE_4K;
-    // Safety: We own `shmem_addr` and will only access it through volatile reads/writes.
-    unsafe { tee_host::register_shmem(shmem_addr).expect("TsmSetShmem failed") };
-    // Safety: `shmem_addr` points to a sufficient number of pages to hold a TsmShmemArea struct
+    // Safety: We own the memory at `shmem_ptr` and will only access it through volatile reads/writes.
+    unsafe { nacl::register_shmem(shmem_ptr).expect("SetShmem failed") };
+    // Safety: `shmem_ptr` points to a sufficient number of pages to hold a `NaclShmem` struct
     // and will not be used for any other purpose for the duration of `kernel_init()`.
-    let shmem = unsafe { tee_host::TsmShmemAreaRef::new(shmem_addr as *mut _) };
+    let shmem = unsafe { tee_host::TsmShmemAreaRef::new(shmem_ptr) };
 
     // Add pages for the page table
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
@@ -730,7 +730,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         tee_interrupt::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
     }
     exercise_pmu_functionality();
-    tee_host::unregister_shmem().expect("TsmSetShmem failed");
+    nacl::unregister_shmem().expect("SetShmem failed");
     println!("Tellus - All OK");
     poweroff();
 }

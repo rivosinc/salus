@@ -21,6 +21,9 @@ pub use attestation::*;
 // The Base SBI extension
 mod base;
 pub use base::*;
+// The Nested Virtualization Acceleration (NACL) SBI extension
+mod nacl;
+pub use nacl::*;
 // The reset SBI extension
 mod reset;
 pub use reset::*;
@@ -115,6 +118,8 @@ pub enum SbiMessage {
     Reset(ResetFunction),
     /// Handles output to the console for debug.
     DebugConsole(DebugConsoleFunction),
+    /// Provides functions for accelerating nested virtualization.
+    Nacl(NaclFunction),
     /// Provides capabilities for starting confidential virtual machines.
     TeeHost(TeeHostFunction),
     /// Provides interrupt virtualization for confidential virtual machines.
@@ -138,6 +143,7 @@ impl SbiMessage {
             EXT_HART_STATE => StateFunction::from_regs(args).map(SbiMessage::HartState),
             EXT_RESET => ResetFunction::from_regs(args).map(SbiMessage::Reset),
             EXT_DBCN => DebugConsoleFunction::from_regs(args).map(SbiMessage::DebugConsole),
+            EXT_NACL => NaclFunction::from_regs(args).map(SbiMessage::Nacl),
             EXT_TEE_HOST => TeeHostFunction::from_regs(args).map(SbiMessage::TeeHost),
             EXT_TEE_INTERRUPT => {
                 TeeInterruptFunction::from_regs(args).map(SbiMessage::TeeInterrupt)
@@ -158,6 +164,7 @@ impl SbiMessage {
             HartState(_) => EXT_HART_STATE,
             Reset(_) => EXT_RESET,
             DebugConsole(_) => EXT_DBCN,
+            Nacl(_) => EXT_NACL,
             TeeHost(_) => EXT_TEE_HOST,
             TeeInterrupt(_) => EXT_TEE_INTERRUPT,
             TeeGuest(_) => EXT_TEE_GUEST,
@@ -177,6 +184,7 @@ impl SbiMessage {
             HartState(f) => f.a6(),
             Reset(f) => f.a6(),
             DebugConsole(f) => f.a6(),
+            Nacl(f) => f.a6(),
             TeeHost(f) => f.a6(),
             TeeInterrupt(f) => f.a6(),
             TeeGuest(f) => f.a6(),
@@ -194,6 +202,7 @@ impl SbiMessage {
             HartState(f) => f.a5(),
             Reset(f) => f.a5(),
             DebugConsole(f) => f.a5(),
+            Nacl(f) => f.a5(),
             TeeHost(f) => f.a5(),
             TeeInterrupt(f) => f.a5(),
             TeeGuest(f) => f.a5(),
@@ -211,6 +220,7 @@ impl SbiMessage {
             HartState(f) => f.a4(),
             Reset(f) => f.a4(),
             DebugConsole(f) => f.a4(),
+            Nacl(f) => f.a4(),
             TeeHost(f) => f.a4(),
             TeeInterrupt(f) => f.a4(),
             TeeGuest(f) => f.a4(),
@@ -228,6 +238,7 @@ impl SbiMessage {
             HartState(f) => f.a3(),
             Reset(f) => f.a3(),
             DebugConsole(f) => f.a3(),
+            Nacl(f) => f.a3(),
             TeeHost(f) => f.a3(),
             TeeInterrupt(f) => f.a3(),
             TeeGuest(f) => f.a3(),
@@ -245,6 +256,7 @@ impl SbiMessage {
             HartState(f) => f.a2(),
             Reset(f) => f.a2(),
             DebugConsole(f) => f.a2(),
+            Nacl(f) => f.a2(),
             TeeHost(f) => f.a2(),
             TeeInterrupt(f) => f.a2(),
             TeeGuest(f) => f.a2(),
@@ -262,6 +274,7 @@ impl SbiMessage {
             HartState(f) => f.a1(),
             Reset(f) => f.a1(),
             DebugConsole(f) => f.a1(),
+            Nacl(f) => f.a1(),
             TeeHost(f) => f.a1(),
             TeeInterrupt(f) => f.a1(),
             TeeGuest(f) => f.a1(),
@@ -279,6 +292,7 @@ impl SbiMessage {
             Reset(f) => f.a0(),
             DebugConsole(f) => f.a0(),
             HartState(f) => f.a0(),
+            Nacl(f) => f.a0(),
             TeeHost(f) => f.a0(),
             TeeInterrupt(f) => f.a0(),
             TeeGuest(f) => f.a0(),

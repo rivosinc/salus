@@ -5,15 +5,10 @@
 use crate::error::*;
 use crate::function::*;
 
-/// Layout of the per-CPU host <-> TSM shared-memory communication area. Used to communicate a TVM's
-/// exit status to the host.
-///
-/// The layout of this structure follows that of the proposed nested acceleration ("NACL") SBI
-/// extension. While the structure is the same, the two are not interchangeable: the AP-TEE extension
-/// defines a different layout for the scratch area and applies different rules for the reading
-/// and writing of CSRs.
+/// Layout of `scratch` in the `NaclShmem` structure when used with `TvmCpuRun`. Used to communicate
+/// a TVM's exit status to the host.
 #[repr(C)]
-pub struct TsmShmemArea {
+pub struct TsmShmemScratch {
     /// General purpose registers for a TVM guest.
     ///
     /// The TSM will always read or write the minimum number of registers in this set to complete
@@ -26,47 +21,14 @@ pub struct TsmShmemArea {
     /// The TSM will read from these registers when:
     ///  - The vCPU takes a load guest page fault in an emulated MMIO region.
     pub guest_gprs: [u64; 32],
-    /// Scratch space. Currently unused and will not be read or written by the TSM.
-    pub scratch: [u64; 224],
-    _reserved: [u64; 240],
-    /// Bitmap indicating which CSRs in `csrs` the host wishes to sync. Currently unused and will not
-    /// be read or written by the TSM.
-    pub dirty_bitmap: [u64; 16],
-    /// Hypervisor and virtual-supervisor CSRs. The 12-bit CSR number is transformed into a 10-bit
-    /// index by extracting bits `{csr[11:10], csr[8:0]}` since `csr[9:8]` is always 2'b10 for HS
-    /// and VS CSRs.
-    ///
-    /// The TSM will only access a subset of these registers:
-    ///  - HTVAL is written on guest page faults taken by a TVM vCPU. If the fault is serviceable
-    ///    by the host HTVAL is written with bits 63:2 of the faulting guest physical address,
-    ///    otherwise 0 is written.
-    ///  - HTINST is written on guest page faults taken by a TVM vCPU. If the fault is in an emulated
-    ///    MMIO region HTINST is written with a (transformed version of) the faulting load/store
-    ///    instruction made by the TVM, otherwise 0 is written. If the faulting instruction is a
-    ///    a store, the TSM will also write the value stored by the TVM to the register in
-    ///    `guest_gprs` corresponding to the `rs2` register in the instruction. If the faulting
-    ///    instruction is a load, the TSM will read from the register in `guest_gprs` corresponding
-    ///    to the `rd` register in the instruction and use it to complete the load the next time the
-    ///    TVM vCPU is run.
-    ///  - VSTIMECMP is always written by the TSM upon return from `TvmCpuRun`.
-    pub csrs: [u64; 1024],
+    _reserved: [u64; 224],
 }
 
-impl TsmShmemArea {
-    /// Returns the index in `csrs` of the HS or VS CSR at `csr_num`.
-    pub fn csr_index(csr_num: u16) -> usize {
-        (((csr_num & 0xc00) >> 2) | (csr_num & 0xff)) as usize
-    }
-}
-
-impl Default for TsmShmemArea {
+impl Default for TsmShmemScratch {
     fn default() -> Self {
         Self {
             guest_gprs: [0; 32],
-            scratch: [0; 224],
-            _reserved: [0; 240],
-            dirty_bitmap: [0; 16],
-            csrs: [0; 1024],
+            _reserved: [0; 224],
         }
     }
 }
@@ -317,17 +279,6 @@ pub enum TeeHostFunction {
         /// a4 = guest physical address
         guest_addr: u64,
     },
-    /// Registers the host <-> TSM shared memory area for the calling CPU. `shmem_page_addr` must
-    /// be page-aligned and refer to a sufficient number of contiguous non-confidential pages to
-    /// hold a `TsmShmemArea` struct. The pages are "pinned" in the non-confidential state until
-    /// the shared-memory area is unregistered by calling this function with `shmem_page_addr` set
-    /// to -1.
-    ///
-    /// a6 = 13
-    TsmSetShmem {
-        /// a0 = address of shared memory area
-        shmem_page_addr: u64,
-    },
     /// Adds a vCPU with ID `vcpu_id` to the guest `guest_id`, using the memory at `stage_page_addr`
     /// for internal storage of the vCPU's state.
     ///
@@ -349,8 +300,25 @@ pub enum TeeHostFunction {
     ///
     /// Returns 0 if the vCPU can be resumed via a subsequent call to `TvmCpuRun`, or a value other
     /// than 0 if the vCPU was terminated and is no longer runnable. Writes SCAUSE with the exit cause
-    /// of the vCPU. STVAL, and fields within the currently registered `TsmShmemArea` may also be
-    /// written depending on the specific exit cause.
+    /// of the vCPU, along with STVAL if appropriate.
+    ///
+    /// The TSM will update the currently-registered `NaclShmem` struct with additional details
+    /// depending on the exit cause. The layout of the scratch space in the `NaclShmem` structure is
+    /// that of the `TsmShmemScratch` struct defined above.
+    ///   - HTVAL is written on guest page faults taken by a TVM vCPU. If the fault is serviceable
+    ///     by the host HTVAL is written with bits 63:2 of the faulting guest physical address,
+    ///     otherwise 0 is written.
+    ///   - HTINST is written on guest page faults taken by a TVM vCPU. If the fault is in an emulated
+    ///     MMIO region HTINST is written with a (transformed version of) the faulting load/store
+    ///     instruction made by the TVM, otherwise 0 is written. If the faulting instruction is a
+    ///     a store, the TSM will also write the value stored by the TVM to the register in
+    ///     `guest_gprs` corresponding to the `rs2` register in the instruction. If the faulting
+    ///     instruction is a load, the TSM will read from the register in `guest_gprs` corresponding
+    ///     to the `rd` register in the instruction and use it to complete the load the next time the
+    ///     TVM vCPU is run.
+    ///   - VSTIMECMP is always written by the TSM upon return from `TvmCpuRun`.
+    ///   - A0-A7 will be written in `guest_gprs` with the ECALL arguments on ECALLs made by the
+    ///     TVM vCPU.
     ///
     /// Returns an error if:
     ///   - the specified TVM or vCPU does not exist
@@ -440,9 +408,6 @@ impl TeeHostFunction {
                 num_pages: args[3],
                 guest_addr: args[4],
             }),
-            13 => Ok(TsmSetShmem {
-                shmem_page_addr: args[0],
-            }),
             15 => Ok(TvmCpuCreate {
                 guest_id: args[0],
                 vcpu_id: args[1],
@@ -518,7 +483,6 @@ impl SbiFunction for TeeHostFunction {
                 num_pages: _,
                 guest_addr: _,
             } => 12,
-            TsmSetShmem { shmem_page_addr: _ } => 13,
             TvmCpuCreate {
                 guest_id: _,
                 vcpu_id: _,
@@ -561,7 +525,6 @@ impl SbiFunction for TeeHostFunction {
                 guest_id,
                 vcpu_id: _,
             } => *guest_id,
-            TsmSetShmem { shmem_page_addr } => *shmem_page_addr,
             TvmCpuCreate {
                 guest_id,
                 vcpu_id: _,

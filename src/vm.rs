@@ -41,9 +41,8 @@ const SBI_IMPL_ID_SALUS: u64 = 7;
 const SBI_SPEC_MAJOR_VERSION_SHIFT: u64 = 24;
 const SBI_SPEC_VERSION: u64 = 1 << SBI_SPEC_MAJOR_VERSION_SHIFT;
 
-// The number of pages required for `TsmShmemArea`.
-const TSM_SHMEM_AREA_PAGES: u64 =
-    PageSize::num_4k_pages(core::mem::size_of::<sbi::TsmShmemArea>() as u64);
+// The number of pages required for `NaclShmem`.
+const NACL_SHMEM_PAGES: u64 = PageSize::num_4k_pages(core::mem::size_of::<sbi::NaclShmem>() as u64);
 
 /// Possible MMIO instructions.
 #[derive(Clone, Copy, Debug)]
@@ -719,6 +718,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 self.handle_debug_console(debug_con_func, active_vcpu.active_pages())
             }
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
+            SbiMessage::Nacl(nacl_func) => self.handle_nacl_msg(nacl_func, active_vcpu),
             SbiMessage::TeeHost(host_func) => self.handle_tee_host_msg(host_func, active_vcpu),
             SbiMessage::TeeInterrupt(interrupt_func) => {
                 self.handle_tee_interrupt_msg(interrupt_func, active_vcpu)
@@ -875,6 +875,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 | sbi::EXT_HART_STATE
                 | sbi::EXT_RESET
                 | sbi::EXT_DBCN
+                | sbi::EXT_NACL
                 | sbi::EXT_TEE_HOST
                 | sbi::EXT_TEE_INTERRUPT
                 | sbi::EXT_TEE_GUEST
@@ -963,6 +964,34 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
+    fn handle_nacl_msg(
+        &self,
+        nacl_func: NaclFunction,
+        active_vcpu: &mut ActiveVmCpu<T>,
+    ) -> EcallAction {
+        use NaclFunction::*;
+        match nacl_func {
+            SetShmem { shmem_pfn } => self.set_shmem_area(shmem_pfn, active_vcpu).into(),
+        }
+    }
+
+    fn set_shmem_area(&self, shmem_pfn: u64, active_vcpu: &mut ActiveVmCpu<T>) -> EcallResult<u64> {
+        if shmem_pfn != u64::MAX {
+            // Pin the pages that the VM wants to use for the shared state buffer.
+            let shared_page_addr = self.guest_addr_from_raw(shmem_pfn << PFN_SHIFT)?;
+            let pin = self
+                .vm_pages()
+                .pin_shared_pages(shared_page_addr, NACL_SHMEM_PAGES)
+                .map_err(EcallError::from)?;
+            active_vcpu
+                .register_shmem_area(pin)
+                .map_err(|_| EcallError::Sbi(SbiError::InvalidAddress))?;
+        } else {
+            active_vcpu.unregister_shmem_area();
+        }
+        Ok(0)
+    }
+
     fn handle_tee_host_msg(
         &self,
         host_func: TeeHostFunction,
@@ -973,9 +1002,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TsmGetInfo { dest_addr, len } => self
                 .get_tsm_info(dest_addr, len, active_vcpu.active_pages())
                 .into(),
-            TsmSetShmem { shmem_page_addr } => {
-                self.set_shmem_area(shmem_page_addr, active_vcpu).into()
-            }
             TvmCreate { params_addr, len } => self
                 .add_guest(params_addr, len, active_vcpu.active_pages())
                 .into(),
@@ -1086,27 +1112,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .copy_to_guest(dest_addr, tsm_info_bytes)
             .map_err(EcallError::from)?;
         Ok(len as u64)
-    }
-
-    fn set_shmem_area(
-        &self,
-        shared_page_addr: u64,
-        active_vcpu: &mut ActiveVmCpu<T>,
-    ) -> EcallResult<u64> {
-        if shared_page_addr != u64::MAX {
-            // Pin the pages that the VM wants to use for the shared state buffer.
-            let shared_page_addr = self.guest_addr_from_raw(shared_page_addr)?;
-            let pin = self
-                .vm_pages()
-                .pin_shared_pages(shared_page_addr, TSM_SHMEM_AREA_PAGES)
-                .map_err(EcallError::from)?;
-            active_vcpu
-                .register_shmem_area(pin)
-                .map_err(|_| EcallError::Sbi(SbiError::InvalidAddress))?;
-        } else {
-            active_vcpu.unregister_shmem_area();
-        }
-        Ok(0)
     }
 
     /// Converts `num_pages` of 4kB page-size starting at guest physical address `page_addr` to confidential memory.

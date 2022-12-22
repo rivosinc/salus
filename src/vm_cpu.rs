@@ -784,6 +784,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     pub fn exit(mut self, cause: VmExitCause) {
         self.host_context
             .set_csr(CSR_VSTIMECMP, CSR.vstimecmp.get());
+        self.host_context.set_csr(CSR_VSIE, CSR.vsie.get());
 
         use VmExitCause::*;
         match cause {

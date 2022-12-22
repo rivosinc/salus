@@ -168,7 +168,7 @@ memory region are considered to be owned by the parent VM, and the parent VM
 may share the same page wtih as many child VMs as it likes. Shared pages may
 be inserted at any time, and their initial contents upon being mapped into a
 child VM is undefined. Page faults in a shared region trigger an exit to the VM's
-parent with the faulting adddress.
+parent with the faulting address.
 
 * `Mmio`: Memory that is not backed by physical pages, but instead is used to
 emulate MMIO between a VM and its parent. Accesses by a VM to an MMIO region
@@ -199,7 +199,7 @@ memory that it assigns to any of its guest VMs after the guest VM is destroyed.
 
 ## Memory conversion
 
-In order for a host VM to donate (assign) pages in its address sapce to a
+In order for a host VM to donate (assign) pages in its address space to a
 guest VM, the host must first _convert_ the pages. The conversion process,
 outlined below, results in the pages being made inaccessible to the host VM
 by invalidating them from the 2nd-stage page tables and coordinating a TLB
@@ -232,7 +232,7 @@ available to be assigned to a child VM.
 ## VM creation
 
 Guest VMs are constructed from pages converted by the host VM. When constructing
-a guest VM the converted pages are assigned a particular puprose, either to hold
+a guest VM the converted pages are assigned a particular purpose, either to hold
 internal state or to be mapped into the address space of the guest. Once a page
 is assigned, it is considered to be owned by the guest VM until the guest VM is
 destroyed or the guest VM assigns the pages to a nested guest VM it creates. The

@@ -316,7 +316,7 @@ pub enum TeeHostFunction {
     ///     instruction is a load, the TSM will read from the register in `guest_gprs` corresponding
     ///     to the `rd` register in the instruction and use it to complete the load the next time the
     ///     TVM vCPU is run.
-    ///   - VSTIMECMP is always written by the TSM upon return from `TvmCpuRun`.
+    ///   - VSTIMECMP and VSIE are always written by the TSM upon return from `TvmCpuRun`.
     ///   - A0-A7 will be written in `guest_gprs` with the ECALL arguments on ECALLs made by the
     ///     TVM vCPU.
     ///

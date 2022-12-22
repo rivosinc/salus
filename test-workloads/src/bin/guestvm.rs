@@ -355,10 +355,15 @@ fn test_interrupts() {
     }
 }
 
+// TODO: Put console buffer in shared memory.
+static mut CONSOLE_BUFFER: [u8; 256] = [0; 256];
+
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
-    SbiConsole::set_as_console();
+    // Safety: We're giving SbiConsole exclusive ownership of CONSOLE_BUFFER and will not touch it
+    // for the remainder of this program.
+    unsafe { SbiConsole::set_as_console(&mut CONSOLE_BUFFER) };
 
     println!("*****************************************");
     println!("Hello world from Tellus guest            ");

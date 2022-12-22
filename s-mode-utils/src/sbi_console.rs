@@ -4,27 +4,40 @@
 
 use sbi::api::debug_console::console_puts;
 use sbi::SbiMessage;
+use spin::{Mutex, Once};
 
 use crate::ecall::ecall_send;
 use crate::print::{Console, ConsoleWriter};
 
 /// Driver for an SBI based console.
-pub struct SbiConsole {}
+pub struct SbiConsole {
+    buffer: Mutex<&'static mut [u8]>,
+}
 
-static SBI_CONSOLE: SbiConsole = SbiConsole {};
+static SBI_CONSOLE: Once<SbiConsole> = Once::new();
 
 impl SbiConsole {
-    /// Sets the SBI console as the system console.
-    pub fn set_as_console() {
-        Console::set_writer(&SBI_CONSOLE);
+    /// Sets the SBI debug console as the system console. Uses `console_buffer` for buffering console
+    /// output.
+    pub fn set_as_console(console_buffer: &'static mut [u8]) {
+        let console = SbiConsole {
+            buffer: Mutex::new(console_buffer),
+        };
+        SBI_CONSOLE.call_once(|| console);
+        Console::set_writer(SBI_CONSOLE.get().unwrap());
     }
 }
 
 impl ConsoleWriter for SbiConsole {
     /// Write an entire byte sequence to the SBI console.
     fn write_bytes(&self, bytes: &[u8]) {
-        // Ignore errors as there isn't currently a way to report them if the console doesn't work.
-        let _ = console_puts(bytes);
+        let mut buffer = self.buffer.lock();
+        for chunk in bytes.chunks(buffer.len()) {
+            let (dest, _) = buffer.split_at_mut(chunk.len());
+            dest.copy_from_slice(chunk);
+            // Ignore errors as there isn't currently a way to report them if the console doesn't work.
+            let _ = console_puts(&*dest);
+        }
     }
 }
 

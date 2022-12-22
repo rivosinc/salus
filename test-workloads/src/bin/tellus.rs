@@ -234,20 +234,23 @@ fn check_vectors() {
     }
 }
 
+static mut CONSOLE_BUFFER: [u8; 256] = [0; 256];
+
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     const NUM_TEE_PTE_PAGES: u64 = 10;
     const NUM_CONVERTED_ZERO_PAGES: u64 = NUM_GUEST_ZERO_PAGES + NUM_GUEST_SHARED_PAGES;
 
+    // Safety: We're giving SbiConsole exclusive ownership of CONSOLE_BUFFER and will not touch it
+    // for the remainder of this program.
+    unsafe { SbiConsole::set_as_console(&mut CONSOLE_BUFFER) };
+    println!("Tellus: Booting the test VM");
+
     if hart_id != 0 {
         // TODO handle more than 1 cpu
         abort();
     }
-
-    SbiConsole::set_as_console();
-
-    println!("Tellus: Booting the test VM");
 
     // Safe because we trust the host to boot with a valid fdt_addr pass in register a1.
     let fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {

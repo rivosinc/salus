@@ -27,7 +27,7 @@ SECTIONS
         *(.data .data.*)
 
         . = ALIGN(8);
-        PROVIDE(__global_pointer$ = .);
+        PROVIDE(__global_pointer$ = . + 0x800);
         *(.sdata .sdata.*)
 
         *(.sbss .sbss.*) *(.bss .bss.*)

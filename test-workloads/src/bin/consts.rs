@@ -34,6 +34,8 @@
 /// |-------------------------| 0x1_0000_0000
 /// | Shared pages            |
 /// |-------------------------| +NUM_GUEST_SHARED_PAGES
+/// | Shared console buffer   |
+/// |-------------------------| +4kB
 /// | <empty>                 |
 /// +-------------------------+ 0x1_8000_0000
 
@@ -52,8 +54,8 @@ pub const GUEST_ZERO_PAGES_END_ADDRESS: u64 =
     GUEST_ZERO_PAGES_START_ADDRESS + NUM_GUEST_ZERO_PAGES * PAGE_SIZE_4K - 1;
 pub const GUEST_SHARED_PAGES_START_ADDRESS: u64 = 0x1_0000_0000;
 pub const NUM_GUEST_SHARED_PAGES: u64 = 1;
-pub const GUEST_SHARED_PAGES_END_ADDRESS: u64 =
-    GUEST_SHARED_PAGES_START_ADDRESS + NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K - 1;
+pub const GUEST_DBCN_ADDRESS: u64 =
+    GUEST_SHARED_PAGES_START_ADDRESS + NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K;
 pub const GUEST_RAM_END_ADDRESS: u64 = 0x1_8000_0000;
 pub const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
 pub const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;

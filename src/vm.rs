@@ -750,22 +750,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             initial_value: u64,
             active_vcpu: &mut ActiveVmCpu<T>,
         ) -> EcallResult<u64> {
-            let counter_mask = active_vcpu
-                .pmu()
-                .get_startable_counter_range(counter_index, counter_mask)?;
-            let result = sbi::api::pmu::start_counters(
+            let result = active_vcpu.pmu().start_counters(
                 counter_index,
                 counter_mask,
                 start_flags,
                 initial_value,
             );
-            // Special case "already started" to handle counters that are autostarted following configuration.
-            // Examples of such counters include the legacy timer and insret.
-            if result.is_ok() || matches!(result, Err(SbiError::AlreadyStarted)) {
-                active_vcpu
-                    .pmu()
-                    .update_started_counters(counter_index, counter_mask);
-            }
             result.map(|_| 0).map_err(EcallError::from)
         }
 
@@ -775,18 +765,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             stop_flags: PmuCounterStopFlags,
             active_vcpu: &mut ActiveVmCpu<T>,
         ) -> EcallResult<u64> {
-            let counter_mask = active_vcpu
+            let result = active_vcpu
                 .pmu()
-                .get_stoppable_counter_range(counter_index, counter_mask)?;
-            let result = sbi::api::pmu::stop_counters(counter_index, counter_mask, stop_flags);
-            // Special case "already stopped" to handle counters that can be reset following a stop
-            if result.is_ok()
-                || (matches!(result, Err(SbiError::AlreadyStopped)) && stop_flags.is_reset_flag())
-            {
-                active_vcpu
-                    .pmu()
-                    .update_stopped_counters(counter_index, counter_mask, stop_flags);
-            }
+                .stop_counters(counter_index, counter_mask, stop_flags);
             result.map(|_| 0).map_err(EcallError::from)
         }
 
@@ -798,26 +779,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             event_data: u64,
             active_vcpu: &mut ActiveVmCpu<T>,
         ) -> EcallResult<u64> {
-            let config_flags = config_flags.set_sinh().set_minh();
-            let counter_mask = active_vcpu.pmu().get_configurable_counter_range(
-                counter_index,
-                counter_mask,
-                config_flags,
-            )?;
-            let platform_counter_index = sbi::api::pmu::configure_matching_counters(
+            let result = active_vcpu.pmu().configure_matching_counters(
                 counter_index,
                 counter_mask,
                 config_flags,
                 event_type,
                 event_data,
-            )?;
-            active_vcpu.pmu().update_configured_counter(
-                platform_counter_index,
-                config_flags,
-                event_type,
-                event_data,
-            )?;
-            Ok(platform_counter_index)
+            );
+            result.map_err(EcallError::from)
         }
 
         match pmu_func {

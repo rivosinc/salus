@@ -643,6 +643,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 len,
                             );
                         }
+                        Ok(PutChar(c)) => {
+                            print!("{}", c as u8 as char);
+                        }
                         _ => {
                             println!("Unexpected ECALL from guest");
                             break;

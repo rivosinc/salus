@@ -431,6 +431,9 @@ impl HostVmRunner {
                                 // Can't do anything about errors right now.
                                 let _ = self.handle_put_string(&vm, addr, len);
                             }
+                            Ok(PutChar(c)) => {
+                                print!("{}", c as u8 as char);
+                            }
                             _ => {
                                 println!("Unhandled ECALL from host");
                                 return ControlFlow::Break(());

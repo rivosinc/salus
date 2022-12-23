@@ -418,6 +418,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     next_page += NUM_CONVERTED_ZERO_PAGES * PAGE_SIZE_4K;
     let shared_page_base = next_page;
+    next_page += NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K;
+    let dbcn_page_base = next_page;
 
     // Tell the guest if we have vector support via its boot argument.
     let boot_arg = if vector_enabled {
@@ -496,7 +498,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     sie.modify(sie::sext.val(1));
     CSR.sie.set(sie.get());
 
-    let mut shared_mem_region: Option<Range<u64>> = None;
+    // DBCN shared memory region mapping.
+    let mut dbcn_gpa_range: Option<Range<u64>> = None;
+    let mut dbcn_spa_range: Option<Range<u64>> = None;
+
+    // Non-DBCN shared memory region mapping.
+    let mut shared_gpa_range: Option<Range<u64>> = None;
+    let mut shared_spa_range: Option<Range<u64>> = None;
+
     let mut mmio_region: Option<Range<u64>> = None;
     loop {
         // Safety: running a VM will only write the `TsmShmemArea` struct that was registered
@@ -529,13 +538,18 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     });
                                 }
                                 ShareMemory { addr, len } => {
-                                    if shared_mem_region.is_some() {
-                                        panic!("GuestVm already set a shared memory region");
-                                    }
-                                    shared_mem_region = Some(Range {
+                                    let range = Range {
                                         start: addr,
                                         end: addr + len,
-                                    });
+                                    };
+                                    if addr == GUEST_DBCN_ADDRESS {
+                                        dbcn_gpa_range = Some(range);
+                                    } else {
+                                        if shared_gpa_range.is_some() {
+                                            panic!("GuestVm already set a shared memory region");
+                                        }
+                                        shared_gpa_range = Some(range);
+                                    }
 
                                     if blocked {
                                         tee_host::tvm_run(vmid, 0).unwrap_err();
@@ -545,13 +559,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 }
                                 UnshareMemory { addr, len } => {
                                     assert_eq!(
-                                        shared_mem_region,
+                                        shared_gpa_range,
                                         Some(Range {
                                             start: addr,
                                             end: addr + len,
                                         })
                                     );
-                                    shared_mem_region = None;
+                                    shared_gpa_range = None;
+                                    shared_spa_range = None;
 
                                     if blocked {
                                         tee_host::tvm_run(vmid, 0).unwrap_err();
@@ -593,10 +608,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 Trap::Exception(GuestLoadPageFault) | Trap::Exception(GuestStorePageFault) => {
                     let fault_addr = (shmem.csr(CSR_HTVAL) << 2) | (CSR.stval.get() & 0x3);
                     match fault_addr {
-                        addr if shared_mem_region
+                        addr if shared_gpa_range
                             .as_ref()
                             .filter(|r| r.contains(&addr))
-                            .is_some() =>
+                            .is_some()
+                            && shared_spa_range.is_none() =>
                         {
                             // Safety: shared_page_base points to pages that will only be accessed
                             // as volatile from here on.
@@ -610,6 +626,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 )
                                 .expect("Tellus -- TvmAddSharedPages failed");
                             }
+                            shared_spa_range = Some(Range {
+                                start: shared_page_base,
+                                end: shared_page_base + NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
+                            });
 
                             // Safety: We own the page, and are writing a value expected by the
                             // guest. Note that any access to shared pages must use volatile memory
@@ -620,6 +640,29 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     GUEST_SHARE_PING,
                                 );
                             }
+                        }
+                        addr if dbcn_gpa_range
+                            .as_ref()
+                            .filter(|r| r.contains(&addr))
+                            .is_some()
+                            && dbcn_spa_range.is_none() =>
+                        {
+                            // Safety: dbcn_page_base points to pages that will only be accessed
+                            // as volatile from here on.
+                            unsafe {
+                                tee_host::add_shared_pages(
+                                    vmid,
+                                    dbcn_page_base,
+                                    sbi::TsmPageType::Page4k,
+                                    1,
+                                    addr & !(PAGE_SIZE_4K - 1),
+                                )
+                                .expect("Tellus -- TvmAddSharedPages failed");
+                            }
+                            dbcn_spa_range = Some(Range {
+                                start: dbcn_page_base,
+                                end: dbcn_page_base + PAGE_SIZE_4K,
+                            });
                         }
                         addr if mmio_region.as_ref().filter(|r| r.contains(&addr)).is_some() => {
                             let inst = DecodedInstruction::from_raw(shmem.csr(CSR_HTINST) as u32)

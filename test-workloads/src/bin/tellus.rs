@@ -32,8 +32,9 @@ use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi::api::{base, nacl, pmu, reset, tee_host, tee_interrupt};
 use sbi::{
-    PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags, PmuEventType, PmuFirmware,
-    PmuHardware, SbiMessage, EXT_PMU, EXT_TEE_HOST, EXT_TEE_INTERRUPT,
+    Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags,
+    PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn, EXT_PMU, EXT_TEE_HOST,
+    EXT_TEE_INTERRUPT,
 };
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -636,15 +637,24 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             }
                         }
                         Ok(DebugConsole(sbi::DebugConsoleFunction::PutString { len, addr })) => {
-                            let _ = do_guest_puts(
+                            let sbi_ret = match do_guest_puts(
                                 dbcn_gpa_range.clone(),
                                 dbcn_spa_range.clone(),
                                 addr,
                                 len,
-                            );
+                            ) {
+                                Ok(n) => SbiReturn::success(n),
+                                Err(n) => SbiReturn {
+                                    error_code: SbiError::InvalidAddress as i64,
+                                    return_value: n,
+                                },
+                            };
+                            shmem.set_gpr(GprIndex::A0 as usize, sbi_ret.error_code as u64);
+                            shmem.set_gpr(GprIndex::A1 as usize, sbi_ret.return_value);
                         }
                         Ok(PutChar(c)) => {
                             print!("{}", c as u8 as char);
+                            shmem.set_gpr(GprIndex::A0 as usize, 0);
                         }
                         _ => {
                             println!("Unexpected ECALL from guest");

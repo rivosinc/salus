@@ -193,7 +193,6 @@ impl From<SbiError> for EcallError {
 
 #[derive(Clone, Copy, Debug)]
 enum EcallAction {
-    LegacyOk,
     Unhandled,
     Continue(SbiReturn),
     Break(VmExitCause, SbiReturn),
@@ -489,9 +488,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             match exit {
                 VmCpuTrap::Ecall(Some(sbi_msg)) => {
                     match self.handle_ecall(sbi_msg, &mut active_vcpu) {
-                        EcallAction::LegacyOk => {
-                            active_vcpu.set_ecall_result(Legacy(0));
-                        }
                         EcallAction::Unhandled => {
                             active_vcpu.set_ecall_result(Standard(SbiReturn::from(
                                 SbiError::NotSupported,
@@ -705,10 +701,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     /// Handles ecalls from the guest.
     fn handle_ecall(&self, msg: SbiMessage, active_vcpu: &mut ActiveVmCpu<T>) -> EcallAction {
         match msg {
-            SbiMessage::PutChar(c) => {
-                // put char - legacy command
-                print!("{}", c as u8 as char);
-                EcallAction::LegacyOk
+            SbiMessage::PutChar(_) => {
+                // TODO: Let the host set the return value and forward it to the guest.
+                EcallAction::Break(VmExitCause::ResumableEcall(msg), SbiReturn::success(0))
             }
             SbiMessage::Reset(ResetFunction::Reset { .. }) => {
                 EcallAction::Break(VmExitCause::FatalEcall(msg), SbiReturn::success(0))

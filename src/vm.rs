@@ -129,6 +129,7 @@ pub enum VmExitCause {
     FatalEcall(SbiMessage),
     ResumableEcall(SbiMessage),
     BlockingEcall(SbiMessage, TlbVersion),
+    ForwardedEcall(SbiMessage),
     PageFault(Exception, GuestPageAddr),
     MmioFault(MmioOperation, GuestPhysAddr),
     Wfi(DecodedInstruction),
@@ -197,6 +198,7 @@ enum EcallAction {
     Continue(SbiReturn),
     Break(VmExitCause, SbiReturn),
     Retry(VmExitCause),
+    Forward(SbiMessage),
 }
 
 impl From<EcallResult<u64>> for EcallAction {
@@ -500,6 +502,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                             active_vcpu.set_ecall_result(Standard(sbi_ret));
                             break reason;
                         }
+                        EcallAction::Forward(sbi_msg) => {
+                            break VmExitCause::ForwardedEcall(sbi_msg);
+                        }
                         EcallAction::Retry(reason) => {
                             break reason;
                         }
@@ -701,10 +706,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     /// Handles ecalls from the guest.
     fn handle_ecall(&self, msg: SbiMessage, active_vcpu: &mut ActiveVmCpu<T>) -> EcallAction {
         match msg {
-            SbiMessage::PutChar(_) => {
-                // TODO: Let the host set the return value and forward it to the guest.
-                EcallAction::Break(VmExitCause::ResumableEcall(msg), SbiReturn::success(0))
-            }
+            SbiMessage::PutChar(_) => EcallAction::Forward(msg),
             SbiMessage::Reset(ResetFunction::Reset { .. }) => {
                 EcallAction::Break(VmExitCause::FatalEcall(msg), SbiReturn::success(0))
             }
@@ -885,11 +887,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
     fn handle_debug_console(&self, debug_con_func: DebugConsoleFunction) -> EcallAction {
         match debug_con_func {
-            // TODO: Let the host set the return value and forward it to the guest.
-            DebugConsoleFunction::PutString { len, addr: _ } => EcallAction::Break(
-                VmExitCause::ResumableEcall(SbiMessage::DebugConsole(debug_con_func)),
-                SbiReturn::success(len),
-            ),
+            DebugConsoleFunction::PutString { .. } => {
+                EcallAction::Forward(SbiMessage::DebugConsole(debug_con_func))
+            }
         }
     }
 

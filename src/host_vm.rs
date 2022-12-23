@@ -15,7 +15,7 @@ use riscv_regs::{
     CSR_HTINST, CSR_HTVAL, CSR_SCAUSE, CSR_STVAL,
 };
 use s_mode_utils::print::*;
-use sbi::{self, DebugConsoleFunction, SbiMessage, StateFunction};
+use sbi::{self, DebugConsoleFunction, Error as SbiError, SbiMessage, SbiReturn, StateFunction};
 
 use crate::guest_tracking::{GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
@@ -428,11 +428,20 @@ impl HostVmRunner {
                                 return ControlFlow::Continue(())
                             }
                             Ok(DebugConsole(DebugConsoleFunction::PutString { len, addr })) => {
-                                // Can't do anything about errors right now.
-                                let _ = self.handle_put_string(&vm, addr, len);
+                                let sbi_ret = match self.handle_put_string(&vm, addr, len) {
+                                    Ok(n) => SbiReturn::success(n),
+                                    Err(n) => SbiReturn {
+                                        error_code: SbiError::InvalidAddress as i64,
+                                        return_value: n,
+                                    },
+                                };
+
+                                self.gprs.set_reg(GprIndex::A0, sbi_ret.error_code as u64);
+                                self.gprs.set_reg(GprIndex::A1, sbi_ret.return_value);
                             }
                             Ok(PutChar(c)) => {
                                 print!("{}", c as u8 as char);
+                                self.gprs.set_reg(GprIndex::A0, 0);
                             }
                             _ => {
                                 println!("Unhandled ECALL from host");

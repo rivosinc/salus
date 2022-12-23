@@ -11,7 +11,7 @@ use page_tracking::TlbVersion;
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, RawAddr};
 use riscv_regs::*;
-use sbi::{self, api::tee_host::TsmShmemAreaRef, SbiMessage, SbiReturnType};
+use sbi::{self, api::tee_host::TsmShmemAreaRef, SbiMessage, SbiReturn, SbiReturnType};
 use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::smp::PerCpu;
@@ -364,12 +364,18 @@ struct PrevTlb {
     tlb_version: TlbVersion,
 }
 
+// An operation that's pending a return value from the vCPU's host.
+enum PendingOperation {
+    Mmio(MmioOperation),
+    Ecall(SbiMessage),
+}
+
 // The architectural state of a vCPU.
 struct VmCpuArchState {
     regs: VmCpuRegisters,
     pmu: VmPmuState,
     prev_tlb: Option<PrevTlb>,
-    pending_mmio_op: Option<MmioOperation>,
+    pending_op: Option<PendingOperation>,
     shmem_area: Option<PinnedTsmShmemArea>,
 }
 
@@ -406,7 +412,7 @@ impl VmCpuArchState {
             regs,
             pmu: VmPmuState::default(),
             prev_tlb: None,
-            pending_mmio_op: None,
+            pending_op: None,
             shmem_area: None,
         }
     }
@@ -553,7 +559,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     /// Runs this vCPU until it traps.
     pub fn run(&mut self) -> VmCpuTrap {
-        self.complete_pending_mmio_op();
+        self.complete_pending_op();
 
         match self.host_context {
             VmCpuParent::HostVm(ref host_vcpu) => {
@@ -791,6 +797,10 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             ResumableEcall(msg) | FatalEcall(msg) | BlockingEcall(msg, _) => {
                 self.report_ecall_exit(msg);
             }
+            ForwardedEcall(msg) => {
+                self.report_ecall_exit(msg);
+                self.arch.pending_op = Some(PendingOperation::Ecall(msg));
+            }
             PageFault(exception, page_addr) => {
                 self.report_pf_exit(exception, page_addr.into());
             }
@@ -817,7 +827,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 self.host_context.set_guest_gpr(GprIndex::A0, val);
 
                 // We'll complete a load instruction the next time this vCPU is run.
-                self.arch.pending_mmio_op = Some(mmio_op);
+                self.arch.pending_op = Some(PendingOperation::Mmio(mmio_op));
             }
             Wfi(inst) => {
                 self.report_vi_exit(inst.raw() as u64);
@@ -1052,45 +1062,61 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         self.arch.shmem_area = None;
     }
 
-    // Completes any pending MMIO operation for this CPU.
-    fn complete_pending_mmio_op(&mut self) {
-        // Complete any pending load operations. The host is expected to have written the value
-        // to complete the load to A0.
-        if let Some(mmio_op) = self.arch.pending_mmio_op {
-            let val = self.host_context.guest_gpr(GprIndex::A0);
-            use MmioOpcode::*;
-            // Write the value to the actual destination register.
-            match mmio_op.opcode() {
-                Load8 => {
-                    self.set_gpr(mmio_op.register(), val as i8 as u64);
-                }
-                Load8U => {
-                    self.set_gpr(mmio_op.register(), val as u8 as u64);
-                }
-                Load16 => {
-                    self.set_gpr(mmio_op.register(), val as i16 as u64);
-                }
-                Load16U => {
-                    self.set_gpr(mmio_op.register(), val as u16 as u64);
-                }
-                Load32 => {
-                    self.set_gpr(mmio_op.register(), val as i32 as u64);
-                }
-                Load32U => {
-                    self.set_gpr(mmio_op.register(), val as u32 as u64);
-                }
-                Load64 => {
-                    self.set_gpr(mmio_op.register(), val);
-                }
-                _ => (),
-            };
+    // Completes any pending MMIO or ECALL result from the host for this vCPU.
+    fn complete_pending_op(&mut self) {
+        match self.arch.pending_op {
+            Some(PendingOperation::Mmio(mmio_op)) => {
+                // Complete any pending load operations. The host is expected to have written the
+                // value to complete the load to A0.
+                let val = self.host_context.guest_gpr(GprIndex::A0);
+                use MmioOpcode::*;
+                // Write the value to the actual destination register.
+                match mmio_op.opcode() {
+                    Load8 => {
+                        self.set_gpr(mmio_op.register(), val as i8 as u64);
+                    }
+                    Load8U => {
+                        self.set_gpr(mmio_op.register(), val as u8 as u64);
+                    }
+                    Load16 => {
+                        self.set_gpr(mmio_op.register(), val as i16 as u64);
+                    }
+                    Load16U => {
+                        self.set_gpr(mmio_op.register(), val as u16 as u64);
+                    }
+                    Load32 => {
+                        self.set_gpr(mmio_op.register(), val as i32 as u64);
+                    }
+                    Load32U => {
+                        self.set_gpr(mmio_op.register(), val as u32 as u64);
+                    }
+                    Load64 => {
+                        self.set_gpr(mmio_op.register(), val);
+                    }
+                    _ => (),
+                };
+                self.host_context.set_guest_gpr(GprIndex::A0, 0);
 
-            self.arch.pending_mmio_op = None;
-            self.host_context.set_guest_gpr(GprIndex::A0, 0);
+                // Advance SEPC past the faulting instruction.
+                self.inc_sepc(mmio_op.len() as u64);
+            }
+            Some(PendingOperation::Ecall(msg)) => {
+                // Forward the SBI call return value from the A0/A1 values provided by the host.
+                let sbi_ret = match msg {
+                    SbiMessage::PutChar(_) => {
+                        SbiReturnType::Legacy(self.host_context.guest_gpr(GprIndex::A0))
+                    }
+                    _ => SbiReturnType::Standard(SbiReturn {
+                        error_code: self.host_context.guest_gpr(GprIndex::A0) as i64,
+                        return_value: self.host_context.guest_gpr(GprIndex::A1),
+                    }),
+                };
 
-            // Advance SEPC past the faulting instruction.
-            self.inc_sepc(mmio_op.len() as u64);
+                self.set_ecall_result(sbi_ret);
+            }
+            None => (),
         }
+        self.arch.pending_op = None;
     }
 
     fn save(&mut self) {

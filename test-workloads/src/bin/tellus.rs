@@ -234,6 +234,42 @@ fn check_vectors() {
     }
 }
 
+fn do_guest_puts(
+    dbcn_gpa_range: Option<Range<u64>>,
+    dbcn_spa_range: Option<Range<u64>>,
+    guest_addr: u64,
+    len: u64,
+) -> Result<u64, u64> {
+    // Make sure the range the guest wants to print is fully contained within a GPA region it
+    // converted to shared memory and that we've mapped the backing pages.
+    let guest_end_addr = guest_addr.checked_add(len).ok_or(0u64)? - 1;
+    let dbcn_gpa_range = dbcn_gpa_range
+        .filter(|r| r.contains(&guest_addr) && r.contains(&guest_end_addr))
+        .ok_or(0u64)?;
+    let offset = guest_addr - dbcn_gpa_range.start;
+    let dbcn_spa_range = dbcn_spa_range
+        .filter(|r| r.end - r.start >= offset + len)
+        .ok_or(0u64)?;
+
+    let mut copied = 0;
+    let mut host_addr = dbcn_spa_range.start + offset;
+    while copied != len {
+        let mut buf = [0u8; 256];
+        let to_copy = core::cmp::min(buf.len(), (len - copied) as usize);
+        for c in buf.iter_mut() {
+            // Safety: We've confirmed that the host address is in a valid part of our address
+            // space. `u8`s are always aligned and properly initialized.
+            *c = unsafe { core::ptr::read_volatile(host_addr as *const u8) };
+            host_addr += 1;
+        }
+        let s = core::str::from_utf8(&buf[..to_copy]).map_err(|_| copied)?;
+        print!("{s}");
+        copied += to_copy as u64;
+    }
+
+    Ok(len)
+}
+
 static mut CONSOLE_BUFFER: [u8; 256] = [0; 256];
 
 /// The entry point of the Rust part of the kernel.
@@ -598,6 +634,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     continue;
                                 }
                             }
+                        }
+                        Ok(DebugConsole(sbi::DebugConsoleFunction::PutString { len, addr })) => {
+                            let _ = do_guest_puts(
+                                dbcn_gpa_range.clone(),
+                                dbcn_spa_range.clone(),
+                                addr,
+                                len,
+                            );
                         }
                         _ => {
                             println!("Unexpected ECALL from guest");

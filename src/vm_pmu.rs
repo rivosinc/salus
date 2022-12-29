@@ -374,13 +374,20 @@ impl VmPmuState {
         event_type: PmuEventType,
         event_data: u64,
     ) -> SbiResult<u64> {
-        let config_flags = config_flags.set_sinh().set_minh();
+        // Translate uinh/sinh from VM
+        let mut config_flags = config_flags;
+        if config_flags.is_uinh() {
+            config_flags = config_flags.set_vuinh();
+        }
+        if config_flags.is_sinh() {
+            config_flags = config_flags.set_vsinh();
+        }
         let counter_mask =
             self.get_configurable_counter_range(counter_index, counter_mask, config_flags)?;
         let platform_counter_index = sbi::api::pmu::configure_matching_counters(
             counter_index,
             counter_mask,
-            config_flags,
+            config_flags.set_sinh().set_minh(),
             event_type,
             event_data,
         )?;

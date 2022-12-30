@@ -2169,6 +2169,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         use TeeGuestFunction::*;
         let result = match guest_func {
             AddMmioRegion { addr, len } => self.add_mmio_region(addr, len),
+            RemoveMmioRegion { addr, len } => self.remove_mmio_region(addr, len),
             ShareMemory { addr, len } | UnshareMemory { addr, len } => {
                 let result = if matches!(guest_func, ShareMemory { .. }) {
                     self.share_mem_region(addr, len)

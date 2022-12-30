@@ -17,6 +17,17 @@ pub fn add_emulated_mmio_region(addr: u64, len: u64) -> Result<()> {
     Ok(())
 }
 
+/// Unregister an emulated MMIO region, previously registered using `add_emulated_mmio_region`.
+/// Future accesses in the specified address range will result in a page fault.
+pub fn remove_emulated_mmio_region(addr: u64, len: u64) -> Result<()> {
+    let msg = SbiMessage::TeeGuest(RemoveMmioRegion { addr, len });
+    // Safety: RemoveMmioRegion does not directly access the memory. The specified range of
+    // address space must have been previously registered for MMIO using `AddMmioRegion` for
+    // this call to succeed.
+    unsafe { ecall_send(&msg) }?;
+    Ok(())
+}
+
 /// Converts the specified range of address space from confidential to shared.
 ///
 /// # Safety

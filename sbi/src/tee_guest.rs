@@ -22,6 +22,18 @@ pub enum TeeGuestFunction {
         /// a1 = length of the region
         len: u64,
     },
+    /// Removes the specified range of guest physical address space from the emulated MMIO regions. Upon
+    /// return, all accesses by the TVM within the range will result in a page fault.
+    ///
+    /// Both `addr` and `len` must be 4kB-aligned.
+    ///
+    /// a6 = 1
+    RemoveMmioRegion {
+        /// a0 = start address of the region
+        addr: u64,
+        /// a1 = length of the region
+        len: u64,
+    },
     /// Requests conversion of the specified range of guest physical address space from confidential
     /// to shared. The caller is blocked until the host has completed the invalidation and removal
     /// of any confidential pages that were mapped into the region. Upon return, all accesses by
@@ -30,7 +42,7 @@ pub enum TeeGuestFunction {
     /// Both `addr` and `len` must be 4kB-aligned, and the range must lie within an existing region
     /// of confidential memory. Returns 0 on success.
     ///
-    /// a6 = 1
+    /// a6 = 2
     ShareMemory {
         /// a0 = start address of the region
         addr: u64,
@@ -45,7 +57,7 @@ pub enum TeeGuestFunction {
     /// Both `addr` and `len` must be 4kB-aligned, and the range must lie within an existing region
     /// of shared memory. Returns 0 on success.
     ///
-    /// a6 = 2
+    /// a6 = 3
     UnshareMemory {
         /// a0 = start address of the region
         addr: u64,
@@ -58,7 +70,7 @@ pub enum TeeGuestFunction {
     ///
     /// Returns an error if the specified external interrupt ID is invalid.
     ///
-    /// a6 = 3
+    /// a6 = 4
     AllowExternalInterrupt {
         /// a0 = interrupt ID
         id: i64,
@@ -68,7 +80,7 @@ pub enum TeeGuestFunction {
     ///
     /// Returns an error if the specified external interrupt ID is invalid.
     ///
-    /// a6 = 4
+    /// a6 = 5
     DenyExternalInterrupt {
         /// a0 = interrupt ID
         id: i64,
@@ -84,16 +96,20 @@ impl TeeGuestFunction {
                 addr: args[0],
                 len: args[1],
             }),
-            1 => Ok(ShareMemory {
+            1 => Ok(RemoveMmioRegion {
                 addr: args[0],
                 len: args[1],
             }),
-            2 => Ok(UnshareMemory {
+            2 => Ok(ShareMemory {
                 addr: args[0],
                 len: args[1],
             }),
-            3 => Ok(AllowExternalInterrupt { id: args[0] as i64 }),
-            4 => Ok(DenyExternalInterrupt { id: args[0] as i64 }),
+            3 => Ok(UnshareMemory {
+                addr: args[0],
+                len: args[1],
+            }),
+            4 => Ok(AllowExternalInterrupt { id: args[0] as i64 }),
+            5 => Ok(DenyExternalInterrupt { id: args[0] as i64 }),
             _ => Err(Error::NotSupported),
         }
     }
@@ -104,10 +120,11 @@ impl SbiFunction for TeeGuestFunction {
         use TeeGuestFunction::*;
         match self {
             AddMmioRegion { .. } => 0,
-            ShareMemory { .. } => 1,
-            UnshareMemory { .. } => 2,
-            AllowExternalInterrupt { .. } => 3,
-            DenyExternalInterrupt { .. } => 4,
+            RemoveMmioRegion { .. } => 1,
+            ShareMemory { .. } => 2,
+            UnshareMemory { .. } => 3,
+            AllowExternalInterrupt { .. } => 4,
+            DenyExternalInterrupt { .. } => 5,
         }
     }
 
@@ -115,6 +132,7 @@ impl SbiFunction for TeeGuestFunction {
         use TeeGuestFunction::*;
         match self {
             AddMmioRegion { addr, len: _ } => *addr,
+            RemoveMmioRegion { addr, len: _ } => *addr,
             ShareMemory { addr, len: _ } => *addr,
             UnshareMemory { addr, len: _ } => *addr,
             AllowExternalInterrupt { id } => *id as u64,
@@ -126,6 +144,7 @@ impl SbiFunction for TeeGuestFunction {
         use TeeGuestFunction::*;
         match self {
             AddMmioRegion { addr: _, len } => *len,
+            RemoveMmioRegion { addr: _, len } => *len,
             ShareMemory { addr: _, len } => *len,
             UnshareMemory { addr: _, len } => *len,
             _ => 0,

@@ -32,7 +32,7 @@
 
 use core::mem::{align_of, size_of};
 
-use assertions::const_assert;
+use static_assertions::const_assert;
 
 use crate::DataInit;
 

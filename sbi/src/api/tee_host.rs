@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use assertions::const_assert;
 use core::{marker::PhantomData, ptr};
+use static_assertions::const_assert;
 
 use crate::TeeHostFunction::*;
 use crate::{ecall_send, Error, Result, SbiMessage};

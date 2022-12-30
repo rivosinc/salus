@@ -320,6 +320,25 @@ fn test_memory_sharing() {
     }
 }
 
+fn test_emulated_mmio() {
+    for _ in 0..2 {
+        tee_guest::add_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
+            .expect("GuestVm - AddEmulatedMmioRegion failed");
+        // Try reading and writing MMIO.
+        let write_ptr = GUEST_MMIO_START_ADDRESS as *mut u32;
+        // Safety: write_ptr is properly aligned and a writable part of our address space.
+        unsafe {
+            core::ptr::write_volatile(write_ptr, 0xaabbccdd);
+        }
+        let read_ptr = (GUEST_MMIO_START_ADDRESS + 0x20) as *const u8;
+        // Safety: read_ptr is properly aligned and a readable part of our address space.
+        let val = unsafe { core::ptr::read_volatile(read_ptr) };
+        println!("Host says: 0x{:x}", val);
+        tee_guest::remove_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
+            .expect("GuestVm - RemoveEmulatedMmioRegion failed");
+    }
+}
+
 fn test_interrupts() {
     const INTERRUPT_ID: u64 = 3;
 
@@ -404,18 +423,7 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
         test_vector();
     }
 
-    tee_guest::add_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
-        .expect("GuestVm - AddEmulatedMmioRegion failed");
-    // Try reading and writing MMIO.
-    let write_ptr = GUEST_MMIO_START_ADDRESS as *mut u32;
-    // Safety: write_ptr is properly aligned and a writable part of our address space.
-    unsafe {
-        core::ptr::write_volatile(write_ptr, 0xaabbccdd);
-    }
-    let read_ptr = (GUEST_MMIO_START_ADDRESS + 0x20) as *const u8;
-    // Safety: read_ptr is properly aligned and a readable part of our address space.
-    let val = unsafe { core::ptr::read_volatile(read_ptr) };
-    println!("Host says: 0x{:x}", val);
+    test_emulated_mmio();
 
     test_interrupts();
 

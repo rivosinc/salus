@@ -315,6 +315,63 @@ impl VmRegionList {
         Ok(())
     }
 
+    // Removes the region at [`start`, `end`) of type `region_type`.
+    fn remove(
+        &mut self,
+        start: GuestPageAddr,
+        end: GuestPageAddr,
+        region_type: VmRegionType,
+    ) -> Result<()> {
+        let (mut index, region) = self
+            .regions
+            .iter()
+            .enumerate()
+            .find(|(_i, r)| r.start <= start && r.end >= end && r.region_type == region_type)
+            .ok_or(Error::InvalidMapRegion)?;
+
+        let r_start = region.start;
+        let r_end = region.end;
+
+        // Check if we have enough space to accommodate remaining range. We need to check this
+        // only when we need two extra regions. We will always get one free region given we are
+        // removing the current region. Due to this we only need to check for `is_full` condition
+        // to make sure we can accommodate two extra regions.
+        if r_start < start && r_end > end && self.regions.is_full() {
+            return Err(Error::InsufficientVmRegionSpace);
+        }
+
+        // Remove the memory region.
+        self.regions.remove(index);
+
+        // Add the remaining range at the start as a new region.
+        if r_start < start {
+            let new_region = VmRegion {
+                start: r_start,
+                end: start,
+                region_type,
+            };
+
+            // Using insert instead of try_insert given we have already checked for free space.
+            self.regions.insert(index, new_region);
+
+            index += 1;
+        }
+
+        // Add the remaining range at the end as a new region.
+        if r_end > end {
+            let new_region = VmRegion {
+                start: end,
+                end: r_end,
+                region_type,
+            };
+
+            // Using insert instead of try_insert given we have already checked for free space.
+            self.regions.insert(index, new_region);
+        }
+
+        Ok(())
+    }
+
     // Prepares to update region type of the range [`start`, `end`), which must be in an existing
     // region of type `region_type`. Call `finish()` on the returned `VmRegionUpdater` to complete
     // the update. If the returned `VmRegionUpdater` is dropped before calling `finish()`, the
@@ -1096,7 +1153,28 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
                 .ok_or(Error::AddressOverflow)?,
         )
         .ok_or(Error::UnalignedAddress)?;
+
         self.inner.regions.write().add(page_addr, end, region_type)
+    }
+
+    // Removes a region of type `region_type`.
+    fn do_remove_region(
+        &self,
+        page_addr: GuestPageAddr,
+        len: u64,
+        region_type: VmRegionType,
+    ) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+
+        self.inner
+            .regions
+            .write()
+            .remove(page_addr, end, region_type)
     }
 }
 
@@ -1119,6 +1197,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     /// space.
     pub fn add_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
         self.do_add_region(page_addr, len, VmRegionType::Mmio)
+    }
+
+    /// Removes an emulated MMIO region of `len` bytes starting at `page_addr` from this VM's address
+    /// space.
+    pub fn remove_mmio_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_remove_region(page_addr, len, VmRegionType::Mmio)
     }
 
     /// Converts the specified memory region from confidential to shared. Returns the TLB version

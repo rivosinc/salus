@@ -2212,6 +2212,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
+    fn remove_mmio_region(&self, addr: u64, len: u64) -> EcallResult<u64> {
+        let addr = self.guest_addr_from_raw(addr)?;
+        self.vm_pages()
+            .remove_mmio_region(addr, len)
+            .map_err(EcallError::from)?;
+        Ok(0)
+    }
+
     fn share_mem_region(&self, addr: u64, len: u64) -> EcallResult<TlbVersion> {
         let addr = self.guest_addr_from_raw(addr)?;
         self.vm_pages()

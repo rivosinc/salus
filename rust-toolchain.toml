@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly-2022-11-10"
+channel = "nightly-2022-12-25"
 components = []
 targets = ["riscv64gc-unknown-none-elf"]
 profile = "minimal"

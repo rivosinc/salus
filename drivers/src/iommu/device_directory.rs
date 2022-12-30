@@ -2,12 +2,12 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use assertions::const_assert;
 use core::marker::PhantomData;
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::dma_wmb;
 use spin::Mutex;
+use static_assertions::const_assert;
 
 use super::error::*;
 use super::msi_page_table::MsiPageTable;

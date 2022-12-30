@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use assertions::const_assert;
 use const_field_offset::FieldOffsets;
+use static_assertions::const_assert;
 use tock_registers::interfaces::Readable;
 use tock_registers::registers::{ReadOnly, ReadWrite};
 use tock_registers::{register_bitfields, LocalRegisterCopy, RegisterLongName, UIntLike};

@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 arrayvec = { version = "0.7.2", default-features = false }
-assertions = { path = "../assertions" }
 const-field-offset = { version = "0.1.2" }
 data_model = { path = "../data-model" }
 device_tree = { path = "../device-tree" }
@@ -19,6 +18,7 @@ riscv_page_tables = { path = "../riscv-page-tables" }
 riscv_pages = { path = "../riscv-pages" }
 riscv_regs = { path = "../riscv-regs" }
 spin = { version = "*", default-features = false, features = ["once"] }
+static_assertions = "1.1"
 tock-registers = { version = "0.7" }
 sbi = { path = "../sbi" }
 s_mode_utils = { path = "../s-mode-utils" }

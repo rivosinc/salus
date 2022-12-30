@@ -9,10 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8da52d66c7071e2e3fa2a1e5c6d088fec47b593032b254f5e980de8ea54454d6"
 
 [[package]]
-name = "assertions"
-version = "0.1.0"
-
-[[package]]
 name = "attestation"
 version = "0.1.0"
 dependencies = [
@@ -133,7 +129,7 @@ dependencies = [
 name = "data_model"
 version = "0.1.0"
 dependencies = [
- "assertions",
+ "static_assertions",
 ]
 
 [[package]]
@@ -192,7 +188,6 @@ name = "drivers"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "assertions",
  "const-field-offset",
  "data_model",
  "device_tree",
@@ -206,6 +201,7 @@ dependencies = [
  "s_mode_utils",
  "sbi",
  "spin",
+ "static_assertions",
  "tock-registers",
 ]
 
@@ -564,7 +560,6 @@ name = "salus"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "assertions",
  "attestation",
  "const-oid",
  "data_model",
@@ -587,6 +582,7 @@ dependencies = [
  "sbi",
  "sha2 0.10.2",
  "spin",
+ "static_assertions",
  "u_mode_api",
 ]
 
@@ -595,8 +591,8 @@ name = "sbi"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "assertions",
  "flagset",
+ "static_assertions",
 ]
 
 [[package]]

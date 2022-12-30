@@ -277,7 +277,7 @@ impl<T> Clone for StaticPageRef<T> {
 impl<T> Deref for StaticPageRef<T> {
     type Target = T;
 
-    fn deref(&self) -> &'static T {
+    fn deref(&self) -> &T {
         // Safe because this pointer is guaranteed to be valid in the constructor.
         unsafe { self.0.as_ref() }
     }

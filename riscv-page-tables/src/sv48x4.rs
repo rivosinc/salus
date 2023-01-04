@@ -96,3 +96,93 @@ impl PagingMode for Sv48x4 {
         num_l1_pages + num_l2_pages + num_l3_pages + num_l4_pages
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_stubs::*;
+    use alloc::vec::Vec;
+    use page_tracking::*;
+    use riscv_pages::*;
+    use std::{mem, slice};
+
+    use crate::page_table::*;
+    use crate::sv48x4::Sv48x4;
+
+    #[test]
+    fn ownership_root_pages() {
+        let state = stub_sys_memory();
+
+        let page_tracker = state.page_tracker;
+        let id = page_tracker.add_active_guest().unwrap();
+
+        // Should fail as root_pages owner is not set.
+        assert!(
+            GuestStagePageTable::<Sv48x4>::new(state.root_pages, id, page_tracker.clone()).is_err()
+        );
+    }
+
+    #[test]
+    fn map_and_unmap_sv48x4() {
+        let state = stub_sys_memory();
+
+        let page_tracker = state.page_tracker;
+        let mut host_pages = state.host_pages;
+        let id = PageOwnerId::host();
+        let guest_page_table: GuestStagePageTable<Sv48x4> =
+            GuestStagePageTable::new(state.root_pages, id, page_tracker.clone())
+                .expect("creating sv48x4");
+
+        let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
+        let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
+        let mut pte_pages = state.pte_pages.into_iter();
+        let gpa_base = PageAddr::new(RawAddr::guest(0x8000_0000, PageOwnerId::host())).unwrap();
+        let mapper = guest_page_table
+            .map_range(gpa_base, PageSize::Size4k, 2, &mut || pte_pages.next())
+            .unwrap();
+        for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
+            // Write to the page so that we can test if it's retained later.
+            unsafe {
+                // Not safe - just a test
+                let slice = slice::from_raw_parts_mut(
+                    page.addr().bits() as *mut u64,
+                    page.size() as usize / mem::size_of::<u64>(),
+                );
+                slice[0] = 0xdeadbeef;
+            }
+            let mappable = page_tracker.assign_page_for_mapping(page, id).unwrap();
+            assert!(mapper.map_page(gpa, mappable).is_ok());
+        }
+        let version = TlbVersion::new();
+        let invalidated = guest_page_table
+            .invalidate_range(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
+                page_tracker.is_mapped_page(addr, id, MemType::Ram)
+            })
+            .unwrap();
+        for paddr in invalidated {
+            // Safety: Not safe - just a test
+            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
+            page_tracker.convert_page(page, version).unwrap();
+        }
+        let version = version.increment();
+        let converted = guest_page_table
+            .get_invalidated_pages(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
+                page_tracker.is_converted_page(addr, id, MemType::Ram, version)
+            })
+            .unwrap();
+        let mut locked_pages = LockedPageList::new(page_tracker.clone());
+        for paddr in converted {
+            let page = page_tracker
+                .get_converted_page::<Page<ConvertedDirty>>(paddr, id, version)
+                .unwrap();
+            locked_pages.push(page).unwrap();
+        }
+        let dirty_page = locked_pages.next().unwrap();
+        assert_eq!(dirty_page.addr(), page_addrs[0]);
+        assert_eq!(dirty_page.get_u64(0).unwrap(), 0xdeadbeef);
+        page_tracker.unlock_page(dirty_page).unwrap();
+        let clean_page = locked_pages.next().unwrap().clean();
+        assert_eq!(clean_page.addr(), page_addrs[1]);
+        assert_eq!(clean_page.get_u64(0).unwrap(), 0);
+        page_tracker.unlock_page(clean_page).unwrap();
+    }
+}

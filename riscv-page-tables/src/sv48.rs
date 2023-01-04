@@ -80,3 +80,43 @@ impl PagingMode for Sv48 {
         num_l1_pages + num_l2_pages + num_l3_pages + num_l4_pages
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use crate::test_stubs::*;
+    use crate::*;
+
+    use std::{mem, slice};
+
+    #[test]
+    fn map_and_unmap() {
+        let state = stub_sys_memory();
+
+        let mut host_pages = state.host_pages;
+        let hyp_page_table: FirstStagePageTable<Sv48> =
+            FirstStagePageTable::new(state.root_pages.into_iter().next().unwrap())
+                .expect("creating sv48");
+
+        let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
+        let mut pte_pages = state.pte_pages.into_iter();
+        let gpa_base = PageAddr::new(RawAddr::supervisor_virt(0x8000_0000)).unwrap();
+        let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::RW);
+        let mapper = hyp_page_table
+            .map_range(gpa_base, PageSize::Size4k, 2, &mut || pte_pages.next())
+            .unwrap();
+        for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
+            // Write to the page so that we can test if it's retained later.
+            unsafe {
+                // Not safe - just a test
+                let slice = slice::from_raw_parts_mut(
+                    page.addr().bits() as *mut u64,
+                    page.size() as usize / mem::size_of::<u64>(),
+                );
+                slice[0] = 0xdeadbeef;
+                assert!(mapper.map_addr(gpa, page.addr(), pte_fields).is_ok());
+            }
+        }
+    }
+}

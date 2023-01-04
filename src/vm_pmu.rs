@@ -266,7 +266,7 @@ impl VmPmuState {
 
     fn reset_all_counters(&mut self, counter_mask: u64) -> SbiResult<()> {
         if counter_mask != 0 {
-            self.stop_counters(
+            self.stop_counters_internal(
                 0,
                 counter_mask,
                 PmuCounterStopFlags::default().set_reset_flag(),
@@ -313,7 +313,7 @@ impl VmPmuState {
 
     fn resume_counter(&mut self, counter_index: u64, c: &CounterState) -> SbiResult<()> {
         let start_flags = PmuCounterStartFlags::default().set_init_value();
-        self.start_counters(counter_index, 0x1, start_flags, c.value)
+        self.start_counters_internal(counter_index, 0x1, start_flags, c.value)
             .map(|_| VmPmuState::set_hcounteren_bit(counter_index))
     }
 
@@ -323,7 +323,7 @@ impl VmPmuState {
             .unset_auto_start()
             .unset_skip_match()
             .unset_clear_value();
-        self.configure_matching_counters(
+        self.configure_matching_counters_internal(
             counter_index,
             0x1,
             config_flags,
@@ -365,8 +365,7 @@ impl VmPmuState {
         }
     }
 
-    /// Calls the SBI configure_matching_counters() and performs internal bookkeeping on counter state.
-    pub fn configure_matching_counters(
+    fn configure_matching_counters_internal(
         &mut self,
         counter_index: u64,
         counter_mask: u64,
@@ -382,12 +381,31 @@ impl VmPmuState {
         if config_flags.is_sinh() {
             config_flags = config_flags.set_vsinh();
         }
-        let counter_mask =
-            self.get_configurable_counter_range(counter_index, counter_mask, config_flags)?;
         let platform_counter_index = sbi::api::pmu::configure_matching_counters(
             counter_index,
             counter_mask,
             config_flags.set_sinh().set_minh(),
+            event_type,
+            event_data,
+        )?;
+        Ok(platform_counter_index)
+    }
+
+    /// Calls the SBI configure_matching_counters() and performs internal bookkeeping on counter state.
+    pub fn configure_matching_counters(
+        &mut self,
+        counter_index: u64,
+        counter_mask: u64,
+        config_flags: PmuCounterConfigFlags,
+        event_type: PmuEventType,
+        event_data: u64,
+    ) -> SbiResult<u64> {
+        let counter_mask =
+            self.get_configurable_counter_range(counter_index, counter_mask, config_flags)?;
+        let platform_counter_index = self.configure_matching_counters_internal(
+            counter_index,
+            counter_mask,
+            config_flags,
             event_type,
             event_data,
         )?;
@@ -400,6 +418,16 @@ impl VmPmuState {
         Ok(platform_counter_index)
     }
 
+    fn start_counters_internal(
+        &mut self,
+        counter_index: u64,
+        counter_mask: u64,
+        start_flags: PmuCounterStartFlags,
+        initial_value: u64,
+    ) -> SbiResult<()> {
+        sbi::api::pmu::start_counters(counter_index, counter_mask, start_flags, initial_value)
+    }
+
     /// Calls the SBI start_counters() and performs internal bookkeeping on counter state.
     pub fn start_counters(
         &mut self,
@@ -410,13 +438,22 @@ impl VmPmuState {
     ) -> SbiResult<()> {
         let counter_mask = self.get_startable_counter_range(counter_index, counter_mask)?;
         let result =
-            sbi::api::pmu::start_counters(counter_index, counter_mask, start_flags, initial_value);
+            self.start_counters_internal(counter_index, counter_mask, start_flags, initial_value);
         // Special case "already started" to handle counters that are autostarted following configuration.
         // Examples of such counters include the legacy timer and insret.
         if result.is_ok() || matches!(result, Err(SbiError::AlreadyStarted)) {
             self.update_started_counters(counter_index, counter_mask);
         }
         result
+    }
+
+    fn stop_counters_internal(
+        &mut self,
+        counter_index: u64,
+        counter_mask: u64,
+        stop_flags: PmuCounterStopFlags,
+    ) -> SbiResult<()> {
+        sbi::api::pmu::stop_counters(counter_index, counter_mask, stop_flags)
     }
 
     /// Calls the SBI stop_counters() and performs internal bookkeeping on counter state.
@@ -427,7 +464,7 @@ impl VmPmuState {
         stop_flags: PmuCounterStopFlags,
     ) -> SbiResult<()> {
         let counter_mask = self.get_stoppable_counter_range(counter_index, counter_mask)?;
-        let result = sbi::api::pmu::stop_counters(counter_index, counter_mask, stop_flags);
+        let result = self.stop_counters_internal(counter_index, counter_mask, stop_flags);
         // Special case "already stopped" to handle counters that can be reset following a stop
         if result.is_ok()
             || (matches!(result, Err(SbiError::AlreadyStopped)) && stop_flags.is_reset_flag())

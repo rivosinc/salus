@@ -1,0 +1,4 @@
+[submodule "sbi-rs"]
+	path = sbi-rs
+	url = https://github.com/rivosinc/sbi-rs
+	branch = main

@@ -365,7 +365,7 @@ pub unsafe fn ecall_send(msg: &SbiMessage) -> Result<u64> {
     msg.result(a0, a1)
 }
 
-#[cfg(not(any(target_arch = "riscv64", target_os = "none")))]
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
 unsafe fn ecall_send(_msg: &SbiMessage) -> Result<u64> {
     panic!("ecall_send called");
 }

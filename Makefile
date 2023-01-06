@@ -77,11 +77,11 @@ check:
 CARGO_FLAGS :=
 
 .PHONY: salus
-salus: umode
+salus: umode sbirs
 	cargo build $(CARGO_FLAGS) --release --bin salus
 
 .PHONY: salus_debug
-salus_debug: umode
+salus_debug: umode sbirs
 	cargo build $(CARGO_FLAGS) --bin salus
 
 tellus_bin: tellus
@@ -89,16 +89,24 @@ tellus_bin: tellus
 	${OBJCOPY} -O binary $(RELEASE_BINS)guestvm guestvm_raw
 	./create_guest_image.sh tellus_raw guestvm_raw tellus_guestvm
 
-guestvm:
+guestvm: sbirs
 	RUSTFLAGS='-Ctarget-feature=+v -Clink-arg=-Tlds/guest.lds' cargo build $(CARGO_FLAGS) --package test_workloads --release --bin guestvm
 
 .PHONY: tellus
-tellus: guestvm
+tellus: guestvm sbirs
 	cargo build $(CARGO_FLAGS) --package test_workloads --bin tellus --release
 
 .PHONY: umode
-umode:
+umode: sbirs
 	RUSTFLAGS='-Clink-arg=-Tlds/umode.lds' cargo build  --release --package umode
+
+# Ensures the sbi submodule is present and up-to-date.
+.PHONY: sbirs
+sbirs:
+	# Check if the submodule needs to be initialized
+	if [ "$$(git submodule status | grep -c '^-')" -gt 0 ]; then \
+		git submodule update --init; \
+	fi
 
 # Runnable targets:
 #

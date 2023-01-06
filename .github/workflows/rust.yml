@@ -16,6 +16,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+      with:
+        submodules: true
+    - name: Initialize submodules
+      run: git submodule update --init --recursive
     - name: Install riscv64 target
       run: rustup target add riscv64gc-unknown-none-elf
     - name: Install clippy

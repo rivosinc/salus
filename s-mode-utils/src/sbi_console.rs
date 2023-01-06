@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use sbi::api::debug_console::console_puts;
-use sbi::SbiMessage;
+use sbi_rs::api::debug_console::console_puts;
+use sbi_rs::SbiMessage;
 use spin::{Mutex, Once};
 
 use crate::ecall::ecall_send;

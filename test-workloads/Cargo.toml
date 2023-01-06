@@ -13,7 +13,7 @@ device_tree = { path = "../device-tree" }
 hex-literal = "0.3.4"
 rice = { git = "https://github.com/rivosinc/rice" }
 s_mode_utils = { path = "../s-mode-utils" }
-sbi = { path = "../sbi" }
+sbi_rs = { path = "../sbi-rs" }
 riscv_regs = { path = "../riscv-regs" }
 
 [dependencies.fdt-rs]

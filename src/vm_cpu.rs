@@ -11,7 +11,7 @@ use page_tracking::TlbVersion;
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, RawAddr};
 use riscv_regs::*;
-use sbi::{self, api::tee_host::TsmShmemAreaRef, SbiMessage, SbiReturn, SbiReturnType};
+use sbi_rs::{self, api::tee_host::TsmShmemAreaRef, SbiMessage, SbiReturn, SbiReturnType};
 use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::smp::PerCpu;
@@ -301,7 +301,7 @@ global_asm!(
 
 // Wrapper for a `NaclShmem` struct pinned in host shared memory.
 struct PinnedTsmShmemArea {
-    ptr: NonNull<sbi::NaclShmem>,
+    ptr: NonNull<sbi_rs::NaclShmem>,
     // Optional since we might be sharing with the hypervisor in the host VM case.
     _pin: Option<PinnedPages>,
 }
@@ -310,10 +310,10 @@ impl PinnedTsmShmemArea {
     // Creates a new `PinnedTsmShmemArea` from a set of pinned shared pages.
     fn new(pages: PinnedPages) -> Result<Self> {
         // Make sure the pin actually covers the size of the structure.
-        if pages.range().length_bytes() < size_of::<sbi::NaclShmem>() as u64 {
+        if pages.range().length_bytes() < size_of::<sbi_rs::NaclShmem>() as u64 {
             return Err(Error::InsufficientSharedStatePages);
         }
-        let ptr = pages.range().base().bits() as *mut sbi::NaclShmem;
+        let ptr = pages.range().base().bits() as *mut sbi_rs::NaclShmem;
         Ok(Self {
             ptr: NonNull::new(ptr).ok_or(Error::InvalidSharedStatePtr)?,
             _pin: Some(pages),

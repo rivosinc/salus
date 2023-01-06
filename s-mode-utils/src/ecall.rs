@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use sbi::Result as SbiResult;
-use sbi::SbiMessage;
+use sbi_rs::Result as SbiResult;
+use sbi_rs::SbiMessage;
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use core::arch::asm;

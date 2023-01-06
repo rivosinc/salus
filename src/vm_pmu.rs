@@ -5,7 +5,7 @@
 use drivers::pmu;
 use riscv_regs::{RiscvCsrInterface, CSR, CSR_CYCLE};
 use s_mode_utils::print::*;
-use sbi::{
+use sbi_rs::{
     Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags,
     PmuEventType, Result as SbiResult,
 };
@@ -381,7 +381,7 @@ impl VmPmuState {
         if config_flags.is_sinh() {
             config_flags = config_flags.set_vsinh();
         }
-        let platform_counter_index = sbi::api::pmu::configure_matching_counters(
+        let platform_counter_index = sbi_rs::api::pmu::configure_matching_counters(
             counter_index,
             counter_mask,
             config_flags.set_sinh().set_minh(),
@@ -425,7 +425,7 @@ impl VmPmuState {
         start_flags: PmuCounterStartFlags,
         initial_value: u64,
     ) -> SbiResult<()> {
-        sbi::api::pmu::start_counters(counter_index, counter_mask, start_flags, initial_value)
+        sbi_rs::api::pmu::start_counters(counter_index, counter_mask, start_flags, initial_value)
     }
 
     /// Calls the SBI start_counters() and performs internal bookkeeping on counter state.
@@ -453,7 +453,7 @@ impl VmPmuState {
         counter_mask: u64,
         stop_flags: PmuCounterStopFlags,
     ) -> SbiResult<()> {
-        sbi::api::pmu::stop_counters(counter_index, counter_mask, stop_flags)
+        sbi_rs::api::pmu::stop_counters(counter_index, counter_mask, stop_flags)
     }
 
     /// Calls the SBI stop_counters() and performs internal bookkeeping on counter state.

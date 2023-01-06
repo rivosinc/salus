@@ -9,7 +9,7 @@ use page_tracking::{HwMemMap, HwMemRegionType, HwReservedMemType};
 use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
 use riscv_regs::{sstatus, ReadWriteable, CSR};
 use s_mode_utils::print::*;
-use sbi::api::state;
+use sbi_rs::api::state;
 use spin::Once;
 
 use crate::hyp_map::HypPageTable;

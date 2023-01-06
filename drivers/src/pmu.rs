@@ -5,7 +5,9 @@
 use core::ops::ControlFlow;
 
 use arrayvec::ArrayVec;
-use sbi::{api::pmu, Error as SbiError, PmuCounterInfo, PmuCounterStopFlags, Result as SbiResult};
+use sbi_rs::{
+    api::pmu, Error as SbiError, PmuCounterInfo, PmuCounterStopFlags, Result as SbiResult,
+};
 use spin::Once;
 
 /// Maximum number of supported platform PMU counters

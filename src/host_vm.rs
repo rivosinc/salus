@@ -15,7 +15,7 @@ use riscv_regs::{
     CSR_HTINST, CSR_HTVAL, CSR_SCAUSE, CSR_STVAL,
 };
 use s_mode_utils::print::*;
-use sbi::{self, DebugConsoleFunction, Error as SbiError, SbiMessage, SbiReturn, StateFunction};
+use sbi_rs::{self, DebugConsoleFunction, Error as SbiError, SbiMessage, SbiReturn, StateFunction};
 
 use crate::guest_tracking::{GuestVm, Guests, Result as GuestTrackingResult};
 use crate::smp;
@@ -858,6 +858,6 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     fn vcpu_is_runnable(&self, vcpu_id: u64) -> bool {
         let vm = self.inner.as_finalized_vm().unwrap();
         vm.get_vcpu_status(vcpu_id)
-            .is_ok_and(|s| s == sbi::HartState::Started as u64)
+            .is_ok_and(|s| s == sbi_rs::HartState::Started as u64)
     }
 }

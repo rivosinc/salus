@@ -13,7 +13,7 @@ use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Trap};
 use s_mode_utils::print::*;
-use sbi::{Error as SbiError, *};
+use sbi_rs::{Error as SbiError, *};
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
 use crate::vm_cpu::{ActiveVmCpu, VmCpu, VmCpuParent, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX};
@@ -42,7 +42,8 @@ const SBI_SPEC_MAJOR_VERSION_SHIFT: u64 = 24;
 const SBI_SPEC_VERSION: u64 = 1 << SBI_SPEC_MAJOR_VERSION_SHIFT;
 
 // The number of pages required for `NaclShmem`.
-const NACL_SHMEM_PAGES: u64 = PageSize::num_4k_pages(core::mem::size_of::<sbi::NaclShmem>() as u64);
+const NACL_SHMEM_PAGES: u64 =
+    PageSize::num_4k_pages(core::mem::size_of::<sbi_rs::NaclShmem>() as u64);
 
 /// Possible MMIO instructions.
 #[derive(Clone, Copy, Debug)]
@@ -834,17 +835,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             GetImplementationID => SBI_IMPL_ID_SALUS,
             GetImplementationVersion => 0,
             ProbeSbiExtension(ext) => match ext {
-                sbi::EXT_PUT_CHAR
-                | sbi::EXT_BASE
-                | sbi::EXT_HART_STATE
-                | sbi::EXT_RESET
-                | sbi::EXT_DBCN
-                | sbi::EXT_NACL
-                | sbi::EXT_TEE_HOST
-                | sbi::EXT_TEE_INTERRUPT
-                | sbi::EXT_TEE_GUEST
-                | sbi::EXT_ATTESTATION => 1,
-                sbi::EXT_PMU if PmuInfo::get().is_ok() => 1,
+                sbi_rs::EXT_PUT_CHAR
+                | sbi_rs::EXT_BASE
+                | sbi_rs::EXT_HART_STATE
+                | sbi_rs::EXT_RESET
+                | sbi_rs::EXT_DBCN
+                | sbi_rs::EXT_NACL
+                | sbi_rs::EXT_TEE_HOST
+                | sbi_rs::EXT_TEE_INTERRUPT
+                | sbi_rs::EXT_TEE_GUEST
+                | sbi_rs::EXT_ATTESTATION => 1,
+                sbi_rs::EXT_PMU if PmuInfo::get().is_ok() => 1,
                 _ => 0,
             },
             // TODO: 0 is valid result for the GetMachine* SBI calls but we should probably
@@ -1018,14 +1019,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
         let dest_addr = RawAddr::guest(dest_addr, self.page_owner_id());
-        if len < mem::size_of::<sbi::TsmInfo>() as u64 {
+        if len < mem::size_of::<sbi_rs::TsmInfo>() as u64 {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
-        let len = mem::size_of::<sbi::TsmInfo>();
+        let len = mem::size_of::<sbi_rs::TsmInfo>();
 
         // Since we're the hypervisor we're ready from boot.
-        let tsm_info = sbi::TsmInfo {
-            tsm_state: sbi::TsmState::TsmReady,
+        let tsm_info = sbi_rs::TsmInfo {
+            tsm_state: sbi_rs::TsmState::TsmReady,
             tsm_version: 0,
             tvm_state_pages: GuestVm::<T>::required_pages(),
             tvm_max_vcpus: VM_CPUS_MAX as u64,
@@ -1033,7 +1034,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         };
         // Safety: &tsm_info points to len bytes of initialized memory.
         let tsm_info_bytes: &[u8] =
-            unsafe { slice::from_raw_parts((&tsm_info as *const sbi::TsmInfo).cast(), len) };
+            unsafe { slice::from_raw_parts((&tsm_info as *const sbi_rs::TsmInfo).cast(), len) };
         active_pages
             .copy_to_guest(dest_addr, tsm_info_bytes)
             .map_err(EcallError::from)?;
@@ -1106,17 +1107,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
         // Read the params from the VM's address space.
         let params_addr = RawAddr::guest(params_addr, self.page_owner_id());
-        if len < mem::size_of::<sbi::TvmCreateParams>() as u64 {
+        if len < mem::size_of::<sbi_rs::TvmCreateParams>() as u64 {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
-        let mut param_bytes = [0u8; mem::size_of::<sbi::TvmCreateParams>()];
+        let mut param_bytes = [0u8; mem::size_of::<sbi_rs::TvmCreateParams>()];
         active_pages
             .copy_from_guest(param_bytes.as_mut_slice(), params_addr)
             .map_err(EcallError::from)?;
 
         // Safety: `param_bytes` points to `size_of::<TvmCreateParams>()` contiguous, initialized
         // bytes.
-        let params: sbi::TvmCreateParams =
+        let params: sbi_rs::TvmCreateParams =
             unsafe { core::ptr::read_unaligned(param_bytes.as_slice().as_ptr().cast()) };
 
         // Now claim the pages that the host donated to us.
@@ -1302,11 +1303,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         &self,
         guest_id: u64,
         page_addr: u64,
-        page_type: sbi::TsmPageType,
+        page_type: sbi_rs::TsmPageType,
         num_pages: u64,
         guest_addr: u64,
     ) -> EcallResult<u64> {
-        if page_type != sbi::TsmPageType::Page4k {
+        if page_type != sbi_rs::TsmPageType::Page4k {
             // TODO - support huge pages.
             // TODO - need to break up mappings if given address that's part of a huge page.
             return Err(EcallError::Sbi(SbiError::InvalidParam));
@@ -1351,12 +1352,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         guest_id: u64,
         src_addr: u64,
         dest_addr: u64,
-        page_type: sbi::TsmPageType,
+        page_type: sbi_rs::TsmPageType,
         num_pages: u64,
         guest_addr: u64,
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
-        if page_type != sbi::TsmPageType::Page4k {
+        if page_type != sbi_rs::TsmPageType::Page4k {
             // TODO - support huge pages.
             // TODO - need to break up mappings if given address that's part of a huge page.
             return Err(EcallError::Sbi(SbiError::InvalidParam));
@@ -1420,7 +1421,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         &self,
         guest_id: u64,
         page_addr: u64,
-        page_type: sbi::TsmPageType,
+        page_type: sbi_rs::TsmPageType,
         num_pages: u64,
         guest_addr: u64,
     ) -> EcallResult<u64> {
@@ -1637,7 +1638,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             return Err(EcallError::Sbi(SbiError::InsufficientBufferCapacity));
         }
 
-        let mut measurement_data = [0u8; sbi::MAX_HASH_SIZE];
+        let mut measurement_data = [0u8; sbi_rs::MAX_HASH_SIZE];
         let measurement_data_gpa = RawAddr::guest(msmt_addr, self.page_owner_id());
         active_pages
             .copy_from_guest(
@@ -1764,7 +1765,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     ) -> EcallResult<u64> {
         // Read the params from the VM's address space.
         let params_addr = RawAddr::guest(params_addr, self.page_owner_id());
-        let mut param_bytes = [0u8; mem::size_of::<sbi::TvmAiaParams>()];
+        let mut param_bytes = [0u8; mem::size_of::<sbi_rs::TvmAiaParams>()];
         if params_len < param_bytes.len() {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
@@ -1773,7 +1774,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(EcallError::from)?;
         // Safety: `param_bytes` points to `size_of::<TvmAiaParams>()` contiguous, initialized
         // bytes.
-        let params: sbi::TvmAiaParams =
+        let params: sbi_rs::TvmAiaParams =
             unsafe { core::ptr::read_unaligned(param_bytes.as_slice().as_ptr().cast()) };
 
         // Validate the supplied IMSIC geometry. We don't support nested IMSIC virtualization, so

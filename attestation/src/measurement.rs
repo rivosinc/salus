@@ -5,7 +5,7 @@
 use const_oid::ObjectIdentifier;
 use digest::{Digest, OutputSizeUser};
 use generic_array::GenericArray;
-use sbi::MeasurementRegisterDescriptor;
+use sbi_rs::MeasurementRegisterDescriptor;
 
 use crate::{Error, Result, TcgPcrIndex};
 

@@ -30,8 +30,8 @@ use riscv_regs::{
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::{base, nacl, pmu, reset, tee_host, tee_interrupt};
-use sbi::{
+use sbi_rs::api::{base, nacl, pmu, reset, tee_host, tee_interrupt};
+use sbi_rs::{
     Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags,
     PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn, EXT_PMU, EXT_TEE_HOST,
     EXT_TEE_INTERRUPT,
@@ -90,7 +90,7 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
 }
 
 fn exercise_pmu_functionality() {
-    use sbi::api::pmu::{configure_matching_counters, start_counters, stop_counters};
+    use sbi_rs::api::pmu::{configure_matching_counters, start_counters, stop_counters};
     if base::probe_sbi_extension(EXT_PMU).is_err() {
         println!("Platform doesn't support PMU extensions");
         return;
@@ -112,7 +112,7 @@ fn exercise_pmu_functionality() {
 
     let start_flags = PmuCounterStartFlags::default();
     let result = start_counters(counter_index, 0x1, start_flags, 0);
-    if !matches!(result, Ok(_) | Err(sbi::Error::AlreadyStarted)) {
+    if !matches!(result, Ok(_) | Err(sbi_rs::Error::AlreadyStarted)) {
         panic!("start_counters failed with result {result:?}");
     }
 
@@ -320,9 +320,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     println!("Donating {} pages for TVM creation", tvm_create_pages);
 
     // Make sure TsmGetInfo fails if we pass it a bogus address.
-    let msg = SbiMessage::TeeHost(sbi::TeeHostFunction::TsmGetInfo {
+    let msg = SbiMessage::TeeHost(sbi_rs::TeeHostFunction::TsmGetInfo {
         dest_addr: 0x1000,
-        len: core::mem::size_of::<sbi::TsmInfo>() as u64,
+        len: core::mem::size_of::<sbi_rs::TsmInfo>() as u64,
     });
     // Safety: The passed info pointer is bogus and nothing should be written to our memory.
     unsafe { ecall_send(&msg).expect_err("TsmGetInfo succeeded with an invalid pointer") };
@@ -347,8 +347,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Set aside pages for the shared mem area.
     let num_shmem_pages =
-        (core::mem::size_of::<sbi::NaclShmem>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
-    let shmem_ptr = next_page as *mut sbi::NaclShmem;
+        (core::mem::size_of::<sbi_rs::NaclShmem>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    let shmem_ptr = next_page as *mut sbi_rs::NaclShmem;
     next_page += num_shmem_pages * PAGE_SIZE_4K;
     // Safety: We own the memory at `shmem_ptr` and will only access it through volatile reads/writes.
     unsafe { nacl::register_shmem(shmem_ptr).expect("SetShmem failed") };
@@ -387,7 +387,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         println!("Found {:} guest interrupt files", hgeie.count_ones());
 
         // Set the IMSIC params for the TVM.
-        let aia_params = sbi::TvmAiaParams {
+        let aia_params = sbi_rs::TvmAiaParams {
             imsic_base_addr: 0x2800_0000,
             group_index_bits: 0,
             group_index_shift: 24,
@@ -439,7 +439,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         vmid,
         guest_image,
         next_page,
-        sbi::TsmPageType::Page4k,
+        sbi_rs::TsmPageType::Page4k,
         USABLE_RAM_START_ADDRESS,
     )
     .expect("Tellus - TvmAddMeasuredPages returned error");
@@ -471,7 +471,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     tee_host::add_zero_pages(
         vmid,
         zero_pages_base,
-        sbi::TsmPageType::Page4k,
+        sbi_rs::TsmPageType::Page4k,
         PRE_FAULTED_ZERO_PAGES,
         GUEST_ZERO_PAGES_START_ADDRESS,
     )
@@ -566,7 +566,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             break;
                         }
                         Ok(TeeGuest(guest_func)) => {
-                            use sbi::TeeGuestFunction::*;
+                            use sbi_rs::TeeGuestFunction::*;
                             match guest_func {
                                 AddMmioRegion { addr, len } => {
                                     mmio_region = Some(Range {
@@ -646,7 +646,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 }
                             }
                         }
-                        Ok(DebugConsole(sbi::DebugConsoleFunction::PutString { len, addr })) => {
+                        Ok(DebugConsole(sbi_rs::DebugConsoleFunction::PutString { len, addr })) => {
                             let sbi_ret = match do_guest_puts(
                                 dbcn_gpa_range.clone(),
                                 dbcn_spa_range.clone(),
@@ -687,7 +687,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 tee_host::add_shared_pages(
                                     vmid,
                                     shared_page_base,
-                                    sbi::TsmPageType::Page4k,
+                                    sbi_rs::TsmPageType::Page4k,
                                     NUM_GUEST_SHARED_PAGES,
                                     addr & !(PAGE_SIZE_4K - 1),
                                 )
@@ -720,7 +720,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 tee_host::add_shared_pages(
                                     vmid,
                                     dbcn_page_base,
-                                    sbi::TsmPageType::Page4k,
+                                    sbi_rs::TsmPageType::Page4k,
                                     1,
                                     addr & !(PAGE_SIZE_4K - 1),
                                 )
@@ -759,7 +759,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             tee_host::add_zero_pages(
                                 vmid,
                                 zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
-                                sbi::TsmPageType::Page4k,
+                                sbi_rs::TsmPageType::Page4k,
                                 1,
                                 addr & !(PAGE_SIZE_4K - 1),
                             )

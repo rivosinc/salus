@@ -24,7 +24,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "rice",
- "sbi",
+ "sbi_rs",
  "spin",
  "spki",
  "typenum",
@@ -199,7 +199,7 @@ dependencies = [
  "riscv_pages",
  "riscv_regs",
  "s_mode_utils",
- "sbi",
+ "sbi_rs",
  "spin",
  "static_assertions",
  "tock-registers",
@@ -551,7 +551,7 @@ dependencies = [
 name = "s_mode_utils"
 version = "0.1.0"
 dependencies = [
- "sbi",
+ "sbi_rs",
  "spin",
 ]
 
@@ -579,7 +579,7 @@ dependencies = [
  "riscv_pages",
  "riscv_regs",
  "s_mode_utils",
- "sbi",
+ "sbi_rs",
  "sha2 0.10.2",
  "spin",
  "static_assertions",
@@ -587,7 +587,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sbi"
+name = "sbi_rs"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
@@ -730,7 +730,7 @@ dependencies = [
  "rice",
  "riscv_regs",
  "s_mode_utils",
- "sbi",
+ "sbi_rs",
 ]
 
 [[package]]

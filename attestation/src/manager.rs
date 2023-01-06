@@ -14,7 +14,7 @@ use rice::{
     layer::Layer,
     x509::{certificate::MAX_CERT_SIZE, extensions::dice::tcbinfo::DiceTcbInfo, request::CertReq},
 };
-use sbi::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
+use sbi_rs::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
 use spin::RwLock;
 use typenum::{Unsigned, U32};
 

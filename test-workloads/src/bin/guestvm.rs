@@ -26,7 +26,7 @@ use rice::x509::{
 use riscv_regs::{sie, stopi, Interrupt, Readable, RiscvCsrInterface, Writeable, CSR};
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi::api::{attestation, base, reset, tee_guest};
+use sbi_rs::api::{attestation, base, reset, tee_guest};
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -179,7 +179,7 @@ pub fn test_vector() {
 const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 
 fn test_attestation() {
-    if base::probe_sbi_extension(sbi::EXT_ATTESTATION).is_err() {
+    if base::probe_sbi_extension(sbi_rs::EXT_ATTESTATION).is_err() {
         println!("Platform doesn't support attestation extension");
         return;
     }
@@ -191,7 +191,7 @@ fn test_attestation() {
     );
     if !caps
         .evidence_formats
-        .contains(sbi::EvidenceFormat::DiceTcbInfo)
+        .contains(sbi_rs::EvidenceFormat::DiceTcbInfo)
     {
         panic!("DICE TcbInfo format is not supported")
     }
@@ -215,11 +215,11 @@ fn test_attestation() {
         panic!("Test CSR is too large")
     }
 
-    let request_data = [0u8; sbi::EVIDENCE_DATA_BLOB_SIZE];
+    let request_data = [0u8; sbi_rs::EVIDENCE_DATA_BLOB_SIZE];
     let cert_bytes = match attestation::get_evidence(
         TEST_CSR,
         &request_data,
-        sbi::EvidenceFormat::DiceTcbInfo,
+        sbi_rs::EvidenceFormat::DiceTcbInfo,
     ) {
         Err(e) => {
             println!("Attestation error {e:?}");
@@ -377,7 +377,7 @@ fn test_interrupts() {
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
-    base::probe_sbi_extension(sbi::EXT_TEE_GUEST).expect("TEE-Guest extension not present");
+    base::probe_sbi_extension(sbi_rs::EXT_TEE_GUEST).expect("TEE-Guest extension not present");
 
     // Convert a page to shared memory for use with the debug console.
     //
@@ -430,7 +430,7 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
     println!("Exiting guest");
     println!("*****************************************");
 
-    reset::reset(sbi::ResetType::Shutdown, sbi::ResetReason::NoReason)
+    reset::reset(sbi_rs::ResetType::Shutdown, sbi_rs::ResetReason::NoReason)
         .expect("Guest shutdown failed");
     unreachable!();
 }

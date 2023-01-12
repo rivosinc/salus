@@ -255,7 +255,15 @@ impl UmodeTask {
 
     /// Initialize this CPU's U-mode task. Must be called once on each physical CPU.
     pub fn setup_this_cpu() -> Result<(), Error> {
-        let this_cpu = PerCpu::this_cpu();
+        let arch = UmodeCpuArchState::default();
+        let mut task = UmodeTask { arch };
+        task.reset()?;
+        // Install umode cpu state in the current cpu.
+        PerCpu::this_cpu().set_umode_task(task);
+        Ok(())
+    }
+
+    pub fn reset(&mut self) -> Result<(), Error> {
         // Initialize umode CPU state to run at ELF entry.
         let mut arch = UmodeCpuArchState::default();
         // Unwrap okay: this is called after `Self::init()`.
@@ -263,13 +271,11 @@ impl UmodeTask {
         // Set cpu id as a0.
         arch.umode_regs
             .gprs
-            .set_reg(GprIndex::A0, this_cpu.cpu_id().raw() as u64);
+            .set_reg(GprIndex::A0, PerCpu::this_cpu().cpu_id().raw() as u64);
         // sstatus set to 0 (by default) is actually okay.
-        let mut task = UmodeTask { arch };
+        self.arch = arch;
         // Run task until it initializes itself and calls HypCall::NextOp().
-        task.run()?;
-        // Install umode cpu state in the current cpu.
-        PerCpu::this_cpu().set_umode_task(task);
+        self.run()?;
         Ok(())
     }
 
@@ -277,11 +283,21 @@ impl UmodeTask {
     pub fn send_req(req: UmodeRequest) -> Result<(), Error> {
         let mut task = PerCpu::this_cpu().umode_task_mut();
         req.to_registers(task.arch.umode_regs.gprs.a_regs_mut());
-        task.run()
-        // TODO: In case of `Panic` or `UnexpectedTrap`, the u-mode
-        // process is to be considered in an unrecoverable
-        // state. Restore memory and re-initialize it here. Then
-        // return the error.
+        let ret = task.run();
+        if let Err(e) = &ret {
+            match e {
+                Error::UnexpectedTrap | Error::Panic => {
+                    // Reset on unrecoverable u-mode error.
+                    // 1. restore memory to original state
+                    PerCpu::this_cpu().page_table().restore_umode();
+                    // 2. setup umode again.
+                    // Panic if we can't restore umode: the hypervisor is in an unrecoverable state.
+                    task.reset().expect("Failed to recover U-mode.");
+                }
+                Error::Umode(_) => {}
+            }
+        }
+        ret
     }
 
     fn handle_ecall(&mut self) -> ControlFlow<Result<(), Error>> {

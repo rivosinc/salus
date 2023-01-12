@@ -9,7 +9,7 @@ use riscv_page_tables::{FirstStagePageTable, PteFieldBits, PteLeafPerms, Sv48};
 use riscv_pages::{
     InternalClean, Page, PageAddr, PageSize, RawAddr, SupervisorPhys, SupervisorVirt,
 };
-use riscv_regs::{satp, LocalRegisterCopy, SatpHelpers};
+use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, CSR};
 use spin::Once;
 
 // Maximum number of regions unique to every pagetable (private).
@@ -209,6 +209,44 @@ impl PrivateRegion {
             }
         }
     }
+
+    // Restore private region to initial-state.
+    fn restore(&self) {
+        let mut copied = 0;
+        // We have to reset the full pages mapped for this segment.
+        let mapped_size = PageSize::Size4k.round_up(self.size as u64) as usize;
+        // Copy data at the beginning if it's present.
+        if let Some(data) = self.data {
+            // In case data is bigger than region size, write up to region end only.
+            let len = core::cmp::min(self.size, data.len());
+            let data = &data[0..len];
+            // Copy original data to umode area.
+            // Write to user mapping setting SUM in SSTATUS.
+            CSR.sstatus.modify(sstatus::sum.val(1));
+            // Safety:
+            // - this write is in a umode region guaranteed to be mapped by HypMap in every page table.
+            // - the region starts at self.vaddr and is self.size byte long. `len` is <= `self.size`.
+            unsafe {
+                core::ptr::copy(data.as_ptr(), self.vaddr.bits() as *mut u8, len);
+            }
+            // Restore SUM.
+            CSR.sstatus.modify(sstatus::sum.val(0));
+            copied = len;
+        }
+        // Clear data from the end of copy to the end of mapped_area.
+        let len = mapped_size - copied;
+        let dest = self.vaddr.bits() + copied as u64;
+        // Write to user mapping setting SUM in SSTATUS.
+        CSR.sstatus.modify(sstatus::sum.val(1));
+        // Safety:
+        // - this write is in a umode region guaranteed to be mapped by HypMap in every page table.
+        // - writing to this region start at offset `copied` and goes until the mapped size of the region.
+        unsafe {
+            core::ptr::write_bytes(dest as *mut u8, 0, len);
+        }
+        // Restore SUM.
+        CSR.sstatus.modify(sstatus::sum.val(0));
+    }
 }
 
 /// A page table that contains hypervisor mappings.
@@ -222,6 +260,16 @@ impl HypPageTable {
         let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
         satp.set_from(&self.inner, 0);
         satp.get()
+    }
+
+    /// Restore U-mode mappings to initial state.
+    pub fn restore_umode(&self) {
+        for r in HypMap::get()
+            .private_regions()
+            .filter(|r| r.pte_fields == PteFieldBits::leaf_with_perms(PteLeafPerms::URW))
+        {
+            r.restore();
+        }
     }
 }
 
@@ -259,6 +307,11 @@ impl HypMap {
     pub fn get() -> &'static HypMap {
         // Unwrap okay. This must be called after `init`.
         HYPMAP.get().unwrap()
+    }
+
+    // Return an iterator for this Hypervisor private regions.
+    fn private_regions(&self) -> impl Iterator<Item = &PrivateRegion> {
+        self.private_regions.iter()
     }
 
     /// Create a new page table based on this memory map.

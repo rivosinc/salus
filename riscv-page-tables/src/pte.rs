@@ -164,7 +164,7 @@ impl Pte {
 }
 
 /// The status bits that define PTE state.
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, PartialEq)]
 pub struct PteFieldBits {
     bits: u64,
 }

@@ -1,0 +1,30 @@
+###
+# This action exist to put objcopy
+# into a cache for use in other actions
+###
+
+name: objdump to cache
+
+on:
+  workflow_dispatch
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Update modules
+      run: sudo apt update
+    - name: Install toolchain
+      run: sudo apt install binutils-riscv64-unknown-elf
+    - name: stash objcopy
+      run: cp /usr/bin/riscv64-unknown-elf-objcopy .
+    - name: Cache Objcopy
+      uses: actions/cache@v3
+      with:
+        key: objcopy
+        path: ./riscv64-unknown-elf-objcopy

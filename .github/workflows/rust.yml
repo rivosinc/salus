@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  OBJCOPY: ./riscv64-unknown-elf-objcopy
 
 jobs:
   build:
@@ -17,15 +18,24 @@ jobs:
     steps:
     - uses: actions/checkout@v3
       with:
-        submodules: true
-    - name: Initialize submodules
-      run: git submodule update --init --recursive
+        submodules: recursive
     - name: Install riscv64 target
       run: rustup target add riscv64gc-unknown-none-elf
     - name: Install clippy
       run: rustup component add clippy
     - name: Install rustfmt
       run: rustup component add rustfmt
+    ###
+    # Use cache to store objcopy.
+    # Otherwise this test will fail if there are
+    # network issues.
+    #
+    # This cache is created from another action
+    ###
+    - uses: actions/cache/restore@v3
+      with:
+        path: ./riscv64-unknown-elf-objcopy
+        key: objcopy       
     - name: Build
       run: make salus
     - name: Build tellus
@@ -40,3 +50,7 @@ jobs:
       run: make check
     - name: Generate Docs
       run: make doc
+    - name: Build tellus_guestvm
+      run: make tellus_bin
+    - name: QEMU test
+      uses: rivosinc/rivos-run-salus-qemu@v1

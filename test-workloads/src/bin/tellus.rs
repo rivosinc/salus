@@ -28,13 +28,12 @@ use riscv_regs::{
     CSR_HTVAL,
 };
 use s_mode_utils::abort::abort;
-use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi_rs::api::{base, nacl, pmu, reset, tee_host, tee_interrupt};
 use sbi_rs::{
-    Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags,
-    PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn, EXT_PMU, EXT_TEE_HOST,
-    EXT_TEE_INTERRUPT,
+    ecall_send, Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags,
+    PmuCounterStopFlags, PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn, EXT_PMU,
+    EXT_TEE_HOST, EXT_TEE_INTERRUPT,
 };
 
 // Dummy global allocator - panic if anything tries to do an allocation.

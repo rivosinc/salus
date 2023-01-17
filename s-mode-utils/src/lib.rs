@@ -17,8 +17,6 @@ pub use core::alloc::{GlobalAlloc, Layout};
 
 /// Provides the ability to terminate the running S-mode code.
 pub mod abort;
-/// Supports invoking ecalls in the HS or M mode code above.
-pub mod ecall;
 /// Implementation of `print` macros.
 pub mod print;
 /// Console driver using SBI.

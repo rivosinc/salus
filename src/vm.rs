@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use attestation::{AttestationManager, Error as AttestationError};
+use attestation::{AttestationManager, Error as AttestationError, TcgPcrIndex};
 use core::{mem, ops::ControlFlow, slice};
 use der::Decode;
 use drivers::{imsic::*, pmu::PmuInfo};
@@ -1627,6 +1627,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         index: usize,
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
+        // Check that the index is valid.
+        let msmt_idx: TcgPcrIndex = index.try_into().map_err(EcallError::from)?;
+
         let caps = self
             .attestation_mgr()
             .capabilities()
@@ -1651,11 +1654,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         // If the passed index is invalid, `extend_msmt_register` will return
         // an error.
         self.attestation_mgr()
-            .extend_msmt_register(
-                (index as u8).try_into().map_err(EcallError::from)?,
-                &measurement_data,
-                None,
-            )
+            .extend_msmt_register(msmt_idx, &measurement_data, None)
             .map_err(EcallError::from)?;
 
         Ok(0)
@@ -1668,6 +1667,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         index: usize,
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
+        // Check that the index is valid.
+        let msmt_idx: TcgPcrIndex = index.try_into().map_err(EcallError::from)?;
+
         let caps = self
             .attestation_mgr()
             .capabilities()
@@ -1675,7 +1677,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
         let measurement_data = self
             .attestation_mgr()
-            .read_msmt_register((index as u8).try_into().map_err(EcallError::from)?)
+            .read_msmt_register(msmt_idx)
             .map_err(EcallError::from)?;
 
         // Check if the passed buffer size is large enough.

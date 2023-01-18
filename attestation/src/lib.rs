@@ -86,6 +86,16 @@ impl TryFrom<u8> for TcgPcrIndex {
     }
 }
 
+impl TryFrom<usize> for TcgPcrIndex {
+    type Error = crate::Error;
+    fn try_from(item: usize) -> Result<Self> {
+        // Transform into `u8` first and then into TcgPcrIndex
+        TryInto::<u8>::try_into(item)
+            .map_err(|_| Error::InvalidMeasurementRegisterIndex(item))?
+            .try_into()
+    }
+}
+
 /// Implements the following traits for a newtype of a `der` decodable/encodable type:
 ///
 /// - `From` conversions to/from the inner type

@@ -731,6 +731,7 @@ dependencies = [
  "riscv_regs",
  "s_mode_utils",
  "sbi_rs",
+ "spin",
 ]
 
 [[package]]

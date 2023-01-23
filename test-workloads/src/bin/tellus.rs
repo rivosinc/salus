@@ -18,6 +18,7 @@ extern crate test_workloads;
 
 mod consts;
 
+use arrayvec::ArrayVec;
 use consts::*;
 use core::arch::asm;
 use core::ops::Range;
@@ -30,12 +31,18 @@ use riscv_regs::{
 use s_mode_utils::abort::abort;
 use s_mode_utils::ecall::ecall_send;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi_rs::api::{base, nacl, pmu, reset, tee_host, tee_interrupt};
+use sbi_rs::api::{base, nacl, pmu, reset, state, tee_host, tee_interrupt};
 use sbi_rs::{
     Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags, PmuCounterStopFlags,
     PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn, EXT_PMU, EXT_TEE_HOST,
     EXT_TEE_INTERRUPT,
 };
+use spin::{Mutex, Once};
+
+// The secondary CPU entry point, defined in start.S. Calls secondary_init below.
+extern "C" {
+    fn _secondary_start();
+}
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;
@@ -56,6 +63,99 @@ static GENERAL_ALLOCATOR: GeneralGlobalAlloc = GeneralGlobalAlloc;
 pub fn alloc_error(_layout: Layout) -> ! {
     abort()
 }
+
+/// A helper to run code on other threads synchronously (i.e. waiting for execution to finish). Used
+/// for executing requests to the hypervisor on secondary harts.
+struct TaskRunner(Mutex<Option<&'static (dyn Fn() + Sync)>>);
+
+impl TaskRunner {
+    const fn new() -> TaskRunner {
+        TaskRunner(Mutex::new(None))
+    }
+
+    /// Submit `f` for execution on a different thread (i.e. wherever `self.spin` runs). `f` will
+    /// have completed when `run` returns.
+    ///
+    /// Warning: This code currently doesn't handle the case of submitting a task to the thread's
+    /// own TaskRunner, so the caller must make sure that `spin` runs elsewhere. In particular,
+    /// calling back into `run()` from a task executed by the task runner will deadlock.
+    fn run<F: Fn() + Sync>(&self, f: F) {
+        // We cheat and extend the life time of `f` to `'static`, since that is required to place
+        // the reference in the Mutex. What we really want is to place the reference in the Mutex
+        // with a pledge to have it removed before the reference becomes invalid. We can do so by
+        // spinning in this function until after the `f` has been executed, see below.
+        //
+        // Safety: `&f` is actually only used while this function executes, so its lifetime
+        // constraints are obeyed.
+        let f =
+            unsafe { core::mem::transmute::<&(dyn Fn() + Sync), &'static (dyn Fn() + Sync)>(&f) };
+
+        // Wait for the Mutex to be available and submit `f` - effectively using the Mutex as a
+        // queue of size one. Not suitable for production code (and neither is the spinning wait),
+        // but good (and simple!) enough for test code.
+        loop {
+            let mut guard = self.0.lock();
+            if guard.is_none() {
+                *guard = Some(f);
+                break;
+            }
+        }
+
+        // Spin until `f` has been consumed. Note that in theory we might spin longer than necessary
+        // if another thread races against us and submits another task. In practice, all tellus
+        // execution is synchronized between threads so this race won't occur.
+        while self.0.lock().is_some() {}
+    }
+
+    /// Services execution requests to this TaskRunner instance forever.
+    fn spin(&self) -> ! {
+        loop {
+            let mut guard = self.0.lock();
+            if let Some(f) = *guard {
+                f();
+                *guard = None;
+            }
+        }
+    }
+}
+
+struct PerCpu {
+    hart_id: u64,
+    runner: TaskRunner,
+}
+
+impl PerCpu {
+    fn new(hart_id: u64) -> PerCpu {
+        let runner = TaskRunner::new();
+        PerCpu { hart_id, runner }
+    }
+
+    fn init_tp(hart_id: u64) {
+        let my_tp = PER_CPU
+            .get()
+            .expect("PER_CPU not initialized")
+            .iter()
+            .position(|c| c.hart_id == hart_id)
+            .expect("missing per_cpu entry");
+        unsafe {
+            // Safe since we're the only user of TP.
+            asm!("mv tp, {rs}", rs = in(reg) my_tp)
+        };
+    }
+
+    fn get() -> &'static PerCpu {
+        let tp: u64;
+        unsafe {
+            // Safe since we're the only user of TP.
+            asm!("mv {rd}, tp", rd = out(reg) tp)
+        };
+
+        &PER_CPU.get().expect("PER_CPU not initialized")[tp as usize]
+    }
+}
+
+const MAX_CPUS: usize = 4;
+static PER_CPU: Once<ArrayVec<PerCpu, MAX_CPUS>> = Once::new();
 
 /// Powers off this machine.
 pub fn poweroff() -> ! {
@@ -284,11 +384,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe { SbiConsole::set_as_console(&mut CONSOLE_BUFFER) };
     println!("Tellus: Booting the test VM");
 
-    if hart_id != 0 {
-        // TODO handle more than 1 cpu
-        abort();
-    }
-
     // Safe because we trust the host to boot with a valid fdt_addr pass in register a1.
     let fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {
         Ok(f) => f,
@@ -300,6 +395,37 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         mem_range.base(),
         mem_range.size()
     );
+    let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
+
+    // Initialize PER_CPU.
+    PER_CPU.call_once(|| {
+        fdt.cpus()
+            .filter_map(|cpu| Some(PerCpu::new(cpu.hart_id()?)))
+            .take(MAX_CPUS)
+            .collect::<ArrayVec<_, MAX_CPUS>>()
+    });
+
+    println!("Initializing {} CPUs", PER_CPU.get().unwrap().len());
+
+    // Make PerCpu work for the boot CPU.
+    PerCpu::init_tp(hart_id);
+    // Start secondary CPUs.
+    for cpu in PER_CPU
+        .get()
+        .unwrap()
+        .iter()
+        .filter(|cpu| cpu.hart_id != hart_id)
+    {
+        // Put all of the stacks one after another at the bottom of the memory block we allocate
+        // from. There are no guard pages, so stack overflow will cause memory corruption... Not
+        // ideal, but at least the stacks are all in the same block so it'll hopefully be not
+        // too hard to diagnose if/when it happens.
+        const SECONDARY_CPU_STACK_SIZE: u64 = 4 * 4096;
+        let stack = next_page;
+        next_page += SECONDARY_CPU_STACK_SIZE;
+        let entrypoint = (_secondary_start as *const fn()) as u64;
+        unsafe { state::hart_start(cpu.hart_id, entrypoint, stack) }.expect("Failed to start hart");
+    }
 
     // the 4 is to skip the rv64 or rv32 at the begging of the string
     let vector_enabled = match fdt.get_property("riscv,isa") {
@@ -328,7 +454,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe { ecall_send(&msg).expect_err("TsmGetInfo succeeded with an invalid pointer") };
 
     // Donate the pages necessary to create the TVM.
-    let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
     // reclaimed.
     unsafe {
@@ -849,4 +974,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 }
 
 #[no_mangle]
-extern "C" fn secondary_init(_hart_id: u64) {}
+extern "C" fn secondary_init(hart_id: u64) {
+    println!("Tellus - hart {} active", hart_id);
+    PerCpu::init_tp(hart_id);
+    PerCpu::get().runner.spin();
+}

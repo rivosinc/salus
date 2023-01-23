@@ -8,7 +8,7 @@ use crate::DeviceTreeResult;
 use core::str;
 use fdt_rs::base::iters::{DevTreeNodeIter, DevTreeReserveEntryIter};
 use fdt_rs::base::parse::ParsedTok;
-use fdt_rs::base::{DevTree, DevTreeProp};
+use fdt_rs::base::{DevTree, DevTreeNode, DevTreeProp};
 use fdt_rs::prelude::*;
 
 /// Represents a flattened device-tree (FDT) as passed to the hypervisor by firmware. Currently
@@ -59,6 +59,18 @@ impl<'a> Fdt<'a> {
     /// Returns the range of memory where the host VM's initramfs is loaded, if present.
     pub fn host_initramfs_region(&self) -> Option<FdtMemoryRegion> {
         self.get_module_node_region("multiboot,ramdisk")
+    }
+
+    /// Returns an iterator over CPU nodes.
+    pub fn cpus<'b>(&'b self) -> impl Iterator<Item = Cpu<'b, 'a>> {
+        self.inner
+            .nodes()
+            .filter(|n| {
+                n.props()
+                    .any(|p| Ok(p.name()? == "device_type" && p.str()? == "cpu"))
+            })
+            .iterator()
+            .filter_map(|n| Some(Cpu { inner: n.ok()? }))
     }
 
     /// This returns the property buf for the first property with the give name
@@ -212,5 +224,18 @@ impl<'a, 'dt: 'a> Iterator for ReservedRegionIter<'a, 'dt> {
             base: u64::from(range.address),
             size: u64::from(range.size),
         })
+    }
+}
+
+/// Provides access to CPU node information.
+#[derive(Clone)]
+pub struct Cpu<'a, 'dt> {
+    inner: DevTreeNode<'a, 'dt>,
+}
+
+impl<'a, 'dt> Cpu<'a, 'dt> {
+    pub fn hart_id(&self) -> Option<u64> {
+        let prop = self.inner.props().find(|p| Ok(p.name()? == "reg")).ok()??;
+        Some(prop.u32(0).ok()? as u64)
     }
 }

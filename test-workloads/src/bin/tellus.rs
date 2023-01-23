@@ -165,15 +165,28 @@ pub fn poweroff() -> ! {
     abort()
 }
 
+fn fence_memory() {
+    // TsmInitiateFence implies a fence on the local CPU, so TsmLocalFence only needs to be executed
+    // on every other active CPU.
+    tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
+    for cpu in PER_CPU
+        .get()
+        .unwrap()
+        .iter()
+        .filter(|c| PerCpu::get().hart_id != c.hart_id)
+    {
+        cpu.runner
+            .run(|| tee_host::tsm_local_fence().expect("Tellus - TsmLocalFence failed"));
+    }
+}
+
 // Safety: addr must point to `num_pages` of memory that isn't currently used by this program. This
 // memory will be overwritten and access will be removed.
 unsafe fn convert_pages(addr: u64, num_pages: u64) {
     tee_host::convert_pages(addr, num_pages).expect("TsmConvertPages failed");
 
     // Fence the pages we just converted.
-    //
-    // TODO: Boot secondary CPUs and test the invalidation flow with multiple CPUs.
-    tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
+    fence_memory();
 }
 
 fn reclaim_pages(addr: u64, num_pages: u64) {
@@ -530,7 +543,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // touching this page at all in this program.
         unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
-        tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
+        fence_memory();
     } else {
         println!("Platform doesn't support TEE AIA extension");
     }
@@ -624,7 +637,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // touching this page at all in this program.
         unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
-        tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
+        fence_memory();
 
         tee_interrupt::rebind_vcpu_imsic_begin(vmid, 0, 1 << imsic_file_num)
             .expect("Tellus - TvmCpuRebindImsicBegin failed");

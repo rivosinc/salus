@@ -36,11 +36,11 @@ NVME_DEVICE_ARGS := -device nvme,serial=deadbeef,drive=hd
 
 # QEMU options:
 #
-#  NCPU: Number of CPUs to boot with. Default: 1
+#  NCPU: Number of CPUs to boot with. Default: 2
 #  MEM_SIZE: RAM size for the emulated system. Default: 2GB
 #  EXTRA_QEMU_ARGS: Any extra flags to pass to QEMU (e.g. other devices).
 
-NCPU ?= 1
+NCPU ?= 2
 MEM_SIZE ?= 2048
 EXTRA_QEMU_ARGS ?=
 

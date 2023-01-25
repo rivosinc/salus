@@ -280,8 +280,7 @@ impl<'a, T: PagingMode> LeafPte<'a, T> {
 impl<'a, T: PagingMode> PageTablePte<'a, T> {
     /// Returns the base address of the page table this PTE points to.
     fn table_addr(&self) -> SupervisorPageAddr {
-        // Unwrap ok, PFNs are always 4kB-aligned.
-        PageAddr::from_pfn(self.pte.pfn(), PageSize::Size4k).unwrap()
+        PageAddr::from(self.pte.pfn())
     }
 
     /// Returns the `PageTable` that this PTE points to.
@@ -327,8 +326,7 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
         // Beyond the root, every level must be only one 4kB page.
         assert_eq!(level.table_pages(), 1);
         Self {
-            // Unwrap ok, PFNs are always 4kB-aligned.
-            table_addr: PageAddr::from_pfn(pte.pfn(), PageSize::Size4k).unwrap(),
+            table_addr: PageAddr::from(pte.pfn()),
             level,
             phantom: PhantomData,
         }

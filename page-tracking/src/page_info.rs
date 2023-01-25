@@ -595,7 +595,7 @@ impl<'a> Iterator for PageMapIter<'a> {
         let entry = self.page_map.sparse_map.get(self.cur_sparse_entry)?;
         let page = self.page_map.pages.get(self.cur_index).unwrap();
         let pfn = Pfn::supervisor((entry.base_pfn + self.cur_index - entry.page_map_index) as u64);
-        let addr = SupervisorPageAddr::from_pfn(pfn, PageSize::Size4k).unwrap();
+        let addr = SupervisorPageAddr::from(pfn);
 
         self.cur_index += 1;
         if self.cur_index >= entry.num_pages + entry.page_map_index {

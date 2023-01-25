@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::{ArrayString, ArrayVec};
-use core::{fmt, marker::PhantomData};
+use core::{fmt, marker::PhantomData, ops::Deref};
 use device_tree::{DeviceTree, DeviceTreeResult};
 use page_tracking::HwMemMap;
 use riscv_pages::*;
@@ -23,27 +23,6 @@ pub const MAX_INTERRUPT_IDS: usize = 2048;
 const MAX_GUEST_FILES: usize = 7;
 const MAX_MMIO_REGIONS: usize = 8;
 
-/// IMSIC indirect CSRs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ImsicRegister {
-    Eidelivery,
-    Eithreshold,
-    Eip(usize),
-    Eie(usize),
-}
-
-impl ImsicRegister {
-    /// Returns the ISELECT value used to access this register.
-    fn to_raw(self) -> u64 {
-        match self {
-            ImsicRegister::Eidelivery => 0x70,
-            ImsicRegister::Eithreshold => 0x72,
-            ImsicRegister::Eip(i) => (0x80 + i * 2) as u64,
-            ImsicRegister::Eie(i) => (0xc0 + i * 2) as u64,
-        }
-    }
-}
-
 /// IMSIC external interrupt IDs.
 /// For now, we only expect to handle IPIs at HS-level.
 #[repr(u32)]
@@ -62,14 +41,9 @@ impl ImsicInterruptId {
         }
     }
 
-    /// Returns the indirect EIE register used to enable this interrupt.
-    fn eie_register(&self) -> ImsicRegister {
-        ImsicRegister::Eie(*self as usize / 64)
-    }
-
-    /// Returns the bit position of this interrupt in its indirect EIE register.
-    fn eie_bit(&self) -> u64 {
-        *self as u64 % 64
+    /// Returns the indirect EIE register number and bit position for this interrupt.
+    fn offset_and_bit(&self) -> (usize, usize) {
+        (*self as usize / 64, *self as usize % 64)
     }
 }
 
@@ -219,40 +193,19 @@ fn get_guests_per_hart(guest_index_bits: u32) -> usize {
     (1 << guest_index_bits) - 1
 }
 
-fn indirect_csr_write(reg: ImsicRegister, val: u64) {
-    CSR.siselect.set(reg.to_raw());
-    CSR.sireg.set(val);
-}
-
-fn indirect_csr_set_bits(reg: ImsicRegister, mask: u64) {
-    CSR.siselect.set(reg.to_raw());
-    CSR.sireg.read_and_set_bits(mask);
-}
-
 // Helper struct to provide scoped access to particular guest interrupt file's CSRs.
 struct ImsicGuestCsrAccess {
     old_vgein: u64,
 }
 
-impl ImsicGuestCsrAccess {
-    fn read(&self, reg: ImsicRegister) -> u64 {
-        CSR.vsiselect.set(reg.to_raw());
-        CSR.vsireg.get()
-    }
+// The Deref implementation for ImsicGuestCsrAccess currently just returns a reference to the static
+// CSR instance, the correct external interrupt source is selected via `hstatus.vgein`.
+impl Deref for ImsicGuestCsrAccess {
+    type Target = CSR;
 
-    fn write(&self, reg: ImsicRegister, val: u64) {
-        CSR.vsiselect.set(reg.to_raw());
-        CSR.vsireg.set(val);
-    }
-
-    fn swap(&self, reg: ImsicRegister, val: u64) -> u64 {
-        CSR.vsiselect.set(reg.to_raw());
-        CSR.vsireg.atomic_replace(val)
-    }
-
-    fn set_bits(&self, reg: ImsicRegister, mask: u64) {
-        CSR.vsiselect.set(reg.to_raw());
-        CSR.vsireg.read_and_set_bits(mask);
+    #[inline(always)]
+    fn deref(&self) -> &CSR {
+        CSR
     }
 }
 
@@ -490,13 +443,13 @@ impl Imsic {
     /// up to receive IPIs.
     pub fn setup_this_cpu() {
         // Enable external interrupt delivery.
-        indirect_csr_write(ImsicRegister::Eidelivery, 1);
+        CSR.si_eidelivery.set(1);
         // We don't care about prioritization, so just set EITHRESHOLD to 0.
-        indirect_csr_write(ImsicRegister::Eithreshold, 0);
+        CSR.si_eithreshold.set(0);
 
         // The only interrupts we handle right now are IPIs.
-        let id = ImsicInterruptId::Ipi;
-        indirect_csr_set_bits(id.eie_register(), 1 << id.eie_bit());
+        let (offset, bit) = ImsicInterruptId::Ipi.offset_and_bit();
+        CSR.si_eie[offset].read_and_set_bits(1 << bit);
     }
 
     /// Returns a reference to the global IMSIC state.
@@ -628,10 +581,10 @@ impl Imsic {
         let csrs = self.get_guest_csrs(guest_file)?;
         for i in 0..self.num_ei_regs() {
             sw_file.set_eip(i, 0);
-            sw_file.set_eie(i, csrs.read(ImsicRegister::Eie(i)));
+            sw_file.set_eie(i, csrs.vsi_eie[i].get_value());
         }
-        sw_file.set_eithreshold(csrs.read(ImsicRegister::Eithreshold));
-        sw_file.set_eidelivery(csrs.swap(ImsicRegister::Eidelivery, 0));
+        sw_file.set_eithreshold(csrs.vsi_eithreshold.get());
+        sw_file.set_eidelivery(csrs.vsi_eidelivery.atomic_replace(0));
         Ok(())
     }
 
@@ -646,7 +599,7 @@ impl Imsic {
         let csrs = self.get_guest_csrs(guest_file)?;
         for i in 0..self.num_ei_regs() {
             // TODO: This needs to be done using an atomic-OR with an actual MRIF.
-            let eip = csrs.read(ImsicRegister::Eip(i)) | sw_file.eip(i);
+            let eip = csrs.vsi_eip[i].get_value() | sw_file.eip(i);
             sw_file.set_eip(i, eip);
         }
         Ok(())
@@ -656,11 +609,11 @@ impl Imsic {
     pub fn clear_guest_file(&self, guest_file: ImsicFileId) -> Result<()> {
         let csrs = self.get_guest_csrs(guest_file)?;
         for i in 0..self.num_ei_regs() {
-            csrs.write(ImsicRegister::Eip(i), 0);
-            csrs.write(ImsicRegister::Eie(i), 0);
+            csrs.vsi_eip[i].set_value(0);
+            csrs.vsi_eie[i].set_value(0);
         }
-        csrs.write(ImsicRegister::Eithreshold, 0);
-        csrs.write(ImsicRegister::Eidelivery, 0);
+        csrs.vsi_eithreshold.set(0);
+        csrs.vsi_eidelivery.set(0);
         Ok(())
     }
 
@@ -670,11 +623,11 @@ impl Imsic {
     pub fn restore_guest_file(&self, guest_file: ImsicFileId, sw_file: &mut SwFile) -> Result<()> {
         let csrs = self.get_guest_csrs(guest_file)?;
         for i in 0..self.num_ei_regs() {
-            csrs.set_bits(ImsicRegister::Eip(i), sw_file.eip(i));
-            csrs.write(ImsicRegister::Eie(i), sw_file.eie(i));
+            csrs.vsi_eip[i].read_and_set_bits(sw_file.eip(i));
+            csrs.vsi_eie[i].set_value(sw_file.eie(i));
         }
-        csrs.write(ImsicRegister::Eithreshold, sw_file.eithreshold());
-        csrs.write(ImsicRegister::Eidelivery, sw_file.eidelivery());
+        csrs.vsi_eithreshold.set(sw_file.eithreshold());
+        csrs.vsi_eidelivery.set(sw_file.eidelivery());
         Ok(())
     }
 

@@ -457,3 +457,28 @@ register_bitfields![u64,
         value OFFSET(0) NUMBITS(64) [],
     ]
 ];
+
+// IMSIC indirect registers.
+register_bitfields![u64,
+    pub eidelivery [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+register_bitfields![u64,
+    pub eithreshold [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+register_bitfields![u64,
+    pub eip [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];
+
+register_bitfields![u64,
+    pub eie [
+        value OFFSET(0) NUMBITS(64) [],
+    ]
+];

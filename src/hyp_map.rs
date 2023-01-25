@@ -3,11 +3,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
+use core::cell::RefCell;
 use page_tracking::{HwMemMap, HwMemRegion, HwMemRegionType, HwReservedMemType, HypPageAlloc};
 use riscv_elf::{ElfMap, ElfSegment, ElfSegmentPerms};
-use riscv_page_tables::{FirstStagePageTable, PteFieldBits, PteLeafPerms, Sv48};
+use riscv_page_tables::{
+    FirstStageMapper, FirstStagePageTable, PagingMode, PteFieldBits, PteLeafPerms, Sv48,
+};
 use riscv_pages::{
-    InternalClean, Page, PageAddr, PageSize, RawAddr, SupervisorPhys, SupervisorVirt,
+    InternalClean, Page, PageAddr, PageSize, RawAddr, SeqPageIter, SupervisorPageAddr,
+    SupervisorPhys, SupervisorVirt,
 };
 use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, CSR};
 use spin::Once;
@@ -22,13 +26,21 @@ type PrivateRegionsVec = ArrayVec<PrivateRegion, MAX_PRIVATE_REGIONS>;
 // Shared regions vector.
 type SharedRegionsVec = ArrayVec<SharedRegion, MAX_SHARED_REGIONS>;
 
-/// Errors returned by HypMap.
+/// Errors returned by creating or modifying hypervisor mappings.
 #[derive(Debug)]
 pub enum Error {
     /// U-mode ELF segment is not page aligned.
     ElfUnalignedSegment,
     /// U-mode ELF segment is not in U-mode VA area.
     ElfInvalidAddress,
+    /// Not enough space on the U-mode map area.
+    OutOfMap,
+    /// Could not create a mapper for the U-mode area.
+    MapperCreationFailed,
+    /// Could not map the U-mode area.
+    MapFailed,
+    /// Could not unmap the U-mode area.
+    UnmapFailed,
 }
 
 // Represents a virtual address region of the hypervisor that will be the same in all pagetables.
@@ -40,7 +52,7 @@ struct SharedRegion {
 }
 
 impl SharedRegion {
-    // Create a shared region from a Hw Memory Map entry.
+    // Creates a shared region from a Hw Memory Map entry.
     fn from_hw_mem_region(r: &HwMemRegion) -> Option<Self> {
         let perms = match r.region_type() {
             HwMemRegionType::Available => {
@@ -111,12 +123,33 @@ impl SharedRegion {
     }
 }
 
-// U-mode mappings start here.
+// U-mode binary mappings start here.
 const UMODE_VA_START: u64 = 0xffffffff00000000;
-// Size in bytes of the U-mode VA area.
+// Size in bytes of the U-mode binary VA area.
 const UMODE_VA_SIZE: u64 = 128 * 1024 * 1024;
-// U-mode mappings end here.
+// U-mode binary mappings end here.
 const UMODE_VA_END: u64 = UMODE_VA_START + UMODE_VA_SIZE;
+
+// The addresses between `UMODE_MAPPINGS_START` and `UMODE_MAPPINGS_START` + `UMODE_MAPPINGS_SIZE`
+// is an area of the private page table where the hypervisor can map pages shared from guest
+// VMs. The area is divided in slots, of equal size `UMODE_MAPPING_SLOT_SIZE`.
+const UMODE_MAPPING_SLOT_SIZE: u64 = 4 * 1024 * 1024;
+
+// Start of the private U-mode mappings area.
+const UMODE_MAPPINGS_START: u64 = UMODE_VA_END + 4 * 1024 * 1024;
+//The number of slots available for mapping.
+const UMODE_MAPPING_SLOTS: u64 = 2;
+// Maximum size of the private mappings area.
+const UMODE_MAPPINGS_SIZE: u64 = UMODE_MAPPING_SLOTS * UMODE_MAPPING_SLOT_SIZE;
+
+/// Generic Id names for each of the U-mode mapping slots.
+/// There is no mandated use for each of the slots, and caller can decide to map each of them
+/// readable or writable based on the requirement.
+#[derive(Copy, Clone)]
+pub enum UmodeSlotId {
+    A,
+    B,
+}
 
 // Returns true if `addr` is contained in the U-mode VA area.
 fn is_umode_addr(addr: u64) -> bool {
@@ -175,7 +208,7 @@ impl PrivateRegion {
         })
     }
 
-    // Map this region into a page table.
+    // Maps this region into a page table.
     fn map(&self, sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) {
         // Allocate and populate first.
         let page_count = PageSize::num_4k_pages(self.size as u64);
@@ -210,7 +243,7 @@ impl PrivateRegion {
         }
     }
 
-    // Restore private region to initial-state.
+    // Restores private region to initial-state.
     fn restore(&self) {
         let mut copied = 0;
         // We have to reset the full pages mapped for this segment.
@@ -251,18 +284,21 @@ impl PrivateRegion {
 
 /// A page table that contains hypervisor mappings.
 pub struct HypPageTable {
-    inner: FirstStagePageTable<Sv48>,
+    /// The pagetable containing hypervisor mappings.
+    sv48: FirstStagePageTable<Sv48>,
+    /// A pte page pool for U-mode mappings.
+    pte_pages: RefCell<SeqPageIter<InternalClean>>,
 }
 
 impl HypPageTable {
-    /// Return the value of the SATP register for this page table.
+    /// Returns the value of the SATP register for this page table.
     pub fn satp(&self) -> u64 {
         let mut satp = LocalRegisterCopy::<u64, satp::Register>::new(0);
-        satp.set_from(&self.inner, 0);
+        satp.set_from(&self.sv48, 0);
         satp.get()
     }
 
-    /// Restore U-mode mappings to initial state.
+    /// Restores U-mode mappings to initial state.
     pub fn restore_umode(&self) {
         for r in HypMap::get()
             .private_regions()
@@ -270,6 +306,65 @@ impl HypPageTable {
         {
             r.restore();
         }
+    }
+
+    /// Returns the virtual address of U-mode mapping slot `slot`.
+    pub fn umode_slot_va(&self, slot: UmodeSlotId) -> PageAddr<SupervisorVirt> {
+        let slot_num = match slot {
+            UmodeSlotId::A => 0,
+            UmodeSlotId::B => 1,
+        };
+        // Unwrap okay: the result is dependent on constant that must be page aligned.
+        PageAddr::new(RawAddr::supervisor_virt(
+            UMODE_MAPPINGS_START + slot_num * UMODE_MAPPING_SLOT_SIZE,
+        ))
+        .unwrap()
+    }
+
+    /// Returns a mapper for U-mode slot `slot` for `num_pages` pages. If `writable` is true, the
+    /// mapper will map pages User-writable, otherwhise will be mapped User-readable.
+    pub fn umode_slot_mapper(
+        &self,
+        slot: UmodeSlotId,
+        num_pages: u64,
+        writable: bool,
+    ) -> Result<UmodeSlotMapper, Error> {
+        if num_pages > PageSize::num_4k_pages(UMODE_MAPPING_SLOT_SIZE) {
+            return Err(Error::OutOfMap);
+        }
+        let vaddr = self.umode_slot_va(slot);
+        let mapper = self
+            .sv48
+            .map_range(vaddr, PageSize::Size4k, num_pages, &mut || {
+                self.pte_pages.borrow_mut().next()
+            })
+            .map_err(|_| Error::MapperCreationFailed)?;
+        let perms = if writable {
+            PteFieldBits::leaf_with_perms(PteLeafPerms::URW)
+        } else {
+            PteFieldBits::leaf_with_perms(PteLeafPerms::UR)
+        };
+
+        Ok(UmodeSlotMapper {
+            vaddr,
+            mapper,
+            perms,
+        })
+    }
+
+    /// Unmaps `num_pages` from umode slot `slot` and returns the iterator of page addresses unmapped.
+    pub fn unmap_umode_slot(
+        &self,
+        slot: UmodeSlotId,
+        num_pages: u64,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_, Error> {
+        let vaddr = self.umode_slot_va(slot);
+        if num_pages > PageSize::num_4k_pages(UMODE_MAPPING_SLOT_SIZE) {
+            return Err(Error::OutOfMap);
+        }
+        self.sv48
+            .unmap_range(vaddr, PageSize::Size4k, num_pages)
+            .map_err(|_| Error::UnmapFailed)
     }
 }
 
@@ -283,7 +378,7 @@ pub struct HypMap {
 }
 
 impl HypMap {
-    // Create a new hypervisor map from a hardware memory mem map and a umode ELF.
+    /// Creates a new hypervisor map from a hardware memory mem map and a umode ELF.
     pub fn init(mem_map: HwMemMap, umode_elf: &ElfMap<'static>) -> Result<(), Error> {
         // All shared mappings come from the HW Memory Map.
         let shared_regions = mem_map
@@ -303,18 +398,18 @@ impl HypMap {
         Ok(())
     }
 
-    /// Get the global reference to the Hypervisor Map.
+    /// Gets the global reference to the Hypervisor Map.
     pub fn get() -> &'static HypMap {
         // Unwrap okay. This must be called after `init`.
         HYPMAP.get().unwrap()
     }
 
-    // Return an iterator for this Hypervisor private regions.
+    // Returns an iterator for this Hypervisor private regions.
     fn private_regions(&self) -> impl Iterator<Item = &PrivateRegion> {
         self.private_regions.iter()
     }
 
-    /// Create a new page table based on this memory map.
+    /// Creates a new page table based on this memory map.
     pub fn new_page_table(&self, hyp_mem: &mut HypPageAlloc) -> HypPageTable {
         // Create empty sv48 page table
         // Unwrap okay: we expect to have at least one page free.
@@ -335,6 +430,47 @@ impl HypMap {
         for r in &self.private_regions {
             r.map(&sv48, hyp_mem);
         }
-        HypPageTable { inner: sv48 }
+        // Alloc pte_pages for U-mode mappings.
+        let pte_pages = hyp_mem
+            .take_pages_for_hyp_state(Sv48::max_pte_pages(
+                UMODE_MAPPINGS_SIZE / PageSize::Size4k as u64,
+            ) as usize)
+            .into_iter();
+        HypPageTable {
+            sv48,
+            pte_pages: RefCell::new(pte_pages),
+        }
+    }
+}
+
+/// Represents a hypervisor page table mapper for a U-mode slot. Only
+/// guest pages can be mapped into it.
+pub struct UmodeSlotMapper<'a> {
+    vaddr: PageAddr<SupervisorVirt>,
+    mapper: FirstStageMapper<'a, Sv48>,
+    perms: PteFieldBits,
+}
+
+impl UmodeSlotMapper<'_> {
+    /// Returns the first virtual page address mappable by this mapper.
+    pub fn vaddr(&self) -> PageAddr<SupervisorVirt> {
+        self.vaddr
+    }
+
+    /// Maps a a guest page into an address in the range of this U-mode slot.
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee that the page at address `paddr` is owned by a guest and has been shared with the hypervisor.
+    pub unsafe fn map_addr(
+        &self,
+        vaddr: PageAddr<SupervisorVirt>,
+        paddr: PageAddr<SupervisorPhys>,
+    ) -> Result<(), Error> {
+        // Safety: pages are mapped in user mode, so no aliases of salus mappings have been
+        // created. Pages are owned by guest, so no mapping of hypervisor pages are created.
+        self.mapper
+            .map_addr(vaddr, paddr, self.perms)
+            .map_err(|_| Error::MapFailed)
     }
 }

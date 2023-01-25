@@ -656,18 +656,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Test that a pending timer or external interruptcauses us to exit the guest.
     CSR.stimecmp.set(0);
-    // EIDELIVERY = 1
-    CSR.siselect.set(0x70);
-    CSR.sireg.set(1);
-    // EITHRESHOLD = 0
-    CSR.siselect.set(0x72);
-    CSR.sireg.set(0);
-    // EIE0[1] = 1
-    CSR.siselect.set(0xc0);
-    CSR.sireg.read_and_set_bits(1 << 1);
-    // EIP0[1] = 1
-    CSR.siselect.set(0x80);
-    CSR.sireg.read_and_set_bits(1 << 1);
+    CSR.si_eidelivery.set(1);
+    CSR.si_eithreshold.set(0);
+    CSR.si_eie[0].read_and_set_bits(1 << 1);
+    CSR.si_eip[0].read_and_set_bits(1 << 1);
     let mut sie = LocalRegisterCopy::new(0);
     sie.modify(sie::stimer.val(1));
     sie.modify(sie::sext.val(1));

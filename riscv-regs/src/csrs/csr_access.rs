@@ -208,3 +208,88 @@ impl<R: RegisterLongName, const V: u16> Writeable for ReadWriteRiscvCsr<R, V> {
         self.set_value(val_to_set);
     }
 }
+
+/// Indirect Read/Write registers.
+#[derive(Copy, Clone)]
+pub struct IndirectReadWriteRiscvCsr<
+    R: RegisterLongName,
+    RA: RiscvCsrInterface,
+    RD: RiscvCsrInterface,
+    const V: u64,
+> {
+    associated_register: PhantomData<R>,
+    address_register: RA,
+    data_register: RD,
+}
+
+impl<R: RegisterLongName, RA: RiscvCsrInterface, RD: RiscvCsrInterface, const V: u64>
+    IndirectReadWriteRiscvCsr<R, RA, RD, V>
+{
+    pub const fn new(ra: RA, rd: RD) -> Self {
+        IndirectReadWriteRiscvCsr {
+            associated_register: PhantomData,
+            address_register: ra,
+            data_register: rd,
+        }
+    }
+}
+
+impl<R: RegisterLongName, RA: RiscvCsrInterface, RD: RiscvCsrInterface, const V: u64>
+    RiscvCsrInterface for IndirectReadWriteRiscvCsr<R, RA, RD, V>
+{
+    type R = R;
+
+    #[inline]
+    fn get_value(&self) -> u64 {
+        self.address_register.set_value(V);
+        self.data_register.get_value()
+    }
+
+    #[inline]
+    fn set_value(&self, val_to_set: u64) {
+        self.address_register.set_value(V);
+        self.data_register.set_value(val_to_set)
+    }
+
+    #[inline]
+    fn atomic_replace(&self, val_to_set: u64) -> u64 {
+        self.address_register.set_value(V);
+        self.data_register.atomic_replace(val_to_set)
+    }
+
+    #[inline]
+    fn read_and_set_bits(&self, bitmask: u64) -> u64 {
+        self.address_register.set_value(V);
+        self.data_register.read_and_set_bits(bitmask)
+    }
+
+    #[inline]
+    fn read_and_clear_bits(&self, bitmask: u64) -> u64 {
+        self.address_register.set_value(V);
+        self.data_register.read_and_clear_bits(bitmask)
+    }
+}
+
+// The Readable and Writeable traits aren't object-safe so unfortunately we can't implement them
+// for the RiscvCsrInterface but must implement them directly for IndirectReadWriteRiscvCsr.
+impl<R: RegisterLongName, RA: RiscvCsrInterface, RD: RiscvCsrInterface, const V: u64> Readable
+    for IndirectReadWriteRiscvCsr<R, RA, RD, V>
+{
+    type T = u64;
+    type R = R;
+
+    fn get(&self) -> u64 {
+        self.get_value()
+    }
+}
+
+impl<R: RegisterLongName, RA: RiscvCsrInterface, RD: RiscvCsrInterface, const V: u64> Writeable
+    for IndirectReadWriteRiscvCsr<R, RA, RD, V>
+{
+    type T = u64;
+    type R = R;
+
+    fn set(&self, val_to_set: u64) {
+        self.set_value(val_to_set);
+    }
+}

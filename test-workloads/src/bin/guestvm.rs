@@ -340,7 +340,7 @@ fn test_emulated_mmio() {
 }
 
 fn test_interrupts() {
-    const INTERRUPT_ID: u64 = 3;
+    const INTERRUPT_ID: usize = 3;
 
     // Make sure we return from WFI.
     //
@@ -354,15 +354,10 @@ fn test_interrupts() {
     // interrupts.
     CSR.sie.read_and_set_field(sie::sext);
 
-    // EIDELIVERY = 1
-    CSR.siselect.set(0x70);
-    CSR.sireg.set(1);
-    // EITHRESHOLD = 0
-    CSR.siselect.set(0x72);
-    CSR.sireg.set(0);
-    // EIE0[3] = 1
-    CSR.siselect.set(0xc0 + (INTERRUPT_ID / 64));
-    CSR.sireg.read_and_set_bits(1 << (INTERRUPT_ID % 64));
+    // Enable interrupt delivery in the IMSIC.
+    CSR.si_eidelivery.set(1);
+    CSR.si_eithreshold.set(0);
+    CSR.si_eie[INTERRUPT_ID / 64].read_and_set_bits(1 << (INTERRUPT_ID % 64));
 
     tee_guest::allow_external_interrupt(3).expect("GuestVm - AllowExternalInterrupt failed");
 

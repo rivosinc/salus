@@ -10,3 +10,4 @@ tock-registers = { version = "0.7" }
 riscv-decode = "0.2"
 riscv_pages = { path = "../riscv-pages" }
 riscv_page_tables = { path = "../riscv-page-tables" }
+seq-macro = "0.3.2"

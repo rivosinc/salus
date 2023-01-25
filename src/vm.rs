@@ -711,7 +711,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             SbiMessage::Reset(ResetFunction::Reset { .. }) => {
                 EcallAction::Break(VmExitCause::FatalEcall(msg), SbiReturn::success(0))
             }
-            SbiMessage::Base(base_func) => EcallAction::Continue(self.handle_base_msg(base_func)),
+            SbiMessage::Base(base_func) => {
+                EcallAction::Continue(self.handle_base_msg(base_func, active_vcpu))
+            }
             SbiMessage::DebugConsole(debug_con_func) => self.handle_debug_console(debug_con_func),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
             SbiMessage::Nacl(nacl_func) => self.handle_nacl_msg(nacl_func, active_vcpu),
@@ -829,7 +831,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
     }
 
-    fn handle_base_msg(&self, base_func: BaseFunction) -> SbiReturn {
+    fn handle_base_msg(&self, base_func: BaseFunction, active_vcpu: &ActiveVmCpu<T>) -> SbiReturn {
         use BaseFunction::*;
         let ret = match base_func {
             GetSpecificationVersion => SBI_SPEC_VERSION,
@@ -844,9 +846,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 | sbi_rs::EXT_NACL
                 | sbi_rs::EXT_TEE_HOST
                 | sbi_rs::EXT_TEE_INTERRUPT
-                | sbi_rs::EXT_TEE_GUEST
                 | sbi_rs::EXT_ATTESTATION => 1,
                 sbi_rs::EXT_PMU if PmuInfo::get().is_ok() => 1,
+                sbi_rs::EXT_TEE_GUEST => (!active_vcpu.is_host_vcpu()) as u64,
                 _ => 0,
             },
             // TODO: 0 is valid result for the GetMachine* SBI calls but we should probably
@@ -2170,6 +2172,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         guest_func: TeeGuestFunction,
         active_vcpu: &ActiveVmCpu<T>,
     ) -> EcallAction {
+        // Guest ABI is not supported for Host.
+        if active_vcpu.is_host_vcpu() {
+            return Err(EcallError::Sbi(SbiError::NotSupported)).into();
+        }
+
         use TeeGuestFunction::*;
         let result = match guest_func {
             AddMmioRegion { addr, len } => self.add_mmio_region(addr, len),

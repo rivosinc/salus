@@ -66,7 +66,7 @@ use umode::UmodeTask;
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     println!("panic : {:?}", info);
-    abort();
+    abort()
 }
 
 extern "C" {

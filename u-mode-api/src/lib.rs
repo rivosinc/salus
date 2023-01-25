@@ -50,18 +50,21 @@
 pub enum Error {
     /// Generic failure in execution.
     Failed = 1,
+    /// Invalid arguments passed.
+    InvalidArgument = 2,
     /// Ecall not supported. From hypervisor to umode.
-    EcallNotSupported = 2,
+    EcallNotSupported = 3,
     /// Request not supported. From umode to hypervisor.
-    RequestNotSupported = 3,
+    RequestNotSupported = 4,
 }
 
 impl From<u64> for Error {
     fn from(val: u64) -> Error {
         match val {
             1 => Error::Failed,
-            2 => Error::EcallNotSupported,
-            3 => Error::RequestNotSupported,
+            2 => Error::InvalidArgument,
+            3 => Error::EcallNotSupported,
+            4 => Error::RequestNotSupported,
             _ => Error::Failed,
         }
     }
@@ -122,6 +125,8 @@ pub enum UmodeOp {
     Nop = 1,
     /// Say hello.
     Hello = 2,
+    /// Copy memory from input to output.
+    MemCopy = 3,
 }
 
 impl TryFrom<u64> for UmodeOp {
@@ -131,6 +136,7 @@ impl TryFrom<u64> for UmodeOp {
         match reg {
             1 => Ok(UmodeOp::Nop),
             2 => Ok(UmodeOp::Hello),
+            3 => Ok(UmodeOp::MemCopy),
             _ => Err(Error::RequestNotSupported),
         }
     }
@@ -139,11 +145,16 @@ impl TryFrom<u64> for UmodeOp {
 /// An operation requested by the hypervisor and executed by umode.
 #[derive(Debug)]
 pub struct UmodeRequest {
-    op: UmodeOp,
-    in_addr: Option<u64>,
-    in_len: usize,
-    out_addr: Option<u64>,
-    out_len: usize,
+    /// The operation requested.
+    pub op: UmodeOp,
+    /// Optional start of mapped area accessible as read-only.
+    pub in_addr: Option<u64>,
+    /// If in_addr is valid, length of the area acessible as read-only.
+    pub in_len: usize,
+    /// Optional start of mapped area accessible as read-write.
+    pub out_addr: Option<u64>,
+    /// If in_addr is valid, length of the area acessible as read-write.
+    pub out_len: usize,
 }
 
 impl UmodeRequest {
@@ -169,9 +180,26 @@ impl UmodeRequest {
         }
     }
 
-    /// Returns the requested Operation.
-    pub fn op(&self) -> UmodeOp {
-        self.op
+    /// Copy memory from input to output.
+    ///
+    /// Caller must guarantee that:
+    /// 1. `in_addr` must be mapped user readable for `len` bytes.
+    /// 2. `out_addr` must be mapped user writable for `len` bytes.
+    pub fn memcopy(out_addr: u64, in_addr: u64, len: u64) -> Option<UmodeRequest> {
+        // Check that input and output ranges do not overlap.
+        let overlap = core::cmp::max(out_addr, in_addr)
+            <= core::cmp::min(out_addr + len - 1, in_addr + len - 1);
+        if overlap {
+            None
+        } else {
+            Some(UmodeRequest {
+                op: UmodeOp::MemCopy,
+                in_addr: Some(in_addr),
+                in_len: len as usize,
+                out_addr: Some(out_addr),
+                out_len: len as usize,
+            })
+        }
     }
 }
 

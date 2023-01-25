@@ -10,8 +10,7 @@ use core::mem::size_of;
 use core::ops::ControlFlow;
 use memoffset::offset_of;
 use riscv_elf::ElfMap;
-use riscv_regs::Exception::UserEnvCall;
-use riscv_regs::{GeneralPurposeRegisters, GprIndex, Readable, Trap, CSR};
+use riscv_regs::{Exception::UserEnvCall, GeneralPurposeRegisters, GprIndex, Readable, Trap, CSR};
 use s_mode_utils::print::*;
 use spin::Once;
 use u_mode_api::{Error as UmodeApiError, HypCall, TryIntoRegisters, UmodeRequest};
@@ -227,7 +226,7 @@ global_asm!(
     umode_sstatus = const umode_csr_offset!(sstatus),
 );
 
-/// Errors returned by U-mode runs.
+/// Errors returned by U-mode operations.
 #[derive(Debug)]
 pub enum Error {
     /// Received an unexpected trap while running Umode.
@@ -349,6 +348,7 @@ impl UmodeTask {
                     ControlFlow::Break(res) => break res,
                 },
                 _ => {
+                    println!("Unexpected U-mode Trap:");
                     println!("{}", self.arch);
                     break Err(Error::UnexpectedTrap);
                 }

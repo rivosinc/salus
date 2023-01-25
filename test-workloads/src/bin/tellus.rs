@@ -24,7 +24,7 @@ use core::arch::asm;
 use core::ops::Range;
 use device_tree::{Fdt, ImsicInfo};
 use riscv_regs::{
-    hie, hip, sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt,
+    hie, hip, sie, sip, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt,
     LocalRegisterCopy, Readable, RiscvCsrInterface, Trap, Writeable, CSR, CSR_CYCLE, CSR_HTINST,
     CSR_HTVAL,
 };
@@ -71,6 +71,8 @@ struct Imsic {
 }
 
 impl Imsic {
+    const IPI_INTERRUPT_ID: u32 = 1;
+
     fn new(config: &ImsicInfo) -> Imsic {
         Imsic {
             base_addr: config.base_addr().expect("IMSIC base address missing"),
@@ -88,17 +90,29 @@ impl Imsic {
         let index = (1 << self.guest_index_bits) * hart_index + file_index;
         self.base_addr + PAGE_SIZE_4K * index as u64
     }
+
+    // Sends an IPI to the given hart.
+    fn send_ipi(&self, hart_index: usize) {
+        let addr = self.file_address(hart_index, 0);
+        // Safety: Relies on IMSIC base address and geometry being correct. We can't be sure or even
+        // validate here, so this is in fact beyond our control and potentially unsafe.
+        unsafe { core::ptr::write_volatile(addr as *mut u32, Self::IPI_INTERRUPT_ID) };
+    }
 }
 
 static IMSIC: Once<Imsic> = Once::new();
 
 /// A helper to run code on other threads synchronously (i.e. waiting for execution to finish). Used
 /// for executing requests to the hypervisor on secondary harts.
-struct TaskRunner(Mutex<Option<&'static (dyn Fn() + Sync)>>);
+struct TaskRunner {
+    hart_index: usize,
+    task: Mutex<Option<&'static (dyn Fn() + Sync)>>,
+}
 
 impl TaskRunner {
-    const fn new() -> TaskRunner {
-        TaskRunner(Mutex::new(None))
+    const fn new(hart_index: usize) -> TaskRunner {
+        let task = Mutex::new(None);
+        TaskRunner { hart_index, task }
     }
 
     /// Submit `f` for execution on a different thread (i.e. wherever `self.spin` runs). `f` will
@@ -119,30 +133,56 @@ impl TaskRunner {
             unsafe { core::mem::transmute::<&(dyn Fn() + Sync), &'static (dyn Fn() + Sync)>(&f) };
 
         // Wait for the Mutex to be available and submit `f` - effectively using the Mutex as a
-        // queue of size one. Not suitable for production code (and neither is the spinning wait),
-        // but good (and simple!) enough for test code.
+        // queue of size one. Not suitable for production code but good (and simple!) enough for
+        // test code.
         loop {
-            let mut guard = self.0.lock();
+            let mut guard = self.task.lock();
             if guard.is_none() {
                 *guard = Some(f);
                 break;
             }
         }
 
+        // Trigger an IPI to wake up the target hart from wfi.
+        Imsic::get().send_ipi(self.hart_index);
+
         // Spin until `f` has been consumed. Note that in theory we might spin longer than necessary
         // if another thread races against us and submits another task. In practice, all tellus
         // execution is synchronized between threads so this race won't occur.
-        while self.0.lock().is_some() {}
+        while self.task.lock().is_some() {}
     }
 
     /// Services execution requests to this TaskRunner instance forever.
     fn spin(&self) -> ! {
+        // Configure the IMSIC:
+        //  * Set eidelivery = 1 to enable interrupt delivery from IMSIC file to the hart.
+        //  * Set eithreshold = 0 to disable threshold and deliver all IMSIC interrupt IDs.
+        //  * Set the enable bit in eie[0] for the IMSIC interrupt ID to arm the interrupt.
+        CSR.si_eidelivery.set(1);
+        CSR.si_eithreshold.set(0);
+        CSR.si_eie[0].read_and_set_bits(1 << Imsic::IPI_INTERRUPT_ID);
+
+        // Enable supervisor external interrupts (which is how IMSIC interrupts show up) in CSR.sie.
+        // Keep the global CSR.sstatus.sie disabled though, so the interrupt gets delivered and
+        // wakes up wfi, but doesn't actually cause a trap.
+        CSR.sie.read_and_set_bits(sie::sext.val(1).into());
+
         loop {
-            let mut guard = self.0.lock();
+            // Clear any pending interrupt signals. First in the hart, only then in the IMSIC, to
+            // make sure we're not missing anything when racing against an incoming interrupt.
+            CSR.si_eip[0].read_and_clear_bits(1 << Imsic::IPI_INTERRUPT_ID);
+            CSR.sip.read_and_clear_bits(sip::sext.val(1).into());
+
+            let mut guard = self.task.lock();
             if let Some(f) = *guard {
                 f();
                 *guard = None;
             }
+            drop(guard);
+
+            // Execute a WFI instruction to put the hart to sleep until the next interrupt.
+            // Safe since WFI is functionally equivalent to NOP and doesn't access memory.
+            unsafe { asm!("wfi") };
         }
     }
 }
@@ -153,8 +193,8 @@ struct PerCpu {
 }
 
 impl PerCpu {
-    fn new(hart_id: u64) -> PerCpu {
-        let runner = TaskRunner::new();
+    fn new(hart_id: u64, index: usize) -> PerCpu {
+        let runner = TaskRunner::new(index);
         PerCpu { hart_id, runner }
     }
 
@@ -177,7 +217,6 @@ impl PerCpu {
             // Safe since we're the only user of TP.
             asm!("mv {rd}, tp", rd = out(reg) tp)
         };
-
         &PER_CPU.get().expect("PER_CPU not initialized")[tp as usize]
     }
 }
@@ -443,7 +482,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Initialize PER_CPU.
     PER_CPU.call_once(|| {
         fdt.cpus()
-            .filter_map(|cpu| Some(PerCpu::new(cpu.hart_id()?)))
+            .enumerate()
+            .filter_map(|(index, cpu)| Some(PerCpu::new(cpu.hart_id()?, index)))
             .take(MAX_CPUS)
             .collect::<ArrayVec<_, MAX_CPUS>>()
     });

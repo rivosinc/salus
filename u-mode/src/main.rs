@@ -19,7 +19,7 @@ extern "C" fn task_main(cpuid: u64) -> ! {
         // Return result and wait for next operation.
         let req = hyp_nextop(res);
         res = match req {
-            Ok(req) => match req.op() {
+            Ok(req) => match req.op {
                 UmodeOp::Nop => Ok(()),
                 UmodeOp::Hello => {
                     println!("----------------------------");

@@ -419,7 +419,7 @@ impl VmCpuArchState {
 }
 
 // Sets the status on dropping depending on the state of next_status.
-// Used by ActiveVmCpu sto set the Vcpu's state on de-activation.
+// Used by ActiveVmCpu to set the Vcpu's state on de-activation.
 struct StatusSet<'vcpu> {
     vcpu: &'vcpu VmCpu,
     next_status: VmCpuStatus,

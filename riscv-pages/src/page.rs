@@ -181,7 +181,8 @@ impl<AS: AddressSpace> PageAddr<AS> {
         }
     }
 
-    /// Creates a `PageAddr` from a `Pfn`.
+    /// Creates a `PageAddr` that is aligned with the given alignment from a `Pfn`. Note that for 4k
+    /// pages addresses the `From` trait should be used for infallible conversion from a pfn.
     pub fn from_pfn(pfn: Pfn<AS>, alignment: PageSize) -> Option<Self> {
         let phys_addr = RawAddr(pfn.0 << PFN_SHIFT, pfn.1);
         Self::with_alignment(phys_addr, alignment)
@@ -242,6 +243,14 @@ impl<AS: AddressSpace> PageAddr<AS> {
     /// Gets the index of the page in the system (the linear page count from address 0).
     pub fn index(&self) -> usize {
         self.pfn().bits() as usize
+    }
+}
+
+// Implement the `From` trait for `PageAddr` to convert from `Pfn`. Returns a 4k aligned `PageAddr`.
+impl<AS: AddressSpace> From<Pfn<AS>> for PageAddr<AS> {
+    fn from(pfn: Pfn<AS>) -> Self {
+        let phys_addr = RawAddr(pfn.0 << PFN_SHIFT, pfn.1);
+        Self { addr: phys_addr }
     }
 }
 

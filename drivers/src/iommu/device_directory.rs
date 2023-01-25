@@ -215,8 +215,7 @@ impl<'a> DeviceDirectoryTable<'a> {
     unsafe fn from_non_leaf_entry(nle: &'a mut NonLeafEntry, level: usize) -> Option<Self> {
         if nle.valid() {
             Some(Self {
-                // Unwrap ok: PFNs always map to 4kB-aligned addresses.
-                table_addr: SupervisorPageAddr::from_pfn(nle.pfn(), PageSize::Size4k).unwrap(),
+                table_addr: nle.pfn().into(),
                 level,
                 phantom: PhantomData,
             })

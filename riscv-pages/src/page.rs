@@ -108,6 +108,16 @@ impl RawAddr<SupervisorPhys> {
     pub fn supervisor(addr: u64) -> Self {
         Self(addr, SupervisorPhys::default())
     }
+
+    /// Returns the address of self, but in the Guest address space with the given `PageOwnerId`.
+    pub fn as_guest_phys(&self, id: PageOwnerId) -> RawAddr<GuestPhys> {
+        RawAddr::guest(self.0, id)
+    }
+
+    /// Returns the address of self, but in the SupervisorVirt address space.
+    pub fn as_supervisor_virt(&self) -> RawAddr<SupervisorVirt> {
+        RawAddr::supervisor_virt(self.0)
+    }
 }
 
 impl RawAddr<SupervisorVirt> {
@@ -208,6 +218,11 @@ impl<AS: AddressSpace> PageAddr<AS> {
         self.addr.0
     }
 
+    /// Gets the raw address of this page address.
+    pub fn raw(&self) -> RawAddr<AS> {
+        self.addr
+    }
+
     /// Returns if this address is aligned to the given page size.
     pub fn is_aligned(&self, alignment: PageSize) -> bool {
         alignment.is_aligned(self.addr.0)
@@ -243,6 +258,22 @@ impl<AS: AddressSpace> PageAddr<AS> {
     /// Gets the index of the page in the system (the linear page count from address 0).
     pub fn index(&self) -> usize {
         self.pfn().bits() as usize
+    }
+}
+
+impl PageAddr<SupervisorPhys> {
+    /// Returns a `PageAddr` with the same address but with a different address space and the given owner.
+    pub fn as_guest_phys(&self, id: PageOwnerId) -> PageAddr<GuestPhys> {
+        PageAddr {
+            addr: self.addr.as_guest_phys(id),
+        }
+    }
+
+    /// Returns a `PageAddr` with the same address but in the supervisor virtual address space.
+    pub fn as_supervisor_virt(&self) -> PageAddr<SupervisorVirt> {
+        PageAddr {
+            addr: self.addr.as_supervisor_virt(),
+        }
     }
 }
 

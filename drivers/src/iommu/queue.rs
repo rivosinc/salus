@@ -53,8 +53,11 @@ impl<T: DataInit, Q> Queue<T, Q> {
 
     /// Returns the base physical address of this queue.
     pub fn base_address(&self) -> SupervisorPageAddr {
-        // Unwrap ok since the queue must've been created from a page-aligned slice of memory.
-        PageAddr::new(RawAddr::supervisor(self.mem.as_ptr() as u64)).unwrap()
+        // The queue must've been created from a page-aligned slice of memory, so round_down will be a nop.
+        PageAddr::with_round_down(
+            RawAddr::supervisor(self.mem.as_ptr() as u64),
+            PageSize::Size4k,
+        )
     }
 
     /// Returns the total number of elements that can be held in the queue.

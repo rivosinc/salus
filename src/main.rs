@@ -426,7 +426,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let guest_ram_base = mem_map
         .regions()
         .find(|r| !matches!(r.region_type(), HwMemRegionType::Mmio(_)))
-        .map(|r| RawAddr::guest(r.base().bits(), PageOwnerId::host()))
+        .map(|r| r.base().as_guest_phys(PageOwnerId::host()))
         .unwrap();
     // For the purposes of calculating the total size of the host VM's guest physical address
     // space, use the start and end of the (real) physical memory map. This is a bit of an

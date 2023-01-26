@@ -79,8 +79,7 @@ impl SharedRegion {
         if let Some(pte_perms) = perms {
             let paddr = r.base();
             // vaddr == paddr in mapping HW memory map.
-            // Unwrap okay. `r.base()` is a page addr so it is aligned to the page.
-            let vaddr = PageAddr::new(RawAddr::supervisor_virt(r.base().bits())).unwrap();
+            let vaddr = r.base().as_supervisor_virt();
             let page_count = PageSize::num_4k_pages(r.size()) as usize;
             let pte_fields = PteFieldBits::leaf_with_perms(pte_perms);
             Some(Self {
@@ -185,9 +184,8 @@ impl PrivateRegion {
         //
         // The following check enforces that the segment starts at a 4k page aligned address. Unless
         // the linking is completely corrupt, this also means that it starts at a different page.
-        if !PageSize::Size4k.is_aligned(seg.vaddr()) {
-            return Err(Error::ElfUnalignedSegment);
-        }
+        let vaddr = PageAddr::new(RawAddr::supervisor_virt(seg.vaddr()))
+            .ok_or(Error::ElfUnalignedSegment)?;
         // Sanity check for VA area of the segment.
         if !is_valid_umode_range(seg.vaddr(), seg.size()) {
             return Err(Error::ElfInvalidAddress);
@@ -197,8 +195,6 @@ impl PrivateRegion {
             ElfSegmentPerms::ReadWrite => PteLeafPerms::URW,
             ElfSegmentPerms::ReadOnlyExecute => PteLeafPerms::URX,
         };
-        // Unwrap okay. `seg.vaddr()` has been checked to be 4k aligned.
-        let vaddr = PageAddr::new(RawAddr::supervisor_virt(seg.vaddr())).unwrap();
         let pte_fields = PteFieldBits::leaf_with_perms(pte_perms);
         Ok(Self {
             vaddr,

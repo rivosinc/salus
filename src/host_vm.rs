@@ -265,8 +265,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         pci.take_host_devices();
         // Identity-map the PCIe BAR resources.
         for (res_type, range) in pci.resources() {
-            let gpa =
-                PageAddr::new(RawAddr::guest(range.base().bits(), PageOwnerId::host())).unwrap();
+            let gpa = range.base().as_guest_phys(PageOwnerId::host());
             self.vm.add_pci_region(gpa, range.length_bytes());
             let pages = pci.take_host_resource(res_type).unwrap();
             self.vm.add_pci_pages(gpa, pages);
@@ -362,11 +361,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
 
         // Set up MMIO emulation for the PCIe config space.
         let config_mem = pci.config_space();
-        let config_gpa = PageAddr::new(RawAddr::guest(
-            config_mem.base().bits(),
-            PageOwnerId::host(),
-        ))
-        .unwrap();
+        let config_gpa = config_mem.base().as_guest_phys(PageOwnerId::host());
         self.vm
             .add_mmio_region(config_gpa, config_mem.length_bytes());
 

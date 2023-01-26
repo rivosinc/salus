@@ -11,10 +11,11 @@ use core::arch::global_asm;
 
 global_asm!(include_str!("start.S"));
 
+// Panic handler for U-mode programs.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     println!("panic : {:?}", info);
-    hyp_panic();
+    hyp_panic()
 }
 
 /// Writer for printing characters through the hypervisor via the putchar hypcall.

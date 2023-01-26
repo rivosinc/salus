@@ -43,12 +43,15 @@ pub fn hyp_putchar(c: char) {
 pub fn hyp_panic() -> ! {
     let mut regs = [0u64; 8];
     let hypc = HypCall::Panic;
-    hypc.to_registers(&mut regs);
-    // Safety: This ecall does not contain any memory reference.
-    unsafe {
-        ecall(&mut regs);
+    // Loop indefinitely to expose the `no_return` behaviour. In the extremely corrupt scenario
+    // where this would actually return, at least we would keep looping into the hypervisor...
+    loop {
+        hypc.to_registers(&mut regs);
+        // Safety: This ecall does not contain any memory reference.
+        unsafe {
+            ecall(&mut regs);
+        }
     }
-    unreachable!();
 }
 
 pub fn hyp_nextop(result: Result<(), UmodeApiError>) -> Result<UmodeRequest, UmodeApiError> {

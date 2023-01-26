@@ -22,7 +22,7 @@ use arrayvec::ArrayVec;
 use consts::*;
 use core::arch::asm;
 use core::ops::Range;
-use device_tree::Fdt;
+use device_tree::{Fdt, ImsicInfo};
 use riscv_regs::{
     hie, hip, sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt,
     LocalRegisterCopy, Readable, RiscvCsrInterface, Trap, Writeable, CSR, CSR_CYCLE, CSR_HTINST,
@@ -62,6 +62,34 @@ static GENERAL_ALLOCATOR: GeneralGlobalAlloc = GeneralGlobalAlloc;
 pub fn alloc_error(_layout: Layout) -> ! {
     abort()
 }
+
+/// Rudimentary Imsic interface to compute interrupt file locations and send interrupts.
+struct Imsic {
+    base_addr: u64,
+    guest_index_bits: usize,
+}
+
+impl Imsic {
+    fn new(config: &ImsicInfo) -> Imsic {
+        Imsic {
+            base_addr: config.base_addr().expect("IMSIC base address missing"),
+            guest_index_bits: config.guest_index_bits().unwrap_or(0),
+        }
+    }
+
+    fn get() -> &'static Imsic {
+        IMSIC.get().expect("Imsic not initialized")
+    }
+
+    /// Computes the location of the `index`-th interrupt file for the hart at `index` (which is not
+    /// necessarily identical to the hart ID per the spec).
+    fn file_address(&self, hart_index: usize, file_index: usize) -> u64 {
+        let index = (1 << self.guest_index_bits) * hart_index + file_index;
+        self.base_addr + PAGE_SIZE_4K * index as u64
+    }
+}
+
+static IMSIC: Once<Imsic> = Once::new();
 
 /// A helper to run code on other threads synchronously (i.e. waiting for execution to finish). Used
 /// for executing requests to the hypervisor on secondary harts.
@@ -409,6 +437,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     );
     let mut next_page = (mem_range.base() + mem_range.size() / 2) & !0x3fff;
 
+    IMSIC.call_once(|| Imsic::new(&fdt.imsic().expect("IMSIC configuration missing from DT")));
+
     // Initialize PER_CPU.
     PER_CPU.call_once(|| {
         fdt.cpus()
@@ -515,8 +545,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     tee_host::add_vcpu(vmid, 0, vcpu_pages_base).expect("Tellus - TvmCpuCreate returned error");
 
     let has_aia = base::probe_sbi_extension(EXT_TEE_INTERRUPT).is_ok();
-    // CPU0, guest interrupt file 0.
-    let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K;
+    // CPU0, guest interrupt file 0 (which is at index 1 since supervisor file is at 0).
+    let imsic_file_num = 1;
+    let imsic_file_addr = Imsic::get().file_address(0, imsic_file_num);
     if has_aia {
         // Check HGEIE to see how many guests we have.
         CSR.hgeie.set(!0u64);
@@ -538,8 +569,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
         // Try to convert a guest interrupt file.
         //
-        // Safety: We trust that the IMSIC is actually at IMSIC_START_ADDRESS, and we aren't
-        // touching this page at all in this program.
+        // Safety: We trust that the IMSIC is actually at the address provided in the device tree,
+        // and we aren't touching this page at all in this program.
         unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
         fence_memory();
@@ -626,14 +657,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // For now we run on a single CPU so try to exercise the rebinding interface
     // on the same PCPU.
-    // CPU0, guest interrupt file 2.
+    // CPU0, guest interrupt file 1 (which is file number 2 since index 0 is the supervisor file).
+    let previous_imsic_file_num = imsic_file_num;
     let imsic_file_num = 2;
-    let imsic_file_addr = IMSIC_START_ADDRESS + PAGE_SIZE_4K * imsic_file_num;
+    let imsic_file_addr = Imsic::get().file_address(0, imsic_file_num);
     if has_aia {
         // Try to convert a guest interrupt file.
         //
-        // Safety: We trust that the IMSIC is actually at IMSIC_START_ADDRESS, and we aren't
-        // touching this page at all in this program.
+        // Safety: We trust that the IMSIC is actually at the address provided in the device tree,
+        // and we aren't touching this page at all in this program.
         unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
         fence_memory();
@@ -647,7 +679,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             .expect("Tellus - TvmCpuRebindImsicEnd failed");
 
         // Reclaim previous imsic file address.
-        tee_interrupt::reclaim_imsic(IMSIC_START_ADDRESS + PAGE_SIZE_4K)
+        tee_interrupt::reclaim_imsic(Imsic::get().file_address(0, previous_imsic_file_num))
             .expect("Tellus - TsmReclaimImsic failed");
 
         CSR.hgeie.set(1 << imsic_file_num);

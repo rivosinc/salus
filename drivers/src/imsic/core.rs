@@ -514,10 +514,8 @@ impl Imsic {
     /// the remaining guest interrupt files mapped immediately contiguous to it.
     pub fn host_vm_geometry(&self) -> GuestImsicGeometry {
         let phys = &self.geometry;
-        // Unwrap ok, we know the index widths / addresses are valid since they come from the
-        // physical geometry.
         ImsicGeometry::new(
-            PageAddr::new(RawAddr::guest(phys.base_addr().bits(), PageOwnerId::host())).unwrap(),
+            phys.base_addr().as_guest_phys(PageOwnerId::host()),
             phys.group_index_bits(),
             phys.group_index_shift(),
             phys.hart_index_bits(),

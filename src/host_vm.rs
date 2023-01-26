@@ -151,7 +151,7 @@ pub struct HostVmLoader<T: GuestStagePagingMode> {
     vm: HostVm<T>,
     fdt_pages: FdtPages,
     zero_pages: PageList<Page<ConvertedClean>>,
-    guest_ram_base: GuestPhysAddr,
+    guest_ram_base: GuestPageAddr,
     ram_size: u64,
 }
 
@@ -162,7 +162,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         hypervisor_dt: DeviceTree,
         kernel: HwMemRegion,
         initramfs: Option<HwMemRegion>,
-        guest_ram_base: GuestPhysAddr,
+        guest_ram_base: GuestPageAddr,
         guest_phys_size: u64,
         mut page_alloc: HypPageAlloc,
     ) -> Self {
@@ -210,7 +210,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         // Construct a stripped-down device-tree for the host VM.
         let mut host_dt_builder = HostDtBuilder::new(&self.hypervisor_dt)
             .unwrap()
-            .add_memory_node(self.guest_ram_base, self.ram_size)
+            .add_memory_node(self.guest_ram_base.raw(), self.ram_size)
             .unwrap()
             .add_cpu_nodes()
             .unwrap()
@@ -220,6 +220,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             host_dt_builder = host_dt_builder
                 .set_initramfs_addr(
                     self.guest_ram_base
+                        .raw()
                         .checked_increment(INITRAMFS_OFFSET)
                         .unwrap(),
                     r.size(),
@@ -287,7 +288,7 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         // any discontiguous ranges are also guaranteed to be aligned.
         //
         // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
-        let mut current_gpa = PageAddr::new(self.guest_ram_base).unwrap();
+        let mut current_gpa = self.guest_ram_base;
         self.vm
             .add_confidential_memory_region(current_gpa, self.ram_size);
 
@@ -340,9 +341,13 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         self.vm
             .finalize(
                 self.guest_ram_base
+                    .raw()
                     .checked_increment(KERNEL_OFFSET)
                     .unwrap(),
-                self.guest_ram_base.checked_increment(FDT_OFFSET).unwrap(),
+                self.guest_ram_base
+                    .raw()
+                    .checked_increment(FDT_OFFSET)
+                    .unwrap(),
             )
             .unwrap();
 

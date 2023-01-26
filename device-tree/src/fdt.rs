@@ -73,6 +73,15 @@ impl<'a> Fdt<'a> {
             .filter_map(|n| Some(Cpu { inner: n.ok()? }))
     }
 
+    /// Provides access to IMSIC configuration.
+    pub fn imsic(&self) -> Option<ImsicInfo> {
+        self.inner
+            .compatible_nodes("riscv,imsics")
+            .next()
+            .ok()?
+            .map(|n| ImsicInfo { inner: n })
+    }
+
     /// This returns the property buf for the first property with the give name
     pub fn get_property(&self, name: &str) -> Option<&str> {
         let mut iter = self.inner.parse_iter();
@@ -234,8 +243,33 @@ pub struct Cpu<'a, 'dt> {
 }
 
 impl<'a, 'dt> Cpu<'a, 'dt> {
+    /// Returns the hart ID for this CPU.
     pub fn hart_id(&self) -> Option<u64> {
         let prop = self.inner.props().find(|p| Ok(p.name()? == "reg")).ok()??;
         Some(prop.u32(0).ok()? as u64)
+    }
+}
+
+/// Provides access to IMSIC configuration.
+#[derive(Clone)]
+pub struct ImsicInfo<'a, 'dt> {
+    inner: DevTreeNode<'a, 'dt>,
+}
+
+impl<'a, 'dt> ImsicInfo<'a, 'dt> {
+    /// Returns the IMSIC base address (if specified).
+    pub fn base_addr(&self) -> Option<u64> {
+        let prop = self.inner.props().find(|p| Ok(p.name()? == "reg")).ok()??;
+        prop.u64(0).ok()
+    }
+
+    /// Returns the number of guest index bits (if specified).
+    pub fn guest_index_bits(&self) -> Option<usize> {
+        let prop = self
+            .inner
+            .props()
+            .find(|p| Ok(p.name()? == "riscv,guest-index-bits"))
+            .ok()??;
+        Some(prop.u32(0).ok()? as usize)
     }
 }

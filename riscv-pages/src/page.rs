@@ -40,7 +40,7 @@ impl PageSize {
     }
 
     /// Checks if the given quantity is aligned to this page size.
-    pub fn is_aligned(&self, val: u64) -> bool {
+    pub const fn is_aligned(&self, val: u64) -> bool {
         (val & (*self as u64 - 1)) == 0
     }
 

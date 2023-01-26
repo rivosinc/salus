@@ -15,6 +15,7 @@ use riscv_pages::{
 };
 use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, CSR};
 use spin::Once;
+use static_assertions::const_assert;
 
 // Maximum number of regions unique to every pagetable (private).
 const MAX_PRIVATE_REGIONS: usize = 32;
@@ -132,13 +133,16 @@ const UMODE_VA_END: u64 = UMODE_VA_START + UMODE_VA_SIZE;
 // The addresses between `UMODE_MAPPINGS_START` and `UMODE_MAPPINGS_START` + `UMODE_MAPPINGS_SIZE`
 // is an area of the private page table where the hypervisor can map pages shared from guest
 // VMs. The area is divided in slots, of equal size `UMODE_MAPPING_SLOT_SIZE`.
+// Must be multiple of 4k.
 const UMODE_MAPPING_SLOT_SIZE: u64 = 4 * 1024 * 1024;
+const_assert!(PageSize::Size4k.is_aligned(UMODE_MAPPING_SLOT_SIZE));
 
-// Start of the private U-mode mappings area.
+// Start of the private U-mode mappings area.  Must be 4k-aligned.
 const UMODE_MAPPINGS_START: u64 = UMODE_VA_END + 4 * 1024 * 1024;
+const_assert!(PageSize::Size4k.is_aligned(UMODE_MAPPINGS_START));
 //The number of slots available for mapping.
 const UMODE_MAPPING_SLOTS: u64 = 2;
-// Maximum size of the private mappings area.
+// Maximum size of the private mappings area. Must be 4k-aligned.
 const UMODE_MAPPINGS_SIZE: u64 = UMODE_MAPPING_SLOTS * UMODE_MAPPING_SLOT_SIZE;
 
 /// Generic Id names for each of the U-mode mapping slots.
@@ -310,11 +314,12 @@ impl HypPageTable {
             UmodeSlotId::A => 0,
             UmodeSlotId::B => 1,
         };
-        // Unwrap okay: the result is dependent on constant that must be page aligned.
-        PageAddr::new(RawAddr::supervisor_virt(
-            UMODE_MAPPINGS_START + slot_num * UMODE_MAPPING_SLOT_SIZE,
-        ))
-        .unwrap()
+        // UMODE_MAPPING_START and UMODE_MAPPING_SLOT_SIZE are required by static assertion to be
+        // page aligned, `round_down` will be a nop.
+        PageAddr::with_round_down(
+            RawAddr::supervisor_virt(UMODE_MAPPINGS_START + slot_num * UMODE_MAPPING_SLOT_SIZE),
+            PageSize::Size4k,
+        )
     }
 
     /// Returns a mapper for U-mode slot `slot` for `num_pages` pages. If `writable` is true, the

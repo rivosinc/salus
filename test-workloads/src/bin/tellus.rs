@@ -1009,7 +1009,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                 }
             }
         } else {
-            println!("Guest VM terminated with unexpected cause 0x{:x}", scause,);
+            panic!("Guest VM terminated with unexpected cause 0x{:x}", scause);
         }
     }
 
@@ -1031,7 +1031,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // to guard against the compiler's no-aliasing assumptions.
     let guest_written_value = unsafe { core::ptr::read_volatile(shared_page_base as *mut u64) };
     if guest_written_value != GUEST_SHARE_PONG {
-        println!("Tellus - unexpected value from guest shared page: 0x{guest_written_value:x}");
+        panic!("Tellus - unexpected value from guest shared page: 0x{guest_written_value:x}");
     }
     // Check that we can reclaim previously-converted pages and that they have been cleared.
     reclaim_pages(

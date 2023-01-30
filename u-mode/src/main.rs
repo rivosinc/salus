@@ -5,6 +5,16 @@
 #![no_std]
 #![no_main]
 
+//! # Salus U-mode binary.
+//!
+//! This is Salus U-mode code. It is used to offload functionalities
+//! of the hypervisor in user mode. There's a copy of this task in
+//! each CPU.
+//!
+//! The task it's based on a request loop. This task can be reset at
+//! any time by the hypervisor, so it shouldn't hold non-recoverable
+//! state.
+
 extern crate libuser;
 
 use libuser::*;

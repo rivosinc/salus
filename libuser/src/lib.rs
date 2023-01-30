@@ -4,6 +4,12 @@
 
 #![no_std]
 
+//! # Salus U-mode support library.
+//!
+//! This library implements basic functions used to create a `no_std`
+//! environment for salus U-mode, and helper functions to issue
+//! `ecall` to salus.
+
 mod hypcalls;
 
 pub use crate::hypcalls::*;
@@ -25,12 +31,13 @@ impl core::fmt::Write for UserWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for c in s.chars() {
             // Ignore errors for putchar.
-            let _ = hyp_putchar(c);
+            hyp_putchar(c);
         }
         Ok(())
     }
 }
 
+/// `print` macro using calls to salus.
 #[macro_export]
 macro_rules! print {
     ($($args:tt)*) => {
@@ -42,6 +49,7 @@ macro_rules! print {
     };
 }
 
+/// `println` macro using calls to salus.
 #[macro_export]
 macro_rules! println {
     ($($args:tt)*) => {

@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::hyp_map::UmodeSlotId;
 use arrayvec::ArrayVec;
 use attestation::AttestationManager;
 use core::arch::global_asm;
@@ -21,7 +20,7 @@ use riscv_regs::{
 };
 use spin::{Mutex, Once, RwLock, RwLockReadGuard};
 
-use crate::hyp_map::Error as HypMapError;
+use crate::hyp_map::{Error as HypMapError, HypMap, UmodeSlotId};
 use crate::smp::PerCpu;
 use crate::vm::{VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_id::VmId;
@@ -267,7 +266,7 @@ impl GuestUmodeMapping {
 
     /// Returns the start of the mapping (i.e., the address of the mapped U-mode slot).
     pub fn vaddr(&self) -> PageAddr<SupervisorVirt> {
-        PerCpu::this_cpu().page_table().umode_slot_va(self.slot)
+        HypMap::umode_slot_va(self.slot)
     }
 }
 

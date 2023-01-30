@@ -308,20 +308,6 @@ impl HypPageTable {
         }
     }
 
-    /// Returns the virtual address of U-mode mapping slot `slot`.
-    pub fn umode_slot_va(&self, slot: UmodeSlotId) -> PageAddr<SupervisorVirt> {
-        let slot_num = match slot {
-            UmodeSlotId::A => 0,
-            UmodeSlotId::B => 1,
-        };
-        // UMODE_MAPPING_START and UMODE_MAPPING_SLOT_SIZE are required by static assertion to be
-        // page aligned, `round_down` will be a nop.
-        PageAddr::with_round_down(
-            RawAddr::supervisor_virt(UMODE_MAPPINGS_START + slot_num * UMODE_MAPPING_SLOT_SIZE),
-            PageSize::Size4k,
-        )
-    }
-
     /// Returns a mapper for U-mode slot `slot` for `num_pages` pages. If `writable` is true, the
     /// mapper will map pages User-writable, otherwhise will be mapped User-readable.
     pub fn umode_slot_mapper(
@@ -333,7 +319,7 @@ impl HypPageTable {
         if num_pages > PageSize::num_4k_pages(UMODE_MAPPING_SLOT_SIZE) {
             return Err(Error::OutOfMap);
         }
-        let vaddr = self.umode_slot_va(slot);
+        let vaddr = HypMap::umode_slot_va(slot);
         let mapper = self
             .sv48
             .map_range(vaddr, PageSize::Size4k, num_pages, &mut || {
@@ -359,7 +345,7 @@ impl HypPageTable {
         slot: UmodeSlotId,
         num_pages: u64,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_, Error> {
-        let vaddr = self.umode_slot_va(slot);
+        let vaddr = HypMap::umode_slot_va(slot);
         if num_pages > PageSize::num_4k_pages(UMODE_MAPPING_SLOT_SIZE) {
             return Err(Error::OutOfMap);
         }
@@ -408,6 +394,20 @@ impl HypMap {
     // Returns an iterator for this Hypervisor private regions.
     fn private_regions(&self) -> impl Iterator<Item = &PrivateRegion> {
         self.private_regions.iter()
+    }
+
+    /// Returns the virtual address of U-mode mapping slot `slot`.
+    pub fn umode_slot_va(slot: UmodeSlotId) -> PageAddr<SupervisorVirt> {
+        let slot_num = match slot {
+            UmodeSlotId::A => 0,
+            UmodeSlotId::B => 1,
+        };
+        // UMODE_MAPPING_START and UMODE_MAPPING_SLOT_SIZE are required by static assertion to be
+        // page aligned, `round_down` will be a nop.
+        PageAddr::with_round_down(
+            RawAddr::supervisor_virt(UMODE_MAPPINGS_START + slot_num * UMODE_MAPPING_SLOT_SIZE),
+            PageSize::Size4k,
+        )
     }
 
     /// Creates a new page table based on this memory map.
@@ -462,7 +462,8 @@ impl UmodeSlotMapper<'_> {
     ///
     /// # Safety
     ///
-    /// Caller must guarantee that the page at address `paddr` is owned by a guest and has been shared with the hypervisor.
+    /// Caller must guarantee that the page at address `paddr` is owned by a guest and has been
+    /// shared with the hypervisor.
     pub unsafe fn map_addr(
         &self,
         vaddr: PageAddr<SupervisorVirt>,

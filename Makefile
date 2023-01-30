@@ -177,7 +177,7 @@ run_buildroot_debug: salus_debug
 
 .PHONY: lint
 lint:
-	cargo clippy -- -D warnings  -Wmissing-docs
+	cargo clippy --workspace --exclude test_workloads -- -D warnings  -Wmissing-docs
 
 .PHONY: format
 format:

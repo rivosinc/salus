@@ -2,9 +2,11 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::hyp_map::UmodeBuffer;
 use crate::smp::PerCpu;
 
 use core::arch::global_asm;
+use core::cell::RefMut;
 use core::fmt;
 use core::mem::size_of;
 use core::ops::ControlFlow;
@@ -262,7 +264,12 @@ impl UmodeTask {
         Ok(())
     }
 
-    pub fn reset(&mut self) -> Result<(), Error> {
+    /// Return the U-mode buffer for this task.
+    pub fn umode_buffer_mut() -> RefMut<'static, UmodeBuffer> {
+        PerCpu::this_cpu().page_table().umode_buffer_mut()
+    }
+
+    fn reset(&mut self) -> Result<(), Error> {
         // Initialize umode CPU state to run at ELF entry.
         let mut arch = UmodeCpuArchState::default();
         // Unwrap okay: this is called after `Self::init()`.

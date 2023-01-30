@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrayvec::ArrayVec;
-use core::cell::RefCell;
+use core::cell::{RefCell, RefMut};
 use page_tracking::{HwMemMap, HwMemRegion, HwMemRegionType, HwReservedMemType, HypPageAlloc};
 use riscv_elf::{ElfMap, ElfSegment, ElfSegmentPerms};
 use riscv_page_tables::{
@@ -11,7 +11,7 @@ use riscv_page_tables::{
 };
 use riscv_pages::{
     InternalClean, Page, PageAddr, PageSize, RawAddr, SeqPageIter, SupervisorPageAddr,
-    SupervisorPhys, SupervisorVirt,
+    SupervisorPhys, SupervisorPhysAddr, SupervisorVirt,
 };
 use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, CSR};
 use spin::Once;
@@ -144,6 +144,15 @@ const_assert!(PageSize::Size4k.is_aligned(UMODE_MAPPINGS_START));
 const UMODE_MAPPING_SLOTS: u64 = 2;
 // Maximum size of the private mappings area. Must be 4k-aligned.
 const UMODE_MAPPINGS_SIZE: u64 = UMODE_MAPPING_SLOTS * UMODE_MAPPING_SLOT_SIZE;
+const UMODE_MAPPINGS_END: u64 = UMODE_MAPPINGS_START + UMODE_MAPPINGS_SIZE;
+const_assert!(PageSize::Size4k.is_aligned(UMODE_MAPPINGS_END));
+
+/// Start of the U-mode buffer.
+const UMODE_BUFFER_START: u64 = UMODE_MAPPINGS_END + 4 * 1024 * 1024;
+const_assert!(PageSize::Size4k.is_aligned(UMODE_BUFFER_START));
+/// Size of the U-mode buffer.
+pub const UMODE_BUFFER_SIZE: u64 = 16 * 1024;
+const_assert!(PageSize::Size4k.is_aligned(UMODE_BUFFER_SIZE));
 
 /// Generic Id names for each of the U-mode mapping slots.
 /// There is no mandated use for each of the slots, and caller can decide to map each of them
@@ -286,6 +295,8 @@ impl PrivateRegion {
 pub struct HypPageTable {
     /// The pagetable containing hypervisor mappings.
     sv48: FirstStagePageTable<Sv48>,
+    /// U-mode buffer for this page-table.
+    umode_buffer: RefCell<UmodeBuffer>,
     /// A pte page pool for U-mode mappings.
     pte_pages: RefCell<SeqPageIter<InternalClean>>,
 }
@@ -298,7 +309,7 @@ impl HypPageTable {
         satp.get()
     }
 
-    /// Restores U-mode mappings to initial state.
+    /// Restores U-mode ELF mappings to initial state.
     pub fn restore_umode(&self) {
         for r in HypMap::get()
             .private_regions()
@@ -352,6 +363,11 @@ impl HypPageTable {
         self.sv48
             .unmap_range(vaddr, PageSize::Size4k, num_pages)
             .map_err(|_| Error::UnmapFailed)
+    }
+
+    /// Get the page-table U-mode buffer as a mutable reference.
+    pub fn umode_buffer_mut(&self) -> RefMut<UmodeBuffer> {
+        self.umode_buffer.borrow_mut()
     }
 }
 
@@ -410,6 +426,15 @@ impl HypMap {
         )
     }
 
+    // Returns the virtual address of the U-mode buffer.
+    fn umode_buffer_va() -> PageAddr<SupervisorVirt> {
+        // UMODE_BUFFER_START is 4k aligned (enforced by static assertion), round_down wil be a no-op.
+        PageAddr::with_round_down(
+            RawAddr::supervisor_virt(UMODE_BUFFER_START),
+            PageSize::Size4k,
+        )
+    }
+
     /// Creates a new page table based on this memory map.
     pub fn new_page_table(&self, hyp_mem: &mut HypPageAlloc) -> HypPageTable {
         // Create empty sv48 page table
@@ -431,6 +456,8 @@ impl HypMap {
         for r in &self.private_regions {
             r.map(&sv48, hyp_mem);
         }
+        // Alloc and map the U-mode buffer for this page-table.
+        let umode_buffer = UmodeBuffer::map(&sv48, hyp_mem);
         // Alloc pte_pages for U-mode mappings.
         let pte_pages = hyp_mem
             .take_pages_for_hyp_state(Sv48::max_pte_pages(
@@ -439,6 +466,7 @@ impl HypMap {
             .into_iter();
         HypPageTable {
             sv48,
+            umode_buffer: RefCell::new(umode_buffer),
             pte_pages: RefCell::new(pte_pages),
         }
     }
@@ -474,5 +502,105 @@ impl UmodeSlotMapper<'_> {
         self.mapper
             .map_addr(vaddr, paddr, self.perms)
             .map_err(|_| Error::MapFailed)
+    }
+}
+
+/// Umode Buffer errors.
+#[derive(Debug)]
+pub enum UmodeBufferError {
+    /// Address overflow on increment.
+    AddressOverflow,
+    /// Buffer is full.
+    NoSpace,
+}
+
+/// The U-mode buffer is a private area of the page table used by the hypervisor to pass data to the
+/// current U-mode operation. This avoids mapping hypervisor data directly in U-mode. This area is
+/// written by the hypervisor and mapped read-only in U-mode.
+pub struct UmodeBuffer {
+    /// The start address of the U-mode buffer memory.
+    start: SupervisorPageAddr,
+    /// Pointer to the unused part of the buffer.
+    addr: SupervisorPhysAddr,
+    /// End of buffer memory.
+    max_addr: SupervisorPageAddr,
+}
+
+impl UmodeBuffer {
+    /// Creates a buffer of hypervisor memory that can be mapped into a U-mode slot.
+    pub fn map(sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) -> UmodeBuffer {
+        // Allocate buffer pages.
+        let num_pages = PageSize::num_4k_pages(UMODE_BUFFER_SIZE);
+        let pages = hyp_mem.take_pages_for_hyp_state(num_pages as usize);
+        let start = pages.base();
+        // Unwrap okay: we allocated num_pages already.
+        let max_addr = start.checked_add_pages(num_pages).unwrap();
+
+        // Map the allocated pages as read-only in U-mode at UMODE_BUFFER_START.
+        let vaddr = HypMap::umode_buffer_va();
+        let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::UR);
+        // Unwrap okay: this is called once when we are creating the page-table. Guaranteed to be
+        // unmapped.
+        let mapper = sv48
+            .map_range(vaddr, PageSize::Size4k, num_pages, &mut || {
+                hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
+            })
+            .unwrap();
+        for (virt, phys) in vaddr
+            .iter_from()
+            .zip(pages.base().iter_from())
+            .take(num_pages as usize)
+        {
+            // Safety: These pages are mapped read-only in the VA area reserved for the U-mode
+            // buffer mappings. Hypervisor will write to these pages using the physical mappings and
+            // U-mode will read them through this mapping. Safe because these are per-CPU mappings,
+            // and when the hypervisor will be writing to these pages via the physical mappings no
+            // CPU will be able to access these pages through the U-mode mappings.
+            unsafe {
+                mapper.map_addr(virt, phys, pte_fields).unwrap();
+            }
+        }
+        UmodeBuffer {
+            start,
+            addr: start.raw(),
+            max_addr,
+        }
+    }
+
+    /// Appends `data` in the current CPU's buffer. Returns the U-mode virtual address where `data`
+    /// has been written.
+    pub fn append(&mut self, data: &[u8]) -> Result<RawAddr<SupervisorVirt>, UmodeBufferError> {
+        let end = self
+            .addr
+            .checked_increment(data.len() as u64)
+            .ok_or(UmodeBufferError::AddressOverflow)?;
+        if end >= self.max_addr.raw() {
+            return Err(UmodeBufferError::NoSpace);
+        }
+        // Safety: the range `(self.addr..self.max_addr)` is valid and owned by this buffer and we
+        // verified above that `self.addr` + `data.len()` is included in the range. `buffer` is a
+        // mutable reference to buffer that owns this range.
+        unsafe {
+            core::ptr::copy(data.as_ptr(), self.addr.bits() as *mut u8, data.len());
+        }
+        let offset = self.addr.bits() - self.start.bits();
+        self.addr = end;
+        // Unwrap okay: `offset` cannot be bigger than `self.max_addr - self.start`.
+        Ok(HypMap::umode_buffer_va()
+            .raw()
+            .checked_increment(offset)
+            .unwrap())
+    }
+
+    /// Cleans up used memory and reset the current CPU's buffer to initial state.
+    pub fn clear(&mut self) {
+        let size = self.addr.bits() - self.start.bits();
+        // Safety: the range `(self.addr..self.max_addr)` is valid and owned by this buffer.
+        // `self.addr` cannot exceed `self.max_addr`. `self` is a mutable reference to the buffer
+        // that owns this range.
+        unsafe {
+            core::ptr::write_bytes(self.start.bits() as *mut u8, 0, size as usize);
+        }
+        self.addr = self.start.into();
     }
 }

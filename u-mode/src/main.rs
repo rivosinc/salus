@@ -10,6 +10,17 @@ extern crate libuser;
 use libuser::*;
 use u_mode_api::{Error as UmodeApiError, UmodeOp, UmodeRequest};
 
+fn op_print_string(req: &UmodeRequest) -> Result<(), UmodeApiError> {
+    let in_addr = req.in_addr.ok_or(UmodeApiError::InvalidArgument)?;
+    // Safety: we trust the hypervisor to have mapped at `req.in_addr` `req.in_len` bytes for reading.
+    let input = unsafe { &*core::ptr::slice_from_raw_parts(in_addr as *const u8, req.in_len) };
+    println!(
+        "{}",
+        core::str::from_utf8(input).map_err(|_| UmodeApiError::InvalidArgument)?
+    );
+    Ok(())
+}
+
 fn op_memcopy(req: &UmodeRequest) -> Result<(), UmodeApiError> {
     let in_addr = req.in_addr.ok_or(UmodeApiError::InvalidArgument)?;
     // Safety: we trust the hypervisor to have mapped at `req.in_addr` `req.in_len` bytes for reading.
@@ -35,19 +46,7 @@ extern "C" fn task_main(cpuid: u64) -> ! {
         res = match req {
             Ok(req) => match req.op {
                 UmodeOp::Nop => Ok(()),
-                UmodeOp::Hello => {
-                    println!("----------------------------");
-                    println!(" ___________________");
-                    println!("< Hello from UMODE! >");
-                    println!(" -------------------");
-                    println!("        \\   ^__^");
-                    println!("         \\  (oo)\\_______");
-                    println!("            (__)\\       )\\/\\");
-                    println!("                ||----w |");
-                    println!("                ||     ||");
-                    println!("----------------------------");
-                    Ok(())
-                }
+                UmodeOp::PrintString => op_print_string(&req),
                 UmodeOp::MemCopy => op_memcopy(&req),
             },
             Err(err) => Err(err),

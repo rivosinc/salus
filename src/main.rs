@@ -495,10 +495,24 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     UmodeTask::init(umode_elf);
     // Setup U-mode task for this CPU.
     UmodeTask::setup_this_cpu().expect("Could not setup umode");
-    // Simple test: do a NOP request to the U-mode task.
-    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).unwrap();
-    UmodeTask::send_req(u_mode_api::UmodeRequest::hello()).unwrap();
-    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).unwrap();
+    // Do a NOP request to the U-mode task to check it's functional in this CPU.
+    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).expect("U-mode not executing NOP");
+
+    {
+        // Temporary test: map a string into a U-mode buffer and have U-mode print it back.
+        let mut buffer = UmodeTask::umode_buffer_mut();
+        let msg1 = "Hello from U-mode".as_bytes();
+        let vaddr = buffer.append(msg1).expect("Cannot append to U-mode buffer");
+        let msg2 = " (via U-mode buffer)".as_bytes();
+        let _ = buffer.append(msg2).expect("Cannot append to U-mode buffer");
+        UmodeTask::send_req(u_mode_api::UmodeRequest::print_string(
+            vaddr.bits(),
+            (msg1.len() + msg2.len()) as u64,
+        ))
+        .unwrap();
+        // Request sent. Clear buffer contents.
+        buffer.clear();
+    }
 
     // Now load the host VM.
     let host = HostVmLoader::new(
@@ -543,8 +557,8 @@ extern "C" fn secondary_init(_hart_id: u64) {
 
     // Setup U-mode task for this CPU.
     UmodeTask::setup_this_cpu().expect("Could not setup umode");
-    // Simple test: run U-mode until the first `ecall`.
-    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).unwrap();
+    // Do a NOP request to the U-mode task to check it's functional in this CPU.
+    UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).expect("U-mode not executing NOP");
 
     HOST_VM.wait().run(me.cpu_id().raw() as u64);
     poweroff();

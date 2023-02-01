@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2023 Rivos Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Path variables:
+#
+#  QEMU: Path to compiled QEMU tree. Default: use QEMU in $PATH.
+#  LINUX: Path to compiled Linux kernel tree.
+#  DEBIAN: Path to a pre-baked Debian image.
+
+
+QEMU=${QEMU:-""}
+if [ x$QEMU != "x" ]
+then
+    QEMU=${QEMU}/build/riscv64-softmmu/
+fi
+QEMU_BIN=${QEMU}qemu-system-riscv64
+
+LINUX=${LINUX:-""}
+LINUX_BIN=${LINUX}/arch/riscv/boot/Image
+
+DEBIAN=${DEBIAN:-""}
+ROOTFS_IMAGE=${DEBIAN}/image.qcow2
+INITRD_IMAGE=${DEBIAN}/initrd
+BUILDROOT=${BUILDROOT:-""}
+BUILDROOT_IMAGE=${BUILDROOT}/output/images/rootfs.ext2
+
+SALUS_BINS=bazel-bin/
+TELLUS_BINS=bazel-bin/test-workloads/
+
+KERNEL_ADDR=0xc0200000
+INITRD_ADDR=0xc2200000
+BOOTARGS="console=hvc0 earlycon=sbi"
+IOMMU_ARGS="-device x-riscv-iommu-pci"
+NETWORK_ARGS="-netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7722-0.0.0.0:22 -device e1000e,netdev=usernet"
+NVME_DEVICE_ARGS="-device nvme,serial=deadbeef,drive=hd"
+
+# QEMU options:
+#
+#  NCPU: Number of CPUs to boot with. Default: 2
+#  MEM_SIZE: RAM size for the emulated system. Default: 2GB
+#  EXTRA_QEMU_ARGS: Any extra flags to pass to QEMU (e.g. other devices).
+
+NCPU=${NCPU:-2}
+MEM_SIZE=${MEM_SIZE:-2048}
+EXTRA_QEMU_ARGS=${EXTRA_QEMU_ARGS:-""}
+
+EXTRA_CPU=${VECTORS:+",v=on,vlen=256,elen=64"}
+
+CPU_TYPE=rv64${EXTRA_CPU}
+CPU_ARGS="${CPU_TYPE},x-smaia=true,x-ssaia=true,sscofpmf=true"
+
+MACH_ARGS="-M virt,aia=aplic-imsic,aia-guests=4 -cpu ${CPU_ARGS} -smp ${NCPU} -m ${MEM_SIZE} -nographic"

@@ -4,6 +4,7 @@
 
 
 /// Enter the guest given in `GuestInfo` from `a0`.
+.attribute arch, "rv64gcv"
 .section .text.init
 .global _run_guest
 _run_guest:

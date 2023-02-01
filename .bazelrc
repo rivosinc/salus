@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2023 Rivos Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# By default, build optimized
+build --compilation_mode=opt
+
+# Use toolchain resolution to find the cc toolchain.
+# This is required to ensure cross compilation operates with the correct toolchain.
+build --incompatible_enable_cc_toolchain_resolution
+
+build --platforms="@rules_rivos//platforms:riscv64-none"
+test --platforms=
+build --@rules_rust//rust/toolchain/channel=nightly
+
+# Rust Clippy configuration:
+# - Deny on missing docs
+build --@rules_rust//:clippy_flags=-Dmissing-docs
+
+# Use the workspace status feature to include the git commit in the build:
+# https://bazel.build/docs/user-manual#workspace-status
+build --workspace_status_command=bazel/workspace_status_command.sh
+

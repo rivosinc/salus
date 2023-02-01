@@ -41,7 +41,8 @@
 /// +-------------------------+ 0x1_8000_0000
 
 pub const PAGE_SIZE_4K: u64 = 4096;
-pub const NUM_TELLUS_IMAGE_PAGES: u64 = 32;
+// If NUM_TELLUS_IMAGE_PAGES changes, you must also change it in the BUILD file
+pub const NUM_TELLUS_IMAGE_PAGES: u64 = 512;
 pub const GUEST_MMIO_START_ADDRESS: u64 = 0x1000_8000;
 pub const GUEST_MMIO_END_ADDRESS: u64 = GUEST_MMIO_START_ADDRESS + PAGE_SIZE_4K - 1;
 pub const IMSIC_START_ADDRESS: u64 = 0x2800_0000;

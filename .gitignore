@@ -15,3 +15,8 @@ tellus_raw
 tellus_guestvm
 guestvm_raw
 *~
+bazel-bin
+bazel-out
+bazel-salus
+bazel-testlogs
+.idea/

@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: 2023 Rivos Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+USE_BAZEL_VERSION=6.0.0

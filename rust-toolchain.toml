@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: 2023 Rivos Inc.
-#
-# SPDX-License-Identifier: Apache-2.0
-
-[toolchain]
-channel = "nightly-2023-02-26"
-components = []
-targets = ["riscv64gc-unknown-none-elf"]
-profile = "minimal"

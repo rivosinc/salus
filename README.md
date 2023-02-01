@@ -1,4 +1,4 @@
-<!--
+t<!--
 SPDX-FileCopyrightText: 2023 Rivos Inc.
 
 SPDX-License-Identifier: Apache-2.0
@@ -10,27 +10,20 @@ A micro hypervisor for RISC-V systems.
 
 # Quick Start
 
-## Building
+## Building (using Bazel)
 
+```bash
+bazel build //:salus-all
 ```
-rustup target add riscv64gc-unknown-none-elf
-make salus
-```
-
-Note that Salus relies on unstable features from the nightly toolchain so there
-may be build breakages from time-to-time. Try running `rustup upgrade` first
-should you run into build failures.
 
 ## Running
 
-The `Makefile` provides targets for running various hosts in QEMU.
-
 ### Prerequisites
 
-Toolchains:
-- Rust: Install [rustup](https://www.rust-lang.org/tools/install), then: `rustup target add riscv64gc-unknown-none-elf`
-- GCC: Install `gcc-riscv64-unknown-elf` built from
-  [RISC-V collab](https://github.com/riscv-collab/riscv-gnu-toolchain#installation-linux)
+Salus:
+- `bazelisk` see https://github.com/bazelbuild/bazelisk
+  - `bazelisk` will install the proper version of `bazel`
+  - `bazel` will install all the proper toolchains
 
 QEMU:
 - Out-of-tree patches are required; see table below.
@@ -38,24 +31,24 @@ QEMU:
 - Build using QEMU [instructions](https://wiki.qemu.org/Hosts/Linux) with
   `--target-list=riscv64-softmmu`
 - Set the `QEMU=` variable to point to the compiled QEMU tree when using the
-  `make run_*` targets described below.
+  `run_*` scripts described below.
 
 Linux kernel:
 - Out-of-tree patches are required; see table below.
 - Build: `ARCH=riscv CROSS_COMPILE=riscv64-unknown-linux-gnu- make defconfig Image`
 - Set the `LINUX=` variable to point to the compiled Linux kernel tree when
-  using linux related targets described below.
+  using the linux related `run_*` scripts described below.
 
 Buildroot:
 - Out-of-tree patches are required; see table below.
 - Build: `make qemu_riscv64_virt_defconfig && make`
 - Set the `BUILDROOT=` variable to point to the buildroot source directory while
-  running `make run_buildroot` targets described below.
+  running `run_buildroot.sh` script described below.
 
 Debian:
 - Download and extract a pre-baked `riscv64-virt` image from https://people.debian.org/~gio/dqib/.
 - Set the `DEBIAN=` variable to point to the extracted archive when using the
-  `make run_debian` target described below.
+  `run_debian.sh` script described below.
 
 Latest known-working branches:
 
@@ -65,35 +58,54 @@ Latest known-working branches:
 | Linux   | https://github.com/rivosinc/linux/tree/salus-integration-10312022 |
 | Buildroot| https://github.com/rivosinc/buildroot/tree/salus-integration-2022.08.2 |
 
+
+### Running Salus under QEMU
+
+What were make targets in the Make/Cargo build are now shell scripts.
+
+From the top level directory, run
+```bash
+scripts/run_tellus.sh
+```
+
+Many of the variable can be overwritten using environment variables on the
+command line. For example, to use a different version of qemu and 3 cores,
+you can do the following:
+```bash
+QEMU=/scratch/qemu-salus NCPU=3 scripts/run_tellus.sh
+```
+
+All the other make targets to run salus with linux work analogously.
+
 ### Linux VM
 
-The `make run_linux` target will boot a bare Linux kernel as the host VM
+The `scripts/run_linux.sh` script will boot a bare Linux kernel as the host VM
 that will panic upon reaching `init` due to the lack of a root filesystem.
 
-To boot a more functional Linux VM, use the `make run_debian` target which
+To boot a more functional Linux VM, use the `scripts/run_debian.sh` script which
 will boot a Debian VM with emulated storage and network devices using pre-baked
 Debian initrd and rootfs images.
 
 Example:
 
 ```
-make run_debian \
-    QEMU=<path-to-qemu-tree> \
-    LINUX=<path-to-linux-tree> \
-    DEBIAN=<path-to-pre-baked-image>
+  QEMU=<path-to-qemu-directory> \
+  LINUX=<path-to-linux-tree> \
+  DEBIAN=<path-to-pre-baked-image> \
+  scripts/run_debian.sh
 ```
 
 To boot a quick functional Linux VM with busybox based rootfs built from
-buildroot, use the `make run_buildroot` target. The above buildroot tree
+buildroot, use the `scripts/run_buildroot.sh` script. The above buildroot tree
 must be compiled to generate the rootfs with networking enabled.
 
 Example:
 
 ```
-make run_buildroot \
-    QEMU=<path-to-qemu-tree> \
+    QEMU=<path-to-qemu-directory> \
     LINUX=<path-to-linux-tree> \
     BUILDROOT=<path-to-buildroot repo>
+    scripts/run_buildroot.sh
 ```
 
 Once booted, the VM can be SSH'ed into with `root:root` at `localhost:7722`.
@@ -106,29 +118,40 @@ flags.
 Example:
 
 ```
-make run_debian ... \
-     EXTRA_QEMU_ARGS="-device virtio-net-pci,iommu_platform=on,disable-legacy=on"
+   EXTRA_QEMU_ARGS="-device virtio-net-pci,iommu_platform=on,disable-legacy=on" \
+   ... \
+   scripts/run_debian.sh
 ```
 
 ### Test VM
 
 A pair of test VMs are located in `test-workloads`.
 
-`tellus` is a target build with `make tellus` that runs in VS mode
-and provides the ability to send test API calls to `salus` running in HS mode.
+`tellus` is a target build with `bazel build //test-workloads:tellus_guestvm_rule`
+that runs in VS mode and provides the ability to send test API calls
+to `salus` running in HS mode.
 
 `guestvm` is a test confidential guest. It is started by `tellus` and used for
 testing the guest side of the TSM API.
 
-A makefile shortcut is provided:
+Once it has been build, you can use the command below to run it.
 
 ```
-make run_tellus \
-    QEMU=<path-to-qemu-tree>
+    QEMU=<path-to-qemu-directory> \
+    scripts/run_tellus.sh
 ```
 
-This will build salus, tellus, and the guestvm then boot them with the
-system-installed qemu.
+This will boot salus, tellus, and the guestvm using the specified QEMU.
+
+## Development
+
+### Bazel
+
+One important difference between Bazel and Cargo is in the handling
+of crate dependencies. If you change a dependency, Cargo will pick
+it up automatically. But with Bazel, you must sync the changes.
+There is a script provided to help you do that. To repin the
+changes, you can just run `scripts/repin.sh`.
 
 # Overview - Initial prototype
 
@@ -208,5 +231,5 @@ commandline.
 ### Vectors
 
 Salus is able to detect if the CPU supports the vector extension. The same
-binary will run on processors with or without the exension, and will enable
+binary will run on processors with or without the extension, and will enable
 vector code if it is present.

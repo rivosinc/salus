@@ -1,0 +1,72 @@
+/* SPDX-FileCopyrightText: 2023 Rivos Inc.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+OUTPUT_ARCH( "riscv" )
+
+ENTRY( _start )
+
+MEMORY
+{
+    ram  (wxa) : ORIGIN = 0x80200000, LENGTH = 128M
+}
+
+PHDRS
+{
+    text PT_LOAD;
+    data PT_LOAD;
+    bss PT_LOAD;
+}
+
+SECTIONS
+{
+    .start : {
+        *(.text.start)
+    } >ram AT>ram :text
+
+    .text : {
+        *(.text.init) *(.text .text.*)
+    } >ram AT>ram :text
+
+    .rodata : {
+        *(.rodata .rodata.*)
+    } >ram AT>ram :text
+
+    .umode : {
+        bazel-out/k8-{LVL}/bin/umode.o
+    } >ram AT>ram :text
+
+    .extable : {
+        . = ALIGN(8);
+        PROVIDE(_extable_start = .);
+        KEEP(*(.extable))
+        PROVIDE(_extable_end = .);
+    } >ram AT>ram :text
+
+    .data : {
+        . = ALIGN(4096);
+        *(.data .data.*)
+
+        . = ALIGN(8);
+        PROVIDE(__global_pointer$ = . + 0x800);
+        *(.sdata .sdata.*)
+    } >ram AT>ram :data
+
+    .bss : {
+        . = ALIGN(8);
+        PROVIDE(_bss_start = .);
+        *(.sbss .sbss.*) *(.bss .bss.*)
+        . = ALIGN(8);
+        PROVIDE(_bss_end = .);
+    } >ram AT>ram :bss
+
+    PROVIDE(_stack_start = _bss_end);
+    PROVIDE(_stack_end = _stack_start + 0x80000);
+    PROVIDE(_umode_bin = _binary_bazel_out_k8_{LVL}_bin_u_mode_umode_start);
+    PROVIDE(_umode_bin_len = _binary_bazel_out_k8_{LVL}_bin_u_mode_umode_size);
+
+    /DISCARD/ : {
+        *(.eh_frame)
+    }
+}

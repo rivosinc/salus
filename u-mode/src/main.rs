@@ -45,19 +45,6 @@ extern "C" fn task_main(cpuid: u64) -> ! {
         res = match req {
             Ok(req) => match req.op {
                 UmodeOp::Nop => Ok(()),
-                UmodeOp::Hello => {
-                    println!("----------------------------");
-                    println!(" ___________________");
-                    println!("< Hello from UMODE! >");
-                    println!(" -------------------");
-                    println!("        \\   ^__^");
-                    println!("         \\  (oo)\\_______");
-                    println!("            (__)\\       )\\/\\");
-                    println!("                ||----w |");
-                    println!("                ||     ||");
-                    println!("----------------------------");
-                    Ok(())
-                }
                 UmodeOp::MemCopy => op_memcopy(&req),
             },
             Err(err) => Err(err),

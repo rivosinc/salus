@@ -123,8 +123,6 @@ impl IntoRegisters for Result<(), Error> {
 pub enum UmodeOp {
     /// Do nothing.
     Nop = 1,
-    /// Say hello.
-    Hello = 2,
     /// Copy memory from input to output.
     MemCopy = 3,
 }
@@ -135,7 +133,6 @@ impl TryFrom<u64> for UmodeOp {
     fn try_from(reg: u64) -> Result<UmodeOp, Error> {
         match reg {
             1 => Ok(UmodeOp::Nop),
-            2 => Ok(UmodeOp::Hello),
             3 => Ok(UmodeOp::MemCopy),
             _ => Err(Error::RequestNotSupported),
         }
@@ -162,17 +159,6 @@ impl UmodeRequest {
     pub fn nop() -> UmodeRequest {
         UmodeRequest {
             op: UmodeOp::Nop,
-            in_addr: None,
-            in_len: 0,
-            out_addr: None,
-            out_len: 0,
-        }
-    }
-
-    /// Hello World.
-    pub fn hello() -> UmodeRequest {
-        UmodeRequest {
-            op: UmodeOp::Hello,
             in_addr: None,
             in_len: 0,
             out_addr: None,

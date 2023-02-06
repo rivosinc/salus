@@ -16,7 +16,7 @@
 //! hypervisor for specific services or for signalling end of
 //! execution.
 //!
-//! There are two says to pass data between the two components:
+//! There are two ways to pass data between the two components:
 //! registers and memory.
 //!
 //! ## Passing Data through Registers.
@@ -117,100 +117,90 @@ impl IntoRegisters for Result<(), Error> {
 
 // UmodeRequest: calls from hypervisor to Umode requesting an operation.
 
-/// Umode operations.
-#[derive(Debug, Clone, Copy)]
-#[repr(u64)]
-pub enum UmodeOp {
-    /// Do nothing.
-    Nop = 1,
-    /// Copy memory from input to output.
-    MemCopy = 3,
-}
-
-impl TryFrom<u64> for UmodeOp {
-    type Error = Error;
-
-    fn try_from(reg: u64) -> Result<UmodeOp, Error> {
-        match reg {
-            1 => Ok(UmodeOp::Nop),
-            3 => Ok(UmodeOp::MemCopy),
-            _ => Err(Error::RequestNotSupported),
-        }
-    }
-}
-
 /// An operation requested by the hypervisor and executed by umode.
 #[derive(Debug)]
-pub struct UmodeRequest {
-    /// The operation requested.
-    pub op: UmodeOp,
-    /// Optional start of mapped area accessible as read-only.
-    pub in_addr: Option<u64>,
-    /// If in_addr is valid, length of the area acessible as read-only.
-    pub in_len: usize,
-    /// Optional start of mapped area accessible as read-write.
-    pub out_addr: Option<u64>,
-    /// If in_addr is valid, length of the area acessible as read-write.
-    pub out_len: usize,
+pub enum UmodeRequest {
+    /// Do nothing.
+    Nop,
+    /// (Test) Copy memory from input to output.
+    MemCopy {
+        /// starting address of output
+        out_addr: u64,
+        ///  starting address of input
+        in_addr: u64,
+        /// length of input and output
+        len: u64,
+    },
 }
 
 impl UmodeRequest {
     /// A Nop request: do nothing.
+    ///
+    /// Arguments: none
     pub fn nop() -> UmodeRequest {
-        UmodeRequest {
-            op: UmodeOp::Nop,
-            in_addr: None,
-            in_len: 0,
-            out_addr: None,
-            out_len: 0,
-        }
+        UmodeRequest::Nop
     }
 
     /// Copy memory from input to output.
+    ///
+    /// Arguments:
+    ///    out_addr: starting address of output
+    ///    in_addr: starting address of input
+    ///    len: length of input and output
     ///
     /// Caller must guarantee that:
     /// 1. `in_addr` must be mapped user readable for `len` bytes.
     /// 2. `out_addr` must be mapped user writable for `len` bytes.
     pub fn memcopy(out_addr: u64, in_addr: u64, len: u64) -> Option<UmodeRequest> {
-        // Check that input and output ranges do not overlap.
+        // This test call is special because the guest memory in input/output will be used directly
+        // by U-mode. Check that input and output ranges do not overlap.
         let overlap = core::cmp::max(out_addr, in_addr)
             <= core::cmp::min(out_addr + len - 1, in_addr + len - 1);
         if overlap {
             None
         } else {
-            Some(UmodeRequest {
-                op: UmodeOp::MemCopy,
-                in_addr: Some(in_addr),
-                in_len: len as usize,
-                out_addr: Some(out_addr),
-                out_len: len as usize,
+            Some(UmodeRequest::MemCopy {
+                out_addr,
+                in_addr,
+                len,
             })
         }
     }
 }
 
+// Mappings of A0 register to U-mode operation.
+const UMOP_NOP: u64 = 0;
+const UMOP_MEMCOPY: u64 = 1;
+
 impl TryIntoRegisters for UmodeRequest {
     fn try_from_registers(regs: &[u64]) -> Result<UmodeRequest, Error> {
-        let req = UmodeRequest {
-            op: UmodeOp::try_from(regs[0])?,
-            in_addr: if regs[1] == 0 { None } else { Some(regs[1]) },
-            in_len: regs[2] as usize,
-            out_addr: if regs[3] == 0 { None } else { Some(regs[3]) },
-            out_len: regs[4] as usize,
-        };
-        Ok(req)
+        match regs[0] {
+            UMOP_NOP => Ok(UmodeRequest::Nop),
+            UMOP_MEMCOPY => Ok(UmodeRequest::MemCopy {
+                out_addr: regs[1],
+                in_addr: regs[2],
+                len: regs[3],
+            }),
+            _ => Err(Error::RequestNotSupported),
+        }
     }
 
     fn to_registers(&self, regs: &mut [u64]) {
-        regs[0] = self.op as u64;
-        regs[1] = if let Some(val) = self.in_addr { val } else { 0 };
-        regs[2] = self.in_len as u64;
-        regs[3] = if let Some(val) = self.out_addr {
-            val
-        } else {
-            0
-        };
-        regs[4] = self.out_len as u64;
+        match *self {
+            UmodeRequest::Nop => {
+                regs[0] = UMOP_NOP;
+            }
+            UmodeRequest::MemCopy {
+                out_addr,
+                in_addr,
+                len,
+            } => {
+                regs[0] = UMOP_MEMCOPY;
+                regs[1] = out_addr;
+                regs[2] = in_addr;
+                regs[3] = len;
+            }
+        }
     }
 }
 

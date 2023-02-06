@@ -167,10 +167,11 @@ impl TaskRunner {
         CSR.sie.read_and_set_bits(sie::sext.val(1).into());
 
         loop {
-            // Clear any pending interrupt signals. First in the hart, only then in the IMSIC, to
-            // make sure we're not missing anything when racing against an incoming interrupt.
+            // Clear pending interrupt signal. Note that the CSR.sip.sext bit is managed by the
+            // interrupt controller and read-only to software. Clearing the external interrupt in
+            // CSR.si_eip will indirectly de-assert the CSR.sip.sext (since there are no other
+            // external interrupts enabled for the hart).
             CSR.si_eip[0].read_and_clear_bits(1 << Imsic::IPI_INTERRUPT_ID);
-            CSR.sip.read_and_clear_bits(sip::sext.val(1).into());
 
             let mut guard = self.task.lock();
             if let Some(f) = *guard {

@@ -498,6 +498,16 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Do a NOP request to the U-mode task to check it's functional in this CPU.
     UmodeTask::send_req(u_mode_api::UmodeRequest::nop()).expect("U-mode not executing NOP");
 
+    {
+        // Temporary test: share a string with U-mode and have U-mode print it back.
+        let msg1: [u8; 17] = "Hello from U-mode".as_bytes().try_into().unwrap();
+        UmodeTask::send_req_with_shared_data(
+            u_mode_api::UmodeRequest::print_string(msg1.len()),
+            msg1,
+        )
+        .unwrap();
+    }
+
     // Now load the host VM.
     let host = HostVmLoader::new(
         hyp_dt,

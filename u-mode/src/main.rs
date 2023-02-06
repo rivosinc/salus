@@ -17,7 +17,7 @@
 
 extern crate libuser;
 
-use data_model::VolatileSlice;
+use data_model::{VolatileMemory, VolatileSlice};
 use libuser::*;
 use u_mode_api::{Error as UmodeApiError, UmodeRequest};
 
@@ -26,6 +26,29 @@ struct UmodeTask {
 }
 
 impl UmodeTask {
+    // (Test) Print String from U-mode Shared Region
+    //
+    // U-mode Shared Region:
+    //    Contains the data to be printed at the beginning of the area.
+    fn op_print_string(&self, len: usize) -> Result<(), UmodeApiError> {
+        // Print maximum 80 chars.
+        const MAX_LENGTH: usize = 80;
+        let vs_input = self
+            .vslice
+            .get_slice(0, len)
+            .map_err(|_| UmodeApiError::InvalidArgument)?;
+        // Copy input from volatile slice.
+        let mut input = [0u8; MAX_LENGTH];
+        vs_input.copy_to(&mut input[..]);
+        let len = core::cmp::min(len, MAX_LENGTH);
+        println!(
+            "Received a {} bytes string: \"{}\"",
+            len,
+            core::str::from_utf8(&input[0..len]).map_err(|_| UmodeApiError::InvalidArgument)?
+        );
+        Ok(())
+    }
+
     // Copy memory from input to output.
     //
     // Arguments:
@@ -58,6 +81,7 @@ impl UmodeTask {
                         in_addr,
                         len,
                     } => self.op_memcopy(out_addr, in_addr, len as usize),
+                    UmodeRequest::PrintString { len } => self.op_print_string(len),
                 },
                 Err(err) => Err(err),
             };

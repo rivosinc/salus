@@ -17,6 +17,8 @@ _start:
     la sp, _stack_end
 
     // a0 contains cpu id
+    // a1 contains the U-mode mapped area address
+    // a2 contains the U-mode mapped area size
     call task_main
 
     // ecall to panic

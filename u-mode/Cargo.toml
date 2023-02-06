@@ -6,5 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+data_model = { path = "../data-model" }
 libuser = { path = "../libuser" }
 u_mode_api = { path = "../u-mode-api" }

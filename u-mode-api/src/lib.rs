@@ -137,6 +137,7 @@ impl UmodeRequest {
     /// A Nop request: do nothing.
     ///
     /// Arguments: none
+    /// U-mode Shared Region: not used.
     pub fn nop() -> UmodeRequest {
         UmodeRequest::Nop
     }
@@ -147,6 +148,8 @@ impl UmodeRequest {
     ///    out_addr: starting address of output
     ///    in_addr: starting address of input
     ///    len: length of input and output
+    ///
+    /// U-mode Shared Region: Not used.
     ///
     /// Caller must guarantee that:
     /// 1. `in_addr` must be mapped user readable for `len` bytes.

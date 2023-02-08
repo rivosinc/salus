@@ -157,6 +157,13 @@ const_assert!(PageSize::Size4k.is_aligned(UMODE_SHARED_START));
 pub const UMODE_SHARED_SIZE: u64 = 4 * 1024;
 const_assert!(PageSize::Size4k.is_aligned(UMODE_SHARED_SIZE));
 
+/// Starting page address of slot A.
+const UMODE_MAPPINGS_A_PAGE_ADDR: PageAddr<SupervisorVirt> =
+    PageAddr::<SupervisorVirt>::new_const::<UMODE_MAPPINGS_START>();
+/// Starting page address of slot B.
+const UMODE_MAPPINGS_B_PAGE_ADDR: PageAddr<SupervisorVirt> =
+    PageAddr::<SupervisorVirt>::new_const::<{ UMODE_MAPPINGS_START + UMODE_MAPPING_SLOT_SIZE }>();
+
 /// Generic Id names for each of the U-mode mapping slots.
 /// There is no mandated use for each of the slots, and caller can decide to map each of them
 /// readable or writable based on the requirement.
@@ -423,16 +430,10 @@ impl HypMap {
 
     /// Returns the virtual address of U-mode mapping slot `slot`.
     pub fn umode_slot_va(slot: UmodeSlotId) -> PageAddr<SupervisorVirt> {
-        let slot_num = match slot {
-            UmodeSlotId::A => 0,
-            UmodeSlotId::B => 1,
-        };
-        // UMODE_MAPPING_START and UMODE_MAPPING_SLOT_SIZE are required by static assertion to be
-        // page aligned, `round_down` will be a nop.
-        PageAddr::with_round_down(
-            RawAddr::supervisor_virt(UMODE_MAPPINGS_START + slot_num * UMODE_MAPPING_SLOT_SIZE),
-            PageSize::Size4k,
-        )
+        match slot {
+            UmodeSlotId::A => UMODE_MAPPINGS_A_PAGE_ADDR,
+            UmodeSlotId::B => UMODE_MAPPINGS_B_PAGE_ADDR,
+        }
     }
 
     /// Creates a new page table based on this memory map.

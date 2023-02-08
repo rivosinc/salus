@@ -1220,10 +1220,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     }
 
     pub fn is_host_vcpu(&self) -> bool {
-        match self.host_context {
-            VmCpuParent::HostVm(_) => false,
-            VmCpuParent::Tsm(_) => true,
-        }
+        self.vcpu.guest_id.is_host()
     }
 }
 

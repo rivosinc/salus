@@ -2,20 +2,13 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::MSMT_REGISTERS;
 use const_oid::ObjectIdentifier;
 use digest::{Digest, OutputSizeUser};
 use generic_array::GenericArray;
 use sbi_rs::MeasurementRegisterDescriptor;
 
 use crate::{Error, Result, TcgPcrIndex};
-
-/// Number of static measurement registers
-pub const STATIC_MSMT_REGISTERS: usize = 4;
-
-/// Number of dynamically extensible measurement registers
-pub const DYNAMIC_MSMT_REGISTERS: usize = 4;
-
-pub(crate) const MSMT_REGISTERS: usize = STATIC_MSMT_REGISTERS + DYNAMIC_MSMT_REGISTERS;
 
 pub struct MeasurementRegisterBuilder {
     // The DiceTcbInfo FWIDs list index.

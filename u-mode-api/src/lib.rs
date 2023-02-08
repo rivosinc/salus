@@ -122,88 +122,15 @@ impl IntoRegisters for Result<(), Error> {
 pub enum UmodeRequest {
     /// Do nothing.
     Nop,
-    /// (Test) Print string passed in shared region.
-    PrintString {
-        /// length of data in the U-mode Shared Region to be printed.
-        len: usize,
-    },
-    /// (Test) Copy memory from input to output.
-    MemCopy {
-        /// starting address of output
-        out_addr: u64,
-        ///  starting address of input
-        in_addr: u64,
-        /// length of input and output
-        len: u64,
-    },
-}
-
-impl UmodeRequest {
-    /// A Nop request: do nothing.
-    ///
-    /// Arguments: none
-    /// U-mode Shared Region: not used.
-    pub fn nop() -> UmodeRequest {
-        UmodeRequest::Nop
-    }
-
-    /// Print String from U-mode Shared Region
-    ///
-    /// Arguments:
-    ///    len: length of data in the U-mode Shared Region to be printed.
-    ///
-    /// U-mode Shared Region:
-    ///    Contains the data to be printed at the beginning of the area.
-    pub fn print_string(len: usize) -> UmodeRequest {
-        UmodeRequest::PrintString { len }
-    }
-
-    /// Copy memory from input to output.
-    ///
-    /// Arguments:
-    ///    out_addr: starting address of output
-    ///    in_addr: starting address of input
-    ///    len: length of input and output
-    ///
-    /// U-mode Shared Region: Not used.
-    ///
-    /// Caller must guarantee that:
-    /// 1. `in_addr` must be mapped user readable for `len` bytes.
-    /// 2. `out_addr` must be mapped user writable for `len` bytes.
-    pub fn memcopy(out_addr: u64, in_addr: u64, len: u64) -> Option<UmodeRequest> {
-        // This test call is special because the guest memory in input/output will be used directly
-        // by U-mode. Check that input and output ranges do not overlap.
-        let overlap = core::cmp::max(out_addr, in_addr)
-            <= core::cmp::min(out_addr + len - 1, in_addr + len - 1);
-        if overlap {
-            None
-        } else {
-            Some(UmodeRequest::MemCopy {
-                out_addr,
-                in_addr,
-                len,
-            })
-        }
-    }
 }
 
 // Mappings of A0 register to U-mode operation.
 const UMOP_NOP: u64 = 0;
-const UMOP_MEMCOPY: u64 = 1;
-const UMOP_PRINTSTR: u64 = 2;
 
 impl TryIntoRegisters for UmodeRequest {
     fn try_from_registers(regs: &[u64]) -> Result<UmodeRequest, Error> {
         match regs[0] {
             UMOP_NOP => Ok(UmodeRequest::Nop),
-            UMOP_MEMCOPY => Ok(UmodeRequest::MemCopy {
-                out_addr: regs[1],
-                in_addr: regs[2],
-                len: regs[3],
-            }),
-            UMOP_PRINTSTR => Ok(UmodeRequest::PrintString {
-                len: regs[1] as usize,
-            }),
             _ => Err(Error::RequestNotSupported),
         }
     }
@@ -212,20 +139,6 @@ impl TryIntoRegisters for UmodeRequest {
         match *self {
             UmodeRequest::Nop => {
                 regs[0] = UMOP_NOP;
-            }
-            UmodeRequest::MemCopy {
-                out_addr,
-                in_addr,
-                len,
-            } => {
-                regs[0] = UMOP_MEMCOPY;
-                regs[1] = out_addr;
-                regs[2] = in_addr;
-                regs[3] = len;
-            }
-            UmodeRequest::PrintString { len } => {
-                regs[0] = UMOP_PRINTSTR;
-                regs[1] = len as u64;
             }
         }
     }

@@ -26,47 +26,6 @@ struct UmodeTask {
 }
 
 impl UmodeTask {
-    // (Test) Print String from U-mode Shared Region
-    //
-    // U-mode Shared Region:
-    //    Contains the data to be printed at the beginning of the area.
-    fn op_print_string(&self, len: usize) -> Result<(), UmodeApiError> {
-        // Print maximum 80 chars.
-        const MAX_LENGTH: usize = 80;
-        let vs_input = self
-            .vslice
-            .get_slice(0, len)
-            .map_err(|_| UmodeApiError::InvalidArgument)?;
-        // Copy input from volatile slice.
-        let mut input = [0u8; MAX_LENGTH];
-        vs_input.copy_to(&mut input[..]);
-        let len = core::cmp::min(len, MAX_LENGTH);
-        println!(
-            "Received a {} bytes string: \"{}\"",
-            len,
-            core::str::from_utf8(&input[0..len]).map_err(|_| UmodeApiError::InvalidArgument)?
-        );
-        Ok(())
-    }
-
-    // Copy memory from input to output.
-    //
-    // Arguments:
-    //    out_addr: starting address of output
-    //    in_addr: starting address of input
-    //    len: length of input and output
-    //
-    // U-mode Shared Region: Not used.
-    fn op_memcopy(&self, out_addr: u64, in_addr: u64, len: usize) -> Result<(), UmodeApiError> {
-        // Safety: we trust the hypervisor to have mapped at `in_addr` `len` bytes for reading.
-        let input = unsafe { &*core::ptr::slice_from_raw_parts(in_addr as *const u8, len) };
-        // Safety: we trust the hypervisor to have mapped at `out_addr` `len` bytes valid
-        // for reading and writing.
-        let output = unsafe { &mut *core::ptr::slice_from_raw_parts_mut(out_addr as *mut u8, len) };
-        output[0..len].copy_from_slice(&input[0..len]);
-        Ok(())
-    }
-
     // Run the main loop, receiving requests from the hypervisor and executing them.
     fn run_loop(&self) -> ! {
         let mut res = Ok(());
@@ -76,12 +35,6 @@ impl UmodeTask {
             res = match req {
                 Ok(req) => match req {
                     UmodeRequest::Nop => Ok(()),
-                    UmodeRequest::MemCopy {
-                        out_addr,
-                        in_addr,
-                        len,
-                    } => self.op_memcopy(out_addr, in_addr, len as usize),
-                    UmodeRequest::PrintString { len } => self.op_print_string(len),
                 },
                 Err(err) => Err(err),
             };

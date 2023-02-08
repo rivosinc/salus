@@ -12,7 +12,6 @@ use hkdf::HmacImpl;
 use rice::{
     cdi::{CdiType, CDI_ID_LEN},
     layer::Layer,
-    x509::{certificate::MAX_CERT_SIZE, extensions::dice::tcbinfo::DiceTcbInfo, request::CertReq},
 };
 use sbi_rs::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
 use spin::RwLock;
@@ -243,27 +242,6 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
     /// Return the CDI ID of the attestation layer.
     pub fn attestation_cdi_id(&self) -> Result<[u8; CDI_ID_LEN]> {
         self.attestation_layer.cdi_id().map_err(Error::DiceCdiId)
-    }
-
-    /// Build a DER-formatted x.509 certificate from a CSR.
-    /// The built certificate is signed by the TSM, and contains the provided
-    /// subject and subject PKI.
-    pub fn csr_certificate(&self, csr: &CertReq) -> Result<ArrayVec<u8, MAX_CERT_SIZE>> {
-        let mut tcb_info_bytes = [0u8; 4096];
-        let mut tcb_info = DiceTcbInfo::new();
-        let measurements = self.measurements.read();
-
-        for m in measurements.iter() {
-            tcb_info
-                .add_fwid::<D>(m.hash_algorithm, &m.digest)
-                .map_err(Error::DiceTcbInfo)?;
-        }
-
-        let tcb_info_extn = tcb_info.to_extension(&mut tcb_info_bytes).unwrap();
-        let extensions: [&[u8]; 1] = [tcb_info_extn];
-        self.attestation_layer
-            .csr_certificate(csr, Some(&extensions))
-            .map_err(Error::DiceCsrCertificate)
     }
 
     /// Set the TVM initial PC.

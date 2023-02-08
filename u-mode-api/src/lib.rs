@@ -90,23 +90,24 @@ pub trait TryIntoRegisters: Sized {
     fn to_registers(&self, regs: &mut [u64]);
 }
 
-// Result<(), Error> is passed through registers. Implement trait.
+// Result<u64, Error> is passed through registers. Implement trait.
 
 // Error code for success.
 const HYPC_SUCCESS: u64 = 0;
 
-impl IntoRegisters for Result<(), Error> {
-    fn from_registers(regs: &[u64]) -> Result<(), Error> {
+impl IntoRegisters for Result<u64, Error> {
+    fn from_registers(regs: &[u64]) -> Result<u64, Error> {
         match regs[0] {
-            HYPC_SUCCESS => Ok(()),
+            HYPC_SUCCESS => Ok(regs[1]),
             e => Err(e.into()),
         }
     }
 
     fn to_registers(&self, regs: &mut [u64]) {
         match self {
-            Ok(_) => {
+            Ok(val) => {
                 regs[0] = HYPC_SUCCESS;
+                regs[1] = *val;
             }
             Err(e) => {
                 regs[0] = *e as u64;
@@ -153,7 +154,7 @@ pub enum HypCall {
     /// Print a character for debug.
     PutChar(u8),
     /// Return result of previous request and wait for next operation.
-    NextOp(Result<(), Error>),
+    NextOp(Result<u64, Error>),
 }
 
 const HYPC_PANIC: u64 = 0;

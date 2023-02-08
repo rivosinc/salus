@@ -16,7 +16,7 @@ use s_mode_utils::print::*;
 use sbi_rs::{salus::*, Error as SbiError, *};
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
-use crate::hyp_map::UmodeSlotId;
+use crate::hyp_map::{UmodeSlotId, UmodeSlotPerm};
 use crate::umode::UmodeTask;
 use crate::vm_cpu::{ActiveVmCpu, VmCpu, VmCpuParent, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX};
 use crate::vm_pages::Error as VmPagesError;
@@ -1512,7 +1512,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         slot: UmodeSlotId,
         addr: u64,
         len: u64,
-        writable: bool,
+        slot_perm: UmodeSlotPerm,
     ) -> EcallResult<(u64, GuestUmodeMapping)> {
         let base = PageSize::Size4k.round_down(addr);
         let end = addr
@@ -1524,7 +1524,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 slot,
                 self.guest_addr_from_raw(base)?,
                 PageSize::num_4k_pages(end - base),
-                writable,
+                slot_perm,
             )
             .map_err(EcallError::from)?;
         let vaddr = umode_mapping.vaddr().bits() + (addr - base);

@@ -20,7 +20,7 @@ use riscv_regs::{
 };
 use spin::{Mutex, Once, RwLock, RwLockReadGuard};
 
-use crate::hyp_map::{Error as HypMapError, HypMap, UmodeSlotId};
+use crate::hyp_map::{Error as HypMapError, HypMap, UmodeSlotId, UmodeSlotPerm};
 use crate::smp::PerCpu;
 use crate::vm::{VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_id::VmId;
@@ -1811,13 +1811,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         slot: UmodeSlotId,
         page_addr: GuestPageAddr,
         count: u64,
-        writable: bool,
+        slot_perm: UmodeSlotPerm,
     ) -> Result<GuestUmodeMapping> {
         let pages = self.get_shareable_pages(page_addr, count)?;
         // TODO: Check that guest request for mapping it writable is consistent with the guest mappings.
         let mapper = PerCpu::this_cpu()
             .page_table()
-            .umode_slot_mapper(slot, count, writable)
+            .umode_slot_mapper(slot, count, slot_perm)
             .map_err(Error::HypMap)?;
         let to_page_addr = mapper.vaddr();
 

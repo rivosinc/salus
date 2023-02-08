@@ -166,6 +166,12 @@ pub enum UmodeSlotId {
     B,
 }
 
+/// Mapping permission for a U-mode mapping slot.
+pub enum UmodeSlotPerm {
+    Readonly,
+    Writable,
+}
+
 // Returns true if `addr` is contained in the U-mode VA area.
 fn is_umode_addr(addr: u64) -> bool {
     (UMODE_BINARY_START..UMODE_BINARY_END).contains(&addr)
@@ -322,13 +328,12 @@ impl HypPageTable {
         }
     }
 
-    /// Returns a mapper for U-mode slot `slot` for `num_pages` pages. If `writable` is true, the
-    /// mapper will map pages User-writable, otherwhise will be mapped User-readable.
+    /// Returns a mapper for U-mode slot `slot` for `num_pages` pages.
     pub fn umode_slot_mapper(
         &self,
         slot: UmodeSlotId,
         num_pages: u64,
-        writable: bool,
+        slot_perm: UmodeSlotPerm,
     ) -> Result<UmodeSlotMapper, Error> {
         if num_pages > PageSize::num_4k_pages(UMODE_MAPPING_SLOT_SIZE) {
             return Err(Error::OutOfMap);
@@ -340,12 +345,10 @@ impl HypPageTable {
                 self.pte_pages.borrow_mut().next()
             })
             .map_err(|_| Error::MapperCreationFailed)?;
-        let perms = if writable {
-            PteFieldBits::leaf_with_perms(PteLeafPerms::URW)
-        } else {
-            PteFieldBits::leaf_with_perms(PteLeafPerms::UR)
+        let perms = match slot_perm {
+            UmodeSlotPerm::Readonly => PteFieldBits::leaf_with_perms(PteLeafPerms::UR),
+            UmodeSlotPerm::Writable => PteFieldBits::leaf_with_perms(PteLeafPerms::URW),
         };
-
         Ok(UmodeSlotMapper {
             vaddr,
             mapper,

@@ -12,9 +12,6 @@ pub enum Error {
     /// The DICE engine failed to extract a CDI.
     DiceCdiExtraction(rice::Error),
 
-    /// The DICE engine Failed to generate a certificate from a CSR.
-    DiceCsrCertificate(rice::Error),
-
     /// The DICE engine failed to build a new layer.
     DiceLayerBuild(rice::Error),
 

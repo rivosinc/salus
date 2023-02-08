@@ -16,7 +16,6 @@ use rice::{
 };
 use sbi_rs::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
 use spin::RwLock;
-use typenum::{Unsigned, U32};
 
 use crate::{
     measurement::{
@@ -29,7 +28,7 @@ use crate::{
 // TODO Get the SVN from the RoT
 const TCB_SVN: u64 = 0xdeadbeef;
 
-type CdiLen = U32;
+const CDI_LEN: usize = 32;
 
 /// The TVM configuration data.
 /// This structure extends PCR3 when the TVM finalizes.
@@ -58,10 +57,10 @@ pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
     measurements: RwLock<ArrayVec<MeasurementRegister<D>, MSMT_REGISTERS>>,
 
     // The attestation DICE layer (Built from the attestation TCI)
-    attestation_layer: Layer<CdiLen, D, H>,
+    attestation_layer: Layer<CDI_LEN, D, H>,
 
     // The sealing DICE layer (Built from the sealing TCI)
-    sealing_layer: Layer<CdiLen, D, H>,
+    sealing_layer: Layer<CDI_LEN, D, H>,
 
     // TVM identifier
     vm_id: u64,
@@ -94,10 +93,10 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             measurements.insert(idx, msmt.build(hash_algorithm));
         }
 
-        // The CDIs must have the same length as CdiLen, so we extract them if
+        // The CDIs must have the same length as CDI_LEN, so we extract them if
         // that's not the case.
-        let mut tmp_a_cdi = [0u8; CdiLen::USIZE];
-        let extracted_attestation_cdi = if attestation_cdi.len() != CdiLen::USIZE {
+        let mut tmp_a_cdi = [0u8; CDI_LEN];
+        let extracted_attestation_cdi = if attestation_cdi.len() != CDI_LEN {
             rice::kdf::extract_cdi::<D, H>(attestation_cdi, &mut tmp_a_cdi)
                 .map_err(Error::DiceCdiExtraction)?;
             &tmp_a_cdi
@@ -105,8 +104,8 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             attestation_cdi
         };
 
-        let mut tmp_s_cdi = [0u8; CdiLen::USIZE];
-        let extracted_sealing_cdi = if sealing_cdi.len() != CdiLen::USIZE {
+        let mut tmp_s_cdi = [0u8; CDI_LEN];
+        let extracted_sealing_cdi = if sealing_cdi.len() != CDI_LEN {
             rice::kdf::extract_cdi::<D, H>(sealing_cdi, &mut tmp_s_cdi)
                 .map_err(Error::DiceCdiExtraction)?;
             &tmp_s_cdi

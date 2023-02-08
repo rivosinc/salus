@@ -74,6 +74,27 @@ impl PageSize {
     }
 }
 
+struct AlignAssert<const A: u64, const S: u64>;
+impl<const A: u64, const S: u64> AlignAssert<A, S> {
+    pub const ALIGNED: u64 = 0 - (A & (S - 1));
+    pub const POW_TWO: u64 = 1 - S.count_ones() as u64;
+}
+
+/// Checks if the given address is aligned to the given page size.
+///
+/// # Example
+///
+/// ```rust
+/// use riscv_pages::{assert_page_aligned, PageSize};
+/// assert_page_aligned::<0x1000, 0x1000>();
+/// assert_page_aligned::<0x4000, 0x2000>();
+/// ```
+pub const fn assert_page_aligned<const A: u64, const S: u64>() -> (u64, u64) {
+    let pt = AlignAssert::<A, S>::POW_TWO;
+    let a = AlignAssert::<A, S>::ALIGNED;
+    (pt, a)
+}
+
 /// A raw address in an address space.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RawAddr<AS: AddressSpace>(u64, AS);
@@ -105,8 +126,8 @@ impl<AS: AddressSpace> RawAddr<AS> {
 impl RawAddr<SupervisorPhys> {
     /// Creates a `RawAddr` in the `SupervisorPhys` address space.
     /// Short for `RawAddr::new(addr, SupervisorPhys::default())`.
-    pub fn supervisor(addr: u64) -> Self {
-        Self(addr, SupervisorPhys::default())
+    pub const fn supervisor(addr: u64) -> Self {
+        Self(addr, SupervisorPhys::new())
     }
 
     /// Returns the address of self, but in the Guest address space with the given `PageOwnerId`.
@@ -123,8 +144,8 @@ impl RawAddr<SupervisorPhys> {
 impl RawAddr<SupervisorVirt> {
     /// Creates a `RawAddr` in the `SupervisorVirt` address space.
     /// Short for `RawAddr::new(addr, SupervisorVirt::default())`.
-    pub fn supervisor_virt(addr: u64) -> Self {
-        Self(addr, SupervisorVirt::default())
+    pub const fn supervisor_virt(addr: u64) -> Self {
+        Self(addr, SupervisorVirt::new())
     }
 }
 
@@ -173,6 +194,17 @@ pub struct PageAddr<AS: AddressSpace> {
 pub type SupervisorPageAddr = PageAddr<SupervisorPhys>;
 /// A page-aligned address in a `GuestPhys` address space.
 pub type GuestPageAddr = PageAddr<GuestPhys>;
+
+impl PageAddr<SupervisorVirt> {
+    /// Creates a 4kb-aligned `pageaddr` from a `rawaddr`, asserting at compile
+    /// time if the address isn't aligned.
+    pub const fn new_const<const N: u64>() -> Self {
+        assert_page_aligned::<N, 4096>();
+        Self {
+            addr: RawAddr::supervisor_virt(N),
+        }
+    }
+}
 
 impl<AS: AddressSpace> PageAddr<AS> {
     /// Creates a 4kB-aligned `PageAddr` from a `RawAddr`, returning `None` if the address isn't

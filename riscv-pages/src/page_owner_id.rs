@@ -74,6 +74,12 @@ pub trait AddressSpace: Clone + Copy + PartialEq + Eq {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Supervisor<T: AddressType>(PhantomData<T>);
 
+impl<T: AddressType> Supervisor<T> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
 impl<T: AddressType> Default for Supervisor<T> {
     fn default() -> Self {
         Self(PhantomData)

@@ -40,6 +40,15 @@ pub enum Error {
 /// Custom attestation result.
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// Number of static measurement registers
+pub const STATIC_MSMT_REGISTERS: usize = 4;
+
+/// Number of dynamically extensible measurement registers
+pub const DYNAMIC_MSMT_REGISTERS: usize = 4;
+
+/// Total number of measurement registers
+pub const MSMT_REGISTERS: usize = STATIC_MSMT_REGISTERS + DYNAMIC_MSMT_REGISTERS;
+
 /// Our TCG PCR indexes mapping.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

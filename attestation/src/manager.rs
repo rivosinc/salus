@@ -18,11 +18,8 @@ use sbi_rs::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
 use spin::RwLock;
 
 use crate::{
-    measurement::{
-        MeasurementRegister, DYNAMIC_MSMT_REGISTERS, MSMT_REGISTERS, STATIC_MSMT_REGISTERS,
-        TVM_MSMT_REGISTERS,
-    },
-    Error, Result, TcgPcrIndex,
+    measurement::{MeasurementRegister, MeasurementRegisterDigest, TVM_MSMT_REGISTERS},
+    Error, Result, TcgPcrIndex, DYNAMIC_MSMT_REGISTERS, MSMT_REGISTERS, STATIC_MSMT_REGISTERS,
 };
 
 // TODO Get the SVN from the RoT

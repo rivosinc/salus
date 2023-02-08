@@ -4,20 +4,19 @@
 
 use attestation::{AttestationManager, Error as AttestationError, TcgPcrIndex};
 use core::{mem, ops::ControlFlow, slice};
-use der::Decode;
 use drivers::{imsic::*, pmu::PmuInfo};
 use page_tracking::collections::PageBox;
 use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
-use rice::x509::{request::CertReq, MAX_CSR_LEN};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Trap};
 use s_mode_utils::print::*;
 use sbi_rs::{salus::*, Error as SbiError, *};
+use u_mode_api::Error as UmodeApiError;
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
 use crate::hyp_map::{UmodeSlotId, UmodeSlotPerm};
-use crate::umode::UmodeTask;
+use crate::umode::{Error as UmodeError, ExecError, UmodeTask};
 use crate::vm_cpu::{ActiveVmCpu, VmCpu, VmCpuParent, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
@@ -186,6 +185,24 @@ impl From<AttestationError> for EcallError {
             // TODO: Map individual error types.
             // InvalidParam may not be the right value for each error.
             _ => EcallError::Sbi(SbiError::InvalidParam),
+        }
+    }
+}
+
+impl From<UmodeApiError> for EcallError {
+    fn from(error: UmodeApiError) -> EcallError {
+        match error {
+            UmodeApiError::InvalidArgument => EcallError::Sbi(SbiError::InvalidParam),
+            _ => EcallError::Sbi(SbiError::Failed),
+        }
+    }
+}
+
+impl From<UmodeError> for EcallError {
+    fn from(error: UmodeError) -> EcallError {
+        match error {
+            UmodeError::Exec(ExecError::Umode(api_error)) => api_error.into(),
+            _ => EcallError::Sbi(SbiError::Failed),
         }
     }
 }
@@ -1559,7 +1576,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                     evidence_format,
                     cert_addr_out,
                     cert_size as usize,
-                    active_pages,
                 )
                 .into(),
 
@@ -1621,55 +1637,47 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn guest_get_evidence(
         &self,
-        cert_request_addr: u64,
-        cert_request_size: usize,
+        csr_guest_addr: u64,
+        csr_len: usize,
         _request_data_addr: u64,
         _evidence_format: u64,
-        cert_addr_out: u64,
-        cert_size: usize,
-        active_pages: &ActiveVmPages<T>,
+        certout_guest_addr: u64,
+        certout_len: usize,
     ) -> EcallResult<u64> {
-        if cert_request_size > MAX_CSR_LEN {
-            return Err(EcallError::Sbi(SbiError::InsufficientBufferCapacity));
+        // Map CSR read-only.
+        let (csr_addr, _csr_mapping) = self.map_guest_range_in_umode_slot(
+            UmodeSlotId::A,
+            csr_guest_addr,
+            csr_len as u64,
+            UmodeSlotPerm::Readonly,
+        )?;
+        // Map Output Certificate writable.
+        let (certout_addr, _certout_mapping) = self.map_guest_range_in_umode_slot(
+            UmodeSlotId::B,
+            certout_guest_addr,
+            certout_len as u64,
+            UmodeSlotPerm::Writable,
+        )?;
+        // Gather measurement registers from the attestation manager and transform it in a array.
+        let msmt_genarray = self.attestation_mgr().measurement_registers()?;
+        let zero = [0u8; u_mode_api::cert::SHA384_LEN];
+        let mut msmt_regs = [zero; attestation::MSMT_REGISTERS];
+        for (i, r) in msmt_genarray.iter().enumerate() {
+            msmt_regs[i].copy_from_slice(r.as_slice());
         }
-
-        let mut csr_bytes = [0u8; MAX_CSR_LEN];
-        let csr_gpa = RawAddr::guest(cert_request_addr, self.page_owner_id());
-        active_pages
-            .copy_from_guest(&mut csr_bytes.as_mut_slice()[..cert_request_size], csr_gpa)
-            .map_err(EcallError::from)?;
-
-        let csr = CertReq::from_der(&csr_bytes[..cert_request_size])
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        println!(
-            "CSR version {:?} Signature algorithm {:?}",
-            csr.info.version, csr.algorithm.oid
-        );
-
-        csr.verify()
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-
-        let cert_gpa = RawAddr::guest(cert_addr_out, self.page_owner_id());
-        let cert_der_array = self
-            .attestation_mgr()
-            .csr_certificate(&csr)
-            .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
-        let cert_der = cert_der_array.as_slice();
-        let cert_der_len = cert_der.len();
-
-        // Check that the guest gave us enough space
-        if cert_size < cert_der_len {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
-
-        active_pages
-            .copy_to_guest(cert_gpa, cert_der)
-            .map_err(EcallError::from)?;
-
-        Ok(cert_der_len as u64)
+        // Get the CDI ID for the attestation layer.
+        let cdi_id = self.attestation_mgr().attestation_cdi_id()?;
+        let shared_data = u_mode_api::cert::GetEvidenceShared { msmt_regs, cdi_id };
+        let request = u_mode_api::UmodeRequest::GetEvidence {
+            csr_addr,
+            csr_len,
+            certout_addr,
+            certout_len,
+        };
+        // Send request to U-mode.
+        Ok(UmodeTask::send_req_with_shared_data(request, shared_data)?)
     }
 
     fn guest_extend_measurement(

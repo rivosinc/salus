@@ -1166,8 +1166,9 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 }
             }
             VmCpuParent::Tsm(_) => {
-                // Clear the bit in HGEIE for our own interrupt file to prevent trapping back into
-                // the TSM for own VS external interrupts.
+                // Given now we will be running the host, so clear the bit in HGEIE for the host's
+                // interrupt file to prevent trapping back into the TSM. This was enabled above when
+                // we scheduled the TVM.
                 if let Some(vgein) = self.bound_interrupt_file().map(|f| f.bits()) {
                     CSR.hgeie.read_and_clear_bits(1 << vgein);
                 }

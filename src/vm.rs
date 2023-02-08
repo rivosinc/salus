@@ -1501,13 +1501,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
     fn handle_salus_test(
         &self,
-        test_func: SalusTestFunction,
+        _test_func: SalusTestFunction,
         _active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
-        use SalusTestFunction::*;
-        match test_func {
-            MemCopy(args) => self.guest_test_memcopy(args.to, args.from, args.len),
-        }
+        Err(EcallError::Sbi(SbiError::NotSupported))
     }
 
     fn map_guest_range_in_umode_slot(
@@ -1532,19 +1529,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .map_err(EcallError::from)?;
         let vaddr = umode_mapping.vaddr().bits() + (addr - base);
         Ok((vaddr, umode_mapping))
-    }
-
-    fn guest_test_memcopy(&self, to: u64, from: u64, len: u64) -> EcallResult<u64> {
-        let (from_vaddr, _from_mapping) =
-            self.map_guest_range_in_umode_slot(UmodeSlotId::A, from, len, false)?;
-        let (to_vaddr, _to_mapping) =
-            self.map_guest_range_in_umode_slot(UmodeSlotId::B, to, len, true)?;
-        // Both ranges are mapped for at least `len` bytes, `to_vaddr` is user-writable and
-        // `from_vaddr` user-readable.
-        let request = u_mode_api::UmodeRequest::memcopy(to_vaddr, from_vaddr, len)
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        UmodeTask::send_req(request).map_err(|_| EcallError::Sbi(SbiError::Failed))?;
-        Ok(0)
     }
 
     fn handle_attestation_msg(

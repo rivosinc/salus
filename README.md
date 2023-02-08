@@ -20,11 +20,13 @@ The `Makefile` provides targets for running various hosts in QEMU.
 ### Prerequisites
 
 Toolchains:
-- Rust: Install [rustup](rustup.rs), then: `rustup target add riscv64gc-unknown-none-elf`
-- GCC: Install `gcc-riscv64-unknown-elf`
+- Rust: Install [rustup](https://www.rust-lang.org/tools/install), then: `rustup target add riscv64gc-unknown-none-elf`
+- GCC: Install `gcc-riscv64-unknown-elf` built from
+  [RISC-V collab](https://github.com/riscv-collab/riscv-gnu-toolchain#installation-linux)
 
 QEMU:
 - Out-of-tree patches are required; see table below.
+- Install `libslirp-dev` for QEMU to build SLIRP network stack
 - Build using QEMU [instructions](https://wiki.qemu.org/Hosts/Linux) with
   `--target-list=riscv64-softmmu`
 - Set the `QEMU=` variable to point to the compiled QEMU tree when using the

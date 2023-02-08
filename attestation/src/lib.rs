@@ -35,6 +35,9 @@ pub enum Error {
 
     /// Derived Key is too short
     DerivedKeyTooShort,
+
+    /// The DICE engined failed to retrieve the CDI ID.
+    DiceCdiId(rice::Error),
 }
 
 /// Custom attestation result.

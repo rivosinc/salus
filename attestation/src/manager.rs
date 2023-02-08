@@ -10,7 +10,7 @@ use ed25519_dalek::SECRET_KEY_LENGTH;
 use generic_array::GenericArray;
 use hkdf::HmacImpl;
 use rice::{
-    cdi::CdiType,
+    cdi::{CdiType, CDI_ID_LEN},
     layer::Layer,
     x509::{certificate::MAX_CERT_SIZE, extensions::dice::tcbinfo::DiceTcbInfo, request::CertReq},
 };
@@ -226,6 +226,23 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             .map_err(Error::DiceRoll)?;
 
         Ok(())
+    }
+
+    /// Extract data from attestation layer for U-mode operation.
+    pub fn measurement_registers(
+        &self,
+    ) -> Result<ArrayVec<MeasurementRegisterDigest<D>, MSMT_REGISTERS>> {
+        Ok(self
+            .measurements
+            .read()
+            .iter()
+            .map(|m| m.digest.clone())
+            .collect())
+    }
+
+    /// Return the CDI ID of the attestation layer.
+    pub fn attestation_cdi_id(&self) -> Result<[u8; CDI_ID_LEN]> {
+        self.attestation_layer.cdi_id().map_err(Error::DiceCdiId)
     }
 
     /// Build a DER-formatted x.509 certificate from a CSR.

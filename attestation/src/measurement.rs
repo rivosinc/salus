@@ -96,6 +96,9 @@ pub const TVM_MSMT_REGISTERS: [MeasurementRegisterBuilder; MSMT_REGISTERS] = [
     msmt_dynamic_reg!(7, TcgPcrIndex::RuntimePcr3, true),
 ];
 
+/// Type of the register measured data hash.
+pub type MeasurementRegisterDigest<D> = GenericArray<u8, <D as OutputSizeUser>::OutputSize>;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeasurementRegister<D: Digest> {
     // The DiceTcbInfo sequence index.
@@ -130,7 +133,7 @@ pub struct MeasurementRegister<D: Digest> {
     pub hash_algorithm: ObjectIdentifier,
 
     // The measured data hash.
-    pub digest: GenericArray<u8, <D as OutputSizeUser>::OutputSize>,
+    pub digest: MeasurementRegisterDigest<D>,
 }
 
 impl<D: Digest> MeasurementRegister<D> {

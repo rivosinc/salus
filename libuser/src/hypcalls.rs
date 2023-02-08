@@ -56,7 +56,7 @@ pub fn hyp_panic() -> ! {
 
 /// Complete current operation (sending a Result to the hypervisor)
 /// and request the next operation to execute.
-pub fn hyp_nextop(result: Result<(), UmodeApiError>) -> Result<UmodeRequest, UmodeApiError> {
+pub fn hyp_nextop(result: Result<u64, UmodeApiError>) -> Result<UmodeRequest, UmodeApiError> {
     let mut regs = [0u64; 8];
     let hypc = HypCall::NextOp(result);
     hypc.to_registers(&mut regs);

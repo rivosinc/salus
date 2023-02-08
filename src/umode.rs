@@ -300,7 +300,7 @@ impl UmodeTask {
     fn execute_request<T: DataInit>(
         req: UmodeRequest,
         shared_data: Option<T>,
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         let mut task = PerCpu::this_cpu().umode_task_mut();
         req.to_registers(task.arch.umode_regs.gprs.a_regs_mut());
         if let Some(data) = shared_data {
@@ -330,7 +330,7 @@ impl UmodeTask {
     }
 
     /// Send a request and execute U-mode until an error is returned.
-    pub fn send_req(req: UmodeRequest) -> Result<(), Error> {
+    pub fn send_req(req: UmodeRequest) -> Result<u64, Error> {
         Self::execute_request::<u8>(req, None)
     }
 
@@ -338,11 +338,11 @@ impl UmodeTask {
     pub fn send_req_with_shared_data<T: DataInit>(
         req: UmodeRequest,
         shared_data: T,
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         Self::execute_request(req, Some(shared_data))
     }
 
-    fn handle_ecall(&mut self) -> ControlFlow<Result<(), ExecError>> {
+    fn handle_ecall(&mut self) -> ControlFlow<Result<u64, ExecError>> {
         let regs = self.arch.umode_regs.gprs.a_regs();
         let cflow = match HypCall::try_from_registers(regs) {
             Ok(hypercall) => match hypercall {
@@ -382,7 +382,7 @@ impl UmodeTask {
     }
 
     // Run `umode` until result is returned.
-    fn run(&mut self) -> Result<(), ExecError> {
+    fn run(&mut self) -> Result<u64, ExecError> {
         loop {
             self.run_to_exit();
             match Trap::from_scause(self.arch.trap_csrs.scause).unwrap() {

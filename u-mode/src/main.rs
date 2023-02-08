@@ -28,13 +28,13 @@ struct UmodeTask {
 impl UmodeTask {
     // Run the main loop, receiving requests from the hypervisor and executing them.
     fn run_loop(&self) -> ! {
-        let mut res = Ok(());
+        let mut res = Ok(0);
         loop {
             // Return result and wait for next operation.
             let req = hyp_nextop(res);
             res = match req {
                 Ok(req) => match req {
-                    UmodeRequest::Nop => Ok(()),
+                    UmodeRequest::Nop => Ok(0),
                 },
                 Err(err) => Err(err),
             };

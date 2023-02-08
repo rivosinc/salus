@@ -44,6 +44,9 @@
 //! specified in the ELF file with register `A0` containing a unique
 //! u64 ID (the CPU ID).
 
+/// Attestation-related data structures.
+pub mod cert;
+
 /// The Error type returned returned from this library.
 #[derive(Debug, Clone, Copy)]
 #[repr(u64)]
@@ -123,15 +126,35 @@ impl IntoRegisters for Result<u64, Error> {
 pub enum UmodeRequest {
     /// Do nothing.
     Nop,
+    /// Get Attestation Evidence.
+    ///
+    /// Umode Shared Region: contains `GetEvidenceShared`.
+    GetEvidence {
+        /// starting address of the Certificate Signing Request.
+        csr_addr: u64,
+        /// size of the Certificate Signing Request.
+        csr_len: usize,
+        /// starting address of the output Certificate.
+        certout_addr: u64,
+        /// size of the output Certificate.
+        certout_len: usize,
+    },
 }
 
 // Mappings of A0 register to U-mode operation.
 const UMOP_NOP: u64 = 0;
+const UMOP_GET_EVIDENCE: u64 = 1;
 
 impl TryIntoRegisters for UmodeRequest {
     fn try_from_registers(regs: &[u64]) -> Result<UmodeRequest, Error> {
         match regs[0] {
             UMOP_NOP => Ok(UmodeRequest::Nop),
+            UMOP_GET_EVIDENCE => Ok(UmodeRequest::GetEvidence {
+                csr_addr: regs[1],
+                csr_len: regs[2] as usize,
+                certout_addr: regs[3],
+                certout_len: regs[3] as usize,
+            }),
             _ => Err(Error::RequestNotSupported),
         }
     }
@@ -140,6 +163,18 @@ impl TryIntoRegisters for UmodeRequest {
         match *self {
             UmodeRequest::Nop => {
                 regs[0] = UMOP_NOP;
+            }
+            UmodeRequest::GetEvidence {
+                csr_addr,
+                csr_len,
+                certout_addr,
+                certout_len,
+            } => {
+                regs[0] = UMOP_GET_EVIDENCE;
+                regs[1] = csr_addr;
+                regs[2] = csr_len as u64;
+                regs[3] = certout_addr;
+                regs[4] = certout_len as u64;
             }
         }
     }

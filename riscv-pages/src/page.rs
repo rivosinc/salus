@@ -80,7 +80,8 @@ impl<const A: u64, const S: u64> AlignAssert<A, S> {
     pub const POW_TWO: u64 = 1 - S.count_ones() as u64;
 }
 
-/// Checks if the given address is aligned to the given page size.
+/// Checks if the given address is aligned to the given page size. This is a compile-time check
+/// that will assert and fail to compile if the address is not aligned.
 ///
 /// # Example
 ///

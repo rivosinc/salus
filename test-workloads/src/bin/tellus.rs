@@ -24,7 +24,7 @@ use core::arch::asm;
 use core::ops::Range;
 use device_tree::{Fdt, ImsicInfo};
 use riscv_regs::{
-    hie, hip, sie, sip, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt,
+    hie, hip, sie, DecodedInstruction, Exception, GprIndex, Instruction, Interrupt,
     LocalRegisterCopy, Readable, RiscvCsrInterface, Trap, Writeable, CSR, CSR_CYCLE, CSR_HTINST,
     CSR_HTVAL,
 };

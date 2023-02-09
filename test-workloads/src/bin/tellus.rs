@@ -11,6 +11,7 @@
     alloc_error_handler,
     lang_items
 )]
+#![allow(missing_docs)]
 
 use core::alloc::{GlobalAlloc, Layout};
 extern crate alloc;
@@ -337,8 +338,8 @@ fn store_into_vectors() {
     const REG_WIDTH_IN_U64S: usize = 4;
 
     let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
-    for i in 0..inbuf.len() {
-        inbuf[i] = 0xDEADBEEFCAFEBABE;
+    for elem in &mut inbuf {
+        *elem = 0xDEADBEEFCAFEBABE;
     }
 
     let bufp1 = inbuf.as_ptr();
@@ -401,9 +402,9 @@ fn check_vectors() {
 
     println!("Verify registers");
     let mut should_panic = false;
-    for i in 0..inbuf.len() {
-        if inbuf[i] != 0xDEADBEEFCAFEBABE {
-            println!("error:  {} {} {}", i, 0xDEADBEEFCAFEBABE_u64, inbuf[i]);
+    for (i, elem) in inbuf.iter().enumerate() {
+        if *elem != 0xDEADBEEFCAFEBABE {
+            println!("error:  {} {} {}", i, 0xDEADBEEFCAFEBABE_u64, *elem);
             should_panic = true;
         }
     }

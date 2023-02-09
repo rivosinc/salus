@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use attestation::{AttestationManager, Error as AttestationError, TcgPcrIndex};
-use core::{mem, ops::ControlFlow, slice};
+use core::{mem, num::Wrapping, ops::ControlFlow, ops::Neg, slice};
 use drivers::{imsic::*, pmu::PmuInfo};
 use page_tracking::collections::PageBox;
 use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
-use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Trap};
+use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Trap, CSR};
 use s_mode_utils::print::*;
 use sbi_rs::{salus::*, Error as SbiError, *};
+use spin::Once;
 use u_mode_api::Error as UmodeApiError;
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
@@ -253,6 +254,8 @@ pub struct Vm<T: GuestStagePagingMode> {
     // Only used by Host VM to track guest VMs.
     guests: Option<Guests<T>>,
     attestation_mgr: AttestationSha384,
+    // Latched htimedelta (-CSR_TIME) at the time of first VCPU run.
+    htimedelta: Once<u64>,
 }
 
 impl<T: GuestStagePagingMode> Vm<T> {
@@ -272,6 +275,7 @@ impl<T: GuestStagePagingMode> Vm<T> {
                 const_oid::db::rfc5912::ID_SHA_384,
             )
             .map_err(Error::AttestationManagerCreationFailed)?,
+            htimedelta: Once::new(),
         })
     }
 
@@ -492,6 +496,27 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(status as u64)
     }
 
+    /// Set htimedelta for the current VM and all of it's VCPU's.
+    fn set_vcpu_htimedelta(&self) -> u64 {
+        let htimedelta: u64 = Wrapping(CSR.hpmcounter[1].get_value()).neg().0;
+
+        for i in 0..VM_CPUS_MAX {
+            // Set htimedelta for all VCPUs.
+            if let Ok(vcpu) = self.vm().vcpus.get_vcpu(i as u64) {
+                vcpu.set_htimedelta(htimedelta);
+            }
+        }
+
+        htimedelta
+    }
+
+    /// Sets htimedelta for the VM.
+    fn set_htimedelta(&self) {
+        self.vm()
+            .htimedelta
+            .call_once(|| self.set_vcpu_htimedelta());
+    }
+
     /// Run `vcpu_id` until an unhandled exit is encountered. Save/restore `host_context` on entry/exit
     /// from the vCPU being run.
     pub fn run_vcpu(&self, vcpu_id: u64, host_context: VmCpuParent) -> EcallResult<u64> {
@@ -500,6 +525,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .vcpus
             .get_vcpu(vcpu_id)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+
+        // Set htimedelta for ALL VCPU's of the VM.
+        self.set_htimedelta();
+
         // Activate the vCPU, giving us exclusive ownership over the ability to run it.
         let mut active_vcpu = vcpu
             .activate(self.vm_pages(), host_context)
@@ -966,9 +995,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             TsmGetInfo { dest_addr, len } => self
                 .get_tsm_info(dest_addr, len, active_vcpu.active_pages())
                 .into(),
-            TvmCreate { params_addr, len } => self
-                .add_guest(params_addr, len, active_vcpu.active_pages())
-                .into(),
+            TvmCreate { params_addr, len } => self.add_guest(params_addr, len, active_vcpu).into(),
             TvmDestroy { guest_id } => self.destroy_guest(guest_id).into(),
             TsmConvertPages {
                 page_addr,
@@ -1136,7 +1163,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         &self,
         params_addr: u64,
         len: u64,
-        active_pages: &ActiveVmPages<T>,
+        host_active_vcpu: &mut ActiveVmCpu<T>,
     ) -> EcallResult<u64> {
         if self.guests().is_none() {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
@@ -1148,7 +1175,8 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             return Err(EcallError::Sbi(SbiError::InvalidParam));
         }
         let mut param_bytes = [0u8; mem::size_of::<sbi_rs::TvmCreateParams>()];
-        active_pages
+        host_active_vcpu
+            .active_pages()
             .copy_from_guest(param_bytes.as_mut_slice(), params_addr)
             .map_err(EcallError::from)?;
 

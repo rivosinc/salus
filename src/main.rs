@@ -266,7 +266,6 @@ pub fn setup_csrs() {
     hie.modify(Interrupt::VirtualSupervisorExternal.to_hie_field().unwrap());
     CSR.hie.set(hie.get());
 
-    // TODO: Handle virtualization of timer/htimedelta (see issue #46)
     // Enable access to timer for now.
     CSR.hcounteren.set(1 << (CSR_TIME - CSR_CYCLE));
 

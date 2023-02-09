@@ -791,6 +791,31 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         self.host_context
             .set_csr(CSR_VSTIMECMP, CSR.vstimecmp.get());
         self.host_context.set_csr(CSR_VSIE, CSR.vsie.get());
+        // We need to report guest's htimedelta to Host so that it can schedule timer properly.
+        //
+        //   Salus             Host                TVM
+        //  /                   /                   /
+        // |                   |                   |
+        // |                   |                   |
+        // _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+        // 0 1 2 3 4 5 6 7 8 9 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2
+        //                     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9
+        //                 Time
+        //
+        // For host the TVM's timedelta is
+        //     g_htimedelta = -get_cycle() = -(host time) = -(time + h_htimedelta)
+        //     g_htimedelta = - (20 - 10) = -10
+        //
+        // So from host's view g_htimedelta should be the difference between TVM start and
+        // Host start.
+        if let VmCpuParent::HostVm(ref host_vcpu) = self.host_context {
+            self.host_context.set_csr(
+                CSR_HTIMEDELTA,
+                CSR.htimedelta
+                    .get()
+                    .wrapping_sub(host_vcpu.vs_csrs().htimedelta),
+            );
+        }
 
         use VmExitCause::*;
         match cause {
@@ -1352,6 +1377,12 @@ impl VmCpu {
         arch.regs.guest_regs.gprs.set_reg(GprIndex::A1, opaque);
         *status = VmCpuStatus::Runnable;
         Ok(())
+    }
+
+    /// Sets htimedelta csr of the VCPU.
+    pub fn set_htimedelta(&self, htimedelta: u64) {
+        let mut arch = self.arch.lock();
+        arch.regs.vs_csrs.htimedelta = htimedelta;
     }
 
     /// Returns the ID of the vCPU in the guest.

@@ -22,7 +22,7 @@
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
-
+use test_system::*;
 extern crate alloc;
 
 mod asm;
@@ -308,6 +308,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     SbiConsoleV01::set_as_console();
     println!("Salus: Boot test VM");
 
+    test_declare_pass!("Salus Boot", hart_id);
+
     // Safe because we trust that the firmware passed a valid FDT.
     let hyp_fdt =
         unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.expect("Failed to read FDT");
@@ -353,7 +355,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         // unless we have support for per-mode filtering.
         println!("Sscofpmf support present");
         if let Err(e) = PmuInfo::init() {
+            test_declare_fail!("PMU counters");
             println!("PmuInfo::init() failed with {:?}", e);
+        } else {
+            test_declare_pass!("PMU counters");
         }
     }
     if cpu_info.has_vector() {
@@ -496,6 +501,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     UmodeTask::setup_this_cpu().expect("Could not setup umode");
     // Do a NOP request to the U-mode task to check it's functional in this CPU.
     UmodeTask::send_req(u_mode_api::UmodeRequest::Nop).expect("U-mode not executing NOP");
+    test_declare_pass!("successful return from u-mode");
 
     // Now load the host VM.
     let host = HostVmLoader::new(
@@ -521,9 +527,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 }
 
 #[no_mangle]
-extern "C" fn secondary_init(_hart_id: u64) {
+extern "C" fn secondary_init(hart_id: u64) {
     setup_csrs();
 
+    test_declare_pass!("secondary init", hart_id);
     // Load the page-tables in the CPU.
     let page_table = PerCpu::this_cpu().page_table();
     CSR.satp.set(page_table.satp());

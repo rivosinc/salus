@@ -25,6 +25,7 @@ use riscv_regs::{sie, stopi, Interrupt, Readable, RiscvCsrInterface, Writeable, 
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi_rs::api::{attestation, base, reset, tee_guest};
+use test_system::*;
 use test_workloads::consts::*;
 
 // Dummy global allocator - panic if anything tries to do an allocation.
@@ -74,7 +75,7 @@ pub fn print_vector_csrs() {
     println!("vtype {:#x}", vtype);
 }
 
-pub fn test_vector() {
+pub fn test_vector() -> TestResult {
     let vec_len: u64 = 8;
     let vtype: u64 = 0xda;
     let enable: u64 = 0x200;
@@ -103,6 +104,7 @@ pub fn test_vector() {
 
     const REG_WIDTH_IN_U64S: usize = 4;
 
+    // write arbitrary bytes to  to vector registers
     let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
     let mut refbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
     for i in 0..inbuf.len() {
@@ -161,26 +163,29 @@ pub fn test_vector() {
     print_vector_csrs();
 
     println!("Verify registers");
-    let mut should_panic = false;
+    let mut failed = false;
     for i in 0..inbuf.len() {
         if inbuf[i] != refbuf[i] {
             println!("error:  {} {} {}", i, refbuf[i], inbuf[i]);
-            should_panic = true;
+            failed = true;
         }
     }
 
-    if should_panic {
-        panic!("Vector registers did not restore correctly");
+    if failed {
+        println!("Vector registers did not restore correctly");
+        TestResult::Fail
+    } else {
+        TestResult::Pass
     }
 }
 
 /// Test `CertReq` encoded as ASN.1 DER
 const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 
-fn test_attestation() {
+fn test_attestation() -> TestResult {
     if base::probe_sbi_extension(sbi_rs::EXT_ATTESTATION).is_err() {
         println!("Platform doesn't support attestation extension");
-        return;
+        return TestResult::Fail;
     }
 
     let caps = attestation::get_capabilities().expect("Failed to get attestation capabilities");
@@ -192,7 +197,8 @@ fn test_attestation() {
         .evidence_formats
         .contains(sbi_rs::EvidenceFormat::DiceTcbInfo)
     {
-        panic!("DICE TcbInfo format is not supported")
+        println!("DICE TcbInfo format is not supported");
+        return TestResult::Fail;
     }
 
     // SHA384 for "helloworld"
@@ -206,12 +212,16 @@ fn test_attestation() {
 
     // SHA384 for (RuntimePCR1 || SHA384(b"helloworld"))
     let expected_pcr = hex!("4d783cdfa8d6bc1293d0f1bfb58f9f0b05a8ef723cb8745d142d60ac3b9d213c51f06aa1e9b92ff09f64e4a2d0c8fe87");
+    let result = pcr_read.as_slice() != expected_pcr;
+    test_assert!(!result, "pcr attestation measurement");
     if pcr_read.as_slice() != expected_pcr {
-        panic!("Wrong runtime PCR #1 measurement")
+        println!("Wrong runtime PCR #1 measurement");
+        return TestResult::Fail;
     }
 
     if TEST_CSR.len() > MAX_CSR_LEN {
-        panic!("Test CSR is too large")
+        println!("Test CSR is too large");
+        return TestResult::Fail;
     }
 
     let request_data = [0u8; sbi_rs::EVIDENCE_DATA_BLOB_SIZE];
@@ -222,7 +232,8 @@ fn test_attestation() {
     ) {
         Err(e) => {
             println!("Attestation error {e:?}");
-            panic!("Guest evidence call failed");
+            println!("Guest evidence call failed");
+            return TestResult::Fail;
         }
         Ok(cert_bytes) => cert_bytes,
     };
@@ -265,9 +276,11 @@ fn test_attestation() {
         tvm_fwid.hash_alg,
         tvm_fwid.digest.as_bytes().len()
     );
+
+    TestResult::Pass
 }
 
-fn test_memory_sharing() {
+fn test_memory_sharing() -> TestResult {
     // Convert some of our memory to shared.
     //
     // Safety: We haven't touched this memory and we won't touch it until the call returns.
@@ -317,9 +330,11 @@ fn test_memory_sharing() {
         )
         .expect("GuestVm -- ShareMemory failed");
     }
+
+    TestResult::Pass
 }
 
-fn test_emulated_mmio() {
+fn test_emulated_mmio() -> TestResult {
     for _ in 0..2 {
         tee_guest::add_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
             .expect("GuestVm - AddEmulatedMmioRegion failed");
@@ -336,9 +351,11 @@ fn test_emulated_mmio() {
         tee_guest::remove_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
             .expect("GuestVm - RemoveEmulatedMmioRegion failed");
     }
+
+    TestResult::Pass
 }
 
-fn test_interrupts() {
+fn test_interrupts() -> TestResult {
     const INTERRUPT_ID: usize = 3;
 
     // Make sure we return from WFI.
@@ -366,11 +383,13 @@ fn test_interrupts() {
     } else {
         println!("External interrupt NOT pending in GuestVm");
     }
+
+    TestResult::Pass
 }
 
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
-extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
+extern "C" fn kernel_init(hart_id: u64, boot_args: u64) {
     base::probe_sbi_extension(sbi_rs::EXT_TEE_GUEST).expect("TEE-Guest extension not present");
 
     // Convert a page to shared memory for use with the debug console.
@@ -387,6 +406,7 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
 
     println!("*****************************************");
     println!("Hello world from Tellus guest            ");
+    test_declare_pass!("guestvm boot", hart_id);
 
     let vectors_enabled = boot_args & BOOT_ARG_VECTORS_ENABLED != 0;
     if vectors_enabled {
@@ -396,7 +416,7 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
     }
 
     let mut next_page = USABLE_RAM_START_ADDRESS + NUM_GUEST_DATA_PAGES * PAGE_SIZE_4K;
-    test_attestation();
+    test_runtest!("test attestation", { test_attestation() });
     // Touch the rest of the data pages to force Tellus to fault them in.
     let end =
         USABLE_RAM_START_ADDRESS + (NUM_GUEST_DATA_PAGES + NUM_GUEST_ZERO_PAGES) * PAGE_SIZE_4K;
@@ -411,15 +431,15 @@ extern "C" fn kernel_init(_hart_id: u64, boot_args: u64) {
         next_page += PAGE_SIZE_4K;
     }
 
-    test_memory_sharing();
+    test_runtest!("Test memory sharing", { test_memory_sharing() });
 
     if vectors_enabled {
-        test_vector();
+        test_runtest!("test vectors", { test_vector() });
     }
 
-    test_emulated_mmio();
+    test_runtest!("test emulated mmio", { test_emulated_mmio() });
 
-    test_interrupts();
+    test_runtest!("test interrupts", { test_interrupts() });
 
     println!("Exiting guest");
     println!("*****************************************");

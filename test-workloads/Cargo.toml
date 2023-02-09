@@ -20,6 +20,7 @@ s_mode_utils = { path = "../s-mode-utils" }
 sbi_rs = { path = "../sbi-rs" }
 spin = { version = "*", default-features = false }
 riscv_regs = { path = "../riscv-regs" }
+test_system = { path = "../test-system" }
 
 [dependencies.fdt-rs]
 git = "https://github.com/rivosinc/fdt-rs"

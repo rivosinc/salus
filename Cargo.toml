@@ -40,6 +40,7 @@ sbi_rs = { path = "./sbi-rs" }
 spin = { version = "*", default-features = false }
 sha2 = {version = "0.10", default-features = false }
 riscv_elf = { path = "./riscv-elf" }
+test_system = { path = "./test-system" }
 
 [workspace]
 

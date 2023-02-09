@@ -19,6 +19,7 @@ extern crate libuser;
 
 use data_model::{VolatileMemory, VolatileSlice};
 use libuser::*;
+use test_system::*;
 use u_mode_api::{Error as UmodeApiError, UmodeRequest};
 
 mod cert;
@@ -121,5 +122,6 @@ extern "C" fn task_main(cpuid: u64, shared_addr: u64, shared_size: u64) -> ! {
         "umode/#{}: U-mode Shared Region: {:016x} - {} bytes",
         cpuid, shared_addr, shared_size
     );
+    test_declare_pass!("umode start", cpuid);
     task.run_loop()
 }

@@ -16,10 +16,7 @@ use core::alloc::{GlobalAlloc, Layout};
 extern crate alloc;
 extern crate test_workloads;
 
-mod consts;
-
 use arrayvec::ArrayVec;
-use consts::*;
 use core::arch::asm;
 use core::ops::Range;
 use device_tree::{Fdt, ImsicInfo};
@@ -37,6 +34,7 @@ use sbi_rs::{
     EXT_TEE_HOST, EXT_TEE_INTERRUPT,
 };
 use spin::{Mutex, Once};
+use test_workloads::consts::*;
 
 // The secondary CPU entry point, defined in start.S. Calls secondary_init below.
 extern "C" {

@@ -1178,7 +1178,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     host_vcpu
                         .vs_csrs()
                         .vstimecmp
-                        .wrapping_add(host_vcpu.vs_csrs().htimedelta),
+                        .wrapping_sub(host_vcpu.vs_csrs().htimedelta),
                 );
 
                 // If our host has external interrupts enabled, set the bit for their interrupt file

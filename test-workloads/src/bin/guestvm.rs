@@ -14,10 +14,7 @@ use hex_literal::hex;
 extern crate alloc;
 extern crate test_workloads;
 
-mod consts;
-
 use ::attestation::TcgPcrIndex::{RuntimePcr1, TvmPage};
-use consts::*;
 use rice::x509::{
     certificate::Certificate,
     extensions::dice::tcbinfo::{DiceTcbInfo, TCG_DICE_TCB_INFO},
@@ -27,6 +24,7 @@ use riscv_regs::{sie, stopi, Interrupt, Readable, RiscvCsrInterface, Writeable, 
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
 use sbi_rs::api::{attestation, base, reset, tee_guest};
+use test_workloads::consts::*;
 
 // Dummy global allocator - panic if anything tries to do an allocation.
 struct GeneralGlobalAlloc;

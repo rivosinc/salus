@@ -11,6 +11,7 @@ use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
 
 mod asm;
+pub mod consts;
 
 /// Panics the running test workload.
 #[panic_handler]

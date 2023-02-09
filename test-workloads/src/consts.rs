@@ -4,6 +4,7 @@
 
 // Not all constants are used in both binaries.
 #![allow(dead_code)]
+#![allow(missing_docs)]
 
 /// Constants defining the layout of the Tellus & GuestVM address space.
 ///

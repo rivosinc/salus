@@ -5,6 +5,7 @@
 #![no_main]
 #![no_std]
 #![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
+#![allow(missing_docs)]
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
@@ -138,8 +139,8 @@ pub fn test_vector() {
     print_vector_csrs();
 
     // Overwrite memory to verify that it changes
-    for i in 0..inbuf.len() {
-        inbuf[i] = 99_u64;
+    for elem in &mut inbuf {
+        *elem = 99_u64;
     }
 
     println!("Reading vector registers");
@@ -209,7 +210,7 @@ fn test_attestation() {
         panic!("Wrong runtime PCR #1 measurement")
     }
 
-    if TEST_CSR.len() > MAX_CSR_LEN as usize {
+    if TEST_CSR.len() > MAX_CSR_LEN {
         panic!("Test CSR is too large")
     }
 
@@ -233,7 +234,7 @@ fn test_attestation() {
     );
 
     let mut tcb_info_extn = DiceTcbInfo::default();
-    let cert = Certificate::from_der(&cert_bytes.as_slice()).expect("Cert parsing error");
+    let cert = Certificate::from_der(cert_bytes.as_slice()).expect("Cert parsing error");
 
     // Look for a DiceTcbInfo extension
     if let Some(extensions) = cert.tbs_certificate.extensions.as_ref() {

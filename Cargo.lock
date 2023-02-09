@@ -583,6 +583,7 @@ dependencies = [
  "sha2 0.10.2",
  "spin",
  "static_assertions",
+ "test_system",
  "u_mode_api",
 ]
 
@@ -724,6 +725,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "test_system"
+version = "0.1.0"
+
+[[package]]
 name = "test_workloads"
 version = "0.1.0"
 dependencies = [
@@ -738,6 +743,7 @@ dependencies = [
  "s_mode_utils",
  "sbi_rs",
  "spin",
+ "test_system",
 ]
 
 [[package]]
@@ -799,6 +805,7 @@ dependencies = [
  "libuser",
  "rice",
  "sha2 0.10.2",
+ "test_system",
  "u_mode_api",
 ]
 

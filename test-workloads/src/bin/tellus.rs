@@ -35,6 +35,7 @@ use sbi_rs::{
     EXT_TEE_HOST, EXT_TEE_INTERRUPT,
 };
 use spin::{Mutex, Once};
+use test_system::*;
 use test_workloads::consts::*;
 
 // The secondary CPU entry point, defined in start.S. Calls secondary_init below.
@@ -462,6 +463,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // for the remainder of this program.
     unsafe { SbiConsole::set_as_console(&mut CONSOLE_BUFFER) };
     println!("Tellus: Booting the test VM");
+    test_declare_pass!("booting tellus", hart_id);
 
     // Safe because we trust the host to boot with a valid fdt_addr pass in register a1.
     let fdt = match unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) } {

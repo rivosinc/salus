@@ -11,7 +11,7 @@ attestation = { path = "../attestation" }
 der = "0.6.0"
 device_tree = { path = "../device-tree" }
 hex-literal = "0.3.4"
-rice = { git = "https://github.com/rivosinc/rice" }
+rice = { path = "../rice" }
 s_mode_utils = { path = "../s-mode-utils" }
 sbi_rs = { path = "../sbi-rs" }
 spin = { version = "*", default-features = false }

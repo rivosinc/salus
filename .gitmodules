@@ -2,3 +2,7 @@
 	path = sbi-rs
 	url = https://github.com/rivosinc/sbi-rs
 	branch = main
+[submodule "rice"]
+	path = rice
+	url = https://github.com/rivosinc/rice
+	branch = main

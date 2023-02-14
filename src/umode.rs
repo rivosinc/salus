@@ -300,7 +300,18 @@ impl UmodeTask {
         Ok(())
     }
 
-    fn execute_request<T: DataInit>(
+    /// Execute a NOP request.
+    pub fn execute_nop() -> Result<(), Error> {
+        Self::execute_request::<u8>(UmodeRequest::Nop, None)?;
+        Ok(())
+    }
+
+    /// Enter U-mode task and execute a request.
+    ///
+    /// # Arguments:
+    ///
+    /// `shared_data`: if present, the structure will be copied to the U-mode shared region.
+    pub fn execute_request<T: DataInit>(
         req: UmodeRequest,
         shared_data: Option<T>,
     ) -> Result<u64, Error> {
@@ -326,19 +337,6 @@ impl UmodeTask {
         }
         let res = ret.map_err(Error::Exec)?;
         res.map_err(Error::Request)
-    }
-
-    /// Send a request and execute U-mode until an error is returned.
-    pub fn send_req(req: UmodeRequest) -> Result<u64, Error> {
-        Self::execute_request::<u8>(req, None)
-    }
-
-    /// Same as `send_req` but share `shared_data` in U-mode shared area while executing this request.
-    pub fn send_req_with_shared_data<T: DataInit>(
-        req: UmodeRequest,
-        shared_data: T,
-    ) -> Result<u64, Error> {
-        Self::execute_request(req, Some(shared_data))
     }
 
     fn handle_ecall(&mut self) -> ControlFlow<Result<OpResult, ExecError>> {

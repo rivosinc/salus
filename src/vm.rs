@@ -1677,7 +1677,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             certout_len,
         };
         // Send request to U-mode.
-        Ok(UmodeTask::send_req_with_shared_data(request, shared_data)?)
+        Ok(UmodeTask::execute_request(request, Some(shared_data))?)
     }
 
     fn guest_extend_measurement(

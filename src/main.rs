@@ -496,7 +496,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Setup U-mode task for this CPU.
     UmodeTask::setup_this_cpu().expect("Could not setup umode");
     // Do a NOP request to the U-mode task to check it's functional in this CPU.
-    UmodeTask::send_req(u_mode_api::UmodeRequest::Nop).expect("U-mode not executing NOP");
+    UmodeTask::execute_nop().expect("U-mode not executing NOP");
 
     // Now load the host VM.
     let host = HostVmLoader::new(
@@ -542,7 +542,7 @@ extern "C" fn secondary_init(_hart_id: u64) {
     // Setup U-mode task for this CPU.
     UmodeTask::setup_this_cpu().expect("Could not setup umode");
     // Do a NOP request to the U-mode task to check it's functional in this CPU.
-    UmodeTask::send_req(u_mode_api::UmodeRequest::Nop).expect("U-mode not executing NOP");
+    UmodeTask::execute_nop().expect("U-mode not executing NOP");
 
     HOST_VM.wait().run(me.cpu_id().raw() as u64);
     poweroff();

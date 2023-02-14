@@ -201,7 +201,7 @@ impl From<UmodeApiError> for EcallError {
 impl From<UmodeError> for EcallError {
     fn from(error: UmodeError) -> EcallError {
         match error {
-            UmodeError::Exec(ExecError::Umode(api_error)) => api_error.into(),
+            UmodeError::Request(api_error) => api_error.into(),
             _ => EcallError::Sbi(SbiError::Failed),
         }
     }

@@ -36,9 +36,10 @@ pub enum Error {
 struct UmodeSigner {}
 
 impl Signer<Signature> for UmodeSigner {
-    fn try_sign(&self, _: &[u8]) -> Result<Signature, ed25519::Error> {
-        // TODO: Implement Signing of certificate.
-        Signature::from_bytes(&[0; 64])
+    fn try_sign(&self, msg: &[u8]) -> Result<Signature, ed25519::Error> {
+        let mut signature_bytes = [0; 64];
+        hyp_sign(msg, &mut signature_bytes);
+        Signature::from_bytes(&signature_bytes)
     }
 }
 

@@ -67,3 +67,22 @@ pub fn hyp_nextop(result: Result<u64, UmodeApiError>) -> Result<UmodeRequest, Um
     // In case there's an error on decoding the request, return it to caller.
     UmodeRequest::try_from_registers(&regs)
 }
+
+/// Request hypervisor to sign data. Specifics of the signature,
+/// including key to use, are dependent on the request.
+pub fn hyp_sign(msg: &[u8], signature: &mut [u8]) {
+    let mut regs = [0u64; 8];
+    let hypc = HypCall::ExtSign {
+        msg_addr: msg.as_ptr() as u64,
+        msg_size: msg.len(),
+        sign_addr: signature.as_ptr() as u64,
+        sign_size: signature.len(),
+    };
+    hypc.to_registers(&mut regs);
+    // Safety: we trust the hypervisor to write at `sign_addr` for `sign_len` bytes. This range is
+    // entirely contained in `signature`, of which we have a mutable reference. We also trust the
+    // hypervisor to read from `msg_addr` for `msg_len` bytes, which is entirely contained in `msg`.
+    unsafe {
+        ecall(&mut regs);
+    }
+}

@@ -194,11 +194,23 @@ pub enum HypCall {
     PutChar(u8),
     /// Return result of previous request and wait for next operation.
     NextOp(OpResult),
+    /// Implemented in External HypCall Handler: Sign a message and return a signature.
+    ExtSign {
+        /// Address of the message start.
+        msg_addr: u64,
+        /// Size of message.
+        msg_size: usize,
+        /// Address where the signature will be written.
+        sign_addr: u64,
+        /// Size of the signature.
+        sign_size: usize,
+    },
 }
 
 const HYPC_PANIC: u64 = 0;
 const HYPC_PUTCHAR: u64 = 1;
 const HYPC_NEXTOP: u64 = 2;
+const HYPC_EXT_SIGN: u64 = 0x10;
 
 impl TryIntoRegisters for HypCall {
     fn try_from_registers(regs: &[u64]) -> Result<Self, Error> {
@@ -206,22 +218,40 @@ impl TryIntoRegisters for HypCall {
             HYPC_PANIC => Ok(HypCall::Panic),
             HYPC_PUTCHAR => Ok(HypCall::PutChar(regs[0] as u8)),
             HYPC_NEXTOP => Ok(HypCall::NextOp(Result::from_registers(regs))),
+            HYPC_EXT_SIGN => Ok(HypCall::ExtSign {
+                msg_addr: regs[0],
+                msg_size: regs[1] as usize,
+                sign_addr: regs[2],
+                sign_size: regs[3] as usize,
+            }),
             _ => Err(Error::EcallNotSupported),
         }
     }
 
     fn to_registers(&self, regs: &mut [u64]) {
-        match self {
+        match *self {
             HypCall::Panic => {
                 regs[7] = HYPC_PANIC;
             }
             HypCall::PutChar(byte) => {
-                regs[0] = *byte as u64;
+                regs[0] = byte as u64;
                 regs[7] = HYPC_PUTCHAR;
             }
             HypCall::NextOp(result) => {
                 result.to_registers(regs);
                 regs[7] = HYPC_NEXTOP;
+            }
+            HypCall::ExtSign {
+                msg_addr,
+                msg_size,
+                sign_addr,
+                sign_size,
+            } => {
+                regs[0] = msg_addr;
+                regs[1] = msg_size as u64;
+                regs[2] = sign_addr;
+                regs[3] = sign_size as u64;
+                regs[7] = HYPC_EXT_SIGN;
             }
         }
     }

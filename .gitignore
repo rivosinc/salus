@@ -6,6 +6,7 @@ target/
 !/Cargo.lock
 lcov.info
 .vscode
+.project
 tellus_raw
 tellus_guestvm
 guestvm_raw

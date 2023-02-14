@@ -182,10 +182,11 @@ impl TryIntoRegisters for UmodeRequest {
 
 // HypCall: calls from umode to hypervisor.
 
-/// Result returned from Umode Op execution.
+/// Result returned from Umode Request execution (U-mode -> Hypervisor)
 pub type OpResult = Result<u64, Error>;
 
 /// Calls from umode to the hypervisors.
+#[derive(Debug)]
 pub enum HypCall {
     /// Panic and exit immediately.
     Panic,

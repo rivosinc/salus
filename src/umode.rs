@@ -248,6 +248,8 @@ pub enum ExecError {
     Panic,
     /// U-mode API error.
     Api(UmodeApiError),
+    /// Unhandled Hypervisor Call from U-mode.
+    UnhandledHypCall(HypCall),
 }
 
 // Entry for umode task.
@@ -295,15 +297,20 @@ impl UmodeTask {
         // sstatus set to 0 (by default) is actually okay.
         self.arch = arch;
         // Run task until it initializes itself and calls HypCall::NextOp().
-        let op_res = self.run().map_err(Error::Exec)?;
+        let op_res = self.run(&Self::only_std_hypcalls).map_err(Error::Exec)?;
         op_res.map_err(Error::Request)?;
         Ok(())
     }
 
     /// Execute a NOP request.
     pub fn execute_nop() -> Result<(), Error> {
-        Self::execute_request::<u8>(UmodeRequest::Nop, None)?;
+        Self::execute_request::<u8, _>(UmodeRequest::Nop, None, &Self::only_std_hypcalls)?;
         Ok(())
+    }
+
+    /// Hypercall handler that does not implement hypercalls.
+    pub const fn only_std_hypcalls(hypc: HypCall) -> Result<(), ExecError> {
+        Err(ExecError::UnhandledHypCall(hypc))
     }
 
     /// Enter U-mode task and execute a request.
@@ -311,10 +318,16 @@ impl UmodeTask {
     /// # Arguments:
     ///
     /// `shared_data`: if present, the structure will be copied to the U-mode shared region.
-    pub fn execute_request<T: DataInit>(
+    /// `hypc_handler`: Request-specific HypCall handlers. Use `Self::only_std_hypcalls` if not
+    /// required.
+    pub fn execute_request<T: DataInit, F>(
         req: UmodeRequest,
         shared_data: Option<T>,
-    ) -> Result<u64, Error> {
+        hypc_handler: &F,
+    ) -> Result<u64, Error>
+    where
+        F: Fn(HypCall) -> Result<(), ExecError>,
+    {
         let mut task = PerCpu::this_cpu().umode_task_mut();
         req.to_registers(task.arch.umode_regs.gprs.a_regs_mut());
         if let Some(data) = shared_data {
@@ -323,7 +336,7 @@ impl UmodeTask {
                 .share_with_umode(data)
                 .map_err(Error::HypMap)?;
         }
-        let ret = task.run();
+        let ret = task.run(hypc_handler);
         // Errors encountered while executing the operation are unrecoverable: reset U-mode.
         if ret.is_err() {
             // 1. restore memory to original state
@@ -339,7 +352,10 @@ impl UmodeTask {
         res.map_err(Error::Request)
     }
 
-    fn handle_ecall(&mut self) -> ControlFlow<Result<OpResult, ExecError>> {
+    fn handle_ecall<F>(&mut self, hypc_handler: &F) -> ControlFlow<Result<OpResult, ExecError>>
+    where
+        F: Fn(HypCall) -> Result<(), ExecError>,
+    {
         let regs = self.arch.umode_regs.gprs.a_regs();
         let cflow = match HypCall::try_from_registers(regs) {
             Ok(hypercall) => match hypercall {
@@ -356,6 +372,14 @@ impl UmodeTask {
                     ControlFlow::Continue(())
                 }
                 HypCall::NextOp(result) => ControlFlow::Break(Ok(result)),
+                hypc => {
+                    // Handle the rest through the caller-supplied `hypc_handler`.
+                    // All errors will immediately stop and reset U-mode.
+                    match hypc_handler(hypc) {
+                        Ok(()) => ControlFlow::Continue(()),
+                        Err(e) => ControlFlow::Break(Err(e)),
+                    }
+                }
             },
             Err(err) => {
                 // Hypervisor could not parse the hypercall. Stop running umode and return error.
@@ -379,11 +403,14 @@ impl UmodeTask {
     }
 
     // Run `umode` until result is returned.
-    fn run(&mut self) -> Result<OpResult, ExecError> {
+    fn run<F>(&mut self, hypc_handler: &F) -> Result<OpResult, ExecError>
+    where
+        F: Fn(HypCall) -> Result<(), ExecError>,
+    {
         loop {
             self.run_to_exit();
             match Trap::from_scause(self.arch.trap_csrs.scause).unwrap() {
-                Trap::Exception(UserEnvCall) => match self.handle_ecall() {
+                Trap::Exception(UserEnvCall) => match self.handle_ecall(hypc_handler) {
                     ControlFlow::Continue(_) => continue,
                     ControlFlow::Break(res) => break res,
                 },

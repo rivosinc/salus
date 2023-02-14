@@ -1677,7 +1677,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             certout_len,
         };
         // Send request to U-mode.
-        Ok(UmodeTask::execute_request(request, Some(shared_data))?)
+        Ok(UmodeTask::execute_request(
+            request,
+            Some(shared_data),
+            &UmodeTask::only_std_hypcalls,
+        )?)
     }
 
     fn guest_extend_measurement(

@@ -1,6 +1,6 @@
 // Copyright (c) 2021 The RustCrypto Project Developers
-// Copyright (c) 2022 by Rivos Inc.
-// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-FileCopyrightText: 2023 Rivos Inc.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pure Rust, heapless attestation crate.

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2023 Rivos Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Path variables:
 #
 #  RV64_PREFIX: Path prefix for riscv64 toolchain. Default: use toolchain in $PATH.

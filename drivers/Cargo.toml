@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2023 Rivos Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "drivers"
 version = "0.1.0"
@@ -22,4 +26,3 @@ static_assertions = "1.1"
 tock-registers = { version = "0.7" }
 sbi_rs = { path = "../sbi-rs" }
 s_mode_utils = { path = "../s-mode-utils" }
-

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2023 Rivos Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "libuser"
 version = "0.1.0"

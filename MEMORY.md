@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2023 Rivos Inc.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Memory Initialization
 
 At startup, memory layout is discovered from the device tree and used to build

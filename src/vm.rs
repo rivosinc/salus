@@ -1680,7 +1680,18 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(UmodeTask::execute_request(
             request,
             Some(shared_data),
-            &UmodeTask::only_std_hypcalls,
+            &|hypc| match hypc {
+                u_mode_api::HypCall::ExtSign {
+                    msg_addr: _,
+                    msg_size: _,
+                    sign_addr: _,
+                    sign_size: _,
+                } => {
+                    println!("Signing!");
+                    Ok(())
+                }
+                _ => Err(ExecError::UnhandledHypCall(hypc)),
+            },
         )?)
     }
 

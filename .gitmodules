@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2023 Rivos Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [submodule "sbi-rs"]
 	path = sbi-rs
 	url = https://github.com/rivosinc/sbi-rs

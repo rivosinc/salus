@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2023 Rivos Inc.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 A micro hypervisor for RISC-V systems.
 
 # Quick Start

@@ -4,7 +4,6 @@
 
 use arrayvec::ArrayVec;
 use attestation::AttestationManager;
-use core::arch::global_asm;
 use core::marker::PhantomData;
 use drivers::{imsic::*, iommu::*, pci::PciBarPage, pci::PciDevice, pci::PcieRoot};
 use page_tracking::{
@@ -66,8 +65,6 @@ pub enum InstructionFetchError {
 }
 
 pub type InstructionFetchResult = core::result::Result<DecodedInstruction, InstructionFetchError>;
-
-global_asm!(include_str!("guest_mem.S"));
 
 // The copy to/from guest memory routines defined in guest_mem.S.
 extern "C" {

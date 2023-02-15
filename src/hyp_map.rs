@@ -18,6 +18,12 @@ use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, C
 use static_assertions::const_assert;
 use sync::Once;
 
+// The copy to/from guest memory routines defined in umode_mem.S.
+extern "C" {
+    fn _copy_to_user(dest_addr: u64, src: *const u8, len: usize) -> usize;
+    fn _copy_from_user(dest: *mut u8, src_addr: u64, len: usize) -> usize;
+}
+
 // Maximum number of regions unique to every pagetable (private).
 const MAX_PRIVATE_REGIONS: usize = 32;
 // Maximum number of regions shared across all pagetables.
@@ -45,6 +51,10 @@ pub enum Error {
     UnmapFailed,
     /// U-mode Shared Memory Error.
     UmodeShared(VolatileMemoryError),
+    /// Invalid U-mode address.
+    InvalidAddress,
+    /// Page Fault while accessing U-mode memory.
+    UmodePageFault(RawAddr<SupervisorVirt>, usize),
 }
 
 // Represents a virtual address region of the hypervisor that will be the same in all pagetables.
@@ -436,6 +446,42 @@ impl HypMap {
         match slot {
             UmodeSlotId::A => UMODE_MAPPINGS_A_PAGE_ADDR,
             UmodeSlotId::B => UMODE_MAPPINGS_B_PAGE_ADDR,
+        }
+    }
+
+    pub fn copy_from_umode(dest: &mut [u8], src: RawAddr<SupervisorVirt>) -> Result<(), Error> {
+        if !is_valid_umode_range(src.bits(), dest.len()) {
+            return Err(Error::InvalidAddress);
+        }
+        // Reading from user mapping, set SUM in SSTATUS.
+        CSR.sstatus.modify(sstatus::sum.val(1));
+        // Safety: _copy_from_user internally detects and handles an invalid u-mode address
+        // in `src`, and copies at most `dest.len()` bytes.
+        let bytes = unsafe { _copy_from_user(dest.as_mut_ptr(), src.bits(), dest.len()) };
+        // Restore SUM.
+        CSR.sstatus.modify(sstatus::sum.val(0));
+        if bytes == dest.len() {
+            Ok(())
+        } else {
+            Err(Error::UmodePageFault(src, bytes))
+        }
+    }
+
+    pub fn copy_to_umode(dest: RawAddr<SupervisorVirt>, src: &[u8]) -> Result<(), Error> {
+        if !is_valid_umode_range(dest.bits(), src.len()) {
+            return Err(Error::InvalidAddress);
+        }
+        // Writing to user mapping, set SUM in SSTATUS.
+        CSR.sstatus.modify(sstatus::sum.val(1));
+        // Safety: _copy_to_user internally detects and handles an invalid u-mode address
+        // in `dest`, and copies at most `src.len()` bytes.
+        let bytes = unsafe { _copy_to_user(dest.bits(), src.as_ptr(), src.len()) };
+        // Restore SUM.
+        CSR.sstatus.modify(sstatus::sum.val(0));
+        if bytes == src.len() {
+            Ok(())
+        } else {
+            Err(Error::UmodePageFault(dest, bytes))
         }
     }
 

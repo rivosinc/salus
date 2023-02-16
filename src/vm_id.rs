@@ -6,6 +6,9 @@ use riscv_page_tables::tlb;
 use riscv_regs::{hgatp, ReadWriteable, Readable, Writeable, CSR};
 use spin::Once;
 
+/// Number of supported bits for VMID in HGATP csr.
+static VMIDLEN: Once<u64> = Once::new();
+
 /// Represents the VMID tag for a VM, as programmed into the HGATP CSR. VMIDs are versioned in
 /// order to detect rollover of the VMID counter.
 #[derive(Clone, Copy, Debug, Default)]
@@ -28,7 +31,6 @@ impl VmId {
 
 /// Tracks the assignment of VMIDs for a particular physcial CPU.
 pub struct VmIdTracker {
-    vmid_bits: Once<u64>,
     next_vmid: u64,
     current_version: u64,
 }
@@ -43,10 +45,13 @@ fn get_vmid_bits() -> u64 {
 }
 
 impl VmIdTracker {
+    pub fn init() {
+        VMIDLEN.call_once(get_vmid_bits);
+    }
+
     /// Returns an initialized `VmIdTracker`.
     pub const fn new() -> Self {
         Self {
-            vmid_bits: Once::new(),
             next_vmid: 0,
             current_version: 0,
         }
@@ -59,7 +64,8 @@ impl VmIdTracker {
 
     /// Assigns a VMID, rolling over and flushing the TLB if necessary.
     pub fn next_vmid(&mut self) -> VmId {
-        let vmid_bits = self.vmid_bits.call_once(get_vmid_bits);
+        // Unwrap okay: this is called after `init()`
+        let vmid_bits = *VMIDLEN.get().unwrap();
         if self.next_vmid == 0 {
             // We rolled over. Bump the version and flush everything since we're now potentially
             // reusing old VMIDs.

@@ -60,6 +60,8 @@ impl PerCpu {
             .unwrap();
         PER_CPU_BASE.call_once(|| pcpu_base);
 
+        VmIdTracker::init();
+
         // Now initialize each PerCpu structure.
         for i in 0..cpu_info.num_cpus() {
             let cpu_id = CpuId::new(i);

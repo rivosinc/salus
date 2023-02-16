@@ -5,6 +5,7 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,7 +36,7 @@ jobs:
     - uses: actions/cache/restore@v3
       with:
         path: ./riscv64-unknown-elf-objcopy
-        key: objcopy       
+        key: objcopy
     - name: Build
       run: make salus
     - name: Build tellus

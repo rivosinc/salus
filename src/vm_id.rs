@@ -44,6 +44,12 @@ fn get_vmid_bits() -> u64 {
     vmid_bits
 }
 
+/// Returns the VMID length.
+pub fn get_vmid_len() -> u64 {
+    // Unwrap okay: this is called after `VmIdTracker::init()`
+    *VMIDLEN.get().unwrap()
+}
+
 impl VmIdTracker {
     pub fn init() {
         VMIDLEN.call_once(get_vmid_bits);
@@ -64,8 +70,7 @@ impl VmIdTracker {
 
     /// Assigns a VMID, rolling over and flushing the TLB if necessary.
     pub fn next_vmid(&mut self) -> VmId {
-        // Unwrap okay: this is called after `init()`
-        let vmid_bits = *VMIDLEN.get().unwrap();
+        let vmid_bits = get_vmid_len();
         if self.next_vmid == 0 {
             // We rolled over. Bump the version and flush everything since we're now potentially
             // reusing old VMIDs.

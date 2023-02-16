@@ -16,7 +16,7 @@ use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::smp::PerCpu;
 use crate::vm::{MmioOpcode, MmioOperation, VmExitCause};
-use crate::vm_id::VmId;
+use crate::vm_id::*;
 use crate::vm_interrupts::{self, VmCpuExtInterrupts};
 use crate::vm_pages::{ActiveVmPages, FinalizedVmPages, PinnedPages};
 use crate::vm_pmu::VmPmuState;
@@ -105,6 +105,7 @@ pub struct GuestVsCsrs {
 pub struct GuestVirtualHsCsrs {
     hie: u64,
     hgeie: u64,
+    hgatp: u64,
 }
 
 /// CSRs written on an exit from virtualization that are used by the hypervisor to determine the cause
@@ -993,6 +994,28 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     } else {
                         Ok(0)
                     }
+                }
+                CSR_HGATP => {
+                    let prev = self.arch.regs.virtual_hs_csrs.hgatp;
+                    let vmid_len = get_vmid_len();
+
+                    let mut valid = LocalRegisterCopy::new(0);
+                    valid.modify(hgatp::vmid.val((1 << vmid_len) - 1));
+
+                    // Mode field represents a decimal value which can have overlapping bits as well.
+                    // For example, if we support mode = 9 and Host writes mode = 8 to check if it's
+                    // supported or not, the normal masking logic (valid.get() & mask & value) will
+                    // produce 8 as the bits in it are all present in 9. So we need to handle this
+                    // separately here and only allow supported mode writes.
+                    if LocalRegisterCopy::new(value).read(hgatp::mode) == T::HGATP_MODE {
+                        valid.modify(hgatp::mode.val(T::HGATP_MODE));
+                    } else {
+                        valid.modify(hgatp::mode.val(0));
+                    }
+
+                    self.arch.regs.virtual_hs_csrs.hgatp =
+                        (prev & !mask) | (valid.get() & mask & value);
+                    Ok(prev)
                 }
                 // If the vCPU is getting an interrupt injected via HVICTL, we'll trap on accesses to
                 // SIE, SIP, and STIMECMP. Just forward the access to the appropriate VS-level CSR.

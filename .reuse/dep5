@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: crosvm
+Upstream-Contact: <crosvm-dev@google.com>
+Source: https://chromium.googlesource.com/crosvm/crosvm
+
+Files: data-model/*
+Copyright: Copyright 2017 The Chromium OS Authors
+License: LicenseRef-ChromiumOS-BSD-style

@@ -25,6 +25,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 enum BindStatus {
     Binding(CpuId, ImsicFileId),
     Bound(CpuId, ImsicFileId),
+    // Rebinding has old CpuId and old ImsicFileId first and new ones later.
     Rebinding(CpuId, ImsicFileId, CpuId, ImsicFileId),
     Cloned(CpuId, ImsicFileId),
     Unbinding(CpuId, ImsicFileId),
@@ -308,7 +309,7 @@ impl VmCpuExtInterrupts {
             return Err(Error::DeniedInterruptId(id));
         }
         match self.bind_status {
-            BindStatus::Bound(cpu_id, file) => {
+            BindStatus::Bound(cpu_id, file) | BindStatus::Rebinding(_, _, cpu_id, file) => {
                 // Unwrap ok: CPU ID and file must be valid if a vCPU is bound to it.
                 Imsic::get().send_ipi_raw(cpu_id, file, id as u32).unwrap();
             }

@@ -308,6 +308,10 @@ enum VmRegionType {
     Unsharing(TlbVersion),
     // Temporary region type for regions that are being updated.
     Updating,
+    // Memory that is private to this VM and marked removable.
+    ConfidentialRemovable,
+    // Memory that is shared with the host and marked removable.
+    SharedRemovable,
 }
 
 // A contiguous region of guest physical address space.

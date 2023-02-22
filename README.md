@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 
 A micro hypervisor for RISC-V systems.
 
+[![REUSE status](https://api.reuse.software/badge/github.com/rivosinc/salus)](https://api.reuse.software/info/github.com/rivosinc/salus)
+
 # Quick Start
 
 ## Building

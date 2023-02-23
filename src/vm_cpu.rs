@@ -29,7 +29,6 @@ pub enum Error {
     VmCpuRunning,
     VmCpuOff,
     VmCpuAlreadyPowered,
-    VmCpuBlocked,
     WrongAddressSpace,
     InvalidSharedStatePtr,
     InsufficientSharedStatePages,
@@ -366,7 +365,7 @@ struct PrevTlb {
 }
 
 // An operation that's pending a return value from the vCPU's host.
-enum PendingOperation {
+pub enum PendingOperation {
     Mmio(MmioOperation),
     Ecall(SbiMessage),
 }
@@ -560,8 +559,6 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
     /// Runs this vCPU until it traps.
     pub fn run(&mut self) -> VmCpuTrap {
-        self.complete_pending_op();
-
         match self.host_context {
             VmCpuParent::HostVm(ref host_vcpu) => {
                 // TODO: Consider bailing out early if any of the below host interrupts are pending.
@@ -820,10 +817,10 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
         use VmExitCause::*;
         match cause {
-            ResumableEcall(msg) | FatalEcall(msg) | BlockingEcall(msg, _) => {
+            ResumableEcall(msg) | FatalEcall(msg) => {
                 self.report_ecall_exit(msg);
             }
-            ForwardedEcall(msg) => {
+            ForwardedEcall(msg) | BlockingEcall(msg) => {
                 self.report_ecall_exit(msg);
                 self.arch.pending_op = Some(PendingOperation::Ecall(msg));
             }
@@ -871,8 +868,6 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
 
         if cause.is_fatal() {
             self.status_set.next_status = VmCpuStatus::PoweredOff;
-        } else if let BlockingEcall(_, tlb_version) = cause {
-            self.status_set.next_status = VmCpuStatus::Blocked(tlb_version);
         }
     }
 
@@ -1111,7 +1106,13 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     }
 
     // Completes any pending MMIO or ECALL result from the host for this vCPU.
-    fn complete_pending_op(&mut self) {
+    pub fn try_complete_pending_op<F, E>(
+        &mut self,
+        ecall_completion: F,
+    ) -> core::result::Result<(), E>
+    where
+        F: Fn(&SbiMessage, SbiReturnType) -> core::result::Result<(), E>,
+    {
         match self.arch.pending_op {
             Some(PendingOperation::Mmio(mmio_op)) => {
                 // Complete any pending load operations. The host is expected to have written the
@@ -1160,11 +1161,14 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     }),
                 };
 
+                ecall_completion(&msg, sbi_ret)?;
+
                 self.set_ecall_result(sbi_ret);
             }
             None => (),
         }
         self.arch.pending_op = None;
+        Ok(())
     }
 
     fn save(&mut self) {
@@ -1359,8 +1363,6 @@ pub enum VmCpuStatus {
     Runnable,
     /// The vCPU has been claimed exclusively for running on a (physical) CPU.
     Running,
-    /// The vCPU is blocked from running until the VM reaches the given TLB version.
-    Blocked(TlbVersion),
 }
 
 /// Represents a single virtual CPU of a VM.
@@ -1429,10 +1431,7 @@ impl VmCpu {
         let mut status = self.status.write();
         use VmCpuStatus::*;
         match *status {
-            Blocked(tlb_version) if tlb_version > vm_pages.min_tlb_version() => {
-                Err(Error::VmCpuBlocked)
-            }
-            Runnable | Blocked(_) => {
+            Runnable => {
                 if self.guest_id != vm_pages.page_owner_id() {
                     return Err(Error::WrongAddressSpace);
                 }

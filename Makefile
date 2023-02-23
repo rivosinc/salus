@@ -30,6 +30,7 @@ BUILDROOT_IMAGE := $(BUILDROOT)/output/images/rootfs.ext2
 
 RELEASE_BINS := target/riscv64gc-unknown-none-elf/release/
 DEBUG_BINS := target/riscv64gc-unknown-none-elf/debug/
+TEST_BINS := target/riscv64gc-unknown-none-elf/debug/deps/
 
 KERNEL_ADDR := 0xc0200000
 INITRD_ADDR := 0xc2200000
@@ -88,6 +89,9 @@ salus: umode sbirs
 salus_debug: umode sbirs
 	cargo build $(CARGO_FLAGS) --bin salus
 
+salus_test:
+	cargo test --no-run $(CARGO_FLAGS) --bin salus
+
 tellus_bin: tellus
 	${OBJCOPY} -O binary $(RELEASE_BINS)tellus tellus_raw
 	${OBJCOPY} -O binary $(RELEASE_BINS)guestvm guestvm_raw
@@ -114,11 +118,19 @@ sbirs:
 
 # Runnable targets:
 #
+#  run_salus_test: runs salus unit tests under qemu
 #  run_tellus_gdb: Run Tellus as the host VM with GDB debugging enabled.
 #  run_tellus: Run Tellus as the host VM.
 #  run_linux: Run a bare Linux kernel as the host VM.
 #  run_debian: Run a Linux kernel as the host VM with a Debian rootfs.
 #  run_buildroot: Run a Linux kernel as the host VM with a buildroot rootfs
+
+run_salus_test: salus_test
+	$(QEMU_BIN) \
+		-s $(MACH_ARGS) \
+		-kernel $(TEST_BINS)salus*[0-9] \
+		-device guest-loader,kernel=tellus_guestvm,addr=$(KERNEL_ADDR) \
+		$(EXTRA_QEMU_ARGS)
 
 run_tellus_gdb: tellus_bin salus_debug
 	$(QEMU_BIN) \

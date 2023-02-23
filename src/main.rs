@@ -19,6 +19,18 @@
     is_some_and,
     negative_impls
 )]
+#![feature(custom_test_frameworks)]
+#![test_runner(crate::test_runner)]
+#![reexport_test_harness_main = "test_main"]
+#![cfg_attr(test, allow(unused))]
+
+#[cfg(test)]
+fn test_runner(tests: &[&dyn Fn()]) {
+    println!("Running {} tests\n", tests.len());
+    for test in tests {
+        test();
+    }
+}
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
@@ -299,7 +311,30 @@ fn check_vector_width() {
     CSR.sstatus.read_and_clear_bits(sstatus::vs::Dirty.value);
 }
 
+/// The entry point for the test runner
+#[cfg(test)]
+#[no_mangle]
+extern "C" fn kernel_init(_hart_id: u64, _fdt_addr: u64) {
+    setup_csrs();
+    SbiConsoleV01::set_as_console();
+
+    println!("\n\nSalus: Booting into test runner");
+
+    // test_main created automatically by test_harness
+    test_main();
+
+    poweroff();
+}
+
+#[test_case]
+fn example_test() {
+    println!("example test");
+    assert!(true);
+    println!("OK\n");
+}
+
 /// The entry point of the Rust part of the kernel.
+#[cfg(not(test))]
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     // Reset CSRs to a sane state.
@@ -526,6 +561,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     poweroff();
 }
 
+#[cfg(test)]
+#[no_mangle]
+extern "C" fn secondary_init(hart_id: u64) {}
+
+#[cfg(not(test))]
 #[no_mangle]
 extern "C" fn secondary_init(hart_id: u64) {
     setup_csrs();

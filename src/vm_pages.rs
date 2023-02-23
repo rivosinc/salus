@@ -42,6 +42,7 @@ pub enum Error {
     VmRegionNotRemovable,
     InvalidMapRegion,
     EmptyPageRange,
+    PageRangeNotEmpty,
     Measurement(attestation::Error),
     NoImsicVirtualization,
     ImsicGeometryAlreadySet,
@@ -487,6 +488,67 @@ impl VmRegionList {
         Ok(VmRegionUpdater::new(self, index, region_type))
     }
 
+    // Updates the region type with the new provided type. The region must already exist
+    // and be marked with the expected type. If the range covers only a subrange of the
+    // region, it is split accordingly.
+    fn update_in_place(
+        &mut self,
+        start: GuestPageAddr,
+        end: GuestPageAddr,
+        region_type: VmRegionType,
+        new_region_type: VmRegionType,
+        coalesce: bool,
+    ) -> Result<()> {
+        let mut index = self
+            .regions
+            .iter()
+            .position(|r| r.start <= start && end <= r.end && r.region_type == region_type)
+            .ok_or(Error::VmRegionNotFound)?;
+
+        // Make sure we have space to split the region.
+        let to_split = &self.regions[index].clone();
+        let mut to_reserve = 0;
+        if to_split.start != start {
+            to_reserve += 1;
+        }
+        if to_split.end != end {
+            to_reserve += 1;
+        }
+        if self.regions.remaining_capacity() < to_reserve {
+            return Err(Error::InsufficientVmRegionSpace);
+        }
+
+        // Now do the split, marking the range with the `new_region_type` type.
+        if to_split.start != start {
+            let prev = VmRegion {
+                start: to_split.start,
+                end: start,
+                region_type,
+            };
+            self.regions.insert(index, prev);
+            index += 1;
+        }
+        self.regions[index] = VmRegion {
+            start,
+            end,
+            region_type: new_region_type,
+        };
+        if to_split.end != end {
+            let next = VmRegion {
+                start: end,
+                end: to_split.end,
+                region_type,
+            };
+            self.regions.insert(index + 1, next);
+        }
+
+        if coalesce {
+            self.try_coalesce_at(index);
+        }
+
+        Ok(())
+    }
+
     // Calls `update_fn` on each region, updating the region to the returned `VmRegionType`. No
     // action is taken if `update_fn` returns `None`.
     fn update_all<F>(&mut self, mut update_fn: F)
@@ -813,17 +875,11 @@ pub struct ActiveVmPages<'a, T: GuestStagePagingMode> {
 
 impl<'a, T: GuestStagePagingMode> Drop for ActiveVmPages<'a, T> {
     fn drop(&mut self) {
-        // Unwrap ok since tlb_tracker won't increment the version while there are outstanding
-        // references.
-        let flush_completed = self
-            .vm_pages
+        self.vm_pages
             .inner
             .tlb_tracker
             .put_version(self.tlb_version)
             .unwrap();
-        if flush_completed {
-            self.vm_pages.complete_pending_unassignment();
-        }
     }
 }
 
@@ -1262,6 +1318,146 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         self.do_remove_region(page_addr, len, VmRegionType::Mmio)
     }
 
+    /// Converts the specified memory region from confidential to shared.
+    pub fn share_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_convert_mem_region(page_addr, len, true)
+    }
+
+    /// Converts the specified memory region from shared to confidential.
+    pub fn unshare_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_convert_mem_region(page_addr, len, false)
+    }
+
+    fn do_convert_mem_region(&self, page_addr: GuestPageAddr, len: u64, share: bool) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+
+        let (region_type, new_region_type) = if share {
+            // Check the address range lies within a "Confidential" region of guest physical
+            // address space and update the region type to "ConfidentialRemovable".
+            (
+                VmRegionType::Confidential,
+                VmRegionType::ConfidentialRemovable,
+            )
+        } else {
+            // Check the address range lies within a "Shared" region of guest physical address
+            // space and update the region type to "SharedRemovable".
+            (VmRegionType::Shared, VmRegionType::SharedRemovable)
+        };
+        self.inner.regions.write().update_in_place(
+            page_addr,
+            end,
+            region_type,
+            new_region_type,
+            false,
+        )?;
+
+        Ok(())
+    }
+
+    /// Completes guest memory sharing by verifying the pages have been previously removed
+    /// and by marking the region as "Shared".
+    pub fn complete_share_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_complete_convert_mem_region(page_addr, len, true)
+    }
+
+    /// Completes guest memory unsharing by verifying the pages have been previously removed
+    /// and by marking the region as "Confidential".
+    pub fn complete_unshare_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_complete_convert_mem_region(page_addr, len, false)
+    }
+
+    fn do_complete_convert_mem_region(
+        &self,
+        page_addr: GuestPageAddr,
+        len: u64,
+        share: bool,
+    ) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+
+        // Check all the pages have been removed.
+        if !self.inner.root.range_is_empty(page_addr, len) {
+            return Err(Error::PageRangeNotEmpty);
+        }
+
+        let (region_type, new_region_type) = if share {
+            // Check the address range lies within a "ConfidentialRemovable" region of guest
+            // physical address space and update the region type to "Shared".
+            (VmRegionType::ConfidentialRemovable, VmRegionType::Shared)
+        } else {
+            // Check the address range lies within a "SharedRemovable" region of guest physical
+            // address space and update the region type to "Confidential".
+            (VmRegionType::SharedRemovable, VmRegionType::Confidential)
+        };
+        self.inner.regions.write().update_in_place(
+            page_addr,
+            end,
+            region_type,
+            new_region_type,
+            true,
+        )?;
+
+        Ok(())
+    }
+
+    /// The host has rejected the sharing request, meaning we must revert the region back
+    /// to its previous state.
+    pub fn reject_share_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_reject_convert_mem_region(page_addr, len, true)
+    }
+
+    /// The host has rejected the unsharing request, meaning we must revert the region back
+    /// to its previous state.
+    pub fn reject_unshare_mem_region(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        self.do_reject_convert_mem_region(page_addr, len, false)
+    }
+
+    fn do_reject_convert_mem_region(
+        &self,
+        page_addr: GuestPageAddr,
+        len: u64,
+        share: bool,
+    ) -> Result<()> {
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+
+        let (region_type, new_region_type) = if share {
+            // Check the address range lies within a "ConfidentialRemovable" region of guest
+            // physical address space and update the region type to "Confidential".
+            (
+                VmRegionType::ConfidentialRemovable,
+                VmRegionType::Confidential,
+            )
+        } else {
+            // Check the address range lies within a "SharedRemovable" region of guest physical
+            // address space and update the region type to "Shared".
+            (VmRegionType::SharedRemovable, VmRegionType::Shared)
+        };
+        self.inner.regions.write().update_in_place(
+            page_addr,
+            end,
+            region_type,
+            new_region_type,
+            true,
+        )?;
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
     /// Converts the specified memory region from confidential to shared. Returns the TLB version
     /// at which the conversion will be completed.
     pub fn share_mem_region_begin(&self, page_addr: GuestPageAddr, len: u64) -> Result<TlbVersion> {
@@ -1334,6 +1530,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Converts the specified memory region from shared to confidential. Returns the TLB version
     /// at which the conversion will be completed.
     pub fn unshare_mem_region_begin(
@@ -1403,6 +1600,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     // Complete any (un)sharing operations with TLB versions older than the current one. Called
     // whenever a TLB shootdown is completed.
     fn complete_pending_unassignment(&self) {
@@ -1728,24 +1926,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
-    /// Returns the oldest TLB version with active references in this address space.
-    pub fn min_tlb_version(&self) -> TlbVersion {
-        self.inner.tlb_tracker.min_version()
-    }
-
     /// Initiates a page conversion fence for this `VmPages` by incrementing the TLB version.
     pub fn initiate_fence(&self) -> Result<()> {
-        let flush_completed = self.inner.tlb_tracker.increment()?;
+        self.inner.tlb_tracker.increment()?;
         // If we have an IOMMU context then we need to issue a fence there as well as our page
         // tables may be used for DMA translation.
         if let Some(iommu_context) = self.inner.iommu_context.get() {
             // Unwrap ok since we must have an IOMMU to have a `VmIommuContext`.
             Iommu::get().unwrap().fence(iommu_context.gscid, None);
-        }
-        // If there weren't any references to the old TLB version, we can immediately proceed
-        // with any pending unassignment operations.
-        if flush_completed {
-            self.complete_pending_unassignment();
         }
         Ok(())
     }

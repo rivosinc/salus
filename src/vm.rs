@@ -6,7 +6,7 @@ use attestation::{AttestationManager, Error as AttestationError, TcgPcrIndex};
 use core::{mem, num::Wrapping, ops::ControlFlow, ops::Neg, slice};
 use drivers::{imsic::*, pmu::PmuInfo};
 use page_tracking::collections::PageBox;
-use page_tracking::{LockedPageList, PageList, PageTracker, TlbVersion};
+use page_tracking::{LockedPageList, PageList, PageTracker};
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Trap, CSR};
@@ -132,7 +132,7 @@ impl MmioOperation {
 pub enum VmExitCause {
     FatalEcall(SbiMessage),
     ResumableEcall(SbiMessage),
-    BlockingEcall(SbiMessage, TlbVersion),
+    BlockingEcall(SbiMessage),
     ForwardedEcall(SbiMessage),
     PageFault(Exception, GuestPageAddr),
     MmioFault(MmioOperation, GuestPhysAddr),
@@ -490,7 +490,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .status();
         use VmCpuStatus::*;
         let status = match vcpu_status {
-            Runnable | Running | Blocked(_) => HartState::Started,
+            Runnable | Running => HartState::Started,
             PoweredOff => HartState::Stopped,
         };
         Ok(status as u64)
@@ -517,6 +517,47 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             .call_once(|| self.set_vcpu_htimedelta());
     }
 
+    /// Complete pending ecalls related to the conversion of guest memory regions.
+    fn complete_pending_ecall(
+        &self,
+        sbi_msg: &SbiMessage,
+        sbi_ret: SbiReturnType,
+    ) -> EcallResult<()> {
+        if let (SbiMessage::TeeGuest(tee_guest_function), SbiReturnType::Standard(sbi_std)) =
+            (sbi_msg, sbi_ret)
+        {
+            let host_a0 = sbi_std.error_code;
+            match tee_guest_function {
+                TeeGuestFunction::ShareMemory { addr, len } => {
+                    let addr = self.guest_addr_from_raw(*addr)?;
+                    if host_a0 == 0 {
+                        self.vm_pages()
+                            .complete_share_mem_region(addr, *len)
+                            .map_err(EcallError::from)?;
+                    } else {
+                        self.vm_pages()
+                            .reject_share_mem_region(addr, *len)
+                            .map_err(EcallError::from)?;
+                    }
+                }
+                TeeGuestFunction::UnshareMemory { addr, len } => {
+                    let addr = self.guest_addr_from_raw(*addr)?;
+                    if host_a0 == 0 {
+                        self.vm_pages()
+                            .complete_unshare_mem_region(addr, *len)
+                            .map_err(EcallError::from)?;
+                    } else {
+                        self.vm_pages()
+                            .reject_unshare_mem_region(addr, *len)
+                            .map_err(EcallError::from)?;
+                    }
+                }
+                _ => (),
+            }
+        }
+        Ok(())
+    }
+
     /// Run `vcpu_id` until an unhandled exit is encountered. Save/restore `host_context` on entry/exit
     /// from the vCPU being run.
     pub fn run_vcpu(&self, vcpu_id: u64, host_context: VmCpuParent) -> EcallResult<u64> {
@@ -533,6 +574,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let mut active_vcpu = vcpu
             .activate(self.vm_pages(), host_context)
             .map_err(|_| EcallError::Sbi(SbiError::InvalidParam))?;
+
+        // Complete a possible pending operation
+        active_vcpu.try_complete_pending_op(|sbi_msg, sbi_ret| {
+            self.complete_pending_ecall(sbi_msg, sbi_ret)
+        })?;
+
         // Run until there's an exit we can't handle.
         let cause = loop {
             let exit = active_vcpu.run();
@@ -2359,14 +2406,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                     self.unshare_mem_region(addr, len)
                 };
 
-                // Block if we need a TLB invalidation.
+                // Always block given we expect a TLB increment to be triggered from the host.
                 let action = match result {
-                    Ok(tlbv) if tlbv > self.vm_pages().min_tlb_version() => EcallAction::Break(
-                        VmExitCause::BlockingEcall(SbiMessage::TeeGuest(guest_func), tlbv),
-                        SbiReturn::success(0),
-                    ),
                     Ok(_) => EcallAction::Break(
-                        VmExitCause::ResumableEcall(SbiMessage::TeeGuest(guest_func)),
+                        VmExitCause::BlockingEcall(SbiMessage::TeeGuest(guest_func)),
                         SbiReturn::success(0),
                     ),
                     Err(_) => result.map(|_| 0).into(),
@@ -2403,17 +2446,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    fn share_mem_region(&self, addr: u64, len: u64) -> EcallResult<TlbVersion> {
+    fn share_mem_region(&self, addr: u64, len: u64) -> EcallResult<()> {
         let addr = self.guest_addr_from_raw(addr)?;
         self.vm_pages()
-            .share_mem_region_begin(addr, len)
+            .share_mem_region(addr, len)
             .map_err(EcallError::from)
     }
 
-    fn unshare_mem_region(&self, addr: u64, len: u64) -> EcallResult<TlbVersion> {
+    fn unshare_mem_region(&self, addr: u64, len: u64) -> EcallResult<()> {
         let addr = self.guest_addr_from_raw(addr)?;
         self.vm_pages()
-            .unshare_mem_region_begin(addr, len)
+            .unshare_mem_region(addr, len)
             .map_err(EcallError::from)
     }
 

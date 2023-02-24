@@ -355,6 +355,31 @@ impl PageTracker {
         info.complete_unassignment(tlb_version)
     }
 
+    /// Move the page to a blocked state.
+    pub fn block_page<P: InvalidatedPhysPage>(
+        &self,
+        page: P,
+        tlb_version: TlbVersion,
+    ) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(page.addr()).unwrap();
+        info.block(tlb_version)
+    }
+
+    /// Move the page back to the state it was before being blocked.
+    pub fn unblock_page(&self, addr: SupervisorPageAddr) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr).unwrap();
+        info.unblock()
+    }
+
+    /// Remove the page, moving it to either "Mapped" or "Converted" state.
+    pub fn remove_page(&self, addr: SupervisorPageAddr) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr).unwrap();
+        info.remove()
+    }
+
     /// Releases an exclusive reference to a "ConvertedLocked" page.
     pub fn unlock_page<P: ConvertedPhysPage>(&self, page: P) -> Result<()> {
         let mut page_tracker = self.inner.lock();
@@ -480,6 +505,61 @@ impl PageTracker {
             info.owner() == Some(owner)
                 && info.mem_type() == MemType::Ram
                 && info.state() == PageState::VmState
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if `addr` is a page owned by `owner` and it's in a "Blocked" state with
+    /// type `mem_type`, or if `addr` is a page not owned by `owner` and it's in a "SharedBlocked"
+    /// state with type `mem_type`.
+    pub fn is_blocked_page(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        mem_type: MemType,
+    ) -> bool {
+        let mut page_tracker = self.inner.lock();
+        if let Ok(info) = page_tracker.get(addr) {
+            info.mem_type() == mem_type
+                && ((info.owner() == Some(owner) && info.is_blocked())
+                    || (info.owner() != Some(owner) && info.is_blocked_shared()))
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if the page is considered blockable.
+    pub fn is_blockable_page(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        mem_type: MemType,
+    ) -> bool {
+        let mut page_tracker = self.inner.lock();
+        if let Ok(info) = page_tracker.get(addr) {
+            info.mem_type() == mem_type
+                && ((info.owner() == Some(owner) && info.state() == PageState::Mapped)
+                    || (info.owner() != Some(owner) && info.is_shared()))
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if the page is considered removable.
+    pub fn is_removable_page(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+        mem_type: MemType,
+        tlb_version: TlbVersion,
+    ) -> bool {
+        let mut page_tracker = self.inner.lock();
+        if let Ok(info) = page_tracker.get(addr) {
+            info.is_removable(tlb_version)
+                && info.mem_type() == mem_type
+                && ((info.owner() == Some(owner) && info.is_blocked())
+                    || (info.owner() == Some(PageOwnerId::host()) && info.is_blocked_shared()))
         } else {
             false
         }

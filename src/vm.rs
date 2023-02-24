@@ -1573,12 +1573,30 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    fn guest_block_pages(&self, _guest_id: u64, _guest_addr: u64, _len: u64) -> EcallResult<u64> {
-        Err(EcallError::Sbi(SbiError::NotSupported))
+    fn guest_block_pages(&self, guest_id: u64, guest_addr: u64, len: u64) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let addr = self.guest_addr_from_raw(guest_addr)?;
+        guest_vm
+            .vm_pages()
+            .block_pages(addr, len)
+            .map_err(EcallError::from)?;
+        Ok(0)
     }
 
-    fn guest_unblock_pages(&self, _guest_id: u64, _guest_addr: u64, _len: u64) -> EcallResult<u64> {
-        Err(EcallError::Sbi(SbiError::NotSupported))
+    fn guest_unblock_pages(&self, guest_id: u64, guest_addr: u64, len: u64) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let addr = self.guest_addr_from_raw(guest_addr)?;
+        guest_vm
+            .vm_pages()
+            .unblock_pages(addr, len)
+            .map_err(EcallError::from)?;
+        Ok(0)
     }
 
     fn guest_promote_page(
@@ -1599,8 +1617,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Err(EcallError::Sbi(SbiError::NotSupported))
     }
 
-    fn guest_remove_pages(&self, _guest_id: u64, _guest_addr: u64, _len: u64) -> EcallResult<u64> {
-        Err(EcallError::Sbi(SbiError::NotSupported))
+    fn guest_remove_pages(&self, guest_id: u64, guest_addr: u64, len: u64) -> EcallResult<u64> {
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let addr = self.guest_addr_from_raw(guest_addr)?;
+        guest_vm
+            .vm_pages()
+            .remove_pages(addr, len)
+            .map_err(EcallError::from)?;
+        Ok(0)
     }
 
     fn handle_salus_test(

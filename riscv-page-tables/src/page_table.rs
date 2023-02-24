@@ -977,11 +977,12 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         Ok(mapper)
     }
 
-    fn do_invalidate_range<F>(
+    /// Verifies the entire virtual address range is mapped and that `pred` returns true for
+    /// each page, returning an iterator that yields the pages after invalidating them.
+    pub fn invalidate_range<F>(
         &self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
-        sparse: bool,
         mut pred: F,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
     where
@@ -1005,9 +1006,6 @@ impl<T: PagingMode> GuestStagePageTable<T> {
                         return Err(Error::PredicateFailed);
                     }
                 }
-                Unused(_) if sparse => {
-                    continue;
-                }
                 _ => {
                     return Err(Error::PageNotMapped);
                 }
@@ -1024,36 +1022,9 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             }))
     }
 
-    /// Verifies the entire virtual address range is mapped and that `pred` returns true for
-    /// each page, returning an iterator that yields the pages after invalidating them.
-    pub fn invalidate_range<F>(
-        &self,
-        vaddr: PageAddr<T::MappedAddressSpace>,
-        len: u64,
-        pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
-    where
-        F: FnMut(SupervisorPageAddr) -> bool,
-    {
-        self.do_invalidate_range(vaddr, len, false, pred)
-    }
-
-    /// Like `invalidate_range()`, but the virtual address range need not be entirely populated
-    /// with mapped pages. Any holes in the address range must be completely unmapped, i.e. there
-    /// must not be invalidated or locked PTEs.
-    pub fn invalidate_range_sparse<F>(
-        &self,
-        vaddr: PageAddr<T::MappedAddressSpace>,
-        len: u64,
-        pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
-    where
-        F: FnMut(SupervisorPageAddr) -> bool,
-    {
-        self.do_invalidate_range(vaddr, len, true, pred)
-    }
-
-    fn do_validate_range<F>(
+    /// Verifies the entire virtual address range is invalidated and that `pred` returns true
+    /// for each page, returning an iterator that yields the pages after validating them.
+    pub fn validate_range<F>(
         &self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
@@ -1096,20 +1067,6 @@ impl<T: PagingMode> GuestStagePageTable<T> {
                         .page_addr(),
                 )
             }))
-    }
-
-    /// Verifies the entire virtual address range is invalidated and that `pred` returns true
-    /// for each page, returning an iterator that yields the pages after validating them.
-    pub fn validate_range<F>(
-        &self,
-        vaddr: PageAddr<T::MappedAddressSpace>,
-        len: u64,
-        pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
-    where
-        F: FnMut(SupervisorPageAddr) -> bool,
-    {
-        self.do_validate_range(vaddr, len, pred)
     }
 
     /// Verifies the entire virtual address range is invalidated (or unpopulated) and that `pred`

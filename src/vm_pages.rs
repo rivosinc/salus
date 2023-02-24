@@ -304,12 +304,6 @@ enum VmRegionType {
     Imsic,
     // PCI BAR pages.
     Pci,
-    // Memory that started conversion from confidential to shared at the given TLB version.
-    Sharing(TlbVersion),
-    // Memory that started conversion from shared to confidential at the given TLB version.
-    Unsharing(TlbVersion),
-    // Temporary region type for regions that are being updated.
-    Updating,
     // Memory that is private to this VM and marked removable.
     ConfidentialRemovable,
     // Memory that is shared with the host and marked removable.
@@ -432,62 +426,6 @@ impl VmRegionList {
         Ok(())
     }
 
-    // Prepares to update region type of the range [`start`, `end`), which must be in an existing
-    // region of type `region_type`. Call `finish()` on the returned `VmRegionUpdater` to complete
-    // the update. If the returned `VmRegionUpdater` is dropped before calling `finish()`, the
-    // region returns to its previous type.
-    fn update(
-        &mut self,
-        start: GuestPageAddr,
-        end: GuestPageAddr,
-        region_type: VmRegionType,
-    ) -> Result<VmRegionUpdater> {
-        let mut index = self
-            .regions
-            .iter()
-            .position(|r| r.start <= start && end <= r.end && r.region_type == region_type)
-            .ok_or(Error::VmRegionNotFound)?;
-
-        // Make sure we have space to split the region.
-        let to_split = &self.regions[index].clone();
-        let mut to_reserve = 0;
-        if to_split.start != start {
-            to_reserve += 1;
-        }
-        if to_split.end != end {
-            to_reserve += 1;
-        }
-        if self.regions.remaining_capacity() < to_reserve {
-            return Err(Error::InsufficientVmRegionSpace);
-        }
-
-        // Now do the split, marking the range to be updated as 'Updating'.
-        if to_split.start != start {
-            let prev = VmRegion {
-                start: to_split.start,
-                end: start,
-                region_type,
-            };
-            self.regions.insert(index, prev);
-            index += 1;
-        }
-        self.regions[index] = VmRegion {
-            start,
-            end,
-            region_type: VmRegionType::Updating,
-        };
-        if to_split.end != end {
-            let next = VmRegion {
-                start: end,
-                end: to_split.end,
-                region_type,
-            };
-            self.regions.insert(index + 1, next);
-        }
-
-        Ok(VmRegionUpdater::new(self, index, region_type))
-    }
-
     // Updates the region type with the new provided type. The region must already exist
     // and be marked with the expected type. If the range covers only a subrange of the
     // region, it is split accordingly.
@@ -549,26 +487,6 @@ impl VmRegionList {
         Ok(())
     }
 
-    // Calls `update_fn` on each region, updating the region to the returned `VmRegionType`. No
-    // action is taken if `update_fn` returns `None`.
-    fn update_all<F>(&mut self, mut update_fn: F)
-    where
-        F: FnMut(&VmRegion) -> Option<VmRegionType>,
-    {
-        let mut i = 0;
-        while i < self.regions.len() {
-            let r = &mut self.regions[i];
-            if let Some(new_type) = update_fn(r) {
-                r.region_type = new_type;
-                // Need to coalesce since the region type might have changed. Unwrap ok here
-                // since we know 'i' is a valid index.
-                i = self.try_coalesce_at(i).unwrap() + 1;
-            } else {
-                i += 1;
-            }
-        }
-    }
-
     // Try to coalesce the region list at `index`, returning the index of the coalesced region.
     // Called after modifying the region list to coalesce entries with the same region type.
     fn try_coalesce_at(&mut self, mut index: usize) -> Option<usize> {
@@ -617,41 +535,6 @@ impl VmRegionList {
             .iter()
             .find(|r| r.start.bits() <= addr.bits() && r.end.bits() > addr.bits())
             .map(|r| r.region_type)
-    }
-}
-
-// A reference to a `VmRegion` that is in the process of being updated. The referenced region
-// is converted back into its previous region type if this object is dropped before `finish()`
-// is called.
-struct VmRegionUpdater<'a> {
-    region_list: &'a mut VmRegionList,
-    index: usize,
-    region_type: VmRegionType,
-}
-
-impl<'a> VmRegionUpdater<'a> {
-    // Creates a new `VmRegionUpdater` at `index` in `region_list` that will revert back to
-    // `region_type` when dropped.
-    fn new(region_list: &'a mut VmRegionList, index: usize, region_type: VmRegionType) -> Self {
-        Self {
-            region_list,
-            index,
-            region_type,
-        }
-    }
-
-    // Completes the update, setting the region type to `new_type`.
-    fn finish(mut self, new_type: VmRegionType) {
-        self.region_type = new_type;
-    }
-}
-
-impl<'a> Drop for VmRegionUpdater<'a> {
-    fn drop(&mut self) {
-        let to_update = &mut self.region_list.regions[self.index];
-        to_update.region_type = self.region_type;
-        // Need to coalesce again in case we reverted back to the old region type.
-        self.region_list.try_coalesce_at(self.index);
     }
 }
 
@@ -1455,171 +1338,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         )?;
 
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    /// Converts the specified memory region from confidential to shared. Returns the TLB version
-    /// at which the conversion will be completed.
-    pub fn share_mem_region_begin(&self, page_addr: GuestPageAddr, len: u64) -> Result<TlbVersion> {
-        let end = PageAddr::new(
-            RawAddr::from(page_addr)
-                .checked_increment(len)
-                .ok_or(Error::AddressOverflow)?,
-        )
-        .ok_or(Error::UnalignedAddress)?;
-        let mut regions = self.inner.regions.write();
-        let region = regions.update(page_addr, end, VmRegionType::Confidential)?;
-
-        // Zap any mapped pages.
-        let invalidated = self
-            .inner
-            .root
-            .invalidate_range_sparse(page_addr, len, |addr| {
-                self.inner
-                    .page_tracker
-                    .is_mapped_page(addr, self.inner.page_owner_id, MemType::Ram)
-            })
-            .map_err(Error::Paging)?;
-        let version = self.inner.tlb_tracker.current_version();
-        let mut num_pages = 0;
-        for paddr in invalidated {
-            // Safety: We've verified the typing of the page and we must have unique
-            // ownership since the page was mapped before it was invalidated.
-            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
-            // Unwrap ok: Page was mapped and has just been invalidated.
-            self.inner
-                .page_tracker
-                .unassign_page_begin(page, version)
-                .unwrap();
-            num_pages += 1;
-        }
-
-        // If the range was populated we need a TLB flush before the conversion to shared can
-        // be completed.
-        if num_pages != 0 {
-            region.finish(VmRegionType::Sharing(version));
-            Ok(version.increment())
-        } else {
-            region.finish(VmRegionType::Shared);
-            Ok(self.inner.tlb_tracker.min_version())
-        }
-    }
-
-    // Complete the pending unassignment of confidential pages in the given region.
-    fn share_mem_region_end(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        let version = self.inner.tlb_tracker.min_version();
-        let unmapped = self
-            .inner
-            .root
-            .unmap_range(page_addr, len, |addr| {
-                self.inner.page_tracker.is_unassignable_page(
-                    addr,
-                    self.inner.page_owner_id,
-                    MemType::Ram,
-                    version,
-                )
-            })
-            .map_err(Error::Paging)?;
-        for paddr in unmapped {
-            // Unwrap ok: we verified the page was unassignable above.
-            self.inner
-                .page_tracker
-                .unassign_page_complete(paddr, self.inner.page_owner_id, MemType::Ram, version)
-                .unwrap();
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    /// Converts the specified memory region from shared to confidential. Returns the TLB version
-    /// at which the conversion will be completed.
-    pub fn unshare_mem_region_begin(
-        &self,
-        page_addr: GuestPageAddr,
-        len: u64,
-    ) -> Result<TlbVersion> {
-        let end = PageAddr::new(
-            RawAddr::from(page_addr)
-                .checked_increment(len)
-                .ok_or(Error::AddressOverflow)?,
-        )
-        .ok_or(Error::UnalignedAddress)?;
-        let mut regions = self.inner.regions.write();
-        let region = regions.update(page_addr, end, VmRegionType::Shared)?;
-
-        // Zap any mapped pages. We don't track the TLB version in PageTracker, so just consume
-        // the iterator.
-        let num_pages = self
-            .inner
-            .root
-            .invalidate_range_sparse(page_addr, len, |addr| {
-                self.inner.page_tracker.is_shared_page(addr, MemType::Ram)
-                    && !self
-                        .inner
-                        .page_tracker
-                        .is_owned(addr, self.inner.page_owner_id)
-            })
-            .map_err(Error::Paging)?
-            .count();
-
-        // If the range was populated we need a TLB flush before the conversion to confidential can
-        // be completed.
-        if num_pages != 0 {
-            let version = self.inner.tlb_tracker.current_version();
-            region.finish(VmRegionType::Unsharing(version));
-            Ok(version.increment())
-        } else {
-            region.finish(VmRegionType::Confidential);
-            Ok(self.inner.tlb_tracker.min_version())
-        }
-    }
-
-    // Complete the pending unassignment of confidential pages in the given region.
-    fn unshare_mem_region_end(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
-        // We don't track TLB versions of shared pages in PageTracker, so the caller is responsible
-        // for making sure the flush has completed.
-        let unmapped = self
-            .inner
-            .root
-            .unmap_range(page_addr, len, |addr| {
-                self.inner.page_tracker.is_shared_page(addr, MemType::Ram)
-                    && !self
-                        .inner
-                        .page_tracker
-                        .is_owned(addr, self.inner.page_owner_id)
-            })
-            .map_err(Error::Paging)?;
-        for paddr in unmapped {
-            // Unwrap ok: We verified above that it's a shared page we don't own, therefore we
-            // must be able to drop our reference to it.
-            self.inner
-                .page_tracker
-                .release_page_by_addr(paddr, self.inner.page_owner_id)
-                .unwrap();
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    // Complete any (un)sharing operations with TLB versions older than the current one. Called
-    // whenever a TLB shootdown is completed.
-    fn complete_pending_unassignment(&self) {
-        let min_version = self.inner.tlb_tracker.min_version();
-        let mut regions = self.inner.regions.write();
-        regions.update_all(|r| {
-            let len = r.end.bits() - r.start.bits();
-            match r.region_type {
-                VmRegionType::Sharing(v) if v < min_version => self
-                    .share_mem_region_end(r.start, len)
-                    .ok()
-                    .map(|_| VmRegionType::Shared),
-                VmRegionType::Unsharing(v) if v < min_version => self
-                    .unshare_mem_region_end(r.start, len)
-                    .ok()
-                    .map(|_| VmRegionType::Confidential),
-                _ => None,
-            }
-        });
     }
 
     /// Locks `count` 4kB pages starting at `page_addr` for mapping of zero-filled pages in a

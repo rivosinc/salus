@@ -429,7 +429,7 @@ impl VmRegionList {
     // Updates the region type with the new provided type. The region must already exist
     // and be marked with the expected type. If the range covers only a subrange of the
     // region, it is split accordingly.
-    fn update_in_place(
+    fn update(
         &mut self,
         start: GuestPageAddr,
         end: GuestPageAddr,
@@ -1231,13 +1231,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             // space and update the region type to "SharedRemovable".
             (VmRegionType::Shared, VmRegionType::SharedRemovable)
         };
-        self.inner.regions.write().update_in_place(
-            page_addr,
-            end,
-            region_type,
-            new_region_type,
-            false,
-        )?;
+        self.inner
+            .regions
+            .write()
+            .update(page_addr, end, region_type, new_region_type, false)?;
 
         Ok(())
     }
@@ -1281,13 +1278,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             // address space and update the region type to "Confidential".
             (VmRegionType::SharedRemovable, VmRegionType::Confidential)
         };
-        self.inner.regions.write().update_in_place(
-            page_addr,
-            end,
-            region_type,
-            new_region_type,
-            true,
-        )?;
+        self.inner
+            .regions
+            .write()
+            .update(page_addr, end, region_type, new_region_type, true)?;
 
         Ok(())
     }
@@ -1329,13 +1323,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             // address space and update the region type to "Shared".
             (VmRegionType::SharedRemovable, VmRegionType::Shared)
         };
-        self.inner.regions.write().update_in_place(
-            page_addr,
-            end,
-            region_type,
-            new_region_type,
-            true,
-        )?;
+        self.inner
+            .regions
+            .write()
+            .update(page_addr, end, region_type, new_region_type, true)?;
 
         Ok(())
     }

@@ -56,6 +56,14 @@ pub enum PageState {
 
     /// A Converted page that has been locked exclusively for assignment or reclaim.
     ConvertedLocked,
+
+    /// A Mapped page invalidated by the host at the given TLB version in the current owner's
+    /// address space.
+    Blocked(TlbVersion),
+
+    /// A Shared page invalidated by the host at the given TLB version in the current owner's
+    /// address space. The reference count of the page is recorded.
+    BlockedShared(u64, TlbVersion),
 }
 
 /// The maximum length for an ownership chain. Enough for the host VM to assign to a guest VM
@@ -117,15 +125,14 @@ impl PageInfo {
     pub fn owner(&self) -> Option<PageOwnerId> {
         use PageState::*;
         match self.state {
-            Converting(_) | Unassigning(_) | Converted | ConvertedLocked | Mapped | VmState
-            | Shared(_) => {
+            Reserved | Free | HypState => None,
+            _ => {
                 if !self.owners.is_empty() {
                     Some(self.owners[self.owners.len() - 1])
                 } else {
                     Some(PageOwnerId::hypervisor())
                 }
             }
-            _ => None,
         }
     }
 
@@ -151,10 +158,11 @@ impl PageInfo {
     }
 
     /// Pops the current owner if there is one, returning the page to the previous owner.
-    pub fn release(&mut self) -> PageTrackingResult<()> {
+    /// Takes into account the special case that the page was invalidated.
+    pub fn release(&mut self, was_invalidated: bool) -> PageTrackingResult<()> {
         use PageState::*;
         match self.state {
-            Mapped | VmState | Converted | Converting(_) | Unassigning(_) => {
+            Mapped | VmState | Converted | Converting(_) | Unassigning(_) | Blocked(_) => {
                 if self.owners.is_empty() {
                     Err(PageTrackingError::OwnerUnderflow) // Can't pop the last owner.
                 } else {
@@ -164,11 +172,18 @@ impl PageInfo {
                 }
             }
             ConvertedLocked => Err(PageTrackingError::PageLocked),
-            Shared(rc) => {
+            BlockedShared(rc, tlbv) if !was_invalidated => {
+                if let Some(rc) = rc.checked_sub(1) {
+                    self.state = BlockedShared(rc, tlbv);
+                    Ok(())
+                } else {
+                    Err(PageTrackingError::RefCountUnderflow)
+                }
+            }
+            Shared(rc) | BlockedShared(rc, _) => {
                 // Shared pages start with a RC of 1, so RC is always > 0 here
                 if let Some(rc) = rc.checked_sub(1) {
                     self.state = if rc == 0 { Mapped } else { Shared(rc) };
-                    // Unwrap ok: Shared pages must have an owner
                     Ok(())
                 } else {
                     Err(PageTrackingError::RefCountUnderflow)

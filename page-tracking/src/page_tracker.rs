@@ -57,6 +57,10 @@ pub enum Error {
     RefCountOverflow,
     /// The ref count was already 0.
     RefCountUnderflow,
+    /// This page is not in a state it can be blocked.
+    PageNotBlockable,
+    /// Attempt to unblock, promote, demote or remove a page that is not blocked.
+    PageNotBlocked,
 }
 
 /// Holds the result of page tracking operations.
@@ -241,7 +245,7 @@ impl PageTracker {
     pub fn release_page<P: PhysPage>(&self, page: P) -> Result<()> {
         let mut page_tracker = self.inner.lock();
         let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.release()?;
+        info.release(false)?;
         Ok(())
     }
 
@@ -254,7 +258,25 @@ impl PageTracker {
         if info.owner() != Some(owner) && !info.is_shared() {
             return Err(Error::OwnerMismatch);
         }
-        info.release()?;
+        info.release(false)?;
+        Ok(())
+    }
+
+    /// Releases the page at `addr` back to its previous owner if it's currently owned by `owner`
+    /// and is in a releasable state. Takes into account the special case where the page was
+    /// invalidated.
+    pub fn release_invalidated_page_by_addr(
+        &self,
+        addr: SupervisorPageAddr,
+        owner: PageOwnerId,
+    ) -> Result<()> {
+        let mut page_tracker = self.inner.lock();
+        let info = page_tracker.get_mut(addr)?;
+        // Shared pages might be owned by the parent
+        if info.owner() != Some(owner) && !info.is_shared() {
+            return Err(Error::OwnerMismatch);
+        }
+        info.release(true)?;
         Ok(())
     }
 

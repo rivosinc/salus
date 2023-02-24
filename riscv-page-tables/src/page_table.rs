@@ -414,7 +414,7 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
                     // Unwrap ok since the only usage of invalid PTEs we currently have is for
                     // converted pages.
                     page_tracker
-                        .release_page_by_addr(i.page_addr(), owner)
+                        .release_invalidated_page_by_addr(i.page_addr(), owner)
                         .unwrap();
                 }
                 _ => (),

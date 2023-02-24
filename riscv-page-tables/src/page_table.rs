@@ -37,6 +37,8 @@ pub enum Error {
     PageNotUnmappable,
     /// The requested range isn't converted.
     PageNotConverted,
+    /// The requested range isn't invalidated.
+    PageNotInvalidated,
     /// Attempt to lock a PTE that is already locked.
     PteLocked,
     /// Attempt to unlock a PTE that is not locked.
@@ -198,6 +200,11 @@ impl<'a, T: PagingMode> InvalidatedPte<'a, T> {
     /// Clears the PTE.
     fn clear(self) {
         self.pte.clear();
+    }
+
+    fn mark_valid(self) -> LeafPte<'a, T> {
+        self.pte.mark_valid();
+        LeafPte::new(self.pte, self.level)
     }
 }
 
@@ -1044,6 +1051,65 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         F: FnMut(SupervisorPageAddr) -> bool,
     {
         self.do_invalidate_range(vaddr, len, true, pred)
+    }
+
+    fn do_validate_range<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        len: u64,
+        mut pred: F,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    where
+        F: FnMut(SupervisorPageAddr) -> bool,
+    {
+        let num_pages = PageSize::num_4k_pages(len);
+        vaddr
+            .checked_add_pages(num_pages)
+            .ok_or(Error::AddressOverflow)?;
+        let mut inner = self.inner.lock();
+        for va in vaddr.iter_from().take(num_pages as usize) {
+            use TableEntryType::*;
+            match inner.walk(va.into()) {
+                Invalidated(pte) => {
+                    if !pte.level().is_leaf() {
+                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
+                    }
+                    if !pred(pte.page_addr()) {
+                        return Err(Error::PredicateFailed);
+                    }
+                }
+                _ => return Err(Error::PageNotInvalidated),
+            }
+        }
+
+        Ok(vaddr
+            .iter_from()
+            .take(num_pages as usize)
+            .filter_map(move |va| {
+                // Skip over unused PTEs -- we verified there were no unmapped or locked PTEs
+                // above.
+                Some(
+                    inner
+                        .get_invalidated_4k_leaf(va)
+                        .ok()?
+                        .mark_valid()
+                        .page_addr(),
+                )
+            }))
+    }
+
+    /// Verifies the entire virtual address range is invalidated and that `pred` returns true
+    /// for each page, returning an iterator that yields the pages after validating them.
+    pub fn validate_range<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        len: u64,
+        pred: F,
+    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    where
+        F: FnMut(SupervisorPageAddr) -> bool,
+    {
+        self.do_validate_range(vaddr, len, pred)
     }
 
     /// Verifies the entire virtual address range is invalidated (or unpopulated) and that `pred`

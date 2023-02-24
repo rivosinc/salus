@@ -39,6 +39,7 @@ pub enum Error {
     OverlappingVmRegion,
     InsufficientVmRegionSpace,
     VmRegionNotFound,
+    VmRegionNotRemovable,
     InvalidMapRegion,
     EmptyPageRange,
     Measurement(attestation::Error),
@@ -539,15 +540,13 @@ impl VmRegionList {
     }
 
     // Returns if the range [`start`, `end`) is fully contained within a region of type `region_type`.
-    fn contains(
-        &self,
-        start: GuestPageAddr,
-        end: GuestPageAddr,
-        region_type: VmRegionType,
-    ) -> bool {
+    fn contains<F>(&self, start: GuestPageAddr, end: GuestPageAddr, pred: F) -> bool
+    where
+        F: Fn(VmRegionType) -> bool,
+    {
         self.regions
             .iter()
-            .any(|r| r.start <= start && r.end >= end && r.region_type == region_type)
+            .any(|r| r.start <= start && r.end >= end && pred(r.region_type))
     }
 
     // Returns the type of the region that `addr` resides in, or `None` if it's not in any region.
@@ -616,7 +615,7 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let regions = vm_pages.regions.read();
-        if !regions.contains(page_addr, end, region_type) {
+        if !regions.contains(page_addr, end, |r| r == region_type) {
             return Err(Error::InvalidMapRegion);
         }
         let mapper = vm_pages
@@ -645,7 +644,7 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let regions = vm_pages.regions.read();
-        if !regions.contains(page_addr, end, region_type) {
+        if !regions.contains(page_addr, end, |r| r == region_type) {
             return Err(Error::InvalidMapRegion);
         }
         let mapper = vm_pages
@@ -1747,6 +1746,90 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         // with any pending unassignment operations.
         if flush_completed {
             self.complete_pending_unassignment();
+        }
+        Ok(())
+    }
+
+    /// Invalidates a page range.
+    pub fn block_pages(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        let invalidated = self
+            .inner
+            .root
+            .invalidate_range(page_addr, len, |addr| {
+                self.inner.page_tracker.is_blockable_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    MemType::Ram,
+                )
+            })
+            .map_err(Error::Paging)?;
+        let version = self.inner.tlb_tracker.current_version();
+        for paddr in invalidated {
+            // Safety: We've verified the typing of the page and its ownership
+            // before it was invalidated.
+            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
+            // Unwrap ok: Page was mapped or shared and has just been invalidated.
+            self.inner.page_tracker.block_page(page, version).unwrap();
+        }
+
+        Ok(())
+    }
+
+    /// Unblocks previously invalidated page range.
+    pub fn unblock_pages(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        let valid_pages = self
+            .inner
+            .root
+            .validate_range(page_addr, len, |addr| {
+                self.inner.page_tracker.is_blocked_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    MemType::Ram,
+                )
+            })
+            .map_err(Error::Paging)?;
+        for paddr in valid_pages {
+            // Unwrap ok: Page was blocked and has just been marked valid.
+            self.inner.page_tracker.unblock_page(paddr).unwrap();
+        }
+
+        Ok(())
+    }
+
+    /// Removes previously invalidated page range.
+    pub fn remove_pages(&self, page_addr: GuestPageAddr, len: u64) -> Result<()> {
+        // Check the address range lies within a removable region of guest physical address space.
+        let end = PageAddr::new(
+            RawAddr::from(page_addr)
+                .checked_increment(len)
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::UnalignedAddress)?;
+        let regions = self.inner.regions.read();
+        if !regions.contains(page_addr, end, |r| {
+            r == VmRegionType::ConfidentialRemovable || r == VmRegionType::SharedRemovable
+        }) {
+            return Err(Error::VmRegionNotRemovable);
+        }
+
+        // Does this need to be TLB current_version instead of TLB min_version?
+        let tlb_version = self.inner.tlb_tracker.min_version();
+        // Now check each page is removable before it is unmapped.
+        let unmapped = self
+            .inner
+            .root
+            .unmap_range(page_addr, len, |addr| {
+                self.inner.page_tracker.is_removable_page(
+                    addr,
+                    self.inner.page_owner_id,
+                    MemType::Ram,
+                    tlb_version,
+                )
+            })
+            .map_err(Error::Paging)?;
+        for paddr in unmapped {
+            // Unwrap ok: Page was blocked and has just been unmapped.
+            self.inner.page_tracker.remove_page(paddr).unwrap();
         }
         Ok(())
     }

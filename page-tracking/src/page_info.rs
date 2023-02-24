@@ -152,6 +152,14 @@ impl PageInfo {
         matches!(self.state, PageState::Reserved)
     }
 
+    pub fn is_blocked(&self) -> bool {
+        matches!(self.state, PageState::Blocked(_))
+    }
+
+    pub fn is_blocked_shared(&self) -> bool {
+        matches!(self.state, PageState::BlockedShared(_, _))
+    }
+
     /// Returns the page type.
     pub fn mem_type(&self) -> MemType {
         self.mem_type
@@ -322,6 +330,17 @@ impl PageInfo {
         }
     }
 
+    /// Returns if the page is Blocked or BlockedShared and can complete the removal at
+    /// the given `tlb_version`.
+    pub fn is_removable(&self, tlb_version: TlbVersion) -> bool {
+        use PageState::*;
+        match self.state {
+            Blocked(version) => version < tlb_version,
+            BlockedShared(_, version) => version < tlb_version,
+            _ => false,
+        }
+    }
+
     /// Returns if the page is Shared
     pub fn is_shared(&self) -> bool {
         use PageState::*;
@@ -385,6 +404,64 @@ impl PageInfo {
             }
             // TODO: Reclaim pages that are converting but not yet fully converted?
             _ => Err(PageTrackingError::PageNotReclaimable),
+        }
+    }
+
+    /// Invalidates the page for promotion/demotion or removal from the TVM's address space.
+    pub fn block(&mut self, tlb_version: TlbVersion) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            Mapped => {
+                self.state = Blocked(tlb_version);
+                Ok(())
+            }
+            Shared(rc) => {
+                self.state = BlockedShared(rc, tlb_version);
+                Ok(())
+            }
+            _ => Err(PageTrackingError::PageNotBlockable),
+        }
+    }
+
+    /// Unblocks an invalidated page.
+    pub fn unblock(&mut self) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            Blocked(_) => {
+                self.state = Mapped;
+                Ok(())
+            }
+            BlockedShared(rc, _) => {
+                self.state = Shared(rc);
+                Ok(())
+            }
+            _ => Err(PageTrackingError::PageNotBlocked),
+        }
+    }
+
+    /// Removes an invalidated page.
+    pub fn remove(&mut self) -> PageTrackingResult<()> {
+        use PageState::*;
+        match self.state {
+            Blocked(_) => {
+                if self.owners.is_empty() {
+                    Err(PageTrackingError::OwnerUnderflow) // Can't pop the last owner.
+                } else {
+                    self.owners.pop().unwrap();
+                    self.state = Converted;
+                    Ok(())
+                }
+            }
+            BlockedShared(rc, _) => {
+                // Shared pages start with a RC of 1, so RC is always > 0 here
+                if let Some(rc) = rc.checked_sub(1) {
+                    self.state = if rc == 0 { Mapped } else { Shared(rc) };
+                    Ok(())
+                } else {
+                    Err(PageTrackingError::RefCountUnderflow)
+                }
+            }
+            _ => Err(PageTrackingError::PageNotBlocked),
         }
     }
 

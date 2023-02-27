@@ -5,7 +5,7 @@
 use arrayvec::{ArrayString, ArrayVec};
 use core::fmt;
 use device_tree::{DeviceTree, DeviceTreeNode, DeviceTreeResult};
-use spin::Once;
+use sync::Once;
 
 const MAX_ISA_STRING_LEN: usize = 256;
 

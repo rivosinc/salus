@@ -4,7 +4,7 @@
 
 use page_tracking::PageTracker;
 use riscv_pages::*;
-use spin::Mutex;
+use sync::Mutex;
 
 use super::error::*;
 use crate::imsic::{GuestImsicGeometry, ImsicLocation, SupervisorImsicGeometry};

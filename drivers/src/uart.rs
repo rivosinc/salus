@@ -7,7 +7,7 @@ use device_tree::DeviceTree;
 use page_tracking::HwMemMap;
 use riscv_pages::{DeviceMemType, RawAddr};
 use s_mode_utils::print::*;
-use spin::{Mutex, Once};
+use sync::{Mutex, Once};
 
 /// Errors that can be returned by the UART driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -25,8 +25,8 @@ dependencies = [
  "hmac",
  "rice",
  "sbi_rs",
- "spin",
  "spki",
+ "sync",
  "typenum",
 ]
 
@@ -200,8 +200,8 @@ dependencies = [
  "riscv_regs",
  "s_mode_utils",
  "sbi_rs",
- "spin",
  "static_assertions",
+ "sync",
  "tock-registers",
 ]
 
@@ -327,7 +327,7 @@ name = "hyp_alloc"
 version = "0.1.0"
 dependencies = [
  "riscv_pages",
- "spin",
+ "sync",
 ]
 
 [[package]]
@@ -341,16 +341,6 @@ name = "libuser"
 version = "0.1.0"
 dependencies = [
  "u_mode_api",
-]
-
-[[package]]
-name = "lock_api"
-version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "327fa5b6a6940e4699ec49a9beae1ea4845c6bab9314e4f84ac68742139d8c53"
-dependencies = [
- "autocfg",
- "scopeguard",
 ]
 
 [[package]]
@@ -400,7 +390,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "riscv_pages",
- "spin",
+ "sync",
 ]
 
 [[package]]
@@ -511,7 +501,7 @@ version = "0.1.0"
 dependencies = [
  "page_tracking",
  "riscv_pages",
- "spin",
+ "sync",
 ]
 
 [[package]]
@@ -552,7 +542,7 @@ name = "s_mode_utils"
 version = "0.1.0"
 dependencies = [
  "sbi_rs",
- "spin",
+ "sync",
 ]
 
 [[package]]
@@ -581,8 +571,8 @@ dependencies = [
  "s_mode_utils",
  "sbi_rs",
  "sha2 0.10.2",
- "spin",
  "static_assertions",
+ "sync",
  "test_system",
  "u_mode_api",
 ]
@@ -595,12 +585,6 @@ dependencies = [
  "flagset",
  "static_assertions",
 ]
-
-[[package]]
-name = "scopeguard"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d29ab0c6d3fc0ee92fe66e2d99f700eab17a8d57d1c1d3b748380fb20baa78cd"
 
 [[package]]
 name = "semver"
@@ -676,9 +660,6 @@ name = "spin"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f6002a767bff9e83f8eeecf883ecb8011875a21ae8da43bffb817a57e78cc09"
-dependencies = [
- "lock_api",
-]
 
 [[package]]
 name = "spki"
@@ -713,6 +694,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync"
+version = "0.1.0"
+dependencies = [
+ "spin",
+]
+
+[[package]]
 name = "synstructure"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -742,7 +730,7 @@ dependencies = [
  "riscv_regs",
  "s_mode_utils",
  "sbi_rs",
- "spin",
+ "sync",
  "test_system",
 ]
 

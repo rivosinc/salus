@@ -22,6 +22,6 @@ hkdf = "0.12.3"
 hmac = "0.12.1"
 rice = { path = "..//rice" }
 sbi_rs = { path = "../sbi-rs" }
-spin = { version = "*", default-features = false, features = ["rwlock"] }
+sync = { path = "../sync" }
 spki = "0.6.0"
 typenum = "1.15.0"

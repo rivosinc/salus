@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use spin::Mutex;
+use sync::Mutex;
 
 pub use crate::{print, println};
 

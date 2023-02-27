@@ -18,7 +18,7 @@ use riscv_regs::{
     hgatp, hstatus, DecodedInstruction, Exception, LocalRegisterCopy, PrivilegeLevel, Readable,
     RiscvCsrInterface, Writeable, CSR,
 };
-use spin::{Mutex, Once, RwLock, RwLockReadGuard};
+use sync::{Mutex, Once, RwLock, RwLockReadGuard};
 
 use crate::hyp_map::{Error as HypMapError, HypMap, UmodeSlotId, UmodeSlotPerm};
 use crate::smp::PerCpu;

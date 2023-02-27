@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use sync::Mutex;
 
 use super::address::*;
 use super::config_space::PciConfigSpace;

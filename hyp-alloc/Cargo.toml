@@ -11,4 +11,4 @@ edition = "2021"
 
 [dependencies]
 riscv_pages = { path = "../riscv-pages" }
-spin = "*"
+sync = { path = "../sync" }

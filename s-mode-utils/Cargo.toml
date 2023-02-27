@@ -11,4 +11,4 @@ edition = "2021"
 
 [dependencies]
 sbi_rs = { path = "../sbi-rs" }
-spin = { version = "*", default-features = false }
+sync = { path = "../sync" }

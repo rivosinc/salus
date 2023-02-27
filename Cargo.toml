@@ -37,8 +37,8 @@ riscv_regs = { path = "./riscv-regs" }
 s_mode_utils = { path = "./s-mode-utils" }
 u_mode_api = { path = "./u-mode-api" }
 sbi_rs = { path = "./sbi-rs" }
-spin = { version = "*", default-features = false }
 sha2 = {version = "0.10", default-features = false }
+sync = { path = "./sync" }
 riscv_elf = { path = "./riscv-elf" }
 test_system = { path = "./test-system" }
 

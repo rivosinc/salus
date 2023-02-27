@@ -12,7 +12,7 @@ use riscv_pages::*;
 use riscv_regs::{DecodedInstruction, Exception, GprIndex, Instruction, Interrupt, Trap, CSR};
 use s_mode_utils::print::*;
 use sbi_rs::{salus::*, Error as SbiError, *};
-use spin::Once;
+use sync::Once;
 use u_mode_api::Error as UmodeApiError;
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};

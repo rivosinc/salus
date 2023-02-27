@@ -34,7 +34,7 @@ use sbi_rs::{
     PmuCounterStopFlags, PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn, EXT_PMU,
     EXT_TEE_HOST, EXT_TEE_INTERRUPT,
 };
-use spin::{Mutex, Once};
+use sync::{Mutex, Once};
 use test_system::*;
 use test_workloads::consts::*;
 

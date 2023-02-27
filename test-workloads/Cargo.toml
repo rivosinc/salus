@@ -18,7 +18,7 @@ hex-literal = "0.3.4"
 rice = { path = "../rice" }
 s_mode_utils = { path = "../s-mode-utils" }
 sbi_rs = { path = "../sbi-rs" }
-spin = { version = "*", default-features = false }
+sync = { path = "../sync" }
 riscv_regs = { path = "../riscv-regs" }
 test_system = { path = "../test-system" }
 

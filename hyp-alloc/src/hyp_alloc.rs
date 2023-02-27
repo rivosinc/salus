@@ -6,7 +6,7 @@ use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use core::slice;
 use riscv_pages::{InternalClean, InternalDirty, PageAddr, PageSize, RawAddr, SequentialPages};
-use spin::Mutex;
+use sync::Mutex;
 
 struct HypAllocInner {
     mem: NonNull<[u8]>,

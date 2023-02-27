@@ -4,7 +4,7 @@
 
 use sbi_rs::api::debug_console::console_puts;
 use sbi_rs::{ecall_send, SbiMessage};
-use spin::{Mutex, Once};
+use sync::{Mutex, Once};
 
 use crate::print::{Console, ConsoleWriter};
 

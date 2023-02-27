@@ -2,9 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// TODO - move to a riscv-specific mutex implementation when ready.
 use riscv_pages::*;
-use spin::Mutex;
+use sync::Mutex;
 
 use crate::collections::{RawPageVec, StaticPageRef};
 use crate::page_info::{PageInfo, PageMap, PageState};

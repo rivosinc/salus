@@ -10,7 +10,7 @@ use riscv_pages::*;
 use riscv_regs::{
     hstatus, sie, stopei, ReadWriteable, Readable, RiscvCsrInterface, Writeable, CSR,
 };
-use spin::{Mutex, Once};
+use sync::{Mutex, Once};
 
 use super::error::{Error, Result};
 use super::geometry::*;

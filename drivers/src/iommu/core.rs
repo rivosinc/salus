@@ -5,7 +5,7 @@
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{mmio_wmb, pause};
-use spin::{Mutex, Once};
+use sync::{Mutex, Once};
 use tock_registers::interfaces::{Readable, Writeable};
 use tock_registers::LocalRegisterCopy;
 

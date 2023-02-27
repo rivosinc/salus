@@ -14,7 +14,7 @@ use rice::{
     layer::Layer,
 };
 use sbi_rs::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
-use spin::RwLock;
+use sync::RwLock;
 
 use crate::{
     measurement::{MeasurementRegister, MeasurementRegisterDigest, TVM_MSMT_REGISTERS},

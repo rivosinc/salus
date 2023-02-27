@@ -72,7 +72,7 @@ use s_mode_utils::abort::abort;
 use s_mode_utils::print::*;
 use s_mode_utils::sbi_console::SbiConsoleV01;
 use smp::PerCpu;
-use spin::Once;
+use sync::Once;
 use umode::UmodeTask;
 
 #[panic_handler]

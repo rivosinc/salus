@@ -9,7 +9,7 @@ use device_tree::{DeviceTree, DeviceTreeResult};
 use hyp_alloc::{Arena, ArenaId};
 use page_tracking::{HwMemMap, PageTracker};
 use riscv_pages::*;
-use spin::{Mutex, Once};
+use sync::{Mutex, Once};
 
 use crate::imsic::Imsic;
 

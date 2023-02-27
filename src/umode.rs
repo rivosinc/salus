@@ -14,7 +14,7 @@ use memoffset::offset_of;
 use riscv_elf::ElfMap;
 use riscv_regs::{Exception::UserEnvCall, GeneralPurposeRegisters, GprIndex, Readable, Trap, CSR};
 use s_mode_utils::print::*;
-use spin::Once;
+use sync::Once;
 use u_mode_api::{Error as UmodeApiError, HypCall, TryIntoRegisters, UmodeRequest};
 
 /// Host GPR and which must be saved/restored when entering/exiting U-mode.

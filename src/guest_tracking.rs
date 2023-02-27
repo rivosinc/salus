@@ -7,7 +7,7 @@ use page_tracking::collections::{PageArc, PageVec};
 use page_tracking::PageTracker;
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{InternalClean, PageOwnerId, SequentialPages};
-use spin::{Mutex, RwLock, RwLockReadGuard};
+use sync::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::vm::{AnyVm, FinalizedVm, InitializingVm, Vm, VmRef};
 

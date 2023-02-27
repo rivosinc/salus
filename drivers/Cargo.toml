@@ -21,8 +21,8 @@ page_tracking = { path = "../page-tracking" }
 riscv_page_tables = { path = "../riscv-page-tables" }
 riscv_pages = { path = "../riscv-pages" }
 riscv_regs = { path = "../riscv-regs" }
-spin = { version = "*", default-features = false, features = ["once"] }
-static_assertions = "1.1"
-tock-registers = { version = "0.7" }
-sbi_rs = { path = "../sbi-rs" }
 s_mode_utils = { path = "../s-mode-utils" }
+sbi_rs = { path = "../sbi-rs" }
+static_assertions = "1.1"
+sync = { path = "../sync" }
+tock-registers = { version = "0.7" }

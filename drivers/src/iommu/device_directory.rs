@@ -6,8 +6,8 @@ use core::marker::PhantomData;
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::dma_wmb;
-use spin::Mutex;
 use static_assertions::const_assert;
+use sync::Mutex;
 
 use super::error::*;
 use super::msi_page_table::MsiPageTable;

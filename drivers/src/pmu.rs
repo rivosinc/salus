@@ -8,7 +8,7 @@ use arrayvec::ArrayVec;
 use sbi_rs::{
     api::pmu, Error as SbiError, PmuCounterInfo, PmuCounterStopFlags, Result as SbiResult,
 };
-use spin::Once;
+use sync::Once;
 
 /// Maximum number of supported platform PMU counters
 pub const MAX_HARDWARE_COUNTERS: usize = 32;

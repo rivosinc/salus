@@ -6,7 +6,7 @@ use crate::pte::{Pte, PteFieldBits, PteLeafPerms};
 use core::marker::PhantomData;
 use page_tracking::PageTracker;
 use riscv_pages::*;
-use spin::Mutex;
+use sync::Mutex;
 
 pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 

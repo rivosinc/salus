@@ -15,8 +15,8 @@ use riscv_pages::{
     SupervisorPhys, SupervisorVirt,
 };
 use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, CSR};
-use spin::Once;
 use static_assertions::const_assert;
+use sync::Once;
 
 // Maximum number of regions unique to every pagetable (private).
 const MAX_PRIVATE_REGIONS: usize = 32;

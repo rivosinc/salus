@@ -4,7 +4,7 @@
 
 use riscv_page_tables::tlb;
 use riscv_regs::{hgatp, ReadWriteable, Readable, Writeable, CSR};
-use spin::Once;
+use sync::Once;
 
 /// Number of supported bits for VMID in HGATP csr.
 static VMIDLEN: Once<u64> = Once::new();

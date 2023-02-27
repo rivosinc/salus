@@ -746,11 +746,15 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let mut shared_gpa_range: Option<Range<u64>> = None;
     let mut shared_spa_range: Option<Range<u64>> = None;
 
+    // Unshared memory region mapping.
+    let mut unshared_gpa_range: Option<Range<u64>> = None;
+    let mut unshared_spa_range: Option<Range<u64>> = None;
+
     let mut mmio_region: Option<Range<u64>> = None;
     loop {
         // Safety: running a VM will only write the `TsmShmemArea` struct that was registered
         // with `register_shmem()`.
-        let blocked = tee_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
+        let fatal = tee_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
         let scause = CSR.scause.get();
         if let Ok(t) = Trap::from_scause(scause) {
             use Exception::*;
@@ -792,37 +796,58 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                         start: addr,
                                         end: addr + len,
                                     };
-                                    if addr == GUEST_DBCN_ADDRESS {
+                                    let populated_range = if addr == GUEST_DBCN_ADDRESS {
                                         dbcn_gpa_range = Some(range);
+                                        dbcn_spa_range.is_some()
                                     } else {
                                         if shared_gpa_range.is_some() {
                                             panic!("GuestVm already set a shared memory region");
                                         }
                                         shared_gpa_range = Some(range);
-                                    }
+                                        unshared_spa_range.is_some()
+                                    };
 
-                                    if blocked {
-                                        tee_host::tvm_run(vmid, 0).unwrap_err();
+                                    if populated_range {
+                                        println!("Tellus - TVM range invalidation on page sharing");
+                                        tee_host::block_pages(vmid, addr, len).unwrap();
                                         println!("Tellus - TVM fence on page sharing");
                                         tee_host::tvm_initiate_fence(vmid).unwrap();
+                                        println!("Tellus - TVM range removal on page sharing");
+                                        tee_host::remove_pages(vmid, addr, len).unwrap();
                                     }
+                                    println!("Tellus - Set GPR A0 to 0 to indicate page sharing has been accepted");
+                                    shmem.set_gpr(GprIndex::A0 as usize, 0);
+
+                                    unshared_gpa_range = None;
+                                    unshared_spa_range = None;
                                 }
                                 UnshareMemory { addr, len } => {
-                                    assert_eq!(
-                                        shared_gpa_range,
-                                        Some(Range {
-                                            start: addr,
-                                            end: addr + len,
-                                        })
-                                    );
-                                    shared_gpa_range = None;
-                                    shared_spa_range = None;
+                                    let range = Range {
+                                        start: addr,
+                                        end: addr + len,
+                                    };
+                                    assert_eq!(shared_gpa_range, Some(range.clone()));
 
-                                    if blocked {
-                                        tee_host::tvm_run(vmid, 0).unwrap_err();
+                                    if unshared_gpa_range.is_some() {
+                                        panic!("GuestVm already unshared the memory region");
+                                    }
+                                    unshared_gpa_range = Some(range);
+
+                                    if shared_spa_range.is_some() {
+                                        println!(
+                                            "Tellus - TVM range invalidation on page unsharing"
+                                        );
+                                        tee_host::block_pages(vmid, addr, len).unwrap();
                                         println!("Tellus - TVM fence on page unsharing");
                                         tee_host::tvm_initiate_fence(vmid).unwrap();
+                                        println!("Tellus - TVM range removal on page unsharing");
+                                        tee_host::remove_pages(vmid, addr, len).unwrap();
                                     }
+                                    println!("Tellus - Set GPR A0 to 0 to indicate page unsharing has been accepted");
+                                    shmem.set_gpr(GprIndex::A0 as usize, 0);
+
+                                    shared_gpa_range = None;
+                                    shared_spa_range = None;
                                 }
                                 AllowExternalInterrupt { id } => {
                                     // Try to inject the allow-listed interrupt into the guest.
@@ -896,6 +921,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 )
                                 .expect("Tellus -- TvmAddSharedPages failed");
                             }
+
+                            // This will indicate if the range has been faulted with shared pages.
+                            // This information will help decide what tellus must do whenever the
+                            // guest asks for unsharing a memory range.
                             shared_spa_range = Some(Range {
                                 start: shared_page_base,
                                 end: shared_page_base + NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
@@ -954,11 +983,30 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 }
                             }
                         }
-                        addr if !blocked => {
+                        addr if !fatal => {
                             // Fault in the page.
                             if zero_pages_added >= NUM_CONVERTED_ZERO_PAGES {
                                 panic!("Ran out of pages to fault in");
                             }
+
+                            if unshared_gpa_range
+                                .as_ref()
+                                .filter(|r| r.contains(&addr))
+                                .is_some()
+                                && unshared_spa_range.is_none()
+                            {
+                                // This will indicate if the range has been faulted with
+                                // confidential pages. This information will help decide
+                                // what tellus must do whenever the guest asks for sharing
+                                // a memory range.
+                                unshared_spa_range = Some(Range {
+                                    start: zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
+                                    end: zero_pages_base
+                                        + zero_pages_added * PAGE_SIZE_4K
+                                        + PAGE_SIZE_4K,
+                                });
+                            }
+
                             tee_host::add_zero_pages(
                                 vmid,
                                 zero_pages_base + zero_pages_added * PAGE_SIZE_4K,

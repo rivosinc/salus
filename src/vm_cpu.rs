@@ -738,9 +738,9 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         };
         // Set rd (for loads) or rs2 (for stores) to A0.
         let htinst = if mmio_op.opcode().is_load() {
-            htinst_base | ((GprIndex::A0 as u32) << 20)
-        } else {
             htinst_base | ((GprIndex::A0 as u32) << 7)
+        } else {
+            htinst_base | ((GprIndex::A0 as u32) << 20)
         };
         htinst as u64
     }

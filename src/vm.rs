@@ -16,13 +16,11 @@ use sync::Once;
 use u_mode_api::Error as UmodeApiError;
 
 use crate::guest_tracking::{GuestStateGuard, GuestVm, Guests};
-use crate::hyp_map::{UmodeSlotId, UmodeSlotPerm};
-use crate::umode::{Error as UmodeError, ExecError, UmodeTask};
+use crate::umode::{Error as UmodeError, UmodeTask};
 use crate::vm_cpu::{ActiveVmCpu, VmCpu, VmCpuParent, VmCpuStatus, VmCpuTrap, VmCpus, VM_CPUS_MAX};
 use crate::vm_pages::Error as VmPagesError;
 use crate::vm_pages::{
-    ActiveVmPages, AnyVmPages, GuestUmodeMapping, InstructionFetchError, PageFaultType, VmPages,
-    VmPagesRef,
+    ActiveVmPages, AnyVmPages, InstructionFetchError, PageFaultType, VmPages, VmPagesRef,
 };
 
 #[derive(Debug)]
@@ -1683,30 +1681,6 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Err(EcallError::Sbi(SbiError::NotSupported))
     }
 
-    fn map_guest_range_in_umode_slot(
-        &self,
-        slot: UmodeSlotId,
-        addr: u64,
-        len: u64,
-        slot_perm: UmodeSlotPerm,
-    ) -> EcallResult<(u64, GuestUmodeMapping)> {
-        let base = PageSize::Size4k.round_down(addr);
-        let end = addr
-            .checked_add(len)
-            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
-        let umode_mapping = self
-            .vm_pages()
-            .map_in_umode_slot(
-                slot,
-                self.guest_addr_from_raw(base)?,
-                PageSize::num_4k_pages(end - base),
-                slot_perm,
-            )
-            .map_err(EcallError::from)?;
-        let vaddr = umode_mapping.vaddr().bits() + (addr - base);
-        Ok((vaddr, umode_mapping))
-    }
-
     fn handle_attestation_msg(
         &self,
         attestation_func: AttestationFunction,
@@ -1805,38 +1779,15 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         certout_guest_addr: u64,
         certout_len: usize,
     ) -> EcallResult<u64> {
-        // Map CSR read-only.
-        let (csr_addr, _csr_mapping) = self.map_guest_range_in_umode_slot(
-            UmodeSlotId::A,
-            csr_guest_addr,
-            csr_len as u64,
-            UmodeSlotPerm::Readonly,
-        )?;
-        // Map Output Certificate writable.
-        let (certout_addr, _certout_mapping) = self.map_guest_range_in_umode_slot(
-            UmodeSlotId::B,
-            certout_guest_addr,
-            certout_len as u64,
-            UmodeSlotPerm::Writable,
-        )?;
-        // Gather measurement registers from the attestation manager and transform it in a array.
-        let msmt_genarray = self.attestation_mgr().measurement_registers()?;
-        let zero = [0u8; u_mode_api::cert::SHA384_LEN];
-        let mut msmt_regs = [zero; attestation::MSMT_REGISTERS];
-        for (i, r) in msmt_genarray.iter().enumerate() {
-            msmt_regs[i].copy_from_slice(r.as_slice());
-        }
-        // Get the CDI ID for the attestation layer.
-        let cdi_id = self.attestation_mgr().attestation_cdi_id()?;
-        let shared_data = u_mode_api::cert::GetEvidenceShared { msmt_regs, cdi_id };
-        let request = u_mode_api::UmodeRequest::GetEvidence {
-            csr_addr,
+        let csr_gpa = RawAddr::guest(csr_guest_addr, self.page_owner_id());
+        let certout_gpa = RawAddr::guest(certout_guest_addr, self.page_owner_id());
+        Ok(UmodeTask::attestation_evidence(
+            self,
+            csr_gpa,
             csr_len,
-            certout_addr,
+            certout_gpa,
             certout_len,
-        };
-        // Send request to U-mode.
-        Ok(UmodeTask::send_req_with_shared_data(request, shared_data)?)
+        )?)
     }
 
     fn guest_extend_measurement(

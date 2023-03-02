@@ -2,9 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::hyp_map::{Error as HypMapError, UMODE_SHARED_SIZE, UMODE_SHARED_START};
+use crate::hyp_map::{
+    Error as HypMapError, UmodeSlotId, UmodeSlotPerm, UMODE_SHARED_SIZE, UMODE_SHARED_START,
+};
 use crate::smp::PerCpu;
+use crate::vm::FinalizedVm;
+use crate::vm_pages::{Error as VmPagesError, FinalizedVmPages, GuestUmodeMapping};
 
+use attestation::Error as AttestationError;
 use core::arch::global_asm;
 use core::fmt;
 use core::mem::size_of;
@@ -12,6 +17,8 @@ use core::ops::ControlFlow;
 use data_model::DataInit;
 use memoffset::offset_of;
 use riscv_elf::ElfMap;
+use riscv_page_tables::GuestStagePagingMode;
+use riscv_pages::{GuestPhysAddr, PageAddr, PageSize, RawAddr, SupervisorVirt};
 use riscv_regs::{Exception::UserEnvCall, GeneralPurposeRegisters, GprIndex, Readable, Trap, CSR};
 use s_mode_utils::print::*;
 use sync::Once;
@@ -237,6 +244,12 @@ pub enum Error {
     Request(UmodeApiError),
     /// Error while sharing data.
     HypMap(HypMapError),
+    /// Error while mapping VM pages.
+    VmPages(VmPagesError),
+    /// Attestation Manager Errors.
+    Attestation(AttestationError),
+    /// Address Overflow
+    AddressOverflow,
 }
 
 /// Errors returned by U-mode task execution.
@@ -248,6 +261,11 @@ pub enum ExecError {
     Panic,
     /// U-mode API error.
     Api(UmodeApiError),
+}
+
+struct UmodeExecutionContext<T: DataInit> {
+    shared_data: Option<T>,
+    req: UmodeRequest,
 }
 
 // Entry for umode task.
@@ -275,6 +293,89 @@ impl UmodeTask {
         Ok(())
     }
 
+    fn map_guest_range_in_umode_slot<T: GuestStagePagingMode>(
+        vm_pages: FinalizedVmPages<T>,
+        addr: GuestPhysAddr,
+        len: usize,
+        slot: UmodeSlotId,
+        perm: UmodeSlotPerm,
+    ) -> Result<(RawAddr<SupervisorVirt>, GuestUmodeMapping), Error> {
+        let base = PageAddr::with_round_down(addr, PageSize::Size4k);
+        let end = addr
+            .checked_increment(len as u64)
+            .ok_or(Error::AddressOverflow)?;
+        let umode_mapping = vm_pages
+            .map_in_umode_slot(
+                slot,
+                base,
+                PageSize::num_4k_pages(end.bits() - base.bits()),
+                perm,
+            )
+            .map_err(Error::VmPages)?;
+        let vaddr = umode_mapping
+            .vaddr()
+            .raw()
+            .checked_increment(addr.bits() - base.bits())
+            .ok_or(Error::AddressOverflow)?;
+        Ok((vaddr, umode_mapping))
+    }
+
+    pub fn nop() -> Result<u64, Error> {
+        let ctx = UmodeExecutionContext::<u8> {
+            shared_data: None,
+            req: UmodeRequest::Nop,
+        };
+        Self::execute_request(ctx)
+    }
+
+    pub fn attestation_evidence<T: GuestStagePagingMode>(
+        vm: &FinalizedVm<T>,
+        csr_gpa: GuestPhysAddr,
+        csr_len: usize,
+        certout_gpa: GuestPhysAddr,
+        certout_len: usize,
+    ) -> Result<u64, Error> {
+        // Map input CSR in Slot A as read-only.
+        let (csr_vaddr, _csr_mapping) = Self::map_guest_range_in_umode_slot(
+            vm.vm_pages(),
+            csr_gpa,
+            csr_len,
+            UmodeSlotId::A,
+            UmodeSlotPerm::Readonly,
+        )?;
+        // Map output certificate in Slot B as writable.
+        let (certout_vaddr, _certout_mapping) = Self::map_guest_range_in_umode_slot(
+            vm.vm_pages(),
+            certout_gpa,
+            certout_len,
+            UmodeSlotId::B,
+            UmodeSlotPerm::Writable,
+        )?;
+        let attestation_mgr = vm.attestation_mgr();
+        // Gather measurement registers from the attestation manager and transform it in a array.
+        let msmt_genarray = attestation_mgr
+            .measurement_registers()
+            .map_err(Error::Attestation)?;
+        let zero = [0u8; u_mode_api::cert::SHA384_LEN];
+        let mut msmt_regs = [zero; attestation::MSMT_REGISTERS];
+        for (i, r) in msmt_genarray.iter().enumerate() {
+            msmt_regs[i].copy_from_slice(r.as_slice());
+        }
+        // Get the CDI ID for the attestation layer.
+        let cdi_id = [0; 20];
+        let shared_data = u_mode_api::cert::GetEvidenceShared { msmt_regs, cdi_id };
+        let ctx = UmodeExecutionContext {
+            shared_data: Some(shared_data),
+            req: UmodeRequest::GetEvidence {
+                csr_addr: csr_vaddr.bits(),
+                csr_len,
+                certout_addr: certout_vaddr.bits(),
+                certout_len,
+            },
+        };
+        Self::execute_request(ctx)
+    }
+
     fn reset(&mut self) -> Result<(), Error> {
         // Initialize umode CPU state to run at ELF entry.
         let mut arch = UmodeCpuArchState::default();
@@ -299,14 +400,14 @@ impl UmodeTask {
         Ok(())
     }
 
-    fn execute_request<T: DataInit>(
-        req: UmodeRequest,
-        shared_data: Option<T>,
-    ) -> Result<u64, Error> {
+    fn execute_request<T: DataInit>(exec_ctx: UmodeExecutionContext<T>) -> Result<u64, Error> {
         let this_cpu = PerCpu::this_cpu();
         let mut task = this_cpu.umode_task_mut();
-        req.to_registers(task.arch.umode_regs.gprs.a_regs_mut());
-        if let Some(data) = shared_data {
+        // Save request in registers.
+        exec_ctx
+            .req
+            .to_registers(task.arch.umode_regs.gprs.a_regs_mut());
+        if let Some(data) = exec_ctx.shared_data {
             this_cpu
                 .page_table()
                 .share_with_umode(data)
@@ -321,24 +422,11 @@ impl UmodeTask {
             // Panic if we can't restore umode: the hypervisor is in an unrecoverable state.
             task.reset().expect("Failed to recover U-mode.");
         }
-        if shared_data.is_some() {
+        if exec_ctx.shared_data.is_some() {
             this_cpu.page_table().clear_umode_shared();
         }
         let res = ret.map_err(Error::Exec)?;
         res.map_err(Error::Request)
-    }
-
-    /// Send a request and execute U-mode until an error is returned.
-    pub fn send_req(req: UmodeRequest) -> Result<u64, Error> {
-        Self::execute_request::<u8>(req, None)
-    }
-
-    /// Same as `send_req` but share `shared_data` in U-mode shared area while executing this request.
-    pub fn send_req_with_shared_data<T: DataInit>(
-        req: UmodeRequest,
-        shared_data: T,
-    ) -> Result<u64, Error> {
-        Self::execute_request(req, Some(shared_data))
     }
 
     fn handle_ecall(&mut self) -> ControlFlow<Result<OpResult, ExecError>> {

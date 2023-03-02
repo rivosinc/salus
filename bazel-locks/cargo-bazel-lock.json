@@ -1,5 +1,5 @@
 {
-  "checksum": "da8d99e5d4302ff8454ff4bfe3c97853f1da5432858ef0c6a20f8ae71c5f15c7",
+  "checksum": "10d6462d0159208144ee581d02488f938eaa92eddef86966eaa1b9f5f3e033db",
   "crates": {
     "arrayvec 0.7.2": {
       "name": "arrayvec",
@@ -772,6 +772,10 @@
             {
               "id": "sha2 0.10.6",
               "target": "sha2"
+            },
+            {
+              "id": "signature 1.6.4",
+              "target": "signature"
             },
             {
               "id": "spin 0.9.5",

@@ -6,14 +6,18 @@ extern crate libuser;
 use libuser::*;
 
 use der::Decode;
-use ed25519::Signature;
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signature, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
 use generic_array::GenericArray;
-use rice::x509::certificate::{Certificate, MAX_CERT_SIZE};
+use rice::cdi::CompoundDeviceIdentifier;
+use rice::cdi::CDI_ID_LEN;
+use rice::layer::Layer;
 use rice::x509::extensions::dice::tcbinfo::DiceTcbInfo;
 use rice::x509::request::CertReq;
 use rice::x509::MAX_CSR_LEN;
+use signature::{Error as SignatureError, Signer};
 use u_mode_api::cert::*;
+use u_mode_api::CdiSel;
+use zeroize::Zeroize;
 
 #[derive(Debug)]
 pub enum Error {
@@ -33,18 +37,51 @@ pub enum Error {
     CertificateBufferTooSmall(usize, usize),
 }
 
-struct UmodeSigner {}
+struct UmodeCdi {
+    cdi: CdiSel,
+}
 
-impl Signer<Signature> for UmodeSigner {
-    fn try_sign(&self, _: &[u8]) -> Result<Signature, ed25519::Error> {
-        // TODO: Implement Signing of certificate.
-        Signature::from_bytes(&[0; 64])
+impl Zeroize for UmodeCdi {
+    fn zeroize(&mut self) {
+        // No secret information.
     }
 }
 
+impl CompoundDeviceIdentifier<PUBLIC_KEY_LENGTH, Signature> for UmodeCdi {
+    fn id(&self) -> Result<[u8; CDI_ID_LEN], rice::Error> {
+        let mut id = [0u8; CDI_ID_LEN];
+        hyp_cdi_id(self.cdi, &mut id);
+        Ok(id)
+    }
+
+    fn next(&self, _info: Option<&[u8]>, _next_tci: Option<&[u8]>) -> Result<Self, rice::Error> {
+        todo!();
+    }
+
+    fn public_key(&self) -> [u8; PUBLIC_KEY_LENGTH] {
+        todo!();
+    }
+}
+
+impl Signer<Signature> for UmodeCdi {
+    fn try_sign(&self, msg: &[u8]) -> Result<Signature, SignatureError> {
+        let mut signature = [0u8; SIGNATURE_LENGTH];
+        hyp_cdi_sign(self.cdi, msg, &mut signature);
+        Signature::from_bytes(&signature)
+    }
+}
+
+const ATTESTATION_CURRENT_CDI: UmodeCdi = UmodeCdi {
+    cdi: CdiSel::AttestationCurrent,
+};
+
+const ATTESTATION_NEXT_CDI: UmodeCdi = UmodeCdi {
+    cdi: CdiSel::AttestationNext,
+};
+
 pub fn get_certificate_sha384(
     csr_input: &[u8],
-    evidence: GetEvidenceShared,
+    evidence: MeasurementRegisters,
     cert_output: &mut [u8],
 ) -> Result<u64, Error> {
     // Copy CSR from input.
@@ -79,18 +116,11 @@ pub fn get_certificate_sha384(
         .map_err(Error::TcbInfoFailed)?;
     let extensions: [&[u8]; 1] = [tcb_info_extn];
 
-    let mut cert_der_bytes = [0u8; MAX_CERT_SIZE];
-    let cert_der = Certificate::from_raw_parts(
-        evidence.cdi_id,
-        &evidence.cdi_id,
-        csr.info.subject.clone(),
-        csr.info.public_key,
-        Some(&extensions),
-        &UmodeSigner {},
-        &mut cert_der_bytes,
-    )
-    .map_err(Error::CertificateCreationFailed)?;
-
+    let layer: Layer<PUBLIC_KEY_LENGTH, Signature, UmodeCdi, sha2::Sha384> =
+        Layer::new(ATTESTATION_CURRENT_CDI, Some(ATTESTATION_NEXT_CDI));
+    let cert_der = layer
+        .csr_certificate(&csr, Some(&extensions))
+        .map_err(Error::CertificateCreationFailed)?;
     let cert_der_len = cert_der.len();
     if cert_output.len() < cert_der_len {
         return Err(Error::CertificateBufferTooSmall(
@@ -99,6 +129,6 @@ pub fn get_certificate_sha384(
         ));
     }
     // Copy cert to output.
-    cert_output[0..cert_der_len].copy_from_slice(cert_der);
+    cert_output[0..cert_der_len].copy_from_slice(&cert_der);
     Ok(cert_der_len as u64)
 }

@@ -6,12 +6,14 @@ use arrayvec::ArrayVec;
 use const_oid::ObjectIdentifier;
 use core::marker::PhantomData;
 use digest::{Digest, OutputSizeUser};
+use ed25519::Signature;
 use ed25519_dalek::SECRET_KEY_LENGTH;
 use generic_array::GenericArray;
 use hkdf::HmacImpl;
 use rice::{
-    cdi::{CdiType, CDI_ID_LEN},
-    layer::Layer,
+    cdi::{CdiType, CompoundDeviceIdentifier},
+    layer::LayerBase,
+    local_cdi::LocalCdi,
 };
 use sbi_rs::{AttestationCapabilities, EvidenceFormat, HashAlgorithm};
 use sync::RwLock;
@@ -53,10 +55,10 @@ pub struct AttestationManager<D: Digest, H: HmacImpl<D> = hmac::Hmac<D>> {
     measurements: RwLock<ArrayVec<MeasurementRegister<D>, MSMT_REGISTERS>>,
 
     // The attestation DICE layer (Built from the attestation TCI)
-    attestation_layer: Layer<CDI_LEN, D, H>,
+    attestation_layer: LayerBase<CDI_LEN, Signature, LocalCdi<CDI_LEN, D, H>>,
 
     // The sealing DICE layer (Built from the sealing TCI)
-    sealing_layer: Layer<CDI_LEN, D, H>,
+    sealing_layer: LayerBase<CDI_LEN, Signature, LocalCdi<CDI_LEN, D, H>>,
 
     // TVM identifier
     vm_id: u64,
@@ -99,6 +101,8 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
         } else {
             attestation_cdi
         };
+        let local_attestation_cdi = LocalCdi::new(extracted_attestation_cdi, CdiType::Attestation)
+            .map_err(Error::DiceCdiBuild)?;
 
         let mut tmp_s_cdi = [0u8; CDI_LEN];
         let extracted_sealing_cdi = if sealing_cdi.len() != CDI_LEN {
@@ -108,13 +112,13 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
         } else {
             sealing_cdi
         };
+        let local_sealing_cdi = LocalCdi::new(extracted_sealing_cdi, CdiType::Attestation)
+            .map_err(Error::DiceCdiBuild)?;
 
         Ok(AttestationManager {
             measurements: RwLock::new(measurements),
-            attestation_layer: Layer::new(extracted_attestation_cdi, CdiType::Attestation)
-                .map_err(Error::DiceLayerBuild)?,
-            sealing_layer: Layer::new(extracted_sealing_cdi, CdiType::Sealing)
-                .map_err(Error::DiceLayerBuild)?,
+            attestation_layer: LayerBase::new(local_attestation_cdi, None),
+            sealing_layer: LayerBase::new(local_sealing_cdi, None),
             vm_id,
             tvm_config: RwLock::new(Default::default()),
             _pd: PhantomData,
@@ -239,11 +243,6 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
             .collect())
     }
 
-    /// Return the CDI ID of the attestation layer.
-    pub fn attestation_cdi_id(&self) -> Result<[u8; CDI_ID_LEN]> {
-        self.attestation_layer.cdi_id().map_err(Error::DiceCdiId)
-    }
-
     /// Set the TVM initial PC.
     pub fn set_epc(&self, epc: u64) {
         self.tvm_config.write().set_epc(epc);
@@ -270,5 +269,10 @@ impl<'a, D: Digest, H: HmacImpl<D>> AttestationManager<D, H> {
         }
 
         Ok(caps)
+    }
+
+    /// Return a reference to the current CDI of the attestation layer.
+    pub fn attestation_current_cdi(&self) -> &impl CompoundDeviceIdentifier<CDI_LEN, Signature> {
+        self.attestation_layer.current_cdi()
     }
 }

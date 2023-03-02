@@ -24,6 +24,8 @@ rust_binary(
         "@rice-index//:ed25519-dalek",
         "@rice-index//:generic-array",
         "@rice-index//:sha2",
+        "@rice-index//:signature",
+        "@rice-index//:zeroize",
     ],
 )
 

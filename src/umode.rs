@@ -3,26 +3,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::hyp_map::{
-    Error as HypMapError, UmodeSlotId, UmodeSlotPerm, UMODE_SHARED_SIZE, UMODE_SHARED_START,
+    Error as HypMapError, HypMap, UmodeSlotId, UmodeSlotPerm, UMODE_SHARED_SIZE, UMODE_SHARED_START,
 };
 use crate::smp::PerCpu;
 use crate::vm::FinalizedVm;
 use crate::vm_pages::{Error as VmPagesError, FinalizedVmPages, GuestUmodeMapping};
 
-use attestation::Error as AttestationError;
+use attestation::{AttestationManager, Error as AttestationError};
 use core::arch::global_asm;
 use core::fmt;
 use core::mem::size_of;
 use core::ops::ControlFlow;
 use data_model::DataInit;
 use memoffset::offset_of;
+use rice::cdi::CompoundDeviceIdentifier;
 use riscv_elf::ElfMap;
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{GuestPhysAddr, PageAddr, PageSize, RawAddr, SupervisorVirt};
 use riscv_regs::{Exception::UserEnvCall, GeneralPurposeRegisters, GprIndex, Readable, Trap, CSR};
 use s_mode_utils::print::*;
+use signature::Signer;
 use sync::Once;
-use u_mode_api::{Error as UmodeApiError, HypCall, OpResult, TryIntoRegisters, UmodeRequest};
+use u_mode_api::{
+    CdiOp, CdiSel, Error as UmodeApiError, HypCall, OpResult, TryIntoRegisters, UmodeRequest,
+    CDIOP_SIGN_MAXMSG,
+};
 
 /// Host GPR and which must be saved/restored when entering/exiting U-mode.
 #[derive(Default)]
@@ -261,11 +266,20 @@ pub enum ExecError {
     Panic,
     /// U-mode API error.
     Api(UmodeApiError),
+    /// User address access error
+    UmodeAccess(HypMapError),
+    /// Unexpected CDI Operation
+    UnexpectedCdiOp(CdiSel, CdiOp),
+    /// CDI error
+    Cdi(rice::Error),
+    /// Incorrect size of buffer provided.
+    BufferSize(u64, u64),
 }
 
-struct UmodeExecutionContext<T: DataInit> {
+struct UmodeExecutionContext<'a, T: DataInit> {
     shared_data: Option<T>,
     req: UmodeRequest,
+    attestation: Option<&'a AttestationManager<sha2::Sha384>>,
 }
 
 // Entry for umode task.
@@ -324,6 +338,7 @@ impl UmodeTask {
         let ctx = UmodeExecutionContext::<u8> {
             shared_data: None,
             req: UmodeRequest::Nop,
+            attestation: None,
         };
         Self::execute_request(ctx)
     }
@@ -361,9 +376,7 @@ impl UmodeTask {
         for (i, r) in msmt_genarray.iter().enumerate() {
             msmt_regs[i].copy_from_slice(r.as_slice());
         }
-        // Get the CDI ID for the attestation layer.
-        let cdi_id = [0; 20];
-        let shared_data = u_mode_api::cert::GetEvidenceShared { msmt_regs, cdi_id };
+        let shared_data = u_mode_api::cert::MeasurementRegisters { msmt_regs };
         let ctx = UmodeExecutionContext {
             shared_data: Some(shared_data),
             req: UmodeRequest::GetEvidence {
@@ -372,6 +385,7 @@ impl UmodeTask {
                 certout_addr: certout_vaddr.bits(),
                 certout_len,
             },
+            attestation: Some(attestation_mgr),
         };
         Self::execute_request(ctx)
     }
@@ -396,7 +410,9 @@ impl UmodeTask {
         // sstatus set to 0 (by default) is actually okay.
         self.arch = arch;
         // Run task until it initializes itself and calls HypCall::NextOp().
-        self.run().map_err(Error::Exec)?.map_err(Error::Request)?;
+        self.run(None)
+            .map_err(Error::Exec)?
+            .map_err(Error::Request)?;
         Ok(())
     }
 
@@ -413,9 +429,10 @@ impl UmodeTask {
                 .share_with_umode(data)
                 .map_err(Error::HypMap)?;
         }
-        let ret = task.run();
+        let ret = task.run(exec_ctx.attestation);
         // Errors encountered while executing the operation are unrecoverable: reset U-mode.
         if ret.is_err() {
+            println!("Umode error: {:?}", ret);
             // 1. restore memory to original state
             this_cpu.page_table().restore_umode();
             // 2. setup umode again.
@@ -429,7 +446,58 @@ impl UmodeTask {
         res.map_err(Error::Request)
     }
 
-    fn handle_ecall(&mut self) -> ControlFlow<Result<OpResult, ExecError>> {
+    fn handle_cdi_op(
+        attestation: Option<&AttestationManager<sha2::Sha384>>,
+        cdi_sel: CdiSel,
+        cdi_op: CdiOp,
+    ) -> Result<(), ExecError> {
+        if let Some(attmgr) = attestation {
+            let cdi = match cdi_sel {
+                CdiSel::AttestationCurrent => Ok(attmgr.attestation_current_cdi()),
+                _ => Err(ExecError::UnexpectedCdiOp(cdi_sel, cdi_op)),
+            }?;
+            match cdi_op {
+                CdiOp::Id {
+                    idout_addr,
+                    idout_len,
+                } => {
+                    let id = cdi.id().map_err(ExecError::Cdi)?;
+                    if idout_len as usize != id.len() {
+                        return Err(ExecError::BufferSize(idout_len, id.len() as u64));
+                    }
+                    HypMap::copy_to_umode(RawAddr::supervisor_virt(idout_addr), &id)
+                        .map_err(ExecError::UmodeAccess)
+                }
+                CdiOp::Sign {
+                    msg_addr,
+                    msg_len,
+                    signout_addr,
+                    signout_len,
+                } => {
+                    let mut msg_buf = [0u8; CDIOP_SIGN_MAXMSG];
+                    if msg_len > CDIOP_SIGN_MAXMSG as u64 {
+                        return Err(ExecError::BufferSize(msg_len, CDIOP_SIGN_MAXMSG as u64));
+                    }
+                    let msg = &mut msg_buf[0..msg_len as usize];
+                    HypMap::copy_from_umode(msg, RawAddr::supervisor_virt(msg_addr))
+                        .map_err(ExecError::UmodeAccess)?;
+                    let signature = cdi.sign(msg).to_bytes();
+                    if signout_len as usize != signature.len() {
+                        return Err(ExecError::BufferSize(signout_len, signature.len() as u64));
+                    }
+                    HypMap::copy_to_umode(RawAddr::supervisor_virt(signout_addr), &signature)
+                        .map_err(ExecError::UmodeAccess)
+                }
+            }
+        } else {
+            Err(ExecError::UnexpectedCdiOp(cdi_sel, cdi_op))
+        }
+    }
+
+    fn handle_ecall(
+        &mut self,
+        attestation: Option<&AttestationManager<sha2::Sha384>>,
+    ) -> ControlFlow<Result<OpResult, ExecError>> {
         let regs = self.arch.umode_regs.gprs.a_regs();
         let cflow = match HypCall::try_from_registers(regs) {
             Ok(hypercall) => match hypercall {
@@ -444,6 +512,12 @@ impl UmodeTask {
                     }
                     // No return. Leave umode registers untouched and return.
                     ControlFlow::Continue(())
+                }
+                HypCall::Cdi { cdi_sel, cdi_op } => {
+                    match Self::handle_cdi_op(attestation, cdi_sel, cdi_op) {
+                        Ok(_) => ControlFlow::Continue(()),
+                        Err(err) => ControlFlow::Break(Err(err)),
+                    }
                 }
                 HypCall::NextOp(result) => ControlFlow::Break(Ok(result)),
             },
@@ -469,11 +543,14 @@ impl UmodeTask {
     }
 
     // Run `umode` until result is returned.
-    fn run(&mut self) -> Result<OpResult, ExecError> {
+    fn run(
+        &mut self,
+        attestation: Option<&AttestationManager<sha2::Sha384>>,
+    ) -> Result<OpResult, ExecError> {
         loop {
             self.run_to_exit();
             match Trap::from_scause(self.arch.trap_csrs.scause).unwrap() {
-                Trap::Exception(UserEnvCall) => match self.handle_ecall() {
+                Trap::Exception(UserEnvCall) => match self.handle_ecall(attestation) {
                     ControlFlow::Continue(_) => continue,
                     ControlFlow::Break(res) => break res,
                 },

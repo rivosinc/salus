@@ -20,13 +20,11 @@ pub type MeasurementRegisterSha384 = [u8; SHA384_LEN];
 /// certificate.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct GetEvidenceShared {
+pub struct MeasurementRegisters {
     /// Measurement registers in SHA-384. In `fwid` order.
     pub msmt_regs: [MeasurementRegisterSha384; MSMT_REGISTERS],
-    /// CDI Id.
-    pub cdi_id: CdiId,
 }
 
-// Safety: `GetEvidenceShared` is a POD struct without implicit padding and therefore can be
+// Safety: `MeasurementRegisters` is a POD struct without implicit padding and therefore can be
 // initialized from a byte array.
-unsafe impl DataInit for GetEvidenceShared {}
+unsafe impl DataInit for MeasurementRegisters {}

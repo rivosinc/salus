@@ -128,7 +128,7 @@ pub enum UmodeRequest {
     Nop,
     /// Get Attestation Evidence.
     ///
-    /// Umode Shared Region: contains `GetEvidenceShared`.
+    /// Umode Shared Region: contains `MeasurementRegisters`.
     GetEvidence {
         /// starting address of the Certificate Signing Request.
         csr_addr: u64,
@@ -182,10 +182,111 @@ impl TryIntoRegisters for UmodeRequest {
 
 // HypCall: calls from umode to hypervisor.
 
-/// Result returned from Umode Op execution.
+/// Result returned from Umode Request execution (U-mode -> Hypervisor)
 pub type OpResult = Result<u64, Error>;
 
+/// CDI Selector. This lists all possible CDis presents in the attestation manager.
+#[derive(Debug, Clone, Copy)]
+#[repr(u64)]
+pub enum CdiSel {
+    /// Attestation Current CDI.
+    AttestationCurrent = 0,
+    /// Attestation Next CDI.
+    AttestationNext = 1,
+    /// Sealing Current CDI.
+    SealingCurrent = 2,
+    /// Sealing Next CDI.
+    SealingNext = 3,
+}
+
+impl TryFrom<u64> for CdiSel {
+    type Error = Error;
+
+    fn try_from(val: u64) -> Result<CdiSel, Error> {
+        match val {
+            0 => Ok(CdiSel::AttestationCurrent),
+            1 => Ok(CdiSel::AttestationNext),
+            2 => Ok(CdiSel::SealingCurrent),
+            3 => Ok(CdiSel::SealingNext),
+            _ => Err(Error::InvalidArgument),
+        }
+    }
+}
+
+/// Maximum size of a message to sign.
+pub const CDIOP_SIGN_MAXMSG: usize = 2048;
+
+/// CDI Operation
+#[derive(Debug, Clone, Copy)]
+pub enum CdiOp {
+    /// CDI ID.
+    Id {
+        /// Address where ID will be stored.
+        idout_addr: u64,
+        /// Length of the buffer for storing the ID.
+        idout_len: u64,
+    },
+    /// Sign a message with the CDI private key.
+    Sign {
+        /// Address where the message to be sign starts.
+        msg_addr: u64,
+        /// Length of the message to be signed.
+        msg_len: u64,
+        /// Address where the signature will be stored.
+        signout_addr: u64,
+        /// Length of the buffer for storing the signature.
+        signout_len: u64,
+    },
+}
+
+const HYPC_CDI_ID: u64 = 0;
+const HYPC_CDI_SIGN: u64 = 1;
+
+impl TryIntoRegisters for CdiOp {
+    fn try_from_registers(regs: &[u64]) -> Result<Self, Error> {
+        match regs[0] {
+            HYPC_CDI_ID => Ok(CdiOp::Id {
+                idout_addr: regs[1],
+                idout_len: regs[2],
+            }),
+            HYPC_CDI_SIGN => Ok(CdiOp::Sign {
+                msg_addr: regs[1],
+                msg_len: regs[2],
+                signout_addr: regs[3],
+                signout_len: regs[4],
+            }),
+            _ => Err(Error::EcallNotSupported),
+        }
+    }
+
+    fn to_registers(&self, regs: &mut [u64]) {
+        match *self {
+            CdiOp::Id {
+                idout_addr,
+                idout_len,
+            } => {
+                regs[0] = HYPC_CDI_ID;
+                regs[1] = idout_addr;
+                regs[2] = idout_len;
+            }
+            CdiOp::Sign {
+                msg_addr,
+                msg_len,
+                signout_addr,
+                signout_len,
+            } => {
+                regs[0] = HYPC_CDI_SIGN;
+                regs[1] = msg_addr;
+                regs[2] = msg_len;
+                regs[3] = signout_addr;
+                regs[4] = signout_len;
+            }
+        }
+    }
+}
+
 /// Calls from umode to the hypervisors.
+#[derive(Debug)]
 pub enum HypCall {
     /// Panic and exit immediately.
     Panic,
@@ -193,11 +294,19 @@ pub enum HypCall {
     PutChar(u8),
     /// Return result of previous request and wait for next operation.
     NextOp(OpResult),
+    /// Attestation Manager CDI operations.
+    Cdi {
+        /// CDI Selector.
+        cdi_sel: CdiSel,
+        /// CDI Operation.
+        cdi_op: CdiOp,
+    },
 }
 
 const HYPC_PANIC: u64 = 0;
 const HYPC_PUTCHAR: u64 = 1;
 const HYPC_NEXTOP: u64 = 2;
+const HYPC_CDI: u64 = 0x10;
 
 impl TryIntoRegisters for HypCall {
     fn try_from_registers(regs: &[u64]) -> Result<Self, Error> {
@@ -205,22 +314,31 @@ impl TryIntoRegisters for HypCall {
             HYPC_PANIC => Ok(HypCall::Panic),
             HYPC_PUTCHAR => Ok(HypCall::PutChar(regs[0] as u8)),
             HYPC_NEXTOP => Ok(HypCall::NextOp(Result::from_registers(regs))),
+            HYPC_CDI => Ok(HypCall::Cdi {
+                cdi_sel: regs[6].try_into()?,
+                cdi_op: CdiOp::try_from_registers(regs)?,
+            }),
             _ => Err(Error::EcallNotSupported),
         }
     }
 
     fn to_registers(&self, regs: &mut [u64]) {
-        match self {
+        match *self {
             HypCall::Panic => {
                 regs[7] = HYPC_PANIC;
             }
             HypCall::PutChar(byte) => {
-                regs[0] = *byte as u64;
+                regs[0] = byte as u64;
                 regs[7] = HYPC_PUTCHAR;
             }
             HypCall::NextOp(result) => {
                 result.to_registers(regs);
                 regs[7] = HYPC_NEXTOP;
+            }
+            HypCall::Cdi { cdi_sel, cdi_op } => {
+                cdi_op.to_registers(regs);
+                regs[6] = cdi_sel as u64;
+                regs[7] = HYPC_CDI;
             }
         }
     }

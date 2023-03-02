@@ -23,6 +23,7 @@
 #![test_runner(crate::tests::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![cfg_attr(test, allow(unused))]
+#![feature(pointer_is_aligned)]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::fmt::Display;
@@ -31,6 +32,7 @@ use test_system::*;
 extern crate alloc;
 
 mod asm;
+mod backtrace;
 mod guest_tracking;
 mod host_vm;
 mod hyp_layout;
@@ -45,6 +47,7 @@ mod vm_interrupts;
 mod vm_pages;
 mod vm_pmu;
 
+use backtrace::backtrace;
 use device_tree::{DeviceTree, DeviceTreeError, Fdt};
 use drivers::{
     imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
@@ -72,6 +75,22 @@ use umode::UmodeTask;
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     println!("panic : {:?}", info);
+    if let Some(location) = info.location() {
+        println!(
+            "panic occurred in file '{}' at line {}",
+            location.file(),
+            location.line()
+        );
+    }
+
+    println!("panic backtrace:");
+    // Skip the first 2 calls on the stack.
+    // They are always the same, and are from the
+    // panic handling code.
+    backtrace().skip(2).for_each(|frame| {
+        print!("{}", frame);
+    });
+
     abort()
 }
 

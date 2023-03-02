@@ -4,6 +4,8 @@
 
 # By default, build optimized
 build --compilation_mode=opt
+# add frame pointers to make tracing the stack of a crash easier
+build --@rules_rust//:extra_rustc_flag=-Cforce-frame-pointers
 
 # Use toolchain resolution to find the cc toolchain.
 # This is required to ensure cross compilation operates with the correct toolchain.
@@ -21,4 +23,3 @@ build --@rules_rust//:clippy_flags=-Dmissing-docs,-Dwarnings
 # Use the workspace status feature to include the git commit in the build:
 # https://bazel.build/docs/user-manual#workspace-status
 build --workspace_status_command=bazel/workspace_status_command.sh
-

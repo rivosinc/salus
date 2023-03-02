@@ -66,6 +66,7 @@ def salus_dependencies():
             "riscv-decode": crate.spec(
                 version = "0.2",
             ),
+            "signature": crate.spec(version = "1.6.4", default_features = False),
             "spin": crate.spec(
                 version = "0.9",
                 default_features = False,

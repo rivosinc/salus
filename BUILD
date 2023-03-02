@@ -154,6 +154,7 @@ rust_binary(
         "@rice-index//:generic-array",
         "@rice-index//:hkdf",
         "@rice-index//:sha2",
+        "@rice-index//:signature",
         "@salus-index//:arrayvec",
         "@salus-index//:memoffset",
         "@salus-index//:static_assertions",

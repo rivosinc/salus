@@ -12,8 +12,8 @@ pub enum Error {
     /// The DICE engine failed to extract a CDI.
     DiceCdiExtraction(rice::Error),
 
-    /// The DICE engine failed to build a new layer.
-    DiceLayerBuild(rice::Error),
+    /// The DICE engine failed to build a CDI structure.
+    DiceCdiBuild(rice::Error),
 
     /// The DICE engine failed to build the next layer CDI and certificates.
     DiceRoll(rice::Error),

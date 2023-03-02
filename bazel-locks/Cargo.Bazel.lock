@@ -169,6 +169,7 @@ dependencies = [
  "riscv-decode",
  "seq-macro",
  "sha2 0.10.6",
+ "signature",
  "spin",
  "spki",
  "static_assertions",

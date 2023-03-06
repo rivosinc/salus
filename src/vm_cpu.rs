@@ -820,7 +820,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             ResumableEcall(msg) | FatalEcall(msg) => {
                 self.report_ecall_exit(msg);
             }
-            ForwardedEcall(msg) | BlockingEcall(msg) => {
+            ForwardedEcall(msg) => {
                 self.report_ecall_exit(msg);
                 self.arch.pending_op = Some(PendingOperation::Ecall(msg));
             }

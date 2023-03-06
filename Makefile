@@ -5,32 +5,32 @@
 
 # Do not add dependencies to the bazel targets here.
 # The dependencies are handled by bazel.
-all:
+all: sbirs
 	bazel build //:salus-all
 
-check:
+check: sbirs
 	bazel test //:test-all
 
-salus:
+salus: sbirs
 	bazel build //:salus-all
 
-salus_debug:
+salus_debug: sbirs
 	bazel build -c dbg //:salus-all
 
-salus_test:
+salus_test: sbirs
 	bazel build //:salus-unit-tests
 	scripts/run_salus_test.sh
 
-tellus_bin:
+tellus_bin: sbirs
 	bazel build //test-workloads:tellus_raw
 
-guestvm:
+guestvm: sbirs
 	bazel build //test-workloads:guestvm_raw
 
-tellus:
+tellus: sbirs
 	bazel build //test-workloads:tellus
 
-umode:
+umode: sbirs
 	bazel build //umode:
 
 sbirs:

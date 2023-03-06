@@ -132,7 +132,6 @@ impl MmioOperation {
 pub enum VmExitCause {
     FatalEcall(SbiMessage),
     ResumableEcall(SbiMessage),
-    BlockingEcall(SbiMessage),
     ForwardedEcall(SbiMessage),
     PageFault(Exception, GuestPageAddr),
     MmioFault(MmioOperation, GuestPhysAddr),
@@ -150,8 +149,7 @@ impl VmExitCause {
 
     // Returns if the vCPU can immediately resume execution from the exit.
     fn is_resumable(&self) -> bool {
-        use VmExitCause::*;
-        !self.is_fatal() && !matches!(self, BlockingEcall(..))
+        !self.is_fatal()
     }
 }
 
@@ -2409,7 +2407,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 // Always block given we expect a TLB increment to be triggered from the host.
                 let action = match result {
                     Ok(_) => EcallAction::Break(
-                        VmExitCause::BlockingEcall(SbiMessage::TeeGuest(guest_func)),
+                        VmExitCause::ForwardedEcall(SbiMessage::TeeGuest(guest_func)),
                         SbiReturn::success(0),
                     ),
                     Err(_) => result.map(|_| 0).into(),

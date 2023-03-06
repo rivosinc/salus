@@ -5,35 +5,35 @@
 
 # Do not add dependencies to the bazel targets here.
 # The dependencies are handled by bazel.
-all: sbirs
+all: update_submodules
 	bazel build //:salus-all
 
-check: sbirs
+check: update_submodules
 	bazel test //:test-all
 
-salus: sbirs
+salus: update_submodules
 	bazel build //:salus-all
 
-salus_debug: sbirs
+salus_debug: update_submodules
 	bazel build -c dbg //:salus-all
 
-salus_test: sbirs
+salus_test: update_submodules
 	bazel build //:salus-unit-tests
 	scripts/run_salus_test.sh
 
-tellus_bin: sbirs
+tellus_bin: update_submodules
 	bazel build //test-workloads:tellus_raw
 
-guestvm: sbirs
+guestvm: update_submodules
 	bazel build //test-workloads:guestvm_raw
 
-tellus: sbirs
+tellus: update_submodules
 	bazel build //test-workloads:tellus
 
-umode: sbirs
+umode: update_submodules
 	bazel build //umode:
 
-sbirs:
+update_submodules:
 	# Check if the submodule needs to be initialized
 	if [ "$$(git submodule status | grep -c '^-')" -gt 0 ]; then \
 		git submodule update --init; \

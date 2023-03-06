@@ -13,6 +13,7 @@ A micro hypervisor for RISC-V systems.
 ## Building (using Bazel)
 
 ```bash
+git submodule update --init
 bazel build //:salus-all
 ```
 

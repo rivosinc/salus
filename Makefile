@@ -67,6 +67,9 @@ lint:
 format:
 	bazel test //:rustfmt-all
 
+reformat:
+	bazel run @rules_rust//:rustfmt
+
 #doc: currently not handled correctly by rules_rust
 
 ci: salus guestvm tellus lint format check # doc

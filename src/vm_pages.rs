@@ -550,17 +550,20 @@ pub struct VmPagesMapper<'a, T: GuestStagePagingMode, M> {
 impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
     // Creates a new `VmPagesMapper` for `num_pages` starting at `page_addr`, which must lie within
     // a region of type `region_type`.
-    fn new_in_region(
+    fn new_in_region<F>(
         vm_pages: &'a VmPages<T>,
         page_addr: GuestPageAddr,
         num_pages: u64,
-        region_type: VmRegionType,
-    ) -> Result<Self> {
+        pred: F,
+    ) -> Result<Self>
+    where
+        F: Fn(VmRegionType) -> bool,
+    {
         let end = page_addr
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let regions = vm_pages.regions.read();
-        if !regions.contains(page_addr, end, |r| r == region_type) {
+        if !regions.contains(page_addr, end, pred) {
             return Err(Error::InvalidMapRegion);
         }
         let mapper = vm_pages
@@ -884,8 +887,10 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
     ) -> PageFaultType {
         use PageFaultType::*;
         match self.vm_pages.inner.regions.read().find(fault_addr) {
-            Some(VmRegionType::Confidential) => Confidential,
-            Some(VmRegionType::Shared) => Shared,
+            Some(VmRegionType::Confidential) | Some(VmRegionType::ConfidentialRemovable) => {
+                Confidential
+            }
+            Some(VmRegionType::Shared) | Some(VmRegionType::SharedRemovable) => Shared,
             Some(VmRegionType::Mmio) => match exception {
                 Exception::GuestLoadPageFault | Exception::GuestStorePageFault => Mmio,
                 _ => Unmapped,
@@ -1084,16 +1089,19 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         Ok(())
     }
 
-    fn do_map_pages<M>(
+    fn do_map_pages<M, F>(
         &self,
         page_addr: GuestPageAddr,
         count: u64,
-        region_type: VmRegionType,
-    ) -> Result<VmPagesMapper<'a, T, M>> {
+        pred: F,
+    ) -> Result<VmPagesMapper<'a, T, M>>
+    where
+        F: Fn(VmRegionType) -> bool,
+    {
         if count == 0 {
             return Err(Error::EmptyPageRange);
         }
-        VmPagesMapper::new_in_region(self.inner, page_addr, count, region_type)
+        VmPagesMapper::new_in_region(self.inner, page_addr, count, pred)
     }
 
     fn do_remap_pages<M>(
@@ -1114,7 +1122,7 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<ImsicPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, VmRegionType::Imsic)
+        self.do_map_pages(page_addr, count, |r| r == VmRegionType::Imsic)
     }
 
     /// Same as `map_imsic_pages()`, but for remapping the virtual address to a different
@@ -1133,7 +1141,7 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<PciPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, VmRegionType::Pci)
+        self.do_map_pages(page_addr, count, |r| r == VmRegionType::Pci)
     }
 
     // Adds a region of type `region_type`.
@@ -1339,7 +1347,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<ZeroPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, VmRegionType::Confidential)
+        self.do_map_pages(page_addr, count, |r| {
+            r == VmRegionType::Confidential || r == VmRegionType::ConfidentialRemovable
+        })
     }
 
     /// Same as `map_zero_pages()`, but for pages in shared (non-confidential) regions.
@@ -1348,7 +1358,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<SharedPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, VmRegionType::Shared)
+        self.do_map_pages(page_addr, count, |r| {
+            r == VmRegionType::Shared || r == VmRegionType::SharedRemovable
+        })
     }
 
     fn do_get_converted_pages<P: ConvertedPhysPage>(
@@ -1934,7 +1946,7 @@ impl<'a, T: GuestStagePagingMode> InitializingVmPages<'a, T> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<MeasuredPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, VmRegionType::Confidential)
+        self.do_map_pages(page_addr, count, |r| r == VmRegionType::Confidential)
     }
 
     /// Attaches the given PCI device to this VM by enabling DMA translation via the IOMMU using

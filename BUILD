@@ -124,11 +124,11 @@ objcopy_to_object(
 rust_binary(
     name = "salus",
     srcs = glob(["src/*.rs"]),
-    data = glob(["src/*.S"]) + [":umode_to_object"],
-    linker_script = ":l_rule",
+    data = glob(["src/*.S"]) + [":umode_to_object", ":l_rule"],
     rustc_flags = [
         "-Ctarget-feature=+v",
         "--codegen=link-arg=-nostartfiles",
+        "-Clink-arg=-T$(location //:l_rule)"
     ],
     deps = [
         "//attestation",

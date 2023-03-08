@@ -20,3 +20,4 @@ bazel-out
 bazel-salus
 bazel-testlogs
 .idea/
+rust-project.json

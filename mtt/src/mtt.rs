@@ -521,6 +521,7 @@ pub struct Mtt {
 impl Mtt {
     // Performs sanity checks on the platform L2 table
     // TODO: Add additional sanity checks
+    #[cfg(not(test))]
     fn validate_mtt(&self, l2_base_addr: u64) -> Result<()> {
         use Error::*;
         let addr =
@@ -530,6 +531,12 @@ impl Mtt {
         } else {
             Ok(())
         }
+    }
+
+    // Test only NOP validation
+    #[cfg(test)]
+    fn validate_mtt(&self, _l2_base_addr: u64) -> Result<()> {
+        Ok(())
     }
 
     /// Creates a Mtt instance.
@@ -707,5 +714,224 @@ impl Mtt {
     /// maximum physical page address (currently defined as 46-bits of PA).
     pub fn is_non_confidential(&self, addr: SupervisorPageAddr, len: usize) -> Result<bool> {
         self.is_range_of_type(addr, len, MttMemoryType::NonConfidential)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MttL2Entry::*;
+    use super::*;
+
+    // Creates a VA mapping with a PFN that isn't too large.
+    // This is to ensure that we don't affect bits 34 and above in the L2 table entry
+    // when creating an L1 entry.
+    fn l1_pool_allocator(num_4k_pages: usize) -> Option<u64> {
+        use libc::c_void;
+        let prot: libc::c_int = libc::PROT_READ | libc::PROT_WRITE;
+        let flags: libc::c_int =
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE;
+        let mut base_addr = mtt_const::MAX_PAGE_ADDR - (PageSize::Size1G as u64 * 100);
+        let max_addr = mtt_const::MAX_PAGE_ADDR - (4096 * num_4k_pages as u64);
+        while base_addr < max_addr {
+            // Safety: Testing purposes only
+            let ptr = unsafe {
+                libc::mmap(
+                    base_addr as *mut c_void,
+                    (4096 * num_4k_pages) as libc::size_t,
+                    prot,
+                    flags,
+                    0,
+                    0,
+                )
+            };
+            if ptr != libc::MAP_FAILED {
+                return Some(ptr as u64);
+            }
+            base_addr += 4096;
+        }
+        None
+    }
+
+    fn verify_1g_type(mtt: &Mtt, addr: SupervisorPageAddr, memory_type: MttMemoryType) {
+        // Unwrap OK: Test case is expected to succeed
+        let mut platform_info = mtt.inner.lock();
+        let entry_type = MttL2Directory::entry_for_addr(platform_info.mtt_l2_base, addr).unwrap();
+        if memory_type == MttMemoryType::Confidential {
+            assert!(matches!(entry_type, Confidential1G(_)));
+        } else {
+            assert!(matches!(entry_type, NonConfidential1G(_)));
+        }
+    }
+
+    fn verify_2m_type(mtt: &Mtt, addr: SupervisorPageAddr, memory_type: MttMemoryType) {
+        let mut platform_info = mtt.inner.lock();
+        let entry_type = MttL2Directory::entry_for_addr(platform_info.mtt_l2_base, addr).unwrap();
+        assert!(matches!(entry_type, Mixed2M(_)));
+        match entry_type {
+            Mixed2M(mixed_2m) => {
+                let is_conf = mixed_2m.is_conf(addr);
+                if memory_type == MttMemoryType::Confidential {
+                    assert!(is_conf);
+                } else {
+                    assert!(!is_conf);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn verify_4k_type(mtt: &Mtt, addr: SupervisorPageAddr, memory_type: MttMemoryType) {
+        let mut platform_info = mtt.inner.lock();
+        let entry_type = MttL2Directory::entry_for_addr(platform_info.mtt_l2_base, addr).unwrap();
+        assert!(matches!(entry_type, L1Entry(_)));
+        // Unwrap OK: Test case is expected to succeed
+        match entry_type {
+            L1Entry(l1_entry) => {
+                let is_conf = l1_entry.is_conf(addr);
+                if memory_type == MttMemoryType::Confidential {
+                    assert!(is_conf);
+                } else {
+                    assert!(!is_conf);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn test_mtt_ranges() {
+        use riscv_pages::SupervisorPhysAddr;
+        const L1_PAGE_POOL_COUNT: usize = 16;
+        static mut MTT_BASE: [u64; MTT_L2_ENTRY_COUNT * 2] = [0; MTT_L2_ENTRY_COUNT * 2];
+        let mut l1_index = 0 as usize;
+        let l1_pool_base = l1_pool_allocator(L1_PAGE_POOL_COUNT).unwrap();
+        let mut l1_allocator = || {
+            if l1_index < L1_PAGE_POOL_COUNT {
+                let addr = SupervisorPageAddr::new(RawAddr::supervisor(l1_pool_base)).unwrap();
+                let l1_page = unsafe { Page::new_with_size(addr, PageSize::Size4k) };
+                l1_index += 1;
+                Some(l1_page)
+            } else {
+                None
+            }
+        };
+
+        // Safety: Testing purposes only
+        unsafe {
+            let l2_base = MTT_BASE.as_ptr() as u64;
+            const L2_ALIGNMENT: u64 = 1024 * 1024 * 8;
+            let aligned_mtt_base = (l2_base + L2_ALIGNMENT - 1) & !(L2_ALIGNMENT - 1);
+            let addr = SupervisorPageAddr::new(RawAddr::supervisor(aligned_mtt_base)).unwrap();
+            let l2_pages = SequentialPages::from_mem_range(addr, PageSize::Size2M, 4).unwrap();
+            let mut mtt = Mtt::init(l2_pages).unwrap();
+
+            // Unwrap OK: Alignment is guaranteed by construction
+            let addr = PageAddr::new(SupervisorPhysAddr::supervisor(0)).unwrap();
+
+            let len_1g = PageSize::Size1G as usize;
+            let len_2m = PageSize::Size2M as usize;
+            let len_4k = PageSize::Size4k as usize;
+
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+
+            // Unwrap OK: Test case is expected to succeed
+            mtt.set_non_confidential(addr, len_2m, &mut l1_allocator)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+            // Unwrap OK: Test case is expected to succeed
+            mtt.set_non_confidential(addr, len_4k, &mut l1_allocator)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+
+            mtt.set_confidential(addr, len_1g, &mut l1_allocator)
+                .unwrap();
+            for i in 0..=15 {
+                let addr_incr = addr
+                    .checked_add_pages_with_size(i * 32, PageSize::Size2M)
+                    .unwrap();
+                verify_1g_type(&mtt, addr_incr, MttMemoryType::Confidential);
+            }
+
+            // Unwrap OK: Test case is expected to succeed
+            mtt.set_non_confidential(addr, len_1g, &mut l1_allocator)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+            for i in 0..=15 {
+                let addr_incr = addr
+                    .checked_add_pages_with_size(i * 32, PageSize::Size2M)
+                    .unwrap();
+                verify_1g_type(&mtt, addr_incr, MttMemoryType::NonConfidential);
+            }
+
+            mtt.set_confidential(addr, len_1g, &mut l1_allocator)
+                .unwrap();
+            mtt.set_confidential(addr, len_2m, &mut l1_allocator)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::Confidential);
+            mtt.set_confidential(addr, len_4k, &mut l1_allocator)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::Confidential);
+
+            // This will break the 1GB regions into 64MB ranges
+            // Unwrap OK: Test case is expected to succeed
+            mtt.set_non_confidential(addr, len_1g, &mut l1_allocator)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+            mtt.set_confidential(addr, len_2m, &mut l1_allocator)
+                .unwrap();
+            verify_2m_type(&mtt, addr, MttMemoryType::Confidential);
+            let addr_incr = addr
+                .checked_add_pages_with_size(1, PageSize::Size2M)
+                .unwrap();
+            verify_2m_type(&mtt, addr_incr, MttMemoryType::NonConfidential);
+            let addr_incr = addr
+                .checked_add_pages_with_size(64, PageSize::Size2M)
+                .unwrap();
+            verify_2m_type(&mtt, addr_incr, MttMemoryType::NonConfidential);
+            mtt.set_non_confidential(addr, len_2m, &mut l1_allocator)
+                .unwrap();
+            verify_2m_type(&mtt, addr, MttMemoryType::NonConfidential);
+
+            let addr = addr
+                .checked_add_pages_with_size(1, PageSize::Size1G)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+            // Unwrap OK: Test case is expected to succeed
+            mtt.set_non_confidential(addr, len_4k, &mut l1_allocator)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+            mtt.set_confidential(addr, len_4k, &mut l1_allocator)
+                .unwrap();
+            verify_4k_type(&mtt, addr, MttMemoryType::Confidential);
+            let addr_incr = addr.checked_add_pages(1).unwrap();
+            verify_4k_type(&mtt, addr_incr, MttMemoryType::NonConfidential);
+
+            let addr = addr
+                .checked_add_pages_with_size(1, PageSize::Size1G)
+                .unwrap();
+            verify_1g_type(&mtt, addr, MttMemoryType::NonConfidential);
+            mtt.set_confidential(addr, len_2m, &mut l1_allocator)
+                .unwrap();
+            verify_2m_type(&mtt, addr, MttMemoryType::Confidential);
+            mtt.set_non_confidential(addr, len_4k * 4, &mut l1_allocator)
+                .unwrap();
+            verify_4k_type(&mtt, addr, MttMemoryType::NonConfidential);
+            for i in 0..4 {
+                let addr_incr = addr.checked_add_pages(i).unwrap();
+                verify_4k_type(&mtt, addr_incr, MttMemoryType::NonConfidential);
+            }
+
+            let addr_incr = addr.checked_add_pages(5).unwrap();
+            verify_4k_type(&mtt, addr_incr, MttMemoryType::Confidential);
+            assert!(mtt.is_non_confidential(addr, len_4k * 4 as usize).unwrap());
+            assert!(!mtt.is_non_confidential(addr, len_4k * 5 as usize).unwrap());
+            assert!(mtt
+                .is_confidential(addr_incr, len_2m - (len_4k * 5) as usize)
+                .unwrap());
+        }
+    }
+
+    #[test]
+    fn test_mtt() {
+        test_mtt_ranges();
     }
 }

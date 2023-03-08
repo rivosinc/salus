@@ -36,6 +36,10 @@ load("@rules_rust//rust:repositories.bzl", "rules_rust_dependencies", "rust_regi
 
 rules_rust_dependencies()
 
+load("@rules_rust//tools/rust_analyzer:deps.bzl", "rust_analyzer_dependencies")
+
+rust_analyzer_dependencies()
+
 # Register Rust toolchains. rules_rust gives us the latest stable Rust
 # release from the rules_rust release, and the nightly build from that
 # date. For Salus, we use the nightly build to take advantage of some

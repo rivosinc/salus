@@ -19,7 +19,7 @@ use crate::PageTracker;
 ///
 /// # Creation
 ///
-/// 1. Page given to Salus by the host for tracking a data type `T` (for example TEE state).
+/// 1. Page given to Salus by the host for tracking a data type `T` (for example COVE state).
 /// 2. Remove page from the host: unmap_page -> `Page`
 /// 3. Pass the page to the PageBox: `let data = PageBox::new(GuestInfo::new(), page, page_tracker);`
 /// 4. Use type

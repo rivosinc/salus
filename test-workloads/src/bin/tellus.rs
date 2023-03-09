@@ -28,11 +28,11 @@ use riscv_regs::{
 };
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi_rs::api::{base, nacl, pmu, reset, state, tee_host, tee_interrupt};
+use sbi_rs::api::{base, cove_host, cove_interrupt, nacl, pmu, reset, state};
 use sbi_rs::{
     ecall_send, Error as SbiError, PmuCounterConfigFlags, PmuCounterStartFlags,
-    PmuCounterStopFlags, PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn, EXT_PMU,
-    EXT_TEE_HOST, EXT_TEE_INTERRUPT,
+    PmuCounterStopFlags, PmuEventType, PmuFirmware, PmuHardware, SbiMessage, SbiReturn,
+    EXT_COVE_HOST, EXT_COVE_INTERRUPT, EXT_PMU,
 };
 use sync::{Mutex, Once};
 use test_system::*;
@@ -235,7 +235,7 @@ pub fn poweroff() -> ! {
 fn fence_memory() {
     // TsmInitiateFence implies a fence on the local CPU, so TsmLocalFence only needs to be executed
     // on every other active CPU.
-    tee_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
+    cove_host::tsm_initiate_fence().expect("Tellus - TsmInitiateFence failed");
     for cpu in PER_CPU
         .get()
         .unwrap()
@@ -243,21 +243,21 @@ fn fence_memory() {
         .filter(|c| PerCpu::get().hart_id != c.hart_id)
     {
         cpu.runner
-            .run(|| tee_host::tsm_local_fence().expect("Tellus - TsmLocalFence failed"));
+            .run(|| cove_host::tsm_local_fence().expect("Tellus - TsmLocalFence failed"));
     }
 }
 
 // Safety: addr must point to `num_pages` of memory that isn't currently used by this program. This
 // memory will be overwritten and access will be removed.
 unsafe fn convert_pages(addr: u64, num_pages: u64) {
-    tee_host::convert_pages(addr, num_pages).expect("TsmConvertPages failed");
+    cove_host::convert_pages(addr, num_pages).expect("TsmConvertPages failed");
 
     // Fence the pages we just converted.
     fence_memory();
 }
 
 fn reclaim_pages(addr: u64, num_pages: u64) {
-    tee_host::reclaim_pages(addr, num_pages).expect("TsmReclaimPages failed");
+    cove_host::reclaim_pages(addr, num_pages).expect("TsmReclaimPages failed");
 
     for i in 0u64..((num_pages * PAGE_SIZE_4K) / 8) {
         let m = (addr + i) as *const u64;
@@ -456,7 +456,7 @@ static mut CONSOLE_BUFFER: [u8; 256] = [0; 256];
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
 extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
-    const NUM_TEE_PTE_PAGES: u64 = 10;
+    const NUM_COVE_PTE_PAGES: u64 = 10;
     const NUM_CONVERTED_ZERO_PAGES: u64 = NUM_GUEST_ZERO_PAGES + NUM_GUEST_SHARED_PAGES;
 
     // Safety: We're giving SbiConsole exclusive ownership of CONSOLE_BUFFER and will not touch it
@@ -524,13 +524,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         println!("Tellus - Vector disabled");
     };
 
-    base::probe_sbi_extension(EXT_TEE_HOST).expect("Platform doesn't support TEE extension");
-    let tsm_info = tee_host::get_info().expect("Tellus - TsmGetInfo failed");
+    base::probe_sbi_extension(EXT_COVE_HOST).expect("Platform doesn't support COVE extension");
+    let tsm_info = cove_host::get_info().expect("Tellus - TsmGetInfo failed");
     let tvm_create_pages = 4 + tsm_info.tvm_state_pages;
     println!("Donating {} pages for TVM creation", tvm_create_pages);
 
     // Make sure TsmGetInfo fails if we pass it a bogus address.
-    let msg = SbiMessage::TeeHost(sbi_rs::TeeHostFunction::TsmGetInfo {
+    let msg = SbiMessage::CoveHost(sbi_rs::CoveHostFunction::TsmGetInfo {
         dest_addr: 0x1000,
         len: core::mem::size_of::<sbi_rs::TsmInfo>() as u64,
     });
@@ -549,7 +549,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let tvm_page_directory_addr = state_pages_base;
     let tvm_state_addr = tvm_page_directory_addr + 4 * PAGE_SIZE_4K;
 
-    let vmid = tee_host::tvm_create(tvm_page_directory_addr, tvm_state_addr)
+    let vmid = cove_host::tvm_create(tvm_page_directory_addr, tvm_state_addr)
         .expect("Tellus - TvmCreate returned error");
     println!("Tellus - TvmCreate Success vmid: {vmid:x}");
     next_page += PAGE_SIZE_4K * tvm_create_pages;
@@ -563,17 +563,17 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe { nacl::register_shmem(shmem_ptr).expect("SetShmem failed") };
     // Safety: `shmem_ptr` points to a sufficient number of pages to hold a `NaclShmem` struct
     // and will not be used for any other purpose for the duration of `kernel_init()`.
-    let shmem = unsafe { tee_host::TsmShmemAreaRef::new(shmem_ptr) };
+    let shmem = unsafe { cove_host::TsmShmemAreaRef::new(shmem_ptr) };
 
     // Add pages for the page table
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
     // reclaimed.
     unsafe {
-        convert_pages(next_page, NUM_TEE_PTE_PAGES);
+        convert_pages(next_page, NUM_COVE_PTE_PAGES);
     }
-    tee_host::add_page_table_pages(vmid, next_page, NUM_TEE_PTE_PAGES)
+    cove_host::add_page_table_pages(vmid, next_page, NUM_COVE_PTE_PAGES)
         .expect("Tellus - AddPageTablePages returned error");
-    next_page += PAGE_SIZE_4K * NUM_TEE_PTE_PAGES;
+    next_page += PAGE_SIZE_4K * NUM_COVE_PTE_PAGES;
 
     // Add vCPU0.
 
@@ -584,9 +584,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         convert_pages(vcpu_pages_base, tsm_info.tvm_vcpu_state_pages);
     }
     next_page += PAGE_SIZE_4K * tsm_info.tvm_vcpu_state_pages;
-    tee_host::add_vcpu(vmid, 0, vcpu_pages_base).expect("Tellus - TvmCpuCreate returned error");
+    cove_host::add_vcpu(vmid, 0, vcpu_pages_base).expect("Tellus - TvmCpuCreate returned error");
 
-    let has_aia = base::probe_sbi_extension(EXT_TEE_INTERRUPT).is_ok();
+    let has_aia = base::probe_sbi_extension(EXT_COVE_INTERRUPT).is_ok();
     // CPU0, guest interrupt file 0 (which is at index 1 since supervisor file is at 0).
     let imsic_file_num = 1;
     let imsic_file_addr = Imsic::get().file_address(0, imsic_file_num);
@@ -605,19 +605,19 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
             guest_index_bits: 0,
             guests_per_hart: 0,
         };
-        tee_interrupt::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
-        tee_interrupt::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000)
+        cove_interrupt::tvm_aia_init(vmid, aia_params).expect("Tellus - TvmAiaInit failed");
+        cove_interrupt::set_vcpu_imsic_addr(vmid, 0, 0x2800_0000)
             .expect("Tellus - TvmCpuSetImsicAddr failed");
 
         // Try to convert a guest interrupt file.
         //
         // Safety: We trust that the IMSIC is actually at the address provided in the device tree,
         // and we aren't touching this page at all in this program.
-        unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
+        unsafe { cove_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
         fence_memory();
     } else {
-        println!("Platform doesn't support TEE AIA extension");
+        println!("Platform doesn't support COVE AIA extension");
     }
 
     let guest_image_base = USABLE_RAM_START_ADDRESS + PAGE_SIZE_4K * NUM_TELLUS_IMAGE_PAGES;
@@ -632,7 +632,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let donated_pages_base = next_page;
 
     // Declare the confidential region of the guest's physical address space.
-    tee_host::add_memory_region(
+    cove_host::add_memory_region(
         vmid,
         USABLE_RAM_START_ADDRESS,
         GUEST_RAM_END_ADDRESS - USABLE_RAM_START_ADDRESS,
@@ -645,7 +645,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     unsafe {
         convert_pages(next_page, NUM_GUEST_DATA_PAGES);
     }
-    tee_host::add_measured_pages(
+    cove_host::add_measured_pages(
         vmid,
         guest_image,
         next_page,
@@ -675,10 +675,10 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         0
     };
     // TODO test that access to pages crashes somehow
-    tee_host::tvm_finalize(vmid, 0x8020_0000, boot_arg).expect("Tellus - Finalize returned error");
+    cove_host::tvm_finalize(vmid, 0x8020_0000, boot_arg).expect("Tellus - Finalize returned error");
 
     // Map a few zero pages up front. We'll fault the rest in as necessary.
-    tee_host::add_zero_pages(
+    cove_host::add_zero_pages(
         vmid,
         zero_pages_base,
         sbi_rs::TsmPageType::Page4k,
@@ -694,7 +694,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Bind to a guest interrupt file if AIA is enabled.
     if has_aia {
-        tee_interrupt::bind_vcpu_imsic(vmid, 0, 1 << 1).expect("Tellus - TvmCpuBindImsic failed");
+        cove_interrupt::bind_vcpu_imsic(vmid, 0, 1 << 1).expect("Tellus - TvmCpuBindImsic failed");
     }
 
     // For now we run on a single CPU so try to exercise the rebinding interface
@@ -708,20 +708,20 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         //
         // Safety: We trust that the IMSIC is actually at the address provided in the device tree,
         // and we aren't touching this page at all in this program.
-        unsafe { tee_interrupt::convert_imsic(imsic_file_addr) }
+        unsafe { cove_interrupt::convert_imsic(imsic_file_addr) }
             .expect("Tellus - TsmConvertImsic failed");
         fence_memory();
 
-        tee_interrupt::rebind_vcpu_imsic_begin(vmid, 0, 1 << imsic_file_num)
+        cove_interrupt::rebind_vcpu_imsic_begin(vmid, 0, 1 << imsic_file_num)
             .expect("Tellus - TvmCpuRebindImsicBegin failed");
-        tee_host::tvm_initiate_fence(vmid).expect("Tellus - TvmInitiateFence failed");
-        tee_interrupt::rebind_vcpu_imsic_clone(vmid, 0)
+        cove_host::tvm_initiate_fence(vmid).expect("Tellus - TvmInitiateFence failed");
+        cove_interrupt::rebind_vcpu_imsic_clone(vmid, 0)
             .expect("Tellus - TvmCpuRebindImsicClone failed");
-        tee_interrupt::rebind_vcpu_imsic_end(vmid, 0)
+        cove_interrupt::rebind_vcpu_imsic_end(vmid, 0)
             .expect("Tellus - TvmCpuRebindImsicEnd failed");
 
         // Reclaim previous imsic file address.
-        tee_interrupt::reclaim_imsic(Imsic::get().file_address(0, previous_imsic_file_num))
+        cove_interrupt::reclaim_imsic(Imsic::get().file_address(0, previous_imsic_file_num))
             .expect("Tellus - TsmReclaimImsic failed");
 
         CSR.hgeie.set(1 << imsic_file_num);
@@ -754,7 +754,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     loop {
         // Safety: running a VM will only write the `TsmShmemArea` struct that was registered
         // with `register_shmem()`.
-        let fatal = tee_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
+        let fatal = cove_host::tvm_run(vmid, 0).expect("Could not run guest VM") != 0;
         let scause = CSR.scause.get();
         if let Ok(t) = Trap::from_scause(scause) {
             use Exception::*;
@@ -772,8 +772,8 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             println!("Guest VM requested shutdown");
                             break;
                         }
-                        Ok(TeeGuest(guest_func)) => {
-                            use sbi_rs::TeeGuestFunction::*;
+                        Ok(CoveGuest(guest_func)) => {
+                            use sbi_rs::CoveGuestFunction::*;
                             match guest_func {
                                 AddMmioRegion { addr, len } => {
                                     mmio_region = Some(Range {
@@ -809,11 +809,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
                                     if populated_range {
                                         println!("Tellus - TVM range invalidation on page sharing");
-                                        tee_host::block_pages(vmid, addr, len).unwrap();
+                                        cove_host::block_pages(vmid, addr, len).unwrap();
                                         println!("Tellus - TVM fence on page sharing");
-                                        tee_host::tvm_initiate_fence(vmid).unwrap();
+                                        cove_host::tvm_initiate_fence(vmid).unwrap();
                                         println!("Tellus - TVM range removal on page sharing");
-                                        tee_host::remove_pages(vmid, addr, len).unwrap();
+                                        cove_host::remove_pages(vmid, addr, len).unwrap();
                                     }
                                     println!("Tellus - Set GPR A0 to 0 to indicate page sharing has been accepted");
                                     shmem.set_gpr(GprIndex::A0 as usize, 0);
@@ -837,11 +837,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                         println!(
                                             "Tellus - TVM range invalidation on page unsharing"
                                         );
-                                        tee_host::block_pages(vmid, addr, len).unwrap();
+                                        cove_host::block_pages(vmid, addr, len).unwrap();
                                         println!("Tellus - TVM fence on page unsharing");
-                                        tee_host::tvm_initiate_fence(vmid).unwrap();
+                                        cove_host::tvm_initiate_fence(vmid).unwrap();
                                         println!("Tellus - TVM range removal on page unsharing");
-                                        tee_host::remove_pages(vmid, addr, len).unwrap();
+                                        cove_host::remove_pages(vmid, addr, len).unwrap();
                                     }
                                     println!("Tellus - Set GPR A0 to 0 to indicate page unsharing has been accepted");
                                     shmem.set_gpr(GprIndex::A0 as usize, 0);
@@ -855,7 +855,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                     // one.
                                     let id = u64::try_from(id).unwrap_or(7);
                                     println!("Injecting interrupt {id} into guest");
-                                    tee_interrupt::inject_external_interrupt(vmid, 0, id)
+                                    cove_interrupt::inject_external_interrupt(vmid, 0, id)
                                         .expect("Tellus - InjectExternalInterrupt failed");
 
                                     // Check that we see the external interrupt pending in HGEIP/HIP.
@@ -912,7 +912,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             // Safety: shared_page_base points to pages that will only be accessed
                             // as volatile from here on.
                             unsafe {
-                                tee_host::add_shared_pages(
+                                cove_host::add_shared_pages(
                                     vmid,
                                     shared_page_base,
                                     sbi_rs::TsmPageType::Page4k,
@@ -949,7 +949,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                             // Safety: dbcn_page_base points to pages that will only be accessed
                             // as volatile from here on.
                             unsafe {
-                                tee_host::add_shared_pages(
+                                cove_host::add_shared_pages(
                                     vmid,
                                     dbcn_page_base,
                                     sbi_rs::TsmPageType::Page4k,
@@ -1007,7 +1007,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 });
                             }
 
-                            tee_host::add_zero_pages(
+                            cove_host::add_zero_pages(
                                 vmid,
                                 zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
                                 sbi_rs::TsmPageType::Page4k,
@@ -1069,12 +1069,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     if has_aia {
         // A fence is needed in between begin & end.
-        tee_interrupt::unbind_vcpu_imsic_begin(vmid, 0).expect("Tellus - TvmCpuUnbindImsic failed");
-        tee_host::tvm_initiate_fence(vmid).expect("Tellus - TvmInitiateFence failed");
-        tee_interrupt::unbind_vcpu_imsic_end(vmid, 0).expect("Tellus - TvmCpuUnbindImsic failed");
+        cove_interrupt::unbind_vcpu_imsic_begin(vmid, 0)
+            .expect("Tellus - TvmCpuUnbindImsic failed");
+        cove_host::tvm_initiate_fence(vmid).expect("Tellus - TvmInitiateFence failed");
+        cove_interrupt::unbind_vcpu_imsic_end(vmid, 0).expect("Tellus - TvmCpuUnbindImsic failed");
     }
 
-    tee_host::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
+    cove_host::tvm_destroy(vmid).expect("Tellus - TvmDestroy returned error");
 
     // Safety: We own the page.
     // Note that any access to shared pages must use volatile memory semantics
@@ -1091,7 +1092,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     reclaim_pages(state_pages_base, tvm_create_pages);
     reclaim_pages(vcpu_pages_base, tsm_info.tvm_vcpu_state_pages);
     if has_aia {
-        tee_interrupt::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
+        cove_interrupt::reclaim_imsic(imsic_file_addr).expect("Tellus - TsmReclaimImsic failed");
     }
     exercise_pmu_functionality();
     nacl::unregister_shmem().expect("SetShmem failed");

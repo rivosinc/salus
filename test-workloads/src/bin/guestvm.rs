@@ -24,7 +24,7 @@ use rice::x509::{
 use riscv_regs::{sie, stopi, Interrupt, Readable, RiscvCsrInterface, Writeable, CSR};
 use s_mode_utils::abort::abort;
 use s_mode_utils::{print::*, sbi_console::SbiConsole};
-use sbi_rs::api::{attestation, base, reset, tee_guest};
+use sbi_rs::api::{attestation, base, cove_guest, reset};
 use test_system::*;
 use test_workloads::consts::*;
 
@@ -285,7 +285,7 @@ fn test_memory_sharing() -> TestResult {
     //
     // Safety: We haven't touched this memory and we won't touch it until the call returns.
     unsafe {
-        tee_guest::share_memory(
+        cove_guest::share_memory(
             GUEST_SHARED_PAGES_START_ADDRESS,
             NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
         )
@@ -311,7 +311,7 @@ fn test_memory_sharing() -> TestResult {
     // Safety: We don't care about the contents of this memory and we won't touch it until the
     // call returns.
     unsafe {
-        tee_guest::unshare_memory(
+        cove_guest::unshare_memory(
             GUEST_SHARED_PAGES_START_ADDRESS,
             NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
         )
@@ -324,7 +324,7 @@ fn test_memory_sharing() -> TestResult {
     //
     // Safety: We don't care about the contents of this memory and we won't touch it again.
     unsafe {
-        tee_guest::share_memory(
+        cove_guest::share_memory(
             GUEST_SHARED_PAGES_START_ADDRESS,
             NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K,
         )
@@ -336,7 +336,7 @@ fn test_memory_sharing() -> TestResult {
 
 fn test_emulated_mmio() -> TestResult {
     for _ in 0..2 {
-        tee_guest::add_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
+        cove_guest::add_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
             .expect("GuestVm - AddEmulatedMmioRegion failed");
         // Try reading and writing MMIO.
         let write_ptr = GUEST_MMIO_START_ADDRESS as *mut u32;
@@ -348,7 +348,7 @@ fn test_emulated_mmio() -> TestResult {
         // Safety: read_ptr is properly aligned and a readable part of our address space.
         let val = unsafe { core::ptr::read_volatile(read_ptr) };
         println!("Host says: 0x{:x}", val);
-        tee_guest::remove_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
+        cove_guest::remove_emulated_mmio_region(GUEST_MMIO_START_ADDRESS, PAGE_SIZE_4K)
             .expect("GuestVm - RemoveEmulatedMmioRegion failed");
     }
 
@@ -375,7 +375,7 @@ fn test_interrupts() -> TestResult {
     CSR.si_eithreshold.set(0);
     CSR.si_eie[INTERRUPT_ID / 64].read_and_set_bits(1 << (INTERRUPT_ID % 64));
 
-    tee_guest::allow_external_interrupt(3).expect("GuestVm - AllowExternalInterrupt failed");
+    cove_guest::allow_external_interrupt(3).expect("GuestVm - AllowExternalInterrupt failed");
 
     // VSIP implementation is buggy in QEMU; use VSTOPI to check that we got the interrupt instead.
     if CSR.stopi.read(stopi::interrupt_id) == Interrupt::SupervisorExternal as u64 {
@@ -390,13 +390,13 @@ fn test_interrupts() -> TestResult {
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init(hart_id: u64, boot_args: u64) {
-    base::probe_sbi_extension(sbi_rs::EXT_TEE_GUEST).expect("TEE-Guest extension not present");
+    base::probe_sbi_extension(sbi_rs::EXT_COVE_GUEST).expect("COVE-Guest extension not present");
 
     // Convert a page to shared memory for use with the debug console.
     //
     // Safety: We haven't touched this memory and we won't touch it until the call returns.
     unsafe {
-        tee_guest::share_memory(GUEST_DBCN_ADDRESS, PAGE_SIZE_4K)
+        cove_guest::share_memory(GUEST_DBCN_ADDRESS, PAGE_SIZE_4K)
             .expect("GuestVm -- ShareMemory failed");
     }
     let console_mem = unsafe {

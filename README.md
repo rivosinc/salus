@@ -166,7 +166,7 @@ changes, you can just run `scripts/repin.sh`.
   |           | |    Host(linux)  | |         |
   +-----------+ +-----------------+ +---------+
         |                |               |
-   TBD syscall      SBI (TH-API)    SBI(TG-API)
+   TBD syscall   SBI (COVH-API)    SBI(COVG-API)
         |                |               |
   +-------------HS-mode-----------------------+
   |       Salus                               |
@@ -187,7 +187,7 @@ VS mode.
 Responsibilities:
 - Scheduling
 - Memory allocation (except memory kept by firmware and salus at boot)
-- Guest VM start/stop/scheduling via TEE TH-API provided by salus
+- Guest VM start/stop/scheduling via COVH-API provided by salus
 - Device drivers and delegation
 
 #### VMM
@@ -207,7 +207,7 @@ VS-mode operating systems started by the host.
 - Uses memory shared from or donated by the host
 - scheduled by the host
 - can start sub-guests
-- Confidential guests use TG-API for salus/host services
+- Confidential guests use COVG-API for salus/host services
 
 ### Salus
 

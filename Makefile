@@ -43,7 +43,7 @@ run_salus_test: salus_test
 	./scripts/run_salus_test.sh
 
 run_tellus_gdb: tellus_bin salus_debug
-	./scripts/run/tellus_gdb.sh
+	./scripts/run_tellus_gdb.sh
 
 run_tellus: all
 	./scripts/run_tellus.sh

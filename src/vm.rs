@@ -519,12 +519,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         sbi_msg: &SbiMessage,
         sbi_ret: SbiReturnType,
     ) -> EcallResult<()> {
-        if let (SbiMessage::TeeGuest(tee_guest_function), SbiReturnType::Standard(sbi_std)) =
+        if let (SbiMessage::CoveGuest(cove_guest_function), SbiReturnType::Standard(sbi_std)) =
             (sbi_msg, sbi_ret)
         {
             let host_a0 = sbi_std.error_code;
-            match tee_guest_function {
-                TeeGuestFunction::ShareMemory { addr, len } => {
+            match cove_guest_function {
+                CoveGuestFunction::ShareMemory { addr, len } => {
                     let addr = self.guest_addr_from_raw(*addr)?;
                     if host_a0 == 0 {
                         self.vm_pages()
@@ -536,7 +536,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                             .map_err(EcallError::from)?;
                     }
                 }
-                TeeGuestFunction::UnshareMemory { addr, len } => {
+                CoveGuestFunction::UnshareMemory { addr, len } => {
                     let addr = self.guest_addr_from_raw(*addr)?;
                     if host_a0 == 0 {
                         self.vm_pages()
@@ -809,11 +809,13 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             SbiMessage::DebugConsole(debug_con_func) => self.handle_debug_console(debug_con_func),
             SbiMessage::HartState(hsm_func) => self.handle_hart_state_msg(hsm_func),
             SbiMessage::Nacl(nacl_func) => self.handle_nacl_msg(nacl_func, active_vcpu),
-            SbiMessage::TeeHost(host_func) => self.handle_tee_host_msg(host_func, active_vcpu),
-            SbiMessage::TeeInterrupt(interrupt_func) => {
-                self.handle_tee_interrupt_msg(interrupt_func, active_vcpu)
+            SbiMessage::CoveHost(host_func) => self.handle_cove_host_msg(host_func, active_vcpu),
+            SbiMessage::CoveInterrupt(interrupt_func) => {
+                self.handle_cove_interrupt_msg(interrupt_func, active_vcpu)
             }
-            SbiMessage::TeeGuest(guest_func) => self.handle_tee_guest_msg(guest_func, active_vcpu),
+            SbiMessage::CoveGuest(guest_func) => {
+                self.handle_cove_guest_msg(guest_func, active_vcpu)
+            }
             SbiMessage::Attestation(attestation_func) => {
                 self.handle_attestation_msg(attestation_func, active_vcpu.active_pages())
             }
@@ -950,11 +952,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
                 | sbi_rs::EXT_RESET
                 | sbi_rs::EXT_DBCN
                 | sbi_rs::EXT_NACL
-                | sbi_rs::EXT_TEE_HOST
-                | sbi_rs::EXT_TEE_INTERRUPT
+                | sbi_rs::EXT_COVE_HOST
+                | sbi_rs::EXT_COVE_INTERRUPT
                 | sbi_rs::EXT_ATTESTATION => 1,
                 sbi_rs::EXT_PMU if PmuInfo::get().is_ok() => 1,
-                sbi_rs::EXT_TEE_GUEST => (!active_vcpu.is_host_vcpu()) as u64,
+                sbi_rs::EXT_COVE_GUEST => (!active_vcpu.is_host_vcpu()) as u64,
                 _ => 0,
             },
             // TODO: 0 is valid result for the GetMachine* SBI calls but we should probably
@@ -1028,12 +1030,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    fn handle_tee_host_msg(
+    fn handle_cove_host_msg(
         &self,
-        host_func: TeeHostFunction,
+        host_func: CoveHostFunction,
         active_vcpu: &mut ActiveVmCpu<T>,
     ) -> EcallAction {
-        use TeeHostFunction::*;
+        use CoveHostFunction::*;
         match host_func {
             TsmGetInfo { dest_addr, len } => self
                 .get_tsm_info(dest_addr, len, active_vcpu.active_pages())
@@ -1864,12 +1866,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(measurement_data.len() as u64)
     }
 
-    fn handle_tee_interrupt_msg(
+    fn handle_cove_interrupt_msg(
         &self,
-        interrupt_func: TeeInterruptFunction,
+        interrupt_func: CoveInterruptFunction,
         active_vcpu: &ActiveVmCpu<T>,
     ) -> EcallAction {
-        use TeeInterruptFunction::*;
+        use CoveInterruptFunction::*;
         match interrupt_func {
             TvmAiaInit {
                 tvm_id,
@@ -2334,9 +2336,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 
-    fn handle_tee_guest_msg(
+    fn handle_cove_guest_msg(
         &self,
-        guest_func: TeeGuestFunction,
+        guest_func: CoveGuestFunction,
         active_vcpu: &ActiveVmCpu<T>,
     ) -> EcallAction {
         // Guest ABI is not supported for Host.
@@ -2344,7 +2346,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             return Err(EcallError::Sbi(SbiError::NotSupported)).into();
         }
 
-        use TeeGuestFunction::*;
+        use CoveGuestFunction::*;
         let result = match guest_func {
             AddMmioRegion { addr, len } => self.add_mmio_region(addr, len),
             RemoveMmioRegion { addr, len } => self.remove_mmio_region(addr, len),
@@ -2357,7 +2359,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
                 // Always block given we expect a TLB increment to be triggered from the host.
                 let action = match result {
-                    Ok(_) => EcallAction::Forward(SbiMessage::TeeGuest(guest_func)),
+                    Ok(_) => EcallAction::Forward(SbiMessage::CoveGuest(guest_func)),
                     Err(_) => result.map(|_| 0).into(),
                 };
                 return action;
@@ -2366,10 +2368,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             DenyExternalInterrupt { id } => self.deny_ext_interrupt(id, active_vcpu),
         };
 
-        // Notify the host if a TEE-Guest call succeeds.
+        // Notify the host if a COVE-Guest call succeeds.
         match result {
             Ok(r) => EcallAction::Break(
-                VmExitCause::ResumableEcall(SbiMessage::TeeGuest(guest_func)),
+                VmExitCause::ResumableEcall(SbiMessage::CoveGuest(guest_func)),
                 SbiReturn::success(r),
             ),
             Err(_) => result.into(),

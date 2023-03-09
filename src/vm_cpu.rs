@@ -11,7 +11,7 @@ use page_tracking::TlbVersion;
 use riscv_page_tables::GuestStagePagingMode;
 use riscv_pages::{GuestPhysAddr, GuestVirtAddr, PageOwnerId, RawAddr};
 use riscv_regs::*;
-use sbi_rs::{self, api::tee_host::TsmShmemAreaRef, SbiMessage, SbiReturn, SbiReturnType};
+use sbi_rs::{self, api::cove_host::TsmShmemAreaRef, SbiMessage, SbiReturn, SbiReturnType};
 use sync::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::smp::PerCpu;

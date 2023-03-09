@@ -56,7 +56,7 @@ impl UmodeTask {
     //   certout_addr: starting address of the output Certificate.
     //   certout_len: size for the output Certificate.
     //
-    // U-mode Shared Region: contains an instance of `GetEvidenceShared`.
+    // U-mode Input Region: contains an instance of `MeasurementRegisters`.
     fn op_get_evidence(
         &self,
         csr_addr: u64,
@@ -71,12 +71,12 @@ impl UmodeTask {
         let certout = unsafe {
             &mut *core::ptr::slice_from_raw_parts_mut(certout_addr as *mut u8, certout_len)
         };
-        let shared_data = self
+        let input_data = self
             .vslice
             .get_ref(0)
             .map_err(|_| UmodeApiError::Failed)?
             .load();
-        cert::get_certificate_sha384(csr, shared_data, certout).map_err(|e| {
+        cert::get_certificate_sha384(csr, input_data, certout).map_err(|e| {
             println!("get_certificate failed: {:?}", e);
             use cert::Error::*;
             match e {
@@ -112,15 +112,15 @@ impl UmodeTask {
 }
 
 #[no_mangle]
-extern "C" fn task_main(cpuid: u64, shared_addr: u64, shared_size: u64) -> ! {
-    // Safety: we trust the hypervisor to have mapped an area of memory starting at `shared_addr`
-    // valid for at least `shared_size` bytes.
+extern "C" fn task_main(cpuid: u64, input_addr: u64, input_size: u64) -> ! {
+    // Safety: we trust the hypervisor to have mapped an area of memory starting at `input_addr`
+    // valid for at least `input_size` bytes.
     let vslice =
-        unsafe { VolatileSlice::from_raw_parts(shared_addr as *mut u8, shared_size as usize) };
+        unsafe { VolatileSlice::from_raw_parts(input_addr as *mut u8, input_size as usize) };
     let task = UmodeTask { vslice };
     println!(
-        "umode/#{}: U-mode Shared Region: {:016x} - {} bytes",
-        cpuid, shared_addr, shared_size
+        "umode/#{}: U-mode Input Region: {:016x} - {} bytes",
+        cpuid, input_addr, input_size
     );
     test_declare_pass!("umode start", cpuid);
     task.run_loop()

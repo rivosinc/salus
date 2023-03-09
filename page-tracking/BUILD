@@ -4,7 +4,7 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_library", "rust_test", "rustfmt_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_doc", "rust_library", "rust_test", "rustfmt_test")
 
 rust_library(
     name = "page-tracking",
@@ -28,5 +28,10 @@ rustfmt_test(
 
 rust_test(
     name = "page-tracking-test",
+    crate = ":page-tracking",
+)
+
+rust_doc(
+    name = "page-tracking-doc",
     crate = ":page-tracking",
 )

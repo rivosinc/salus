@@ -4,7 +4,7 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_library", "rustfmt_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_doc", "rust_library", "rustfmt_test")
 
 rust_library(
     name = "test-system",
@@ -19,4 +19,9 @@ rust_clippy(
 rustfmt_test(
     name = "rustfmt",
     targets = ["test-system"],
+)
+
+rust_doc(
+    name = "test-system-doc",
+    crate = ":test-system",
 )

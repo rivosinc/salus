@@ -10,7 +10,7 @@
 # bazel test //:rustfmt-all
 # bazel test //:test-all
 
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_clippy", "rust_test", "rustfmt_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_clippy", "rust_doc", "rust_test", "rustfmt_test")
 load("//:objcopy.bzl", "objcopy_to_object")
 load("//:lds.bzl", "lds_rule")
 
@@ -44,6 +44,29 @@ filegroup(
         "//test-workloads:clippy",
         "//u-mode:clippy",
         "//u-mode-api:clippy",
+    ],
+)
+
+filegroup(
+    name = "doc-all",
+    srcs = [
+        "salus-doc",
+        "//attestation:attestation-doc",
+        "//data-model:data-model-doc",
+        "//device-tree:device-tree-doc",
+        "//drivers:drivers-doc",
+        "//hyp-alloc:hyp-alloc-doc",
+        "//libuser:libuser-doc",
+        "//page-tracking:page-tracking-doc",
+        "//riscv-elf:riscv-elf-doc",
+        "//riscv-page-tables:riscv-page-tables-doc",
+        "//riscv-pages:riscv-pages-doc",
+        "//riscv-regs:riscv-regs-doc",
+        "//s-mode-utils:s-mode-utils-doc",
+        "//sync:sync-doc",
+        "//test-system:test-system-doc",
+        "//u-mode:u-mode-doc",
+        "//u-mode-api:u-mode-api-doc",
     ],
 )
 
@@ -124,11 +147,14 @@ objcopy_to_object(
 rust_binary(
     name = "salus",
     srcs = glob(["src/*.rs"]),
-    data = glob(["src/*.S"]) + [":umode_to_object", ":l_rule"],
+    compile_data = glob(["src/*.S"]) + [
+        ":umode_to_object",
+        ":l_rule",
+    ],
     rustc_flags = [
         "-Ctarget-feature=+v",
         "--codegen=link-arg=-nostartfiles",
-        "-Clink-arg=-T$(location //:l_rule)"
+        "-Clink-arg=-T$(location //:l_rule)",
     ],
     deps = [
         "//attestation",
@@ -169,6 +195,11 @@ rust_clippy(
 rustfmt_test(
     name = "salus-rustfmt",
     targets = ["salus"],
+)
+
+rust_doc(
+    name = "salus-doc",
+    crate = ":salus",
 )
 
 rust_test(

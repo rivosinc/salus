@@ -4,12 +4,12 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_library", "rustfmt_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_doc", "rust_library", "rustfmt_test")
 
 rust_library(
     name = "libuser",
     srcs = glob(["src/**/*.rs"]),
-    data = glob(["src/**/*.S"]),
+    compile_data = glob(["src/**/*.S"]),
     deps = ["//u-mode-api"],
 )
 
@@ -21,4 +21,9 @@ rust_clippy(
 rustfmt_test(
     name = "rustfmt",
     targets = ["libuser"],
+)
+
+rust_doc(
+    name = "libuser-doc",
+    crate = ":libuser",
 )

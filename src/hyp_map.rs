@@ -19,21 +19,21 @@ use riscv_pages::{
 use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, CSR};
 use sync::Once;
 
-// The copy to/from guest memory routines defined in umode_mem.S.
+// The copy to/from guest memory routines defined in extable.S.
 extern "C" {
     fn _copy_to_user(dest_addr: u64, src: *const u8, len: usize) -> usize;
     fn _copy_from_user(dest: *mut u8, src_addr: u64, len: usize) -> usize;
 }
 
-// Maximum number of regions unique to every pagetable (private).
-const MAX_PRIVATE_REGIONS: usize = 32;
-// Maximum number of regions shared across all pagetables.
-const MAX_SHARED_REGIONS: usize = 32;
+// Maximum number of U-mode ELF regions.
+const MAX_UMODE_ELF_REGIONS: usize = 32;
+// Maximum number of hardware map regions.
+const MAX_HW_MAP_REGIONS: usize = 32;
 
-// Private regions vector.
-type PrivateRegionsVec = ArrayVec<PrivateRegion, MAX_PRIVATE_REGIONS>;
-// Shared regions vector.
-type SharedRegionsVec = ArrayVec<SharedRegion, MAX_SHARED_REGIONS>;
+// Umode ELF regions vector.
+type UmodeElfRegionsVec = ArrayVec<UmodeElfRegion, MAX_UMODE_ELF_REGIONS>;
+// Hw map regions vector.
+type HwMapRegionsVec = ArrayVec<HwMapRegion, MAX_HW_MAP_REGIONS>;
 
 /// Errors returned by creating or modifying hypervisor mappings.
 #[derive(Debug)]
@@ -58,16 +58,16 @@ pub enum Error {
     UmodePageFault(RawAddr<SupervisorVirt>, usize),
 }
 
-// Represents a virtual address region of the hypervisor that will be the same in all pagetables.
-struct SharedRegion {
+// Represents a virtual address region of the hypervisor created from the Hardware Memory Map.
+struct HwMapRegion {
     vaddr: PageAddr<SupervisorVirt>,
     paddr: PageAddr<SupervisorPhys>,
     page_count: usize,
     pte_fields: PteFieldBits,
 }
 
-impl SharedRegion {
-    // Creates a shared region from a Hw Memory Map entry.
+impl HwMapRegion {
+    // Creates a hypervisor region from a Hw Memory Map entry.
     fn from_hw_mem_region(r: &HwMemRegion) -> Option<Self> {
         let perms = match r.region_type() {
             HwMemRegionType::Available => {
@@ -128,8 +128,8 @@ impl SharedRegion {
             .zip(self.paddr.iter_from())
             .take(self.page_count)
         {
-            // Safety: all shared regions come from the HW memory map. we will create exactly one
-            // mapping for each page and will switch to using that mapping exclusively.
+            // Safety: all regions come from the HW memory map. we will create exactly one mapping for
+            // each page and will switch to using that mapping exclusively.
             unsafe {
                 mapper.map_addr(virt, phys, self.pte_fields).unwrap();
             }
@@ -138,7 +138,7 @@ impl SharedRegion {
 }
 
 // Represents a virtual address region that will point to different physical page on each pagetable.
-struct PrivateRegion {
+struct UmodeElfRegion {
     // The address space where this region starts.
     vaddr: PageAddr<SupervisorVirt>,
     // Number of bytes of the VA area
@@ -149,8 +149,8 @@ struct PrivateRegion {
     data: Option<&'static [u8]>,
 }
 
-impl PrivateRegion {
-    // Creates a per-pagetable region from an U-mode ELF segment.
+impl UmodeElfRegion {
+    // Creates a region from an U-mode ELF segment.
     fn from_umode_elf_segment(seg: &ElfSegment<'static>) -> Result<Self, Error> {
         // Sanity check for segment alignments.
         //
@@ -207,16 +207,15 @@ impl PrivateRegion {
             .zip(pages.base().iter_from())
             .take(page_count as usize)
         {
-            // Safety: all per-pagetable regions are user mappings. User mappings are not considered
-            // aliases because they cannot be accessed by supervisor mode directly (sstatus.SUM needs
-            // to be 1).
+            // Safety: all regions are user mappings. User mappings are not considered aliases because
+            // they cannot be accessed by supervisor mode directly (sstatus.SUM needs to be 1).
             unsafe {
                 mapper.map_addr(virt, phys, self.pte_fields).unwrap();
             }
         }
     }
 
-    // Restores private region to initial-state.
+    // Restores region to initial-state.
     fn restore(&self) {
         let mut copied = 0;
         // We have to reset the full pages mapped for this segment.
@@ -282,7 +281,7 @@ impl HypPageTable {
     /// Restores U-mode ELF mappings to initial state.
     pub fn restore_umode(&self) {
         for r in HypMap::get()
-            .private_regions()
+            .umode_elf_regions()
             .filter(|r| r.pte_fields == PteFieldBits::leaf_with_perms(PteLeafPerms::URW))
         {
             r.restore();
@@ -349,26 +348,24 @@ static HYPMAP: Once<HypMap> = Once::new();
 
 /// A set of global mappings of the hypervisor that can be used to create page tables.
 pub struct HypMap {
-    shared_regions: SharedRegionsVec,
-    private_regions: PrivateRegionsVec,
+    hw_map_regions: HwMapRegionsVec,
+    umode_elf_regions: UmodeElfRegionsVec,
 }
 
 impl HypMap {
     /// Creates a new hypervisor map from a hardware memory mem map and a umode ELF.
     pub fn init(mem_map: HwMemMap, umode_elf: &ElfMap<'static>) -> Result<(), Error> {
-        // All shared mappings come from the HW Memory Map.
-        let shared_regions = mem_map
+        let hw_map_regions = mem_map
             .regions()
-            .filter_map(SharedRegion::from_hw_mem_region)
+            .filter_map(HwMapRegion::from_hw_mem_region)
             .collect();
-        // All private mappings come from the U-mode ELF.
-        let private_regions = umode_elf
+        let umode_elf_regions = umode_elf
             .segments()
-            .map(PrivateRegion::from_umode_elf_segment)
+            .map(UmodeElfRegion::from_umode_elf_segment)
             .collect::<Result<_, _>>()?;
         let hypmap = HypMap {
-            shared_regions,
-            private_regions,
+            hw_map_regions,
+            umode_elf_regions,
         };
         HYPMAP.call_once(|| hypmap);
         Ok(())
@@ -380,9 +377,9 @@ impl HypMap {
         HYPMAP.get().unwrap()
     }
 
-    // Returns an iterator for this Hypervisor private regions.
-    fn private_regions(&self) -> impl Iterator<Item = &PrivateRegion> {
-        self.private_regions.iter()
+    // Returns an iterator for the U-mode ELF regions.
+    fn umode_elf_regions(&self) -> impl Iterator<Item = &UmodeElfRegion> {
+        self.umode_elf_regions.iter()
     }
 
     /// Returns the virtual address of U-mode mapping slot `slot`.
@@ -440,14 +437,14 @@ impl HypMap {
             .unwrap();
         let sv48: FirstStagePageTable<Sv48> =
             FirstStagePageTable::new(root_page).expect("creating first sv48");
-        // Map regions shared across all pagetables.
-        for r in &self.shared_regions {
+        // Map hardware map regions
+        for r in &self.hw_map_regions {
             r.map(&sv48, &mut || {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             });
         }
-        // Map regions unique to a pagetable.
-        for r in &self.private_regions {
+        // Map U-mode ELF region.
+        for r in &self.umode_elf_regions {
             r.map(&sv48, hyp_mem);
         }
         // Alloc and map the U-mode Input Region for this page-table.

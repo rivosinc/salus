@@ -22,6 +22,12 @@
 // +-------------------------+ UMODE_INPUT_START
 // | Umode Input Area        |
 // +-------------------------+ +UMODE_INPUT_SIZE
+// | (unused)                |
+// +-------------------------+ HYP_STACK_BOTTOM (HYP_STACK_TOP - HYP_STACK_SIZE)
+// | Hypervisor Stack        |
+// +-------------------------+ HYP_STACK_TOP (0xffff_ffff_ffe0_0000)
+// | (unused 2Mb)            |
+// +-------------------------+ End of Address Space.
 
 use riscv_pages::{PageAddr, PageSize, SupervisorVirt};
 use static_assertions::const_assert;
@@ -75,6 +81,25 @@ const_assert!(PageSize::Size4k.is_aligned(UMODE_INPUT_START));
 /// Size of the U-mode Input Region.
 pub const UMODE_INPUT_SIZE: u64 = 4 * 1024;
 const_assert!(PageSize::Size4k.is_aligned(UMODE_INPUT_SIZE));
+
+/// Address of the hypervisor stack top.
+#[allow(dead_code)]
+pub const HYP_STACK_TOP: u64 = 0xffff_ffff_ffe0_0000;
+// Align stack top to 2M to ease huge page mappings.
+const_assert!(PageSize::Size2M.is_aligned(HYP_STACK_TOP));
+/// Number of 4k-pages reserved for each CPU as their stack.
+#[allow(dead_code)]
+pub const HYP_STACK_PAGES: u64 = 0x80;
+/// Size of stack in bytes.
+#[allow(dead_code)]
+pub const HYP_STACK_SIZE: u64 = HYP_STACK_PAGES * PageSize::Size4k as u64;
+/// End of stack (lower address)
+#[allow(dead_code)]
+pub const HYP_STACK_BOTTOM: u64 = HYP_STACK_TOP - HYP_STACK_SIZE;
+/// Page address of the stack bottom.
+#[allow(dead_code)]
+pub const HYP_STACK_BOTTOM_PAGE_ADDR: PageAddr<SupervisorVirt> =
+    PageAddr::new_const::<HYP_STACK_BOTTOM>();
 
 // Returns true if `addr` is contained in the U-mode binary area.
 fn is_umode_binary_addr(addr: u64) -> bool {

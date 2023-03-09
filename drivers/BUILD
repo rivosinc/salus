@@ -4,7 +4,7 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_library", "rust_test", "rustfmt_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_doc", "rust_library", "rust_test", "rustfmt_test")
 
 rust_library(
     name = "drivers",
@@ -41,5 +41,10 @@ rustfmt_test(
 
 rust_test(
     name = "drivers-test",
+    crate = ":drivers",
+)
+
+rust_doc(
+    name = "drivers-doc",
     crate = ":drivers",
 )

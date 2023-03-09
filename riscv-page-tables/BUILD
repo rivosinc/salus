@@ -4,7 +4,7 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_library", "rust_test", "rustfmt_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_doc", "rust_library", "rust_test", "rustfmt_test")
 
 rust_library(
     name = "riscv-page-tables",
@@ -28,5 +28,10 @@ rustfmt_test(
 
 rust_test(
     name = "riscv-page-tables-test",
+    crate = ":riscv-page-tables",
+)
+
+rust_doc(
+    name = "riscv-page-tables-doc",
     crate = ":riscv-page-tables",
 )

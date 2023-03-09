@@ -4,7 +4,7 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_clippy", "rustfmt_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_clippy", "rust_doc", "rustfmt_test")
 load("@rules_rust//crate_universe:defs.bzl", "crate", "crates_repository")
 
 rust_binary(
@@ -37,4 +37,9 @@ rust_clippy(
 rustfmt_test(
     name = "rustfmt",
     targets = ["umode"],
+)
+
+rust_doc(
+    name = "u-mode-doc",
+    crate = ":umode",
 )

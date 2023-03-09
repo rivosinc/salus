@@ -35,6 +35,9 @@ type UmodeElfRegionsVec = ArrayVec<UmodeElfRegion, MAX_UMODE_ELF_REGIONS>;
 // Hw map regions vector.
 type HwMapRegionsVec = ArrayVec<HwMapRegion, MAX_HW_MAP_REGIONS>;
 
+// Global reference to the Hypervisor Map.
+static HYPMAP: Once<HypMap> = Once::new();
+
 /// Errors returned by creating or modifying hypervisor mappings.
 #[derive(Debug)]
 pub enum Error {
@@ -254,6 +257,72 @@ impl UmodeElfRegion {
     }
 }
 
+/// The U-mode Input Region is a private region of the page table used by the hypervisor to pass
+/// data to the current U-mode operation. This avoids mapping hypervisor data directly in
+/// U-mode. This area is written by the hypervisor and mapped read-only in U-mode.
+struct UmodeInputRegion {
+    /// Volatile Slice used to write to this area from the hypervisor.
+    vslice: VolatileSlice<'static>,
+}
+
+impl UmodeInputRegion {
+    /// Allocate hypervisor pages and map them read-only in U-mode VA space.
+    fn map(sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) -> Self {
+        // Allocate pages.
+        let num_pages = PageSize::num_4k_pages(UMODE_INPUT_SIZE);
+        let pages = hyp_mem.take_pages_for_hyp_state(num_pages as usize);
+        let start = pages.base();
+
+        // Map the allocated pages as read-only in U-mode at UMODE_INPUT_START.
+        // UMODE_INPUT_START is 4k aligned (enforced by static assertion), round_down wil be a no-op.
+        let vaddr = PageAddr::with_round_down(
+            RawAddr::supervisor_virt(UMODE_INPUT_START),
+            PageSize::Size4k,
+        );
+        let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::UR);
+        // Unwrap okay: this is called once when we are creating the page-table. Guaranteed to be
+        // unmapped.
+        let mapper = sv48
+            .map_range(vaddr, PageSize::Size4k, num_pages, &mut || {
+                hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
+            })
+            .unwrap();
+        for (virt, phys) in vaddr
+            .iter_from()
+            .zip(pages.base().iter_from())
+            .take(num_pages as usize)
+        {
+            // Safety: These pages are mapped read-only in the VA area reserved for the U-mode
+            // input region mappings. Hypervisor will write to these pages using the physical
+            // mappings and U-mode will read them through this mapping. Safe because these are
+            // per-CPU mappings, and when the hypervisor will be writing to these pages via the
+            // physical mappings no CPU will be able to access these pages through the U-mode
+            // mappings.
+            unsafe {
+                mapper.map_addr(virt, phys, pte_fields).unwrap();
+            }
+        }
+        // Safety: the range `(start..max_addr)` is mapped in U-mode as read-only and was uniquely
+        // claimed for this area from the hypervisor map above.
+        let vslice = unsafe {
+            VolatileSlice::from_raw_parts(start.raw().bits() as *mut u8, UMODE_INPUT_SIZE as usize)
+        };
+        Self { vslice }
+    }
+
+    // Writes `data` in the current CPU's U-mode Input Region.
+    fn store<T: DataInit>(&mut self, data: T) -> Result<(), Error> {
+        let vref = self.vslice.get_ref(0).map_err(Error::UmodeInput)?;
+        vref.store(data);
+        Ok(())
+    }
+
+    // Clears the U-mode Input Region.
+    fn clear(&mut self) {
+        self.vslice.write_bytes(0);
+    }
+}
+
 /// Mapping permission for a U-mode mapping slot.
 pub enum UmodeSlotPerm {
     Readonly,
@@ -343,8 +412,38 @@ impl HypPageTable {
     }
 }
 
-// Global reference to the Hypervisor Map.
-static HYPMAP: Once<HypMap> = Once::new();
+/// Represents a hypervisor page table mapper for a U-mode slot. Only
+/// guest pages can be mapped into it.
+pub struct UmodeSlotMapper<'a> {
+    vaddr: PageAddr<SupervisorVirt>,
+    mapper: FirstStageMapper<'a, Sv48>,
+    perms: PteFieldBits,
+}
+
+impl UmodeSlotMapper<'_> {
+    /// Returns the first virtual page address mappable by this mapper.
+    pub fn vaddr(&self) -> PageAddr<SupervisorVirt> {
+        self.vaddr
+    }
+
+    /// Maps a a guest page into an address in the range of this U-mode slot.
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee that the page at address `paddr` is owned by a guest and has been
+    /// shared with the hypervisor.
+    pub unsafe fn map_addr(
+        &self,
+        vaddr: PageAddr<SupervisorVirt>,
+        paddr: PageAddr<SupervisorPhys>,
+    ) -> Result<(), Error> {
+        // Safety: pages are mapped in user mode, so no aliases of salus mappings have been
+        // created. Pages are owned by guest, so no mapping of hypervisor pages are created.
+        self.mapper
+            .map_addr(vaddr, paddr, self.perms)
+            .map_err(|_| Error::MapFailed)
+    }
+}
 
 /// A set of global mappings of the hypervisor that can be used to create page tables.
 pub struct HypMap {
@@ -460,104 +559,5 @@ impl HypMap {
             umode_input: RefCell::new(umode_input),
             pte_pages: RefCell::new(pte_pages),
         }
-    }
-}
-
-/// Represents a hypervisor page table mapper for a U-mode slot. Only
-/// guest pages can be mapped into it.
-pub struct UmodeSlotMapper<'a> {
-    vaddr: PageAddr<SupervisorVirt>,
-    mapper: FirstStageMapper<'a, Sv48>,
-    perms: PteFieldBits,
-}
-
-impl UmodeSlotMapper<'_> {
-    /// Returns the first virtual page address mappable by this mapper.
-    pub fn vaddr(&self) -> PageAddr<SupervisorVirt> {
-        self.vaddr
-    }
-
-    /// Maps a a guest page into an address in the range of this U-mode slot.
-    ///
-    /// # Safety
-    ///
-    /// Caller must guarantee that the page at address `paddr` is owned by a guest and has been
-    /// shared with the hypervisor.
-    pub unsafe fn map_addr(
-        &self,
-        vaddr: PageAddr<SupervisorVirt>,
-        paddr: PageAddr<SupervisorPhys>,
-    ) -> Result<(), Error> {
-        // Safety: pages are mapped in user mode, so no aliases of salus mappings have been
-        // created. Pages are owned by guest, so no mapping of hypervisor pages are created.
-        self.mapper
-            .map_addr(vaddr, paddr, self.perms)
-            .map_err(|_| Error::MapFailed)
-    }
-}
-
-/// The U-mode Input Region is a private region of the page table used by the hypervisor to pass
-/// data to the current U-mode operation. This avoids mapping hypervisor data directly in
-/// U-mode. This area is written by the hypervisor and mapped read-only in U-mode.
-struct UmodeInputRegion {
-    /// Volatile Slice used to write to this area from the hypervisor.
-    vslice: VolatileSlice<'static>,
-}
-
-impl UmodeInputRegion {
-    /// Allocate hypervisor pages and map them read-only in U-mode VA space.
-    fn map(sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) -> Self {
-        // Allocate pages.
-        let num_pages = PageSize::num_4k_pages(UMODE_INPUT_SIZE);
-        let pages = hyp_mem.take_pages_for_hyp_state(num_pages as usize);
-        let start = pages.base();
-
-        // Map the allocated pages as read-only in U-mode at UMODE_INPUT_START.
-        // UMODE_INPUT_START is 4k aligned (enforced by static assertion), round_down wil be a no-op.
-        let vaddr = PageAddr::with_round_down(
-            RawAddr::supervisor_virt(UMODE_INPUT_START),
-            PageSize::Size4k,
-        );
-        let pte_fields = PteFieldBits::leaf_with_perms(PteLeafPerms::UR);
-        // Unwrap okay: this is called once when we are creating the page-table. Guaranteed to be
-        // unmapped.
-        let mapper = sv48
-            .map_range(vaddr, PageSize::Size4k, num_pages, &mut || {
-                hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
-            })
-            .unwrap();
-        for (virt, phys) in vaddr
-            .iter_from()
-            .zip(pages.base().iter_from())
-            .take(num_pages as usize)
-        {
-            // Safety: These pages are mapped read-only in the VA area reserved for the U-mode
-            // input region mappings. Hypervisor will write to these pages using the physical
-            // mappings and U-mode will read them through this mapping. Safe because these are
-            // per-CPU mappings, and when the hypervisor will be writing to these pages via the
-            // physical mappings no CPU will be able to access these pages through the U-mode
-            // mappings.
-            unsafe {
-                mapper.map_addr(virt, phys, pte_fields).unwrap();
-            }
-        }
-        // Safety: the range `(start..max_addr)` is mapped in U-mode as read-only and was uniquely
-        // claimed for this area from the hypervisor map above.
-        let vslice = unsafe {
-            VolatileSlice::from_raw_parts(start.raw().bits() as *mut u8, UMODE_INPUT_SIZE as usize)
-        };
-        Self { vslice }
-    }
-
-    // Writes `data` in the current CPU's U-mode Input Region.
-    fn store<T: DataInit>(&mut self, data: T) -> Result<(), Error> {
-        let vref = self.vslice.get_ref(0).map_err(Error::UmodeInput)?;
-        vref.store(data);
-        Ok(())
-    }
-
-    // Clears the U-mode Input Region.
-    fn clear(&mut self) {
-        self.vslice.write_bytes(0);
     }
 }

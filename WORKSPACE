@@ -40,15 +40,19 @@ load("@rules_rust//tools/rust_analyzer:deps.bzl", "rust_analyzer_dependencies")
 
 rust_analyzer_dependencies()
 
+load("@rules_rust//rust:defs.bzl", "rust_common")
+
 # Register Rust toolchains. rules_rust gives us the latest stable Rust
 # release from the rules_rust release, and the nightly build from that
 # date. For Salus, we use the nightly build to take advantage of some
 # nightly-only language features, but we keep it stable and only update
 # it once per month.
+# A stable version (as specified in rust_common.default_version), must
+# be included as some of the dependencies require it.
 rust_register_toolchains(
     edition = "2021",
     extra_target_triples = ["riscv64gc-unknown-none-elf"],
-    iso_date = "2023-2-26",
+    versions = [rust_common.default_version, "nightly/2023-02-26"],
 )
 
 load("//:deps.bzl", "salus_dependencies")

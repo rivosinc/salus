@@ -57,7 +57,7 @@ SECTIONS
         PROVIDE(_bss_end = .);
     } >ram AT>ram :bss
 
-    PROVIDE(_stack_start = _bss_end);
+    PROVIDE(_stack_start = ALIGN(_bss_end, 4096));
     PROVIDE(_stack_end = _stack_start + 0x80000);
 
     /DISCARD/ : {

@@ -128,7 +128,7 @@ pub enum UmodeRequest {
     Nop,
     /// Get Attestation Evidence.
     ///
-    /// Umode Shared Region: contains `MeasurementRegisters`.
+    /// Umode Input Region: contains `MeasurementRegisters`.
     GetEvidence {
         /// starting address of the Certificate Signing Request.
         csr_addr: u64,

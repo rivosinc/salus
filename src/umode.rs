@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::hyp_map::{
-    Error as HypMapError, HypMap, UmodeSlotId, UmodeSlotPerm, UMODE_SHARED_SIZE, UMODE_SHARED_START,
+    Error as HypMapError, HypMap, UmodeSlotId, UmodeSlotPerm, UMODE_INPUT_SIZE, UMODE_INPUT_START,
 };
 use crate::smp::PerCpu;
 use crate::vm::FinalizedVm;
@@ -277,7 +277,7 @@ pub enum ExecError {
 }
 
 struct UmodeExecutionContext<'a, T: DataInit> {
-    shared_data: Option<T>,
+    input_data: Option<T>,
     req: UmodeRequest,
     attestation: Option<&'a AttestationManager<sha2::Sha384>>,
 }
@@ -336,7 +336,7 @@ impl UmodeTask {
 
     pub fn nop() -> Result<u64, Error> {
         let ctx = UmodeExecutionContext::<u8> {
-            shared_data: None,
+            input_data: None,
             req: UmodeRequest::Nop,
             attestation: None,
         };
@@ -376,9 +376,9 @@ impl UmodeTask {
         for (i, r) in msmt_genarray.iter().enumerate() {
             msmt_regs[i].copy_from_slice(r.as_slice());
         }
-        let shared_data = u_mode_api::cert::MeasurementRegisters { msmt_regs };
+        let input_data = u_mode_api::cert::MeasurementRegisters { msmt_regs };
         let ctx = UmodeExecutionContext {
-            shared_data: Some(shared_data),
+            input_data: Some(input_data),
             req: UmodeRequest::GetEvidence {
                 csr_addr: csr_vaddr.bits(),
                 csr_len,
@@ -399,14 +399,12 @@ impl UmodeTask {
         arch.umode_regs
             .gprs
             .set_reg(GprIndex::A0, PerCpu::this_cpu().cpu_id().raw() as u64);
-        // Set U-mode Shared Area address as a1.
+        // Set U-mode Input Region address as a1.
         arch.umode_regs
             .gprs
-            .set_reg(GprIndex::A1, UMODE_SHARED_START);
-        // Set U-mode Shared Area size as a2.
-        arch.umode_regs
-            .gprs
-            .set_reg(GprIndex::A2, UMODE_SHARED_SIZE);
+            .set_reg(GprIndex::A1, UMODE_INPUT_START);
+        // Set U-mode Input Region size as a2.
+        arch.umode_regs.gprs.set_reg(GprIndex::A2, UMODE_INPUT_SIZE);
         // sstatus set to 0 (by default) is actually okay.
         self.arch = arch;
         // Run task until it initializes itself and calls HypCall::NextOp().
@@ -423,10 +421,10 @@ impl UmodeTask {
         exec_ctx
             .req
             .to_registers(task.arch.umode_regs.gprs.a_regs_mut());
-        if let Some(data) = exec_ctx.shared_data {
+        if let Some(data) = exec_ctx.input_data {
             this_cpu
                 .page_table()
-                .share_with_umode(data)
+                .copy_to_umode_input(data)
                 .map_err(Error::HypMap)?;
         }
         let ret = task.run(exec_ctx.attestation);
@@ -439,8 +437,8 @@ impl UmodeTask {
             // Panic if we can't restore umode: the hypervisor is in an unrecoverable state.
             task.reset().expect("Failed to recover U-mode.");
         }
-        if exec_ctx.shared_data.is_some() {
-            this_cpu.page_table().clear_umode_shared();
+        if exec_ctx.input_data.is_some() {
+            this_cpu.page_table().clear_umode_input();
         }
         let res = ret.map_err(Error::Exec)?;
         res.map_err(Error::Request)

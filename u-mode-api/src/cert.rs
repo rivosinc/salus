@@ -15,7 +15,7 @@ pub type CdiId = [u8; CDI_ID_LEN];
 /// Measurement registers for the Sha384 case.
 pub type MeasurementRegisterSha384 = [u8; SHA384_LEN];
 
-/// Structure passed with `GetEvidence` in the Umode Shared Region.
+/// Structure passed with `GetEvidence` in the Umode Input Region.
 /// Represents the status of the DICE layer needed to generate a
 /// certificate.
 #[repr(C)]

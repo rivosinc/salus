@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::hyp_layout::*;
+
 use arrayvec::ArrayVec;
 use core::cell::RefCell;
 use data_model::{DataInit, VolatileMemory, VolatileMemoryError, VolatileSlice};
@@ -15,7 +17,6 @@ use riscv_pages::{
     SupervisorPhys, SupervisorVirt,
 };
 use riscv_regs::{satp, sstatus, LocalRegisterCopy, ReadWriteable, SatpHelpers, CSR};
-use static_assertions::const_assert;
 use sync::Once;
 
 // The copy to/from guest memory routines defined in umode_mem.S.
@@ -136,69 +137,6 @@ impl SharedRegion {
     }
 }
 
-// U-mode binary mappings start here.
-const UMODE_BINARY_START: u64 = 0xffffffff00000000;
-// Size in bytes of the U-mode binary VA area.
-const UMODE_BINARY_SIZE: u64 = 128 * 1024 * 1024;
-// U-mode binary mappings end here.
-const UMODE_BINARY_END: u64 = UMODE_BINARY_START + UMODE_BINARY_SIZE;
-
-// The addresses between `UMODE_MAPPINGS_START` and `UMODE_MAPPINGS_START` + `UMODE_MAPPINGS_SIZE`
-// is an area of the private page table where the hypervisor can map pages shared from guest
-// VMs. The area is divided in slots, of equal size `UMODE_MAPPING_SLOT_SIZE`.
-// Must be multiple of 4k.
-const UMODE_MAPPING_SLOT_SIZE: u64 = 4 * 1024 * 1024;
-const_assert!(PageSize::Size4k.is_aligned(UMODE_MAPPING_SLOT_SIZE));
-
-// Start of the private U-mode mappings area.  Must be 4k-aligned.
-const UMODE_MAPPINGS_START: u64 = UMODE_BINARY_END + 4 * 1024 * 1024;
-const_assert!(PageSize::Size4k.is_aligned(UMODE_MAPPINGS_START));
-//The number of slots available for mapping.
-const UMODE_MAPPING_SLOTS: u64 = 2;
-// Maximum size of the private mappings area. Must be 4k-aligned.
-const UMODE_MAPPINGS_SIZE: u64 = UMODE_MAPPING_SLOTS * UMODE_MAPPING_SLOT_SIZE;
-const UMODE_MAPPINGS_END: u64 = UMODE_MAPPINGS_START + UMODE_MAPPINGS_SIZE;
-const_assert!(PageSize::Size4k.is_aligned(UMODE_MAPPINGS_END));
-
-/// Start of the U-mode Input Region.
-pub const UMODE_INPUT_START: u64 = UMODE_MAPPINGS_END + 4 * 1024 * 1024;
-const_assert!(PageSize::Size4k.is_aligned(UMODE_INPUT_START));
-/// Size of the U-mode Input Region.
-pub const UMODE_INPUT_SIZE: u64 = 4 * 1024;
-const_assert!(PageSize::Size4k.is_aligned(UMODE_INPUT_SIZE));
-
-/// Starting page address of slot A.
-const UMODE_MAPPINGS_A_PAGE_ADDR: PageAddr<SupervisorVirt> =
-    PageAddr::<SupervisorVirt>::new_const::<UMODE_MAPPINGS_START>();
-/// Starting page address of slot B.
-const UMODE_MAPPINGS_B_PAGE_ADDR: PageAddr<SupervisorVirt> =
-    PageAddr::<SupervisorVirt>::new_const::<{ UMODE_MAPPINGS_START + UMODE_MAPPING_SLOT_SIZE }>();
-
-/// Generic Id names for each of the U-mode mapping slots.
-/// There is no mandated use for each of the slots, and caller can decide to map each of them
-/// readable or writable based on the requirement.
-#[derive(Copy, Clone)]
-pub enum UmodeSlotId {
-    A,
-    B,
-}
-
-/// Mapping permission for a U-mode mapping slot.
-pub enum UmodeSlotPerm {
-    Readonly,
-    Writable,
-}
-
-// Returns true if `addr` is contained in the U-mode VA area.
-fn is_umode_addr(addr: u64) -> bool {
-    (UMODE_BINARY_START..UMODE_BINARY_END).contains(&addr)
-}
-
-// Returns true if (`addr`, `addr` + `len`) is a valid non-empty range in the VA area.
-fn is_valid_umode_range(addr: u64, len: usize) -> bool {
-    len != 0 && is_umode_addr(addr) && is_umode_addr(addr + len as u64 - 1)
-}
-
 // Represents a virtual address region that will point to different physical page on each pagetable.
 struct PrivateRegion {
     // The address space where this region starts.
@@ -226,7 +164,7 @@ impl PrivateRegion {
         let vaddr = PageAddr::new(RawAddr::supervisor_virt(seg.vaddr()))
             .ok_or(Error::ElfUnalignedSegment)?;
         // Sanity check for VA area of the segment.
-        if !is_valid_umode_range(seg.vaddr(), seg.size()) {
+        if !is_valid_umode_binary_range(seg.vaddr(), seg.size()) {
             return Err(Error::ElfInvalidAddress);
         }
         let pte_perms = match seg.perms() {
@@ -315,6 +253,12 @@ impl PrivateRegion {
         // Restore SUM.
         CSR.sstatus.modify(sstatus::sum.val(0));
     }
+}
+
+/// Mapping permission for a U-mode mapping slot.
+pub enum UmodeSlotPerm {
+    Readonly,
+    Writable,
 }
 
 /// A page table that contains hypervisor mappings.
@@ -450,7 +394,7 @@ impl HypMap {
     }
 
     pub fn copy_from_umode(dest: &mut [u8], src: RawAddr<SupervisorVirt>) -> Result<(), Error> {
-        if !is_valid_umode_range(src.bits(), dest.len()) {
+        if !is_valid_umode_binary_range(src.bits(), dest.len()) {
             return Err(Error::InvalidAddress);
         }
         // Reading from user mapping, set SUM in SSTATUS.
@@ -468,7 +412,7 @@ impl HypMap {
     }
 
     pub fn copy_to_umode(dest: RawAddr<SupervisorVirt>, src: &[u8]) -> Result<(), Error> {
-        if !is_valid_umode_range(dest.bits(), src.len()) {
+        if !is_valid_umode_binary_range(dest.bits(), src.len()) {
             return Err(Error::InvalidAddress);
         }
         // Writing to user mapping, set SUM in SSTATUS.

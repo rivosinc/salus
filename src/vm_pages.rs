@@ -19,7 +19,8 @@ use riscv_regs::{
 };
 use sync::{Mutex, Once, RwLock, RwLockReadGuard};
 
-use crate::hyp_map::{Error as HypMapError, HypMap, UmodeSlotId, UmodeSlotPerm};
+use crate::hyp_layout::UmodeSlotId;
+use crate::hyp_map::{Error as HypMapError, HypMap, UmodeSlotPerm};
 use crate::smp::PerCpu;
 use crate::vm::{VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_id::VmId;

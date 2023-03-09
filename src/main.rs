@@ -40,6 +40,7 @@ extern crate alloc;
 mod asm;
 mod guest_tracking;
 mod host_vm;
+mod hyp_layout;
 mod hyp_map;
 mod smp;
 mod trap;

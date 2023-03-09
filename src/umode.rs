@@ -2,9 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::hyp_map::{
-    Error as HypMapError, HypMap, UmodeSlotId, UmodeSlotPerm, UMODE_INPUT_SIZE, UMODE_INPUT_START,
-};
+use crate::hyp_layout::{UmodeSlotId, UMODE_INPUT_SIZE, UMODE_INPUT_START};
+use crate::hyp_map::{Error as HypMapError, HypMap, UmodeSlotPerm};
 use crate::smp::PerCpu;
 use crate::vm::FinalizedVm;
 use crate::vm_pages::{Error as VmPagesError, FinalizedVmPages, GuestUmodeMapping};

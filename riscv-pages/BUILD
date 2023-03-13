@@ -9,7 +9,9 @@ load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_doc", "rust_library", "r
 rust_library(
     name = "riscv-pages",
     srcs = glob(["src/**/*.rs"]),
-    deps = [],
+    deps = [
+        "//sbi-rs",
+    ],
 )
 
 rust_clippy(

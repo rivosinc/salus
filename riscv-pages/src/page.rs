@@ -74,6 +74,18 @@ impl PageSize {
     }
 }
 
+impl From<sbi_rs::TsmPageType> for PageSize {
+    fn from(page_type: sbi_rs::TsmPageType) -> Self {
+        use sbi_rs::TsmPageType::*;
+        match page_type {
+            Page4k => PageSize::Size4k,
+            Page2M => PageSize::Size2M,
+            Page1G => PageSize::Size1G,
+            Page512G => PageSize::Size512G,
+        }
+    }
+}
+
 struct AlignAssert<const A: u64, const S: u64>;
 impl<const A: u64, const S: u64> AlignAssert<A, S> {
     pub const ALIGNED: u64 = 0 - (A & (S - 1));

@@ -55,6 +55,8 @@ pub enum Error {
     PredicateFailed,
     /// An address range causes overflow.
     AddressOverflow,
+    /// The page is out of the expected range.
+    OutOfRange,
 }
 /// Hold the result of page table operations.
 pub type Result<T> = core::result::Result<T, Error>;
@@ -708,22 +710,27 @@ impl<T: PagingMode> PageTableInner<T> {
         }
     }
 
-    /// Returns the invalid 4kB leaf PTE mapping `vaddr` if the PFN the PTE references is a
+    /// Returns the valid leaf PTE mapping `vaddr` if it exists.
+    fn get_mapped_leaf(&mut self, vaddr: PageAddr<T::MappedAddressSpace>) -> Result<LeafPte<T>> {
+        let entry = self.walk(RawAddr::from(vaddr));
+        use TableEntryType::*;
+        match entry {
+            Leaf(l) => Ok(l),
+            _ => Err(Error::PageNotMapped),
+        }
+    }
+
+    /// Returns the invalid leaf PTE mapping `vaddr` if the PFN the PTE references is a
     /// page that was invalidated.
-    fn get_invalidated_4k_leaf(
+    fn get_invalidated_leaf(
         &mut self,
         vaddr: PageAddr<T::MappedAddressSpace>,
     ) -> Result<InvalidatedPte<T>> {
         let entry = self.walk(RawAddr::from(vaddr));
         use TableEntryType::*;
         match entry {
-            Invalidated(i) => {
-                if !i.level().is_leaf() {
-                    return Err(Error::PageSizeNotSupported(i.level().leaf_page_size()));
-                }
-                Ok(i)
-            }
-            _ => Err(Error::PageNotConverted),
+            Invalidated(i) => Ok(i),
+            _ => Err(Error::PageNotInvalidated),
         }
     }
 }
@@ -939,13 +946,13 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         num_pages: u64,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<GuestStageMapper<T>> {
-        if page_size.is_huge() {
-            return Err(Error::PageSizeNotSupported(page_size));
-        }
-
         let mut mapper = GuestStageMapper::new(self, addr, 0);
         let mut inner = self.inner.lock();
-        for a in addr.iter_from().take(num_pages as usize) {
+        for a in addr
+            .iter_from_with_size(page_size)
+            .ok_or(Error::AddressMisaligned(addr.bits()))?
+            .take(num_pages as usize)
+        {
             inner.lock_leaf_for_mapping(a, page_size, get_pte_page)?;
             mapper.num_pages += 1;
         }
@@ -968,13 +975,35 @@ impl<T: PagingMode> GuestStagePageTable<T> {
 
         let mut mapper = GuestStageMapper::new(self, addr, 0);
         let mut inner = self.inner.lock();
-        for a in addr.iter_from().take(num_pages as usize) {
+        for a in addr
+            .iter_from_with_size(page_size)
+            .ok_or(Error::AddressMisaligned(addr.bits()))?
+            .take(num_pages as usize)
+        {
             // The address must be already mapped.
             inner.lock_leaf_for_remapping(a)?;
             mapper.num_pages += 1;
         }
 
         Ok(mapper)
+    }
+
+    fn check_and_increment_vaddr(
+        mut va: PageAddr<T::MappedAddressSpace>,
+        end: PageAddr<T::MappedAddressSpace>,
+        page_size: PageSize,
+    ) -> Result<PageAddr<T::MappedAddressSpace>> {
+        if !va.is_aligned(page_size) {
+            return Err(Error::AddressMisaligned(va.bits()));
+        }
+        va = va
+            .checked_add_pages_with_size(1, page_size)
+            .ok_or(Error::AddressOverflow)?;
+        if va > end {
+            Err(Error::OutOfRange)
+        } else {
+            Ok(va)
+        }
     }
 
     /// Verifies the entire virtual address range is mapped and that `pred` returns true for
@@ -989,37 +1018,29 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         F: FnMut(SupervisorPageAddr) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
-        vaddr
+        let end = vaddr
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let mut inner = self.inner.lock();
-        // TODO: Support huge pages, making sure we're not invalidating pages that are partially
-        // covered by the range.
-        for va in vaddr.iter_from().take(num_pages as usize) {
-            use TableEntryType::*;
-            match inner.walk(va.into()) {
-                Leaf(pte) => {
-                    if !pte.level().is_leaf() {
-                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
-                    }
-                    if !pred(pte.page_addr()) {
-                        return Err(Error::PredicateFailed);
-                    }
-                }
-                _ => {
-                    return Err(Error::PageNotMapped);
-                }
+        let mut va = vaddr;
+        while va < end {
+            let pte = inner.get_mapped_leaf(va)?;
+            let page_size = pte.level().leaf_page_size();
+            if !pred(pte.page_addr()) {
+                return Err(Error::PredicateFailed);
             }
+            va = Self::check_and_increment_vaddr(va, end, page_size)?;
         }
 
-        Ok(vaddr
-            .iter_from()
-            .take(num_pages as usize)
-            .filter_map(move |va| {
-                // Skip over unmapped PTEs -- we verified there were no invalidated or locked PTEs
-                // above.
-                Some(inner.get_mapped_4k_leaf(va).ok()?.invalidate().page_addr())
-            }))
+        Ok(SupervisorPageIter::<T, _>::new(vaddr, end, move |va| {
+            let pte = match inner.get_mapped_leaf(va).ok() {
+                Some(pte) => pte,
+                None => return IteratorAction::End,
+            };
+            let page_size = pte.level().leaf_page_size();
+            let paddr = pte.invalidate().page_addr();
+            IteratorAction::Proceed(page_size, paddr)
+        }))
     }
 
     /// Verifies the entire virtual address range is invalidated and that `pred` returns true
@@ -1034,39 +1055,29 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         F: FnMut(SupervisorPageAddr) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
-        vaddr
+        let end = vaddr
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let mut inner = self.inner.lock();
-        for va in vaddr.iter_from().take(num_pages as usize) {
-            use TableEntryType::*;
-            match inner.walk(va.into()) {
-                Invalidated(pte) => {
-                    if !pte.level().is_leaf() {
-                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
-                    }
-                    if !pred(pte.page_addr()) {
-                        return Err(Error::PredicateFailed);
-                    }
-                }
-                _ => return Err(Error::PageNotInvalidated),
+        let mut va = vaddr;
+        while va < end {
+            let pte = inner.get_invalidated_leaf(va)?;
+            let page_size = pte.level().leaf_page_size();
+            if !pred(pte.page_addr()) {
+                return Err(Error::PredicateFailed);
             }
+            va = Self::check_and_increment_vaddr(va, end, page_size)?;
         }
 
-        Ok(vaddr
-            .iter_from()
-            .take(num_pages as usize)
-            .filter_map(move |va| {
-                // Skip over unused PTEs -- we verified there were no unmapped or locked PTEs
-                // above.
-                Some(
-                    inner
-                        .get_invalidated_4k_leaf(va)
-                        .ok()?
-                        .mark_valid()
-                        .page_addr(),
-                )
-            }))
+        Ok(SupervisorPageIter::<T, _>::new(vaddr, end, move |va| {
+            let pte = match inner.get_invalidated_leaf(va).ok() {
+                Some(pte) => pte,
+                None => return IteratorAction::End,
+            };
+            let page_size = pte.level().leaf_page_size();
+            let paddr = pte.mark_valid().page_addr();
+            IteratorAction::Proceed(page_size, paddr)
+        }))
     }
 
     /// Verifies the entire virtual address range is invalidated (or unpopulated) and that `pred`
@@ -1082,43 +1093,40 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         F: FnMut(SupervisorPageAddr) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
-        vaddr
+        let end = vaddr
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let mut inner = self.inner.lock();
-        // TODO: Support huge pages, making sure we're not clearing PTEs that only partially cover
-        // the address range.
-        for va in vaddr.iter_from().take(num_pages as usize) {
+        let mut va = vaddr;
+        while va < end {
             use TableEntryType::*;
             match inner.walk(va.into()) {
                 Invalidated(pte) => {
-                    if !pte.level().is_leaf() {
-                        return Err(Error::PageSizeNotSupported(pte.level().leaf_page_size()));
-                    }
+                    let page_size = pte.level().leaf_page_size();
                     if !pred(pte.page_addr()) {
                         return Err(Error::PredicateFailed);
                     }
+                    va = Self::check_and_increment_vaddr(va, end, page_size)?;
                 }
                 Unused(_) => {
                     continue;
                 }
-                _ => {
-                    return Err(Error::PageNotUnmappable);
-                }
+                _ => return Err(Error::PageNotUnmappable),
             }
         }
 
-        Ok(vaddr
-            .iter_from()
-            .take(num_pages as usize)
-            .filter_map(move |va| {
-                // Skip over non-invalidated PTEs -- we verified there were no mapped or locked PTEs
-                // above.
-                let pte = inner.get_invalidated_4k_leaf(va).ok()?;
-                let paddr = pte.page_addr();
-                pte.clear();
-                Some(paddr)
-            }))
+        Ok(SupervisorPageIter::<T, _>::new(vaddr, end, move |va| {
+            use TableEntryType::*;
+            let pte = match inner.walk(va.into()) {
+                Invalidated(pte) => pte,
+                Unused(pte) => return IteratorAction::Skip(pte.level().leaf_page_size()),
+                _ => return IteratorAction::End,
+            };
+            let page_size = pte.level().leaf_page_size();
+            let paddr = pte.page_addr();
+            pte.clear();
+            IteratorAction::Proceed(page_size, paddr)
+        }))
     }
 
     /// Verifies the entire virtual address range is mapped and that `pred` returns true for
@@ -1133,22 +1141,28 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         F: FnMut(SupervisorPageAddr) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
-        vaddr
+        let end = vaddr
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let mut inner = self.inner.lock();
-        // TODO: Support huge pages, making sure mappings aren't partially covering the address
-        // range.
-        for va in vaddr.iter_from().take(num_pages as usize) {
-            let paddr = inner.get_mapped_4k_leaf(va)?.page_addr();
-            if !pred(paddr) {
+        let mut va = vaddr;
+        while va < end {
+            let pte = inner.get_mapped_leaf(va)?;
+            let page_size = pte.level().leaf_page_size();
+            if !pred(pte.page_addr()) {
                 return Err(Error::PredicateFailed);
             }
+            va = Self::check_and_increment_vaddr(va, end, page_size)?;
         }
 
-        Ok(vaddr.iter_from().take(num_pages as usize).map(move |va| {
-            // Unwrap ok: We checked that the entire range was mapped above.
-            inner.get_mapped_4k_leaf(va).unwrap().page_addr()
+        Ok(SupervisorPageIter::<T, _>::new(vaddr, end, move |va| {
+            let pte = match inner.get_mapped_leaf(va).ok() {
+                Some(pte) => pte,
+                None => return IteratorAction::End,
+            };
+            let page_size = pte.level().leaf_page_size();
+            let paddr = pte.page_addr();
+            IteratorAction::Proceed(page_size, paddr)
         }))
     }
 
@@ -1164,22 +1178,28 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         F: FnMut(SupervisorPageAddr) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
-        vaddr
+        let end = vaddr
             .checked_add_pages(num_pages)
             .ok_or(Error::AddressOverflow)?;
         let mut inner = self.inner.lock();
-        // TODO: Support huge pages, making sure mappings aren't partially covering the address
-        // range.
-        for va in vaddr.iter_from().take(num_pages as usize) {
-            let paddr = inner.get_invalidated_4k_leaf(va)?.page_addr();
-            if !pred(paddr) {
+        let mut va = vaddr;
+        while va < end {
+            let pte = inner.get_invalidated_leaf(va)?;
+            let page_size = pte.level().leaf_page_size();
+            if !pred(pte.page_addr()) {
                 return Err(Error::PredicateFailed);
             }
+            va = Self::check_and_increment_vaddr(va, end, page_size)?;
         }
 
-        Ok(vaddr.iter_from().take(num_pages as usize).map(move |va| {
-            // Unwrap ok: We checked that the entire range was invalidated above.
-            inner.get_invalidated_4k_leaf(va).unwrap().page_addr()
+        Ok(SupervisorPageIter::<T, _>::new(vaddr, end, move |va| {
+            let pte = match inner.get_invalidated_leaf(va).ok() {
+                Some(pte) => pte,
+                None => return IteratorAction::End,
+            };
+            let page_size = pte.level().leaf_page_size();
+            let paddr = pte.page_addr();
+            IteratorAction::Proceed(page_size, paddr)
         }))
     }
 
@@ -1245,10 +1265,10 @@ impl<'a, T: PagingMode> GuestStageMapper<'a, T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         page_to_map: P,
     ) -> Result<()> {
-        if page_to_map.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(page_to_map.size()));
-        }
-        let end_vaddr = self.vaddr.checked_add_pages(self.num_pages).unwrap();
+        let end_vaddr = self
+            .vaddr
+            .checked_add_pages_with_size(self.num_pages, page_to_map.size())
+            .unwrap();
         if vaddr < self.vaddr || vaddr >= end_vaddr {
             return Err(Error::OutOfMapRange);
         }
@@ -1268,10 +1288,10 @@ impl<'a, T: PagingMode> GuestStageMapper<'a, T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         page_to_map: P,
     ) -> Result<SupervisorPageAddr> {
-        if page_to_map.size().is_huge() {
-            return Err(Error::PageSizeNotSupported(page_to_map.size()));
-        }
-        let end_vaddr = self.vaddr.checked_add_pages(self.num_pages).unwrap();
+        let end_vaddr = self
+            .vaddr
+            .checked_add_pages_with_size(self.num_pages, page_to_map.size())
+            .unwrap();
         if vaddr < self.vaddr || vaddr >= end_vaddr {
             return Err(Error::OutOfMapRange);
         }
@@ -1293,6 +1313,69 @@ impl<'a, T: PagingMode> Drop for GuestStageMapper<'a, T> {
             // GuestStageMapper bailed before having filled the entire range (e.g. because of
             // another failure).
             let _ = inner.unlock_leaf(a);
+        }
+    }
+}
+
+/// Defines a type of action an iterator should follow
+enum IteratorAction {
+    Proceed(PageSize, SupervisorPageAddr),
+    Skip(PageSize),
+    End,
+}
+
+/// Generate a supervisor page iterator for the given range
+struct SupervisorPageIter<T, F>
+where
+    T: PagingMode,
+    F: FnMut(PageAddr<T::MappedAddressSpace>) -> IteratorAction,
+{
+    current: PageAddr<T::MappedAddressSpace>,
+    end: PageAddr<T::MappedAddressSpace>,
+    update: F,
+}
+
+impl<T, F> SupervisorPageIter<T, F>
+where
+    T: PagingMode,
+    F: FnMut(PageAddr<T::MappedAddressSpace>) -> IteratorAction,
+{
+    pub fn new(
+        start: PageAddr<T::MappedAddressSpace>,
+        end: PageAddr<T::MappedAddressSpace>,
+        update: F,
+    ) -> Self {
+        Self {
+            current: start,
+            end,
+            update,
+        }
+    }
+}
+
+impl<T, F> Iterator for SupervisorPageIter<T, F>
+where
+    T: PagingMode,
+    F: FnMut(PageAddr<T::MappedAddressSpace>) -> IteratorAction,
+{
+    type Item = SupervisorPageAddr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current >= self.end {
+                return None;
+            }
+
+            match (self.update)(self.current) {
+                IteratorAction::Proceed(page_size, paddr) => {
+                    self.current = self.current.checked_add_pages_with_size(1, page_size)?;
+                    return Some(paddr);
+                }
+                IteratorAction::Skip(page_size) => {
+                    self.current = self.current.checked_add_pages_with_size(1, page_size)?;
+                }
+                IteratorAction::End => return None,
+            }
         }
     }
 }

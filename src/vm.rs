@@ -2357,10 +2357,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
                 // Always block given we expect a TLB increment to be triggered from the host.
                 let action = match result {
-                    Ok(_) => EcallAction::Break(
-                        VmExitCause::ForwardedEcall(SbiMessage::TeeGuest(guest_func)),
-                        SbiReturn::success(0),
-                    ),
+                    Ok(_) => EcallAction::Forward(SbiMessage::TeeGuest(guest_func)),
                     Err(_) => result.map(|_| 0).into(),
                 };
                 return action;

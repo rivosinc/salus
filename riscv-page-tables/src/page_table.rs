@@ -1019,7 +1019,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         mut pred: F,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
     where
-        F: FnMut(SupervisorPageAddr) -> bool,
+        F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
         let end = vaddr
@@ -1030,7 +1030,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         while va < end {
             let pte = inner.get_mapped_leaf(va)?;
             let page_size = pte.level().leaf_page_size();
-            if !pred(pte.page_addr()) {
+            if !pred(pte.page_addr(), page_size) {
                 return Err(Error::PredicateFailed);
             }
             va = Self::check_and_increment_vaddr(va, end, page_size)?;
@@ -1056,7 +1056,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         mut pred: F,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
     where
-        F: FnMut(SupervisorPageAddr) -> bool,
+        F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
         let end = vaddr
@@ -1067,7 +1067,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         while va < end {
             let pte = inner.get_invalidated_leaf(va)?;
             let page_size = pte.level().leaf_page_size();
-            if !pred(pte.page_addr()) {
+            if !pred(pte.page_addr(), page_size) {
                 return Err(Error::PredicateFailed);
             }
             va = Self::check_and_increment_vaddr(va, end, page_size)?;
@@ -1094,7 +1094,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         mut pred: F,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
     where
-        F: FnMut(SupervisorPageAddr) -> bool,
+        F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
         let end = vaddr
@@ -1107,7 +1107,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             match inner.walk(va.into()) {
                 Invalidated(pte) => {
                     let page_size = pte.level().leaf_page_size();
-                    if !pred(pte.page_addr()) {
+                    if !pred(pte.page_addr(), page_size) {
                         return Err(Error::PredicateFailed);
                     }
                     va = Self::check_and_increment_vaddr(va, end, page_size)?;
@@ -1142,7 +1142,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         mut pred: F,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
     where
-        F: FnMut(SupervisorPageAddr) -> bool,
+        F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
         let end = vaddr
@@ -1153,7 +1153,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         while va < end {
             let pte = inner.get_mapped_leaf(va)?;
             let page_size = pte.level().leaf_page_size();
-            if !pred(pte.page_addr()) {
+            if !pred(pte.page_addr(), page_size) {
                 return Err(Error::PredicateFailed);
             }
             va = Self::check_and_increment_vaddr(va, end, page_size)?;
@@ -1179,7 +1179,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         mut pred: F,
     ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
     where
-        F: FnMut(SupervisorPageAddr) -> bool,
+        F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
         let num_pages = PageSize::num_4k_pages(len);
         let end = vaddr
@@ -1190,7 +1190,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         while va < end {
             let pte = inner.get_invalidated_leaf(va)?;
             let page_size = pte.level().leaf_page_size();
-            if !pred(pte.page_addr()) {
+            if !pred(pte.page_addr(), page_size) {
                 return Err(Error::PredicateFailed);
             }
             va = Self::check_and_increment_vaddr(va, end, page_size)?;

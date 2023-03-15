@@ -1374,15 +1374,24 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let converted = self
             .inner
             .root
-            .get_invalidated_pages(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
-                self.inner.page_tracker.is_converted_page(
-                    addr,
-                    PageSize::Size4k,
-                    self.inner.page_owner_id,
-                    P::mem_type(),
-                    version,
-                )
-            })
+            .get_invalidated_pages(
+                page_addr,
+                num_pages * PageSize::Size4k as u64,
+                |addr, ps| {
+                    // Converted pages should always be 4k given the host is
+                    // exclusively mapped with 4k pages.
+                    if ps.is_huge() {
+                        return false;
+                    }
+                    self.inner.page_tracker.is_converted_page(
+                        addr,
+                        ps,
+                        self.inner.page_owner_id,
+                        P::mem_type(),
+                        version,
+                    )
+                },
+            )
             .map_err(Error::Paging)?;
 
         // Lock the pages for assignment.
@@ -1419,14 +1428,23 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(self
             .inner
             .root
-            .get_mapped_pages(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
-                self.inner.page_tracker.is_shareable_page(
-                    addr,
-                    PageSize::Size4k,
-                    self.inner.page_owner_id,
-                    MemType::Ram,
-                )
-            })
+            .get_mapped_pages(
+                page_addr,
+                num_pages * PageSize::Size4k as u64,
+                |addr, ps| {
+                    // Shareable pages should always be 4k given the host is
+                    // exclusively mapped with 4k pages.
+                    if ps.is_huge() {
+                        return false;
+                    }
+                    self.inner.page_tracker.is_shareable_page(
+                        addr,
+                        ps,
+                        self.inner.page_owner_id,
+                        MemType::Ram,
+                    )
+                },
+            )
             .map_err(Error::Paging)?
             .map(|addr| {
                 self.inner
@@ -1453,14 +1471,23 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let invalidated = self
             .inner
             .root
-            .invalidate_range(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
-                self.inner.page_tracker.is_mapped_page(
-                    addr,
-                    PageSize::Size4k,
-                    self.inner.page_owner_id,
-                    P::mem_type(),
-                )
-            })
+            .invalidate_range(
+                page_addr,
+                num_pages * PageSize::Size4k as u64,
+                |addr, ps| {
+                    // Convertable pages should always be 4k given the host is
+                    // exclusively mapped with 4k pages.
+                    if ps.is_huge() {
+                        return false;
+                    }
+                    self.inner.page_tracker.is_mapped_page(
+                        addr,
+                        ps,
+                        self.inner.page_owner_id,
+                        P::mem_type(),
+                    )
+                },
+            )
             .map_err(Error::Paging)?;
         for paddr in invalidated {
             // Safety: We've verified the typing of the page and we must have unique
@@ -1560,10 +1587,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let invalidated = self
             .inner
             .root
-            .invalidate_range(imsic_addr, PageSize::Size4k as u64, |addr| {
+            .invalidate_range(imsic_addr, PageSize::Size4k as u64, |addr, ps| {
+                // Page covering the IMSIC interrupt file is always 4k.
+                if ps.is_huge() {
+                    return false;
+                }
                 self.inner.page_tracker.is_mapped_page(
                     addr,
-                    PageSize::Size4k,
+                    ps,
                     self.inner.page_owner_id,
                     MemType::Mmio(DeviceMemType::Imsic),
                 )
@@ -1597,10 +1628,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let unmapped = self
             .inner
             .root
-            .unmap_range(imsic_addr, PageSize::Size4k as u64, |addr| {
+            .unmap_range(imsic_addr, PageSize::Size4k as u64, |addr, ps| {
+                // Page covering the IMSIC interrupt file is always 4k.
+                if ps.is_huge() {
+                    return false;
+                }
                 self.inner.page_tracker.is_unassignable_page(
                     addr,
-                    PageSize::Size4k,
+                    ps,
                     self.inner.page_owner_id,
                     MemType::Mmio(DeviceMemType::Imsic),
                     version,
@@ -1669,10 +1704,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let invalidated = self
             .inner
             .root
-            .invalidate_range(page_addr, len, |addr| {
+            .invalidate_range(page_addr, len, |addr, ps| {
                 self.inner.page_tracker.is_blockable_page(
                     addr,
-                    PageSize::Size4k,
+                    ps,
                     self.inner.page_owner_id,
                     MemType::Ram,
                 )
@@ -1695,10 +1730,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let valid_pages = self
             .inner
             .root
-            .validate_range(page_addr, len, |addr| {
+            .validate_range(page_addr, len, |addr, ps| {
                 self.inner.page_tracker.is_blocked_page(
                     addr,
-                    PageSize::Size4k,
+                    ps,
                     self.inner.page_owner_id,
                     MemType::Ram,
                 )
@@ -1737,10 +1772,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let unmapped = self
             .inner
             .root
-            .unmap_range(page_addr, len, |addr| {
+            .unmap_range(page_addr, len, |addr, ps| {
                 self.inner.page_tracker.is_removable_page(
                     addr,
-                    PageSize::Size4k,
+                    ps,
                     self.inner.page_owner_id,
                     MemType::Ram,
                     tlb_version,
@@ -1770,21 +1805,29 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let pages = self
             .inner
             .root
-            .get_mapped_pages(page_addr, count * PageSize::Size4k as u64, |addr| {
-                if let Some(p) = prev_addr && p.checked_add_pages(1) != Some(addr) {
+            .get_mapped_pages(page_addr, count * PageSize::Size4k as u64, |addr, ps| {
+                // Pinned shared pages are always 4k.
+                if ps.is_huge() {
+                    return false;
+                }
+                if let Some(p) = prev_addr && p.checked_add_pages_with_size(1, ps) != Some(addr) {
                     false
                 } else {
                     prev_addr = Some(addr);
                     self.inner
                         .page_tracker
-                        .is_shareable_page(addr, PageSize::Size4k, self.inner.page_owner_id, MemType::Ram)
+                        .is_shareable_page(addr, ps, self.inner.page_owner_id, MemType::Ram)
                 }
             })
             .map_err(Error::Paging)?
             .map(|addr| {
                 self.inner
                     .page_tracker
-                    .get_shareable_page::<Page<Shareable>>(addr, PageSize::Size4k, self.inner.page_owner_id)
+                    .get_shareable_page::<Page<Shareable>>(
+                        addr,
+                        PageSize::Size4k,
+                        self.inner.page_owner_id,
+                    )
                     .unwrap()
             });
 

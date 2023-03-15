@@ -154,7 +154,7 @@ mod tests {
         }
         let version = TlbVersion::new();
         let invalidated = guest_page_table
-            .invalidate_range(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
+            .invalidate_range(gpa_base, 2 * PageSize::Size4k as u64, |addr, _| {
                 page_tracker.is_mapped_page(addr, PageSize::Size4k, id, MemType::Ram)
             })
             .unwrap();
@@ -165,7 +165,7 @@ mod tests {
         }
         let version = version.increment();
         let converted = guest_page_table
-            .get_invalidated_pages(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
+            .get_invalidated_pages(gpa_base, 2 * PageSize::Size4k as u64, |addr, _| {
                 page_tracker.is_converted_page(addr, PageSize::Size4k, id, MemType::Ram, version)
             })
             .unwrap();

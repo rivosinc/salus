@@ -8,7 +8,8 @@ use page_tracking::PageTracker;
 use riscv_pages::*;
 use sync::Mutex;
 
-pub(crate) const ENTRIES_PER_PAGE: u64 = 4096 / 8;
+/// Number of entries that can fit into a page.
+pub const ENTRIES_PER_PAGE: u64 = 4096 / 8;
 
 /// Error in creating or modifying a page table.
 #[derive(Debug)]
@@ -43,6 +44,8 @@ pub enum Error {
     PteLocked,
     /// Attempt to unlock a PTE that is not locked.
     PteNotLocked,
+    /// The PTE cannot be promoted.
+    PteNotPromotable,
     /// At least one of the pages for building a table root were not owned by the table's owner.
     RootPageNotOwned(SequentialPages<InternalClean>),
     /// The page was not in the range that the `GuestStageMapper` covers.
@@ -57,6 +60,18 @@ pub enum Error {
     AddressOverflow,
     /// The page is out of the expected range.
     OutOfRange,
+    /// The page isn't in a Blocked state.
+    PageNotBlocked,
+    /// The page isn't contiguous.
+    PageNotContiguous,
+    /// Invalid page size.
+    InvalidPageSize,
+    /// Invalid page state.
+    InvalidPageState,
+    /// The page cannot be promoted.
+    PageNotPromotable,
+    /// The page cannot be demoted.
+    PageNotDemotable,
 }
 /// Hold the result of page table operations.
 pub type Result<T> = core::result::Result<T, Error>;
@@ -132,7 +147,7 @@ impl<'a, T: PagingMode> TableEntryType<'a, T> {
             } else {
                 Unused(UnusedPte::new(pte, level))
             }
-        } else if !pte.leaf() {
+        } else if !pte.is_leaf() {
             Table(PageTablePte::new(pte, level))
         } else if pte.locked() {
             LockedMapped(LockedMappedPte::new(pte, level))
@@ -183,6 +198,20 @@ impl<'a, T: PagingMode> UnusedPte<'a, T> {
         self.pte.lock();
         LockedUnmappedPte::new(self.pte, self.level)
     }
+
+    /// Makes the entry a valid leaf.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `paddr` references a page uniquely owned by
+    /// the root `GuestStagePageTable`.
+    unsafe fn leaf(self, paddr: SupervisorPageAddr) -> LeafPte<'a, T> {
+        self.pte.set(
+            paddr.pfn(),
+            &PteFieldBits::user_leaf_with_perms(PteLeafPerms::RWX),
+        );
+        LeafPte::new(self.pte, self.level)
+    }
 }
 
 impl<'a, T: PagingMode> InvalidatedPte<'a, T> {
@@ -204,9 +233,22 @@ impl<'a, T: PagingMode> InvalidatedPte<'a, T> {
         self.pte.clear();
     }
 
+    /// Mark the entry as valid.
     fn mark_valid(self) -> LeafPte<'a, T> {
         self.pte.mark_valid();
         LeafPte::new(self.pte, self.level)
+    }
+
+    /// Marks this invalid PTE as valid and maps it to a next-level page table at `table_paddr`.
+    /// Returns this entry as a valid table entry.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `table_paddr` references a page-table page uniquely owned by
+    /// the root `GuestStagePageTable`.
+    unsafe fn demote(self, table_paddr: SupervisorPageAddr) -> PageTablePte<'a, T> {
+        self.pte.set(table_paddr.pfn(), &PteFieldBits::non_leaf());
+        PageTablePte::new(self.pte, self.level)
     }
 }
 
@@ -300,6 +342,20 @@ impl<'a, T: PagingMode> PageTablePte<'a, T> {
         //  - all pages pointed to by PTEs in this paging hierarchy are owned by the root
         //    `GuestStagePageTable` and have their lifetime bound to the root.
         unsafe { PageTable::from_pte(self.pte, self.level.next().unwrap()) }
+    }
+
+    /// Makes the entry a valid leaf.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `paddr` references a page uniquely owned by
+    /// the root `GuestStagePageTable`.
+    unsafe fn promote(self, paddr: SupervisorPageAddr) -> LeafPte<'a, T> {
+        self.pte.set(
+            paddr.pfn(),
+            &PteFieldBits::user_leaf_with_perms(PteLeafPerms::RWX),
+        );
+        LeafPte::new(self.pte, self.level)
     }
 }
 
@@ -736,6 +792,32 @@ impl<T: PagingMode> PageTableInner<T> {
             Invalidated(i) => Ok(i),
             _ => Err(Error::PageNotInvalidated),
         }
+    }
+
+    /// Promotes the table entry at `vaddr` as a valid leaf.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `paddr` references a page uniquely owned by the root
+    /// `GuestStagePageTable`.
+    unsafe fn promote_pte(
+        &mut self,
+        vaddr: RawAddr<T::MappedAddressSpace>,
+        paddr: SupervisorPageAddr,
+        page_size: PageSize,
+    ) -> Result<(LeafPte<T>, Page<InternalClean>)> {
+        let mut entry = PageTable::from_root(self).entry_for_addr_mut(vaddr);
+        use TableEntryType::*;
+        while let Table(t) = entry {
+            if t.level().leaf_page_size() == page_size {
+                let table_addr = t.table_addr();
+                let page: Page<InternalDirty> = unsafe { Page::new(table_addr) };
+                return Ok((unsafe { t.promote(paddr) }, page.clean()));
+            } else {
+                entry = t.table().entry_for_addr_mut(vaddr);
+            }
+        }
+        Err(Error::PteNotPromotable)
     }
 }
 
@@ -1205,6 +1287,131 @@ impl<T: PagingMode> GuestStagePageTable<T> {
             let paddr = pte.page_addr();
             IteratorAction::Proceed(page_size, paddr)
         }))
+    }
+
+    /// Verifies the entire virtual address range is invalidated and that each page is one size
+    /// smaller than the requested page size. Also checks the pages are physically contiguous and
+    /// suitably aligned to the requested page size. It's important that all the pages must be in
+    /// the same state, either "Blocked" and uniquely owned by the TVM, or "BlockedShared" and not
+    /// owned by the TVM.
+    pub fn promote_page<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        requested_page_size: PageSize,
+        mut pred: F,
+    ) -> Result<(SupervisorPageAddr, Page<InternalClean>)>
+    where
+        F: FnMut(SupervisorPageAddr, PageSize) -> bool,
+    {
+        let expected_page_size = requested_page_size
+            .size_down()
+            .ok_or(Error::InvalidPageSize)?;
+        if !vaddr.is_aligned(requested_page_size) {
+            return Err(Error::AddressMisaligned(vaddr.bits()));
+        }
+        // Unwrap ok: `vaddr` is aligned therefore the calculation won't overflow.
+        let end = vaddr
+            .checked_add_pages_with_size(1, requested_page_size)
+            .unwrap();
+        let mut inner = self.inner.lock();
+        let mut first_paddr: Option<SupervisorPageAddr> = None;
+        let mut va = vaddr;
+        while va < end {
+            let pte = inner.get_invalidated_leaf(va)?;
+            let paddr = pte.page_addr();
+            let page_size = pte.level().leaf_page_size();
+
+            // Check the page matches the expected page size (one size smaller than the
+            // requested page size)
+            if page_size != expected_page_size {
+                return Err(Error::InvalidPageSize);
+            }
+
+            // Perform some checks on the physical address
+            if let Some(first_paddr) = &first_paddr {
+                // Check the current page is contiguous with the previous page
+                if va.bits() - vaddr.bits() != paddr.bits() - first_paddr.bits() {
+                    return Err(Error::PageNotContiguous);
+                }
+            } else {
+                first_paddr = Some(paddr);
+                // This is the first page, we must ensure it's suitably aligned with the requested
+                // page size.
+                if !paddr.is_aligned(requested_page_size) {
+                    return Err(Error::AddressMisaligned(paddr.bits()));
+                }
+            }
+
+            // Run the predicate
+            if !pred(paddr, page_size) {
+                return Err(Error::PredicateFailed);
+            }
+
+            // Move to next page
+            va = Self::check_and_increment_vaddr(va, end, page_size)?;
+        }
+
+        // Safe since we uniquely own the page at `paddr`.
+        // Unwrap `first_paddr` is ok since we know `end` was bigger than `vaddr`.
+        let (leaf, free_page) =
+            unsafe { inner.promote_pte(vaddr.into(), first_paddr.unwrap(), requested_page_size)? };
+
+        Ok((leaf.page_addr(), free_page))
+    }
+
+    /// Verifies the virtual address range is covering only one invalidated page that matches the
+    /// expected page size. Also checks the page state is either "Blocked" and uniquely owned by
+    /// the TVM, or "BlockedShared" and not owned by the TVM.
+    pub fn demote_page<F>(
+        &self,
+        vaddr: PageAddr<T::MappedAddressSpace>,
+        requested_page_size: PageSize,
+        free_page: Page<InternalClean>,
+        mut pred: F,
+    ) -> Result<SupervisorPageAddr>
+    where
+        F: FnMut(SupervisorPageAddr, PageSize) -> bool,
+    {
+        let expected_page_size = requested_page_size
+            .size_up()
+            .ok_or(Error::InvalidPageSize)?;
+        if !vaddr.is_aligned(expected_page_size) {
+            return Err(Error::AddressMisaligned(vaddr.bits()));
+        }
+        let mut inner = self.inner.lock();
+        let pte = inner.get_invalidated_leaf(vaddr)?;
+        let paddr = pte.page_addr();
+        let page_size = pte.level().leaf_page_size();
+        // Check the page matches the expected page size
+        if page_size != expected_page_size {
+            return Err(Error::InvalidPageSize);
+        }
+        // Run the predicate
+        if !pred(paddr, page_size) {
+            return Err(Error::PredicateFailed);
+        }
+        // Installs a non-leaf PTE pointing the newly-allocated page-table page in place of the huge-page leaf PTE
+        // Safety: `page.addr()` references a page uniquely owned by the root `GuestStagePageTable`.
+        let table_entry = unsafe { pte.demote(free_page.addr()) };
+        let mut page_table = table_entry.table();
+        // Fills in the free page-table page mapping the sub-pages of the huge page to be split,
+        // marking each PTE as present.
+        for (va, pa) in vaddr
+            .iter_from_with_size(requested_page_size)
+            .unwrap()
+            .zip(paddr.iter_from_with_size(requested_page_size).unwrap())
+            .take(ENTRIES_PER_PAGE as usize)
+        {
+            let entry = page_table.entry_for_addr_mut(va.into());
+            use TableEntryType::*;
+            let u = match entry {
+                Unused(u) => u,
+                _ => unreachable!(),
+            };
+            // Safety: `pa` references a page uniquely owned by the root `GuestStagePageTable`.
+            unsafe { u.leaf(pa) };
+        }
+        Ok(paddr)
     }
 
     /// Returns true if the specified range is completely unpopulated, including pages that are

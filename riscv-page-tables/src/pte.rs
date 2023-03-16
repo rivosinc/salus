@@ -153,7 +153,7 @@ impl Pte {
     }
 
     /// Returns `true` if the entry is a leaf.
-    pub fn leaf(&self) -> bool {
+    pub fn is_leaf(&self) -> bool {
         self.bits() & MASK_RWX != 0
     }
 

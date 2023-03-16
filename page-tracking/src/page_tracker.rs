@@ -554,11 +554,12 @@ impl PageTracker {
         page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
+        tlb_version: Option<TlbVersion>,
     ) -> bool {
         self.all_pages(addr, page_size, |info| {
             info.mem_type() == mem_type
-                && ((info.owner() == Some(owner) && info.is_blocked())
-                    || (info.owner() != Some(owner) && info.is_blocked_shared()))
+                && ((info.owner() == Some(owner) && info.is_blocked(tlb_version))
+                    || (info.owner() != Some(owner) && info.is_blocked_shared(tlb_version)))
         })
     }
 
@@ -574,23 +575,6 @@ impl PageTracker {
             info.mem_type() == mem_type
                 && ((info.owner() == Some(owner) && info.state() == PageState::Mapped)
                     || (info.owner() != Some(owner) && info.is_shared()))
-        })
-    }
-
-    /// Returns true if the page is considered removable.
-    pub fn is_removable_page(
-        &self,
-        addr: SupervisorPageAddr,
-        page_size: PageSize,
-        owner: PageOwnerId,
-        mem_type: MemType,
-        tlb_version: TlbVersion,
-    ) -> bool {
-        self.all_pages(addr, page_size, |info| {
-            info.is_removable(tlb_version)
-                && info.mem_type() == mem_type
-                && ((info.owner() == Some(owner) && info.is_blocked())
-                    || (info.owner() == Some(PageOwnerId::host()) && info.is_blocked_shared()))
         })
     }
 

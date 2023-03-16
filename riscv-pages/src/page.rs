@@ -72,6 +72,26 @@ impl PageSize {
     pub fn is_huge(&self) -> bool {
         !matches!(*self, PageSize::Size4k)
     }
+
+    /// Returns one page size larger.
+    pub fn size_up(&self) -> Option<Self> {
+        Some(match *self {
+            Self::Size4k => Self::Size2M,
+            Self::Size2M => Self::Size1G,
+            Self::Size1G => Self::Size512G,
+            Self::Size512G => return None,
+        })
+    }
+
+    /// Returns one page size smaller.
+    pub fn size_down(&self) -> Option<Self> {
+        Some(match *self {
+            Self::Size4k => return None,
+            Self::Size2M => Self::Size4k,
+            Self::Size1G => Self::Size2M,
+            Self::Size512G => Self::Size1G,
+        })
+    }
 }
 
 impl From<sbi_rs::TsmPageType> for PageSize {

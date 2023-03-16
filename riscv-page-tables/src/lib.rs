@@ -52,7 +52,7 @@ pub use page_table::Error as PageTableError;
 pub use page_table::Result as PageTableResult;
 pub use page_table::{
     FirstStageMapper, FirstStagePageTable, FirstStagePagingMode, GuestStageMapper,
-    GuestStagePageTable, GuestStagePagingMode, PagingMode,
+    GuestStagePageTable, GuestStagePagingMode, PagingMode, ENTRIES_PER_PAGE,
 };
 pub use pte::{PteFieldBits, PteLeafPerms};
 pub use sv48::Sv48;

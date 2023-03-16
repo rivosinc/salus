@@ -1396,7 +1396,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
 
         // Lock the pages for assignment.
         let mut locked_pages = LockedPageList::new(self.inner.page_tracker(), PageSize::Size4k);
-        for paddr in converted {
+        for (paddr, _) in converted {
             // Unwrap ok: The pages are guaranteed to be converted and no one else can get a
             // reference to them until the iterator is destroyed.
             let page = self
@@ -1446,7 +1446,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 },
             )
             .map_err(Error::Paging)?
-            .map(|addr| {
+            .map(|(addr, _)| {
                 self.inner
                     .page_tracker
                     .get_shareable_page(addr, PageSize::Size4k, self.inner.page_owner_id)
@@ -1489,7 +1489,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 },
             )
             .map_err(Error::Paging)?;
-        for paddr in invalidated {
+        for (paddr, _) in invalidated {
             // Safety: We've verified the typing of the page and we must have unique
             // ownership since the page was mapped before it was invalidated.
             let page = unsafe { P::new(paddr) };
@@ -1600,7 +1600,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 )
             })
             .map_err(Error::Paging)?;
-        for paddr in invalidated {
+        for (paddr, _) in invalidated {
             // Safety: We've verified the typing of the page and we must have unique
             // ownership since the page was mapped before it was invalidated.
             let page: ImsicGuestPage<Invalidated> = unsafe { ImsicGuestPage::new(paddr) };
@@ -1642,7 +1642,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 )
             })
             .map_err(Error::Paging)?;
-        for paddr in unmapped {
+        for (paddr, _) in unmapped {
             // Unwrap ok: we verified the page was unassignable above.
             self.inner
                 .page_tracker
@@ -1714,10 +1714,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             })
             .map_err(Error::Paging)?;
         let version = self.inner.tlb_tracker.current_version();
-        for paddr in invalidated {
+        for (paddr, page_size) in invalidated {
             // Safety: We've verified the typing of the page and its ownership
             // before it was invalidated.
-            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
+            let page: Page<Invalidated> = unsafe { Page::new_with_size(paddr, page_size) };
             // Unwrap ok: Page was mapped or shared and has just been invalidated.
             self.inner.page_tracker.block_page(page, version).unwrap();
         }
@@ -1739,11 +1739,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 )
             })
             .map_err(Error::Paging)?;
-        for paddr in valid_pages {
+        for (paddr, page_size) in valid_pages {
             // Unwrap ok: Page was blocked and has just been marked valid.
             self.inner
                 .page_tracker
-                .unblock_page(paddr, PageSize::Size4k)
+                .unblock_page(paddr, page_size)
                 .unwrap();
         }
 
@@ -1782,11 +1782,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 )
             })
             .map_err(Error::Paging)?;
-        for paddr in unmapped {
+        for (paddr, page_size) in unmapped {
             // Unwrap ok: Page was blocked and has just been unmapped.
             self.inner
                 .page_tracker
-                .remove_page(paddr, PageSize::Size4k)
+                .remove_page(paddr, page_size)
                 .unwrap();
         }
         Ok(())
@@ -1820,7 +1820,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 }
             })
             .map_err(Error::Paging)?
-            .map(|addr| {
+            .map(|(addr, _)| {
                 self.inner
                     .page_tracker
                     .get_shareable_page::<Page<Shareable>>(

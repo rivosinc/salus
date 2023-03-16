@@ -158,7 +158,7 @@ mod tests {
                 page_tracker.is_mapped_page(addr, PageSize::Size4k, id, MemType::Ram)
             })
             .unwrap();
-        for paddr in invalidated {
+        for (paddr, _) in invalidated {
             // Safety: Not safe - just a test
             let page: Page<Invalidated> = unsafe { Page::new(paddr) };
             page_tracker.convert_page(page, version).unwrap();
@@ -170,7 +170,7 @@ mod tests {
             })
             .unwrap();
         let mut locked_pages = LockedPageList::new(page_tracker.clone(), PageSize::Size4k);
-        for paddr in converted {
+        for (paddr, _) in converted {
             let page = page_tracker
                 .get_converted_page::<Page<ConvertedDirty>>(paddr, PageSize::Size4k, id, version)
                 .unwrap();

@@ -1017,7 +1017,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
         mut pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    ) -> Result<impl Iterator<Item = (SupervisorPageAddr, PageSize)> + '_>
     where
         F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
@@ -1054,7 +1054,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
         mut pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    ) -> Result<impl Iterator<Item = (SupervisorPageAddr, PageSize)> + '_>
     where
         F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
@@ -1092,7 +1092,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
         mut pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    ) -> Result<impl Iterator<Item = (SupervisorPageAddr, PageSize)> + '_>
     where
         F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
@@ -1140,7 +1140,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
         mut pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    ) -> Result<impl Iterator<Item = (SupervisorPageAddr, PageSize)> + '_>
     where
         F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
@@ -1177,7 +1177,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         vaddr: PageAddr<T::MappedAddressSpace>,
         len: u64,
         mut pred: F,
-    ) -> Result<impl Iterator<Item = SupervisorPageAddr> + '_>
+    ) -> Result<impl Iterator<Item = (SupervisorPageAddr, PageSize)> + '_>
     where
         F: FnMut(SupervisorPageAddr, PageSize) -> bool,
     {
@@ -1362,7 +1362,7 @@ where
     T: PagingMode,
     F: FnMut(PageAddr<T::MappedAddressSpace>) -> IteratorAction,
 {
-    type Item = SupervisorPageAddr;
+    type Item = (SupervisorPageAddr, PageSize);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -1373,7 +1373,7 @@ where
             match (self.update)(self.current) {
                 IteratorAction::Proceed(page_size, paddr) => {
                     self.current = self.current.checked_add_pages_with_size(1, page_size)?;
-                    return Some(paddr);
+                    return Some((paddr, page_size));
                 }
                 IteratorAction::Skip(page_size) => {
                     self.current = self.current.checked_add_pages_with_size(1, page_size)?;

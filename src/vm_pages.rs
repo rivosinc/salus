@@ -11,6 +11,7 @@ use page_tracking::{
 };
 use riscv_page_tables::{
     tlb, GuestStageMapper, GuestStagePageTable, GuestStagePagingMode, PageTableError,
+    ENTRIES_PER_PAGE,
 };
 use riscv_pages::*;
 use riscv_regs::{
@@ -39,6 +40,7 @@ pub enum Error {
     OverlappingVmRegion,
     InsufficientVmRegionSpace,
     VmRegionNotFound,
+    VmRegionNotConfidentialOrShared,
     VmRegionNotRemovable,
     InvalidMapRegion,
     EmptyPageRange,
@@ -55,6 +57,8 @@ pub enum Error {
     AttachingDevice(IommuError),
     PageTracker(PageTrackingError),
     HypMap(HypMapError),
+    InsufficientPtePages,
+    InvalidPageSize,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -1791,6 +1795,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                     ps,
                     self.inner.page_owner_id,
                     MemType::Ram,
+                    None,
                 )
             })
             .map_err(Error::Paging)?;
@@ -1802,6 +1807,82 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 .unwrap();
         }
 
+        Ok(())
+    }
+
+    // Promotes a page range, creating one page of the next larger page size.
+    pub fn promote_page(&self, page_addr: GuestPageAddr, page_size: PageSize) -> Result<()> {
+        let end = page_addr
+            .checked_add_pages_with_size(1, page_size)
+            .ok_or(Error::AddressOverflow)?;
+        let regions = self.inner.regions.read();
+        if !(regions.contains(page_addr, end, |r| {
+            r == VmRegionType::Confidential
+                || r == VmRegionType::ConfidentialRemovable
+                || r == VmRegionType::Shared
+                || r == VmRegionType::SharedRemovable
+        })) {
+            return Err(Error::VmRegionNotConfidentialOrShared);
+        }
+        let (pa, free_page) = self
+            .inner
+            .root
+            .promote_page(page_addr, page_size, |addr, ps| {
+                self.inner.page_tracker.is_blocked_page(
+                    addr,
+                    ps,
+                    self.inner.page_owner_id,
+                    MemType::Ram,
+                    Some(self.inner.tlb_tracker.min_version()),
+                )
+            })
+            .map_err(Error::Paging)?;
+        // Returns to the PTE pages pool the now-unused page table page
+        self.inner.pte_pages.push(free_page);
+        // Unwrap ok: Page was blocked and has just been promoted.
+        self.inner.page_tracker.unblock_page(pa, page_size).unwrap();
+        Ok(())
+    }
+
+    // Demotes a page, creating a page range of the next smaller page size.
+    pub fn demote_page(&self, page_addr: GuestPageAddr, page_size: PageSize) -> Result<()> {
+        let end = page_addr
+            .checked_add_pages_with_size(ENTRIES_PER_PAGE, page_size)
+            .ok_or(Error::AddressOverflow)?;
+        let one_size_larger_page_size = page_size.size_up().ok_or(Error::InvalidPageSize)?;
+        let regions = self.inner.regions.read();
+        if !(regions.contains(page_addr, end, |r| {
+            r == VmRegionType::Confidential
+                || r == VmRegionType::ConfidentialRemovable
+                || r == VmRegionType::Shared
+                || r == VmRegionType::SharedRemovable
+        })) {
+            return Err(Error::VmRegionNotConfidentialOrShared);
+        }
+        // Allocate a free page to be able to insert a new page table page.
+        let free_page = self
+            .inner
+            .pte_pages
+            .pop()
+            .ok_or(Error::InsufficientPtePages)?;
+        let pa = self
+            .inner
+            .root
+            .demote_page(page_addr, page_size, free_page, |addr, ps| {
+                self.inner.page_tracker.is_blocked_page(
+                    addr,
+                    ps,
+                    self.inner.page_owner_id,
+                    MemType::Ram,
+                    Some(self.inner.tlb_tracker.min_version()),
+                )
+            })
+            .map_err(Error::Paging)?;
+        // Unwrap ok: Page was blocked and has just been demoted.
+        self.inner
+            .page_tracker
+            .unblock_page(pa, one_size_larger_page_size)
+            .unwrap();
         Ok(())
     }
 
@@ -1828,12 +1909,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .inner
             .root
             .unmap_range(page_addr, len, |addr, ps| {
-                self.inner.page_tracker.is_removable_page(
+                self.inner.page_tracker.is_blocked_page(
                     addr,
                     ps,
                     self.inner.page_owner_id,
                     MemType::Ram,
-                    tlb_version,
+                    Some(tlb_version),
                 )
             })
             .map_err(Error::Paging)?;

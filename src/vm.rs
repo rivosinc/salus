@@ -1656,20 +1656,40 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
 
     fn guest_promote_page(
         &self,
-        _guest_id: u64,
-        _guest_addr: u64,
-        _page_type: TsmPageType,
+        guest_id: u64,
+        guest_addr: u64,
+        page_type: TsmPageType,
     ) -> EcallResult<u64> {
-        Err(EcallError::Sbi(SbiError::NotSupported))
+        let page_size = PageSize::from(page_type);
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let addr = self.guest_addr_from_raw(guest_addr)?;
+        guest_vm
+            .vm_pages()
+            .promote_page(addr, page_size)
+            .map_err(EcallError::from)?;
+        Ok(0)
     }
 
     fn guest_demote_page(
         &self,
-        _guest_id: u64,
-        _guest_addr: u64,
-        _page_type: TsmPageType,
+        guest_id: u64,
+        guest_addr: u64,
+        page_type: TsmPageType,
     ) -> EcallResult<u64> {
-        Err(EcallError::Sbi(SbiError::NotSupported))
+        let page_size = PageSize::from(page_type);
+        let guest = self.guest_by_id(guest_id)?;
+        let guest_vm = guest
+            .as_finalized_vm()
+            .ok_or(EcallError::Sbi(SbiError::InvalidParam))?;
+        let addr = self.guest_addr_from_raw(guest_addr)?;
+        guest_vm
+            .vm_pages()
+            .demote_page(addr, page_size)
+            .map_err(EcallError::from)?;
+        Ok(0)
     }
 
     fn guest_remove_pages(&self, guest_id: u64, guest_addr: u64, len: u64) -> EcallResult<u64> {

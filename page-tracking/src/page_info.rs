@@ -152,12 +152,32 @@ impl PageInfo {
         matches!(self.state, PageState::Reserved)
     }
 
-    pub fn is_blocked(&self) -> bool {
-        matches!(self.state, PageState::Blocked(_))
+    pub fn is_blocked(&self, tlb_version: Option<TlbVersion>) -> bool {
+        use PageState::*;
+        match self.state {
+            Blocked(version) => {
+                if let Some(tlb_version) = tlb_version {
+                    version < tlb_version
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        }
     }
 
-    pub fn is_blocked_shared(&self) -> bool {
-        matches!(self.state, PageState::BlockedShared(_, _))
+    pub fn is_blocked_shared(&self, tlb_version: Option<TlbVersion>) -> bool {
+        use PageState::*;
+        match self.state {
+            BlockedShared(_, version) => {
+                if let Some(tlb_version) = tlb_version {
+                    version < tlb_version
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Returns the page type.
@@ -326,17 +346,6 @@ impl PageInfo {
         match self.state() {
             Shared(rc) if rc == u64::MAX => false,
             Shared(_) | PageState::Mapped => true,
-            _ => false,
-        }
-    }
-
-    /// Returns if the page is Blocked or BlockedShared and can complete the removal at
-    /// the given `tlb_version`.
-    pub fn is_removable(&self, tlb_version: TlbVersion) -> bool {
-        use PageState::*;
-        match self.state {
-            Blocked(version) => version < tlb_version,
-            BlockedShared(_, version) => version < tlb_version,
             _ => false,
         }
     }

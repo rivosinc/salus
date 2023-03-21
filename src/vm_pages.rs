@@ -912,7 +912,7 @@ impl PtePagePool {
     /// Creates an empty `PtePagePool`.
     fn new(page_tracker: PageTracker) -> Self {
         Self {
-            pages: Mutex::new(PageList::new(page_tracker)),
+            pages: Mutex::new(PageList::new(page_tracker, PageSize::Size4k)),
         }
     }
 
@@ -1386,7 +1386,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .map_err(Error::Paging)?;
 
         // Lock the pages for assignment.
-        let mut locked_pages = LockedPageList::new(self.inner.page_tracker());
+        let mut locked_pages = LockedPageList::new(self.inner.page_tracker(), PageSize::Size4k);
         for paddr in converted {
             // Unwrap ok: The pages are guaranteed to be converted and no one else can get a
             // reference to them until the iterator is destroyed.

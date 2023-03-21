@@ -18,6 +18,8 @@ pub enum Error {
     IdOverflow,
     /// The given page isn't physically present.
     InvalidPage(SupervisorPageAddr),
+    /// The given page isn't the right size.
+    InvalidPageSize,
     /// The ownership chain is too long to add another owner.
     OwnerOverflow,
     /// The page would become unowned as a result of popping its current owner.
@@ -132,7 +134,7 @@ impl PageTracker {
         let host_pages = unsafe {
             // Safe since we trust that HypPageAlloc::drain() properly created a linked-list starting
             // at head_addr and that all the pages in the list were cleaned.
-            PageList::from_raw_parts(page_tracker.clone(), head_addr)
+            PageList::from_raw_parts(page_tracker.clone(), head_addr, PageSize::Size4k)
         };
 
         (page_tracker, host_pages)

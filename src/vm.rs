@@ -1229,7 +1229,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         owner: PageOwnerId,
     ) -> PageList<Page<InternalClean>> {
         let page_tracker = pages.page_tracker();
-        let mut assigned = PageList::new(page_tracker.clone());
+        let mut assigned = PageList::new(page_tracker.clone(), pages.page_size());
         for page in pages {
             // Unwrap ok: we have an exclusive reference to the converted page, so it must be
             // assignable.
@@ -1534,7 +1534,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         // Make sure we can initialize the full set of pages before we start actually inserting
         // them into the destination page table.
         let src_page_addr = self.guest_addr_from_raw(src_addr)?;
-        let mut initialized_pages = LockedPageList::new(self.page_tracker());
+        let mut initialized_pages = LockedPageList::new(self.page_tracker(), pages.page_size());
         for (page, addr) in pages.zip(src_page_addr.iter_from()) {
             match page.try_initialize(|bytes| active_pages.copy_from_guest(bytes, addr.into())) {
                 Ok(p) => {

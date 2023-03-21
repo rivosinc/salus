@@ -26,7 +26,12 @@ _start:
     blt  a3, a4, 1b
 
     la   sp, _stack_end
-    call kernel_init
+    call primary_init
+    // a0 contains SATP value
+    csrw satp, a0
+    // Flush TLBs.
+    sfence.vma
+    call primary_main
     j    wfi_loop
 
 // The entry point for secondary CPUs.
@@ -43,6 +48,11 @@ _secondary_start:
     mv   sp, a1
     mv   tp, a1
     call secondary_init
+    // a0 contains SATP value
+    csrw satp, a0
+    // Flush TLBs.
+    sfence.vma
+    call secondary_main
 wfi_loop:
     wfi
     j    wfi_loop

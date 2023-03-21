@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use riscv_pages::{ConvertedPhysPage, PageSize, PhysPage, SupervisorPageAddr};
 
-use crate::{PageTracker, PageTrackingResult};
+use crate::{PageTracker, PageTrackingError, PageTrackingResult};
 
 /// A linked list of exclusively-owned `PhysPages` created using links in the array of `PageInfo`
 /// structs. This list can be used to pass around a list of non-contiguous pages without having
@@ -17,17 +17,19 @@ pub struct PageList<P: PhysPage> {
     head: Option<SupervisorPageAddr>,
     tail: Option<SupervisorPageAddr>,
     len: usize,
+    page_size: PageSize,
     page_state: PhantomData<P>,
 }
 
 impl<P: PhysPage> PageList<P> {
     /// Creates an empty `PageList`.
-    pub fn new(page_tracker: PageTracker) -> Self {
+    pub fn new(page_tracker: PageTracker, page_size: PageSize) -> Self {
         Self {
             page_tracker,
             head: None,
             tail: None,
             len: 0,
+            page_size,
             page_state: PhantomData,
         }
     }
@@ -41,10 +43,11 @@ impl<P: PhysPage> PageList<P> {
     pub(crate) unsafe fn from_raw_parts(
         page_tracker: PageTracker,
         head: SupervisorPageAddr,
+        page_size: PageSize,
     ) -> Self {
         let mut len = 1;
         let mut tail = head;
-        while let Some(addr) = page_tracker.linked_page(tail, PageSize::Size4k) {
+        while let Some(addr) = page_tracker.linked_page(tail, page_size) {
             len += 1;
             tail = addr;
         }
@@ -54,12 +57,16 @@ impl<P: PhysPage> PageList<P> {
             head: Some(head),
             tail: Some(tail),
             len,
+            page_size,
             page_state: PhantomData,
         }
     }
 
     /// Appends `page` to the end of the list. Returns an error if `page` is already linked.
     pub fn push(&mut self, page: P) -> PageTrackingResult<()> {
+        if page.size() != self.page_size {
+            return Err(PageTrackingError::InvalidPageSize);
+        }
         if let Some(tail_addr) = self.tail {
             self.page_tracker
                 .link_pages(tail_addr, page.addr(), page.size())?;
@@ -75,14 +82,14 @@ impl<P: PhysPage> PageList<P> {
     /// Removes the head of the list.
     pub fn pop(&mut self) -> Option<P> {
         let addr = self.head?;
-        self.head = self.page_tracker.unlink_page(addr, PageSize::Size4k);
+        self.head = self.page_tracker.unlink_page(addr, self.page_size);
         if self.head.is_none() {
             // List is now empty.
             self.tail = None;
         }
         self.len -= 1;
         // Safety: This list has unique ownership of the page ever sicne it was pushed.
-        Some(unsafe { P::new(addr) })
+        Some(unsafe { P::new_with_size(addr, self.page_size) })
     }
 
     /// Returns if the list is empty.
@@ -106,8 +113,8 @@ impl<P: PhysPage> PageList<P> {
             return true;
         }
         let mut prev = self.head.unwrap();
-        while let Some(addr) = self.page_tracker.linked_page(prev, PageSize::Size4k) {
-            if let Some(next) = prev.checked_add_pages(1) && addr == next {
+        while let Some(addr) = self.page_tracker.linked_page(prev, self.page_size) {
+            if let Some(next) = prev.checked_add_pages_with_size(1, self.page_size) && addr == next {
                 prev = next;
             } else {
                 return false;
@@ -119,6 +126,11 @@ impl<P: PhysPage> PageList<P> {
     /// Returns the `PageTracker` this list is using.
     pub fn page_tracker(&self) -> PageTracker {
         self.page_tracker.clone()
+    }
+
+    /// Returns the `PageSize` of each page within this list.
+    pub fn page_size(&self) -> PageSize {
+        self.page_size
     }
 }
 
@@ -150,9 +162,9 @@ pub struct LockedPageList<P: ConvertedPhysPage> {
 
 impl<P: ConvertedPhysPage> LockedPageList<P> {
     /// Creates an empty `LockedPageList`.
-    pub fn new(page_tracker: PageTracker) -> Self {
+    pub fn new(page_tracker: PageTracker, page_size: PageSize) -> Self {
         Self {
-            inner: PageList::new(page_tracker),
+            inner: PageList::new(page_tracker, page_size),
         }
     }
 }
@@ -207,7 +219,7 @@ mod tests {
         let first_page = pages.next().unwrap();
         let first_page_addr = first_page.addr();
         {
-            let mut list = PageList::new(page_tracker.clone());
+            let mut list = PageList::new(page_tracker.clone(), PageSize::Size4k);
             list.push(first_page).unwrap();
             for _ in 0..5 {
                 list.push(pages.next().unwrap()).unwrap();
@@ -217,7 +229,7 @@ mod tests {
             assert!(list.push(already_linked).is_err());
         }
 
-        let mut new_list = PageList::new(page_tracker.clone());
+        let mut new_list = PageList::new(page_tracker.clone(), PageSize::Size4k);
         for _ in 0..5 {
             new_list.push(pages.next().unwrap()).unwrap();
         }

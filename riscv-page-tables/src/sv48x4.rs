@@ -169,7 +169,7 @@ mod tests {
                 page_tracker.is_converted_page(addr, PageSize::Size4k, id, MemType::Ram, version)
             })
             .unwrap();
-        let mut locked_pages = LockedPageList::new(page_tracker.clone());
+        let mut locked_pages = LockedPageList::new(page_tracker.clone(), PageSize::Size4k);
         for paddr in converted {
             let page = page_tracker
                 .get_converted_page::<Page<ConvertedDirty>>(paddr, PageSize::Size4k, id, version)

@@ -235,6 +235,7 @@ mod tests {
         assert!(page_tracker
             .get_converted_page::<Page<ConvertedDirty>>(
                 addr,
+                PageSize::Size4k,
                 PageOwnerId::hypervisor(),
                 TlbVersion::new()
             )

@@ -416,14 +416,18 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
                     // Unwrap ok since by virtue of being mapped into this page table, we must
                     // uniquely own the page and it must be in a releasable state.
                     page_tracker
-                        .release_page_by_addr(l.page_addr(), owner)
+                        .release_page_by_addr(l.page_addr(), l.level().leaf_page_size(), owner)
                         .unwrap();
                 }
                 Invalidated(i) => {
-                    // Unwrap ok since the only usage of invalid PTEs we currently have is for
-                    // converted pages.
+                    // Unwrap ok since the usages of invalid PTEs we have is for converted and
+                    // blocked pages.
                     page_tracker
-                        .release_invalidated_page_by_addr(i.page_addr(), owner)
+                        .release_invalidated_page_by_addr(
+                            i.page_addr(),
+                            i.level().leaf_page_size(),
+                            owner,
+                        )
                         .unwrap();
                 }
                 _ => (),
@@ -900,7 +904,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         // Check that all pages in `root` are owned by `owner`.
         if !root
             .page_addrs()
-            .all(|paddr| page_tracker.is_owned(paddr, owner))
+            .all(|paddr| page_tracker.is_owned(paddr, PageSize::Size4k, owner))
         {
             return Err(Error::RootPageNotOwned(root));
         }

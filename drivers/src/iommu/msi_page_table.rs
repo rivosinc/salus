@@ -128,7 +128,7 @@ impl MsiPageTable {
             return Err(Error::MisalignedMsiTablePages);
         }
         for addr in pages.base().iter_from().take(pages.len() as usize) {
-            if !page_tracker.is_internal_state_page(addr, owner) {
+            if !page_tracker.is_internal_state_page(addr, PageSize::Size4k, owner) {
                 return Err(Error::UnownedMsiTablePages);
             }
         }
@@ -160,6 +160,7 @@ impl MsiPageTable {
             .ok_or(Error::InvalidImsicLocation(dest))?;
         if !inner.page_tracker.is_mapped_page(
             dest_addr,
+            PageSize::Size4k,
             inner.owner,
             MemType::Mmio(DeviceMemType::Imsic),
         ) {
@@ -190,6 +191,7 @@ impl MsiPageTable {
             .ok_or(Error::InvalidImsicLocation(dest))?;
         if !inner.page_tracker.is_mapped_page(
             dest_addr,
+            PageSize::Size4k,
             inner.owner,
             MemType::Mmio(DeviceMemType::Imsic),
         ) {

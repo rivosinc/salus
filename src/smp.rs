@@ -5,8 +5,8 @@
 use core::arch::asm;
 use core::cell::{RefCell, RefMut};
 use drivers::{imsic::Imsic, CpuId, CpuInfo};
-use page_tracking::{HwMemMap, HwMemRegionType, HwReservedMemType};
-use riscv_pages::{PageSize, RawAddr, SupervisorPageAddr};
+use page_tracking::HypPageAlloc;
+use riscv_pages::{PageSize, SupervisorPageAddr};
 use riscv_regs::{sstatus, ReadWriteable, CSR};
 use s_mode_utils::print::*;
 use sbi_rs::api::state;
@@ -41,23 +41,14 @@ static PER_CPU_BASE: Once<SupervisorPageAddr> = Once::new();
 impl PerCpu {
     /// Initializes the `PerCpu` structures for each CPU, taking memory from `mem_map`. This (the
     /// boot CPU's) per-CPU area is initialized and loaded into TP as well.
-    pub fn init(boot_hart_id: u64, mem_map: &mut HwMemMap) {
+    pub fn init(boot_hart_id: u64, hyp_mem: &mut HypPageAlloc) {
         let cpu_info = CpuInfo::get();
 
         // Find somewhere to put the per-CPU memory.
         let total_size = PER_CPU_PAGES * cpu_info.num_cpus() as u64 * PageSize::Size4k as u64;
-        let pcpu_base = mem_map
-            .regions()
-            .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= total_size)
-            .map(|r| r.base())
-            .expect("Not enough free memory for per-CPU area");
-        mem_map
-            .reserve_region(
-                HwReservedMemType::HypervisorPerCpu,
-                RawAddr::from(pcpu_base),
-                total_size,
-            )
-            .unwrap();
+        let pcpu_pages =
+            hyp_mem.take_pages_for_hyp_state(PageSize::num_4k_pages(total_size) as usize);
+        let pcpu_base = pcpu_pages.base();
         PER_CPU_BASE.call_once(|| pcpu_base);
 
         VmIdTracker::init();

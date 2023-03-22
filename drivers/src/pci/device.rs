@@ -749,7 +749,12 @@ fn bar_range_is_owned(
     guest_id: PageOwnerId,
 ) -> Result<()> {
     for p in range {
-        if !page_tracker.is_mapped_page(p, guest_id, MemType::Mmio(DeviceMemType::PciBar)) {
+        if !page_tracker.is_mapped_page(
+            p,
+            PageSize::Size4k,
+            guest_id,
+            MemType::Mmio(DeviceMemType::PciBar),
+        ) {
             return Err(Error::UnownedBarPage(p));
         }
     }

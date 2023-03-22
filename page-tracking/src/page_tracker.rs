@@ -193,6 +193,42 @@ impl PageTracker {
         page_tracker.active_guests.retain(|&id| id != remove_id);
     }
 
+    /// Run a callback returning a Result through this helper to handle all page sizes.
+    fn for_each_page<F>(&self, paddr: SupervisorPageAddr, page_size: PageSize, run: F) -> Result<()>
+    where
+        F: Fn(&mut PageInfo) -> Result<()>,
+    {
+        let mut page_tracker = self.inner.lock();
+        for pa in paddr
+            .iter_from()
+            .take(PageSize::num_4k_pages(page_size as u64) as usize)
+        {
+            run(page_tracker.get_mut(pa)?)?;
+        }
+        Ok(())
+    }
+
+    /// Run a callback returning a boolean through this helper to handle all page sizes.
+    fn all_pages<F>(&self, paddr: SupervisorPageAddr, page_size: PageSize, run: F) -> bool
+    where
+        F: Fn(&PageInfo) -> bool,
+    {
+        let mut page_tracker = self.inner.lock();
+        for pa in paddr
+            .iter_from()
+            .take(PageSize::num_4k_pages(page_size as u64) as usize)
+        {
+            if let Ok(info) = page_tracker.get(pa) {
+                if !run(info) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Assigns `page` as a mapped page for `owner`, returning a page that can then be mapped into
     /// a page table.
     pub fn assign_page_for_mapping<P, M>(
@@ -204,9 +240,9 @@ impl PageTracker {
         P: AssignablePhysPage<M>,
         M: MeasureRequirement,
     {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.assign(owner, PageState::Mapped)?;
+        self.for_each_page(page.addr(), page.size(), |info| {
+            info.assign(owner, PageState::Mapped)
+        })?;
         // Safe since we own the page and have updated its state.
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
@@ -217,12 +253,15 @@ impl PageTracker {
     where
         P: ShareablePhysPage,
     {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        if info.owner() != Some(owner) || info.mem_type() != P::mem_type() || !info.is_shareable() {
-            return Err(Error::PageNotShareable);
-        }
-        info.share()?;
+        self.for_each_page(page.addr(), page.size(), |info| {
+            if info.owner() != Some(owner)
+                || info.mem_type() != P::mem_type()
+                || !info.is_shareable()
+            {
+                return Err(Error::PageNotShareable);
+            }
+            info.share()
+        })?;
         // Safe since we own the page and have updated its state.
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
@@ -234,32 +273,33 @@ impl PageTracker {
         page: Page<ConvertedClean>,
         owner: PageOwnerId,
     ) -> Result<Page<InternalClean>> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.assign(owner, PageState::VmState)?;
+        self.for_each_page(page.addr(), page.size(), |info| {
+            info.assign(owner, PageState::VmState)
+        })?;
         // Safe since we own the page and have updated its state.
         Ok(unsafe { Page::new_with_size(page.addr(), page.size()) })
     }
 
     /// Relases `page` back to its previous owner.
     pub fn release_page<P: PhysPage>(&self, page: P) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.release(false)?;
-        Ok(())
+        self.for_each_page(page.addr(), page.size(), |info| info.release(false))
     }
 
     /// Releases the page at `addr` back to its previous owner if it's currently owned by `owner`
     /// and is in a releasable state.
-    pub fn release_page_by_addr(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr)?;
-        // Shared pages might be owned by the parent
-        if info.owner() != Some(owner) && !info.is_shared() {
-            return Err(Error::OwnerMismatch);
-        }
-        info.release(false)?;
-        Ok(())
+    pub fn release_page_by_addr(
+        &self,
+        addr: SupervisorPageAddr,
+        page_size: PageSize,
+        owner: PageOwnerId,
+    ) -> Result<()> {
+        self.for_each_page(addr, page_size, |info| {
+            // Shared pages might be owned by the parent
+            if info.owner() != Some(owner) && !info.is_shared() {
+                return Err(Error::OwnerMismatch);
+            }
+            info.release(false)
+        })
     }
 
     /// Releases the page at `addr` back to its previous owner if it's currently owned by `owner`
@@ -268,16 +308,16 @@ impl PageTracker {
     pub fn release_invalidated_page_by_addr(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
     ) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr)?;
-        // Shared pages might be owned by the parent
-        if info.owner() != Some(owner) && !info.is_shared() {
-            return Err(Error::OwnerMismatch);
-        }
-        info.release(true)?;
-        Ok(())
+        self.for_each_page(addr, page_size, |info| {
+            // Shared pages might be owned by the parent
+            if info.owner() != Some(owner) && !info.is_shared() {
+                return Err(Error::OwnerMismatch);
+            }
+            info.release(true)
+        })
     }
 
     /// Marks the invalidated page as having started conversion at `tlb_version`.
@@ -286,17 +326,15 @@ impl PageTracker {
         page: P,
         tlb_version: TlbVersion,
     ) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.begin_conversion(tlb_version)
+        self.for_each_page(page.addr(), page.size(), |info| {
+            info.begin_conversion(tlb_version)
+        })
     }
 
     /// Reclaims the converted, but unassigned, `page` back to a mapped page for the current owner.
     /// Returns a page that can then be mapped in a page table.
     pub fn reclaim_page<P: ReclaimablePhysPage>(&self, page: P) -> Result<P::MappablePage> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.reclaim()?;
+        self.for_each_page(page.addr(), page.size(), |info| info.reclaim())?;
         // Safe since we own the page and have verified that it can be reclaimed.
         Ok(unsafe { P::MappablePage::new_with_size(page.addr(), page.size()) })
     }
@@ -307,24 +345,25 @@ impl PageTracker {
     pub fn get_converted_page<P: ConvertedPhysPage>(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         tlb_version: TlbVersion,
     ) -> Result<P::DirtyPage> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr)?;
-        if info.owner() != Some(owner)
-            || info.mem_type() != P::mem_type()
-            || (info.state() != PageState::Converted
-                && info.complete_conversion(tlb_version).is_err())
-        {
-            return Err(Error::PageNotConvertible);
-        }
-        info.lock_for_assignment()?;
+        self.for_each_page(addr, page_size, |info| {
+            if info.owner() != Some(owner)
+                || info.mem_type() != P::mem_type()
+                || (info.state() != PageState::Converted
+                    && info.complete_conversion(tlb_version).is_err())
+            {
+                return Err(Error::PageNotConvertible);
+            }
+            info.lock_for_assignment()
+        })?;
         // Safe since we've taken exclusive ownership of the page, verified its typing, and that it is
         // converted as of `tlb_version`.
         //
         // TODO: Page size
-        Ok(unsafe { P::DirtyPage::new(addr) })
+        Ok(unsafe { P::DirtyPage::new_with_size(addr, page_size) })
     }
 
     /// Marks the invalidated page as having started unassignment at `tlb_version`.
@@ -333,9 +372,9 @@ impl PageTracker {
         page: P,
         tlb_version: TlbVersion,
     ) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.begin_unassignment(tlb_version)
+        self.for_each_page(page.addr(), page.size(), |info| {
+            info.begin_unassignment(tlb_version)
+        })
     }
 
     /// Completes unassignment of the page at `addr` if it is owned by `owner` and was unassigned at
@@ -343,16 +382,17 @@ impl PageTracker {
     pub fn unassign_page_complete(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
         tlb_version: TlbVersion,
     ) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr)?;
-        if info.owner() != Some(owner) || info.mem_type() != mem_type {
-            return Err(Error::PageNotUnassignable);
-        }
-        info.complete_unassignment(tlb_version)
+        self.for_each_page(addr, page_size, |info| {
+            if info.owner() != Some(owner) || info.mem_type() != mem_type {
+                return Err(Error::PageNotUnassignable);
+            }
+            info.complete_unassignment(tlb_version)
+        })
     }
 
     /// Move the page to a blocked state.
@@ -361,57 +401,47 @@ impl PageTracker {
         page: P,
         tlb_version: TlbVersion,
     ) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr()).unwrap();
-        info.block(tlb_version)
+        self.for_each_page(page.addr(), page.size(), |info| info.block(tlb_version))
     }
 
     /// Move the page back to the state it was before being blocked.
-    pub fn unblock_page(&self, addr: SupervisorPageAddr) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr).unwrap();
-        info.unblock()
+    pub fn unblock_page(&self, addr: SupervisorPageAddr, page_size: PageSize) -> Result<()> {
+        self.for_each_page(addr, page_size, |info| info.unblock())
     }
 
     /// Remove the page, moving it to either "Mapped" or "Converted" state.
-    pub fn remove_page(&self, addr: SupervisorPageAddr) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr).unwrap();
-        info.remove()
+    pub fn remove_page(&self, addr: SupervisorPageAddr, page_size: PageSize) -> Result<()> {
+        self.for_each_page(addr, page_size, |info| info.remove())
     }
 
     /// Releases an exclusive reference to a "ConvertedLocked" page.
     pub fn unlock_page<P: ConvertedPhysPage>(&self, page: P) -> Result<()> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(page.addr())?;
-        info.unlock()
+        self.for_each_page(page.addr(), page.size(), |info| info.unlock())
     }
 
     /// Returns true if and only if `addr` is a page owned by `owner`.
-    pub fn is_owned(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
-            info.owner() == Some(owner)
-        } else {
-            false
-        }
+    pub fn is_owned(
+        &self,
+        addr: SupervisorPageAddr,
+        page_size: PageSize,
+        owner: PageOwnerId,
+    ) -> bool {
+        self.all_pages(addr, page_size, |info| info.owner() == Some(owner))
     }
 
     /// Returns true if and only if `addr` is a "Mapped" page owned by `owner` with type `mem_type`.
     pub fn is_mapped_page(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
     ) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+        self.all_pages(addr, page_size, |info| {
             info.owner() == Some(owner)
                 && info.mem_type() == mem_type
                 && info.state() == PageState::Mapped
-        } else {
-            false
-        }
+        })
     }
 
     /// Acquires a reference to the shareable page at `addr` if it's owned by owner, and in a
@@ -421,27 +451,34 @@ impl PageTracker {
     pub fn get_shareable_page<P: ShareablePhysPage>(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
     ) -> Result<P> {
-        let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr)?;
-        if info.owner() != Some(owner) || info.mem_type() != P::mem_type() || !info.is_shareable() {
-            return Err(Error::PageNotShareable);
-        }
+        self.for_each_page(addr, page_size, |info| {
+            if info.owner() != Some(owner)
+                || info.mem_type() != P::mem_type()
+                || !info.is_shareable()
+            {
+                Err(Error::PageNotShareable)
+            } else {
+                Ok(())
+            }
+        })?;
 
         // Safe since we've verified the typing of the page.
-        // TODO: Page size
-        Ok(unsafe { P::new(addr) })
+        Ok(unsafe { P::new_with_size(addr, page_size) })
     }
 
     /// Returns true if and only if `addr` is a "Shared" page with type `mem_type`.
-    pub fn is_shared_page(&self, addr: SupervisorPageAddr, mem_type: MemType) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+    pub fn is_shared_page(
+        &self,
+        addr: SupervisorPageAddr,
+        page_size: PageSize,
+        mem_type: MemType,
+    ) -> bool {
+        self.all_pages(addr, page_size, |info| {
             info.mem_type() == mem_type && info.is_shared()
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns true if and only if `addr` is a "Mapped" or "Shared" page owned by `owner` with
@@ -449,15 +486,13 @@ impl PageTracker {
     pub fn is_shareable_page(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
     ) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+        self.all_pages(addr, page_size, |info| {
             info.owner() == Some(owner) && info.mem_type() == mem_type && info.is_shareable()
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns true if and only if `addr` is a page owned by `owner` with type `mem_type` and
@@ -465,18 +500,16 @@ impl PageTracker {
     pub fn is_converted_page(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
         tlb_version: TlbVersion,
     ) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+        self.all_pages(addr, page_size, |info| {
             info.owner() == Some(owner)
                 && info.mem_type() == mem_type
                 && (info.state() == PageState::Converted || info.is_convertible(tlb_version))
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns true if and only if `addr` is a page owned by `owner` with type `mem_type` and
@@ -484,30 +517,30 @@ impl PageTracker {
     pub fn is_unassignable_page(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
         tlb_version: TlbVersion,
     ) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+        self.all_pages(addr, page_size, |info| {
             info.owner() == Some(owner)
                 && info.mem_type() == mem_type
                 && info.is_unassignable(tlb_version)
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns true if and only if `addr` is a `VmState` page owned by `owner`.
-    pub fn is_internal_state_page(&self, addr: SupervisorPageAddr, owner: PageOwnerId) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+    pub fn is_internal_state_page(
+        &self,
+        addr: SupervisorPageAddr,
+        page_size: PageSize,
+        owner: PageOwnerId,
+    ) -> bool {
+        self.all_pages(addr, page_size, |info| {
             info.owner() == Some(owner)
                 && info.mem_type() == MemType::Ram
                 && info.state() == PageState::VmState
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns true if `addr` is a page owned by `owner` and it's in a "Blocked" state with
@@ -516,79 +549,108 @@ impl PageTracker {
     pub fn is_blocked_page(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
     ) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+        self.all_pages(addr, page_size, |info| {
             info.mem_type() == mem_type
                 && ((info.owner() == Some(owner) && info.is_blocked())
                     || (info.owner() != Some(owner) && info.is_blocked_shared()))
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns true if the page is considered blockable.
     pub fn is_blockable_page(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
     ) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+        self.all_pages(addr, page_size, |info| {
             info.mem_type() == mem_type
                 && ((info.owner() == Some(owner) && info.state() == PageState::Mapped)
                     || (info.owner() != Some(owner) && info.is_shared()))
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns true if the page is considered removable.
     pub fn is_removable_page(
         &self,
         addr: SupervisorPageAddr,
+        page_size: PageSize,
         owner: PageOwnerId,
         mem_type: MemType,
         tlb_version: TlbVersion,
     ) -> bool {
-        let mut page_tracker = self.inner.lock();
-        if let Ok(info) = page_tracker.get(addr) {
+        self.all_pages(addr, page_size, |info| {
             info.is_removable(tlb_version)
                 && info.mem_type() == mem_type
                 && ((info.owner() == Some(owner) && info.is_blocked())
                     || (info.owner() == Some(PageOwnerId::host()) && info.is_blocked_shared()))
-        } else {
-            false
-        }
+        })
     }
 
     /// Creates a link from page `a` to `b` if neither is already linked.
-    pub(crate) fn link_pages(&self, a: SupervisorPageAddr, b: SupervisorPageAddr) -> Result<()> {
+    pub(crate) fn link_pages(
+        &self,
+        a: SupervisorPageAddr,
+        b: SupervisorPageAddr,
+        page_size: PageSize,
+    ) -> Result<()> {
+        let num_pages = PageSize::num_4k_pages(page_size as u64) as usize;
         let mut page_tracker = self.inner.lock();
-        // We don't need to touch the destination, but we need to make sure it isn't linked.
-        let dst = page_tracker.get(b)?;
-        if dst.next().is_some() {
-            return Err(Error::PageAlreadyLinked);
+        let mut prev = a;
+        for next in a
+            .iter_from()
+            .take(num_pages)
+            .chain(b.iter_from().take(num_pages))
+        {
+            if next == prev {
+                continue;
+            }
+            // We don't need to touch the destination, but we need to make sure it isn't linked.
+            let dst = page_tracker.get(next)?;
+            if dst.next().is_some() {
+                return Err(Error::PageAlreadyLinked);
+            }
+            let src = page_tracker.get_mut(prev)?;
+            src.link(next)?;
+            prev = next;
         }
-        let src = page_tracker.get_mut(a)?;
-        src.link(b)
+        Ok(())
     }
 
     /// Unlinks the page at `addr`, returning the address of the page to which it was pointing.
-    pub(crate) fn unlink_page(&self, addr: SupervisorPageAddr) -> Option<SupervisorPageAddr> {
+    pub(crate) fn unlink_page(
+        &self,
+        addr: SupervisorPageAddr,
+        page_size: PageSize,
+    ) -> Option<SupervisorPageAddr> {
         let mut page_tracker = self.inner.lock();
-        let info = page_tracker.get_mut(addr).ok()?;
-        let next = info.next();
-        info.unlink();
+        let mut next = None;
+        for paddr in addr
+            .iter_from()
+            .take(PageSize::num_4k_pages(page_size as u64) as usize)
+        {
+            let info = page_tracker.get_mut(paddr).ok()?;
+            next = info.next();
+            info.unlink();
+        }
         next
     }
 
     /// Returns the address of the page linked to the page at `addr`, if any.
-    pub(crate) fn linked_page(&self, addr: SupervisorPageAddr) -> Option<SupervisorPageAddr> {
+    pub(crate) fn linked_page(
+        &self,
+        mut addr: SupervisorPageAddr,
+        page_size: PageSize,
+    ) -> Option<SupervisorPageAddr> {
         let mut page_tracker = self.inner.lock();
+        if page_size.is_huge() {
+            addr = addr.checked_add_pages(PageSize::num_4k_pages(page_size as u64) - 1)?;
+        }
         let info = page_tracker.get_mut(addr).ok()?;
         info.next()
     }

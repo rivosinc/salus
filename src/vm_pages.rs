@@ -232,7 +232,7 @@ impl Drop for PinnedPages {
             // Unwrap ok: the caller guaranteed at construction that the range of pages is shared
             // and owned by `self.owner`.
             self.page_tracker
-                .release_page_by_addr(addr, self.owner)
+                .release_page_by_addr(addr, PageSize::Size4k, self.owner)
                 .unwrap();
         }
     }
@@ -281,7 +281,7 @@ impl Drop for GuestUmodeMapping {
             // Unwrap ok: the caller guaranteed at construction that the mapped pages are shared and
             // owned by `self.owner`.
             self.page_tracker
-                .release_page_by_addr(addr, self.owner)
+                .release_page_by_addr(addr, PageSize::Size4k, self.owner)
                 .unwrap();
         }
         // Unmapped pages in current CPU. Flush TLBs.
@@ -1377,6 +1377,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .get_invalidated_pages(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
                 self.inner.page_tracker.is_converted_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     P::mem_type(),
                     version,
@@ -1392,7 +1393,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             let page = self
                 .inner
                 .page_tracker
-                .get_converted_page::<P>(paddr, self.inner.page_owner_id, version)
+                .get_converted_page::<P>(paddr, PageSize::Size4k, self.inner.page_owner_id, version)
                 .unwrap();
             locked_pages.push(page).unwrap();
         }
@@ -1421,6 +1422,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .get_mapped_pages(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
                 self.inner.page_tracker.is_shareable_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     MemType::Ram,
                 )
@@ -1429,7 +1431,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .map(|addr| {
                 self.inner
                     .page_tracker
-                    .get_shareable_page(addr, self.inner.page_owner_id)
+                    .get_shareable_page(addr, PageSize::Size4k, self.inner.page_owner_id)
                     .unwrap()
             }))
     }
@@ -1454,6 +1456,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .invalidate_range(page_addr, num_pages * PageSize::Size4k as u64, |addr| {
                 self.inner.page_tracker.is_mapped_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     P::mem_type(),
                 )
@@ -1560,6 +1563,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .invalidate_range(imsic_addr, PageSize::Size4k as u64, |addr| {
                 self.inner.page_tracker.is_mapped_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     MemType::Mmio(DeviceMemType::Imsic),
                 )
@@ -1596,6 +1600,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .unmap_range(imsic_addr, PageSize::Size4k as u64, |addr| {
                 self.inner.page_tracker.is_unassignable_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     MemType::Mmio(DeviceMemType::Imsic),
                     version,
@@ -1608,6 +1613,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 .page_tracker
                 .unassign_page_complete(
                     paddr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     MemType::Mmio(DeviceMemType::Imsic),
                     version,
@@ -1637,6 +1643,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .page_tracker
             .unassign_page_complete(
                 imsic_addr,
+                PageSize::Size4k,
                 self.inner.page_owner_id,
                 MemType::Mmio(DeviceMemType::Imsic),
                 version,
@@ -1665,6 +1672,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .invalidate_range(page_addr, len, |addr| {
                 self.inner.page_tracker.is_blockable_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     MemType::Ram,
                 )
@@ -1690,6 +1698,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .validate_range(page_addr, len, |addr| {
                 self.inner.page_tracker.is_blocked_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     MemType::Ram,
                 )
@@ -1697,7 +1706,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .map_err(Error::Paging)?;
         for paddr in valid_pages {
             // Unwrap ok: Page was blocked and has just been marked valid.
-            self.inner.page_tracker.unblock_page(paddr).unwrap();
+            self.inner
+                .page_tracker
+                .unblock_page(paddr, PageSize::Size4k)
+                .unwrap();
         }
 
         Ok(())
@@ -1728,6 +1740,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .unmap_range(page_addr, len, |addr| {
                 self.inner.page_tracker.is_removable_page(
                     addr,
+                    PageSize::Size4k,
                     self.inner.page_owner_id,
                     MemType::Ram,
                     tlb_version,
@@ -1736,7 +1749,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .map_err(Error::Paging)?;
         for paddr in unmapped {
             // Unwrap ok: Page was blocked and has just been unmapped.
-            self.inner.page_tracker.remove_page(paddr).unwrap();
+            self.inner
+                .page_tracker
+                .remove_page(paddr, PageSize::Size4k)
+                .unwrap();
         }
         Ok(())
     }
@@ -1761,14 +1777,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                     prev_addr = Some(addr);
                     self.inner
                         .page_tracker
-                        .is_shareable_page(addr, self.inner.page_owner_id, MemType::Ram)
+                        .is_shareable_page(addr, PageSize::Size4k, self.inner.page_owner_id, MemType::Ram)
                 }
             })
             .map_err(Error::Paging)?
             .map(|addr| {
                 self.inner
                     .page_tracker
-                    .get_shareable_page::<Page<Shareable>>(addr, self.inner.page_owner_id)
+                    .get_shareable_page::<Page<Shareable>>(addr, PageSize::Size4k, self.inner.page_owner_id)
                     .unwrap()
             });
 

@@ -155,7 +155,7 @@ mod tests {
         let version = TlbVersion::new();
         let invalidated = guest_page_table
             .invalidate_range(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
-                page_tracker.is_mapped_page(addr, id, MemType::Ram)
+                page_tracker.is_mapped_page(addr, PageSize::Size4k, id, MemType::Ram)
             })
             .unwrap();
         for paddr in invalidated {
@@ -166,13 +166,13 @@ mod tests {
         let version = version.increment();
         let converted = guest_page_table
             .get_invalidated_pages(gpa_base, 2 * PageSize::Size4k as u64, |addr| {
-                page_tracker.is_converted_page(addr, id, MemType::Ram, version)
+                page_tracker.is_converted_page(addr, PageSize::Size4k, id, MemType::Ram, version)
             })
             .unwrap();
         let mut locked_pages = LockedPageList::new(page_tracker.clone());
         for paddr in converted {
             let page = page_tracker
-                .get_converted_page::<Page<ConvertedDirty>>(paddr, id, version)
+                .get_converted_page::<Page<ConvertedDirty>>(paddr, PageSize::Size4k, id, version)
                 .unwrap();
             locked_pages.push(page).unwrap();
         }

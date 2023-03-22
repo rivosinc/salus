@@ -4,7 +4,7 @@
 
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-use riscv_pages::{ConvertedPhysPage, PhysPage, SupervisorPageAddr};
+use riscv_pages::{ConvertedPhysPage, PageSize, PhysPage, SupervisorPageAddr};
 
 use crate::{PageTracker, PageTrackingResult};
 
@@ -44,7 +44,7 @@ impl<P: PhysPage> PageList<P> {
     ) -> Self {
         let mut len = 1;
         let mut tail = head;
-        while let Some(addr) = page_tracker.linked_page(tail) {
+        while let Some(addr) = page_tracker.linked_page(tail, PageSize::Size4k) {
             len += 1;
             tail = addr;
         }
@@ -61,7 +61,8 @@ impl<P: PhysPage> PageList<P> {
     /// Appends `page` to the end of the list. Returns an error if `page` is already linked.
     pub fn push(&mut self, page: P) -> PageTrackingResult<()> {
         if let Some(tail_addr) = self.tail {
-            self.page_tracker.link_pages(tail_addr, page.addr())?;
+            self.page_tracker
+                .link_pages(tail_addr, page.addr(), page.size())?;
             self.tail = Some(page.addr());
         } else {
             self.head = Some(page.addr());
@@ -74,7 +75,7 @@ impl<P: PhysPage> PageList<P> {
     /// Removes the head of the list.
     pub fn pop(&mut self) -> Option<P> {
         let addr = self.head?;
-        self.head = self.page_tracker.unlink_page(addr);
+        self.head = self.page_tracker.unlink_page(addr, PageSize::Size4k);
         if self.head.is_none() {
             // List is now empty.
             self.tail = None;
@@ -105,7 +106,7 @@ impl<P: PhysPage> PageList<P> {
             return true;
         }
         let mut prev = self.head.unwrap();
-        while let Some(addr) = self.page_tracker.linked_page(prev) {
+        while let Some(addr) = self.page_tracker.linked_page(prev, PageSize::Size4k) {
             if let Some(next) = prev.checked_add_pages(1) && addr == next {
                 prev = next;
             } else {

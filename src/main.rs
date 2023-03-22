@@ -55,7 +55,7 @@ mod vm_pmu;
 use device_tree::{DeviceTree, Fdt};
 use drivers::{
     imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
-    CpuId, CpuInfo,
+    CpuInfo,
 };
 use host_vm::{HostVm, HostVmLoader};
 use hyp_alloc::HypAlloc;
@@ -522,13 +522,6 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
 
     // Set up per-CPU memory and prepare the structures for secondary CPUs boot.
     PerCpu::init(hart_id, &mut hyp_mem);
-
-    // Create per-cpu page tables.
-    let cpu_info = CpuInfo::get();
-    for i in 0..cpu_info.num_cpus() {
-        let page_table = HypMap::get().new_page_table(&mut hyp_mem);
-        PerCpu::set_cpu_page_table(CpuId::new(i), page_table);
-    }
 
     // Find and initialize the IOMMU.
     match Iommu::probe_from(PcieRoot::get(), &mut || {

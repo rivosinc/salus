@@ -551,6 +551,7 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
     fn new_in_region<F>(
         vm_pages: &'a VmPages<T>,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         num_pages: u64,
         pred: F,
     ) -> Result<Self>
@@ -558,7 +559,7 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
         F: Fn(VmRegionType) -> bool,
     {
         let end = page_addr
-            .checked_add_pages(num_pages)
+            .checked_add_pages_with_size(num_pages, page_size)
             .ok_or(Error::AddressOverflow)?;
         let regions = vm_pages.regions.read();
         if !regions.contains(page_addr, end, pred) {
@@ -566,7 +567,7 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
         }
         let mapper = vm_pages
             .root
-            .map_range(page_addr, PageSize::Size4k, num_pages, &mut || {
+            .map_range(page_addr, page_size, num_pages, &mut || {
                 vm_pages.pte_pages.pop()
             })
             .map_err(Error::Paging)?;
@@ -583,11 +584,12 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
     fn new_in_region_mapped(
         vm_pages: &'a VmPages<T>,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         num_pages: u64,
         region_type: VmRegionType,
     ) -> Result<Self> {
         let end = page_addr
-            .checked_add_pages(num_pages)
+            .checked_add_pages_with_size(num_pages, page_size)
             .ok_or(Error::AddressOverflow)?;
         let regions = vm_pages.regions.read();
         if !regions.contains(page_addr, end, |r| r == region_type) {
@@ -595,7 +597,7 @@ impl<'a, T: GuestStagePagingMode, M> VmPagesMapper<'a, T, M> {
         }
         let mapper = vm_pages
             .root
-            .remap_range(page_addr, PageSize::Size4k, num_pages)
+            .remap_range(page_addr, page_size, num_pages)
             .map_err(Error::Paging)?;
         Ok(Self {
             vm_pages,
@@ -1090,6 +1092,7 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
     fn do_map_pages<M, F>(
         &self,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         count: u64,
         pred: F,
     ) -> Result<VmPagesMapper<'a, T, M>>
@@ -1099,7 +1102,7 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         if count == 0 {
             return Err(Error::EmptyPageRange);
         }
-        VmPagesMapper::new_in_region(self.inner, page_addr, count, pred)
+        VmPagesMapper::new_in_region(self.inner, page_addr, page_size, count, pred)
     }
 
     fn do_remap_pages<M>(
@@ -1111,7 +1114,13 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         if count == 0 {
             return Err(Error::EmptyPageRange);
         }
-        VmPagesMapper::new_in_region_mapped(self.inner, page_addr, count, region_type)
+        VmPagesMapper::new_in_region_mapped(
+            self.inner,
+            page_addr,
+            PageSize::Size4k,
+            count,
+            region_type,
+        )
     }
 
     /// Same as `map_zero_pages()`, but for IMSIC guest interrupt file pages.
@@ -1120,7 +1129,9 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<ImsicPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, |r| r == VmRegionType::Imsic)
+        self.do_map_pages(page_addr, PageSize::Size4k, count, |r| {
+            r == VmRegionType::Imsic
+        })
     }
 
     /// Same as `map_imsic_pages()`, but for remapping the virtual address to a different
@@ -1139,7 +1150,9 @@ impl<'a, T: GuestStagePagingMode, S> VmPagesRef<'a, T, S> {
         page_addr: GuestPageAddr,
         count: u64,
     ) -> Result<PciPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, |r| r == VmRegionType::Pci)
+        self.do_map_pages(page_addr, PageSize::Size4k, count, |r| {
+            r == VmRegionType::Pci
+        })
     }
 
     // Adds a region of type `region_type`.
@@ -1337,15 +1350,16 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(())
     }
 
-    /// Locks `count` 4kB pages starting at `page_addr` for mapping of zero-filled pages in a
-    /// region of confidential memory, returning a `VmPagesMapper` that can be used to insert
+    /// Locks `count` `page_size` pages starting at `page_addr` for mapping of zero-filled pages
+    /// in a region of confidential memory, returning a `VmPagesMapper` that can be used to insert
     /// the pages.
     pub fn map_zero_pages(
         &self,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         count: u64,
     ) -> Result<ZeroPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, |r| {
+        self.do_map_pages(page_addr, page_size, count, |r| {
             r == VmRegionType::Confidential || r == VmRegionType::ConfidentialRemovable
         })
     }
@@ -1354,9 +1368,10 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     pub fn map_shared_pages(
         &self,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         count: u64,
     ) -> Result<SharedPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, |r| {
+        self.do_map_pages(page_addr, page_size, count, |r| {
             r == VmRegionType::Shared || r == VmRegionType::SharedRemovable
         })
     }
@@ -1364,45 +1379,61 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     fn do_get_converted_pages<P: ConvertedPhysPage>(
         &self,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         num_pages: u64,
     ) -> Result<LockedPageList<P::DirtyPage>> {
         if num_pages == 0 {
             return Err(Error::EmptyPageRange);
         }
 
+        let mut prev_pa: Option<SupervisorPageAddr> = None;
         let version = self.inner.tlb_tracker.min_version();
         let converted = self
             .inner
             .root
-            .get_invalidated_pages(
-                page_addr,
-                num_pages * PageSize::Size4k as u64,
-                |addr, ps| {
-                    // Converted pages should always be 4k given the host is
-                    // exclusively mapped with 4k pages.
-                    if ps.is_huge() {
+            .get_invalidated_pages(page_addr, num_pages * page_size as u64, |pa, ps| {
+                // Converted pages should always be 4k given the host is
+                // exclusively mapped with 4k pages.
+                if ps.is_huge() {
+                    return false;
+                }
+
+                // We need to check the first page is suitably aligned and that every page
+                // is contiguous to the previous one. That's because we have some logic below
+                // that allows to create huge pages out of 4k pages, by skipping the intermediate
+                // pages. That's why we must ensure the whole range is physically contiguous and
+                // suitably aligned.
+                if let Some(addr) = prev_pa {
+                    // Check the current page is contiguous with the previous page
+                    if addr.checked_add_pages_with_size(1, ps) != Some(pa) {
                         return false;
                     }
-                    self.inner.page_tracker.is_converted_page(
-                        addr,
-                        ps,
-                        self.inner.page_owner_id,
-                        P::mem_type(),
-                        version,
-                    )
-                },
-            )
+                } else if !pa.is_aligned(page_size) {
+                    // This is the first page, we must ensure it's suitably aligned with the requested
+                    // page size.
+                    return false;
+                }
+                prev_pa = Some(pa);
+
+                self.inner.page_tracker.is_converted_page(
+                    pa,
+                    ps,
+                    self.inner.page_owner_id,
+                    P::mem_type(),
+                    version,
+                )
+            })
             .map_err(Error::Paging)?;
 
         // Lock the pages for assignment.
-        let mut locked_pages = LockedPageList::new(self.inner.page_tracker(), PageSize::Size4k);
-        for (paddr, _) in converted {
+        let mut locked_pages = LockedPageList::new(self.inner.page_tracker(), page_size);
+        for (paddr, _) in converted.filter(|(pa, _)| pa.is_aligned(page_size)) {
             // Unwrap ok: The pages are guaranteed to be converted and no one else can get a
             // reference to them until the iterator is destroyed.
             let page = self
                 .inner
                 .page_tracker
-                .get_converted_page::<P>(paddr, PageSize::Size4k, self.inner.page_owner_id, version)
+                .get_converted_page::<P>(paddr, page_size, self.inner.page_owner_id, version)
                 .unwrap();
             locked_pages.push(page).unwrap();
         }
@@ -1414,43 +1445,61 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     pub fn get_converted_pages(
         &self,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         num_pages: u64,
     ) -> Result<LockedPageList<Page<ConvertedDirty>>> {
-        self.do_get_converted_pages::<Page<ConvertedDirty>>(page_addr, num_pages)
+        self.do_get_converted_pages::<Page<ConvertedDirty>>(page_addr, page_size, num_pages)
     }
 
     /// Acquries an exclusive reference to the `num_pages` shared pages starting at `page_addr`.
     pub fn get_shareable_pages(
         &self,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         num_pages: u64,
     ) -> Result<impl 'a + Iterator<Item = Page<Shareable>>> {
+        let page_tracker = self.inner.page_tracker();
+        let page_owner_id = self.inner.page_owner_id();
+        let mut prev_pa: Option<SupervisorPageAddr> = None;
         Ok(self
             .inner
             .root
-            .get_mapped_pages(
-                page_addr,
-                num_pages * PageSize::Size4k as u64,
-                |addr, ps| {
-                    // Shareable pages should always be 4k given the host is
-                    // exclusively mapped with 4k pages.
-                    if ps.is_huge() {
+            .get_mapped_pages(page_addr, num_pages * page_size as u64, move |pa, ps| {
+                // Shareable pages should always be 4k given the host is
+                // exclusively mapped with 4k pages.
+                if ps.is_huge() {
+                    return false;
+                }
+
+                // We need to check the first page is suitably aligned and that every page
+                // is contiguous to the previous one. That's because we have some logic below
+                // that allows to create huge pages out of 4k pages, by skipping the intermediate
+                // pages. That's why we must ensure the whole range is physically contiguous and
+                // suitably aligned.
+                if let Some(addr) = prev_pa {
+                    // Check the current page is contiguous with the previous page
+                    if addr.checked_add_pages_with_size(1, ps) != Some(pa) {
                         return false;
                     }
-                    self.inner.page_tracker.is_shareable_page(
-                        addr,
-                        ps,
-                        self.inner.page_owner_id,
-                        MemType::Ram,
-                    )
-                },
-            )
+                } else if !pa.is_aligned(page_size) {
+                    // This is the first page, we must ensure it's suitably aligned with the requested
+                    // page size.
+                    return false;
+                }
+                prev_pa = Some(pa);
+
+                page_tracker.is_shareable_page(pa, ps, page_owner_id, MemType::Ram)
+            })
             .map_err(Error::Paging)?
-            .map(|(addr, _)| {
-                self.inner
-                    .page_tracker
-                    .get_shareable_page(addr, PageSize::Size4k, self.inner.page_owner_id)
-                    .unwrap()
+            .filter_map(move |(addr, _)| {
+                if !addr.is_aligned(page_size) {
+                    return None;
+                }
+                Some(
+                    page_tracker
+                        .get_shareable_page(addr, page_size, page_owner_id)
+                        .unwrap(),
+                )
             }))
     }
 
@@ -1508,10 +1557,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     /// Reclaims `num_pages` of confidential memory starting at guest physical address `page_addr`.
     pub fn reclaim_pages(&self, page_addr: GuestPageAddr, num_pages: u64) -> Result<()> {
         // TODO: Support reclaim of converted pages that haven't yet been fenced.
-        let converted_pages = self.get_converted_pages(page_addr, num_pages)?;
+        let converted_pages = self.get_converted_pages(page_addr, PageSize::Size4k, num_pages)?;
         // Unwrap ok since the PTE for the page must have previously been invalid and all of
         // the intermediate page-tables must already have been populatd.
-        let mapper = self.map_zero_pages(page_addr, num_pages).unwrap();
+        let mapper = self
+            .map_zero_pages(page_addr, PageSize::Size4k, num_pages)
+            .unwrap();
         for (page, addr) in converted_pages.zip(page_addr.iter_from()) {
             // Unwrap ok since we know that it's a converted page.
             let mappable = self.inner.page_tracker.reclaim_page(page.clean()).unwrap();
@@ -1525,7 +1576,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         &self,
         imsic_addr: GuestPageAddr,
     ) -> Result<LockedPageList<ImsicGuestPage<ConvertedClean>>> {
-        self.do_get_converted_pages::<ImsicGuestPage<ConvertedClean>>(imsic_addr, 1)
+        self.do_get_converted_pages::<ImsicGuestPage<ConvertedClean>>(
+            imsic_addr,
+            PageSize::Size4k,
+            1,
+        )
     }
 
     /// Converts the guest interrupt file at `imsic_addr` to confidential.
@@ -1866,7 +1921,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         count: u64,
         slot_perm: UmodeSlotPerm,
     ) -> Result<GuestUmodeMapping> {
-        let pages = self.get_shareable_pages(page_addr, count)?;
+        let pages = self.get_shareable_pages(page_addr, PageSize::Size4k, count)?;
         // TODO: Check that guest request for mapping it writable is consistent with the guest mappings.
         let mapper = PerCpu::this_cpu()
             .page_table()
@@ -2001,9 +2056,12 @@ impl<'a, T: GuestStagePagingMode> InitializingVmPages<'a, T> {
     pub fn map_measured_pages(
         &self,
         page_addr: GuestPageAddr,
+        page_size: PageSize,
         count: u64,
     ) -> Result<MeasuredPagesMapper<'a, T>> {
-        self.do_map_pages(page_addr, count, |r| r == VmRegionType::Confidential)
+        self.do_map_pages(page_addr, page_size, count, |r| {
+            r == VmRegionType::Confidential
+        })
     }
 
     /// Attaches the given PCI device to this VM by enabling DMA translation via the IOMMU using

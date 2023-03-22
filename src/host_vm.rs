@@ -703,7 +703,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
         let mapper = vm
             .vm_pages()
-            .map_measured_pages(to_addr, pages.len() as u64)
+            .map_measured_pages(to_addr, PageSize::Size4k, pages.len() as u64)
             .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
@@ -804,7 +804,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         // Unwrap ok since we've donate sufficient PT pages to map the entire address space up front.
         let mapper = vm
             .vm_pages()
-            .map_zero_pages(to_addr, pages.len() as u64)
+            .map_zero_pages(to_addr, PageSize::Size4k, pages.len() as u64)
             .unwrap();
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);

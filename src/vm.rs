@@ -1273,7 +1273,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let page_root_addr = self.guest_addr_from_raw(params.tvm_page_directory_addr)?;
         let guest_root_pages = self
             .vm_pages()
-            .get_converted_pages(page_root_addr, 4)
+            .get_converted_pages(page_root_addr, PageSize::Size4k, 4)
             .map_err(EcallError::from)?;
         if !guest_root_pages.is_contiguous() {
             return Err(EcallError::Sbi(SbiError::InvalidAddress));
@@ -1286,7 +1286,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let state_page_addr = self.guest_addr_from_raw(params.tvm_state_addr)?;
         let guest_box_pages = self
             .vm_pages()
-            .get_converted_pages(state_page_addr, GuestVm::<T>::required_pages())
+            .get_converted_pages(
+                state_page_addr,
+                PageSize::Size4k,
+                GuestVm::<T>::required_pages(),
+            )
             .map_err(EcallError::from)?;
         if !guest_box_pages.is_contiguous() {
             return Err(EcallError::Sbi(SbiError::InvalidAddress));
@@ -1369,7 +1373,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let state_page_addr = self.guest_addr_from_raw(state_page_addr)?;
         let pages = self
             .vm_pages()
-            .get_converted_pages(state_page_addr, VmCpus::required_state_pages_per_vcpu())
+            .get_converted_pages(
+                state_page_addr,
+                PageSize::Size4k,
+                VmCpus::required_state_pages_per_vcpu(),
+            )
             .map_err(EcallError::from)?;
         if !pages.is_contiguous() {
             return Err(EcallError::Sbi(SbiError::InvalidAddress));
@@ -1414,7 +1422,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let from_page_addr = self.guest_addr_from_raw(from_addr)?;
         let pages = self
             .vm_pages()
-            .get_converted_pages(from_page_addr, num_pages)
+            .get_converted_pages(from_page_addr, PageSize::Size4k, num_pages)
             .map_err(EcallError::from)?;
         for page in pages {
             // Unwrap ok: we have an exclusive reference to the converted page, so it must be
@@ -1456,11 +1464,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         num_pages: u64,
         guest_addr: u64,
     ) -> EcallResult<u64> {
-        if page_type != sbi_rs::TsmPageType::Page4k {
-            // TODO - support huge pages.
-            // TODO - need to break up mappings if given address that's part of a huge page.
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
+        let page_size = PageSize::from(page_type);
 
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
@@ -1471,17 +1475,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let from_page_addr = self.guest_addr_from_raw(page_addr)?;
         let pages = self
             .vm_pages()
-            .get_converted_pages(from_page_addr, num_pages)
+            .get_converted_pages(from_page_addr, page_size, num_pages)
             .map_err(EcallError::from)?;
 
         // Reserve the PTEs in the destination page table.
         let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         let mapper = guest_vm
             .vm_pages()
-            .map_zero_pages(to_page_addr, num_pages)
+            .map_zero_pages(to_page_addr, page_size, num_pages)
             .map_err(EcallError::from)?;
 
-        for (page, addr) in pages.zip(to_page_addr.iter_from()) {
+        for (page, addr) in pages.zip(to_page_addr.iter_from_with_size(page_size).unwrap()) {
             // Unwrap ok: we have an exclusive reference to the converted page, so it must be
             // assignable.
             let page = self
@@ -1506,11 +1510,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         guest_addr: u64,
         active_pages: &ActiveVmPages<T>,
     ) -> EcallResult<u64> {
-        if page_type != sbi_rs::TsmPageType::Page4k {
-            // TODO - support huge pages.
-            // TODO - need to break up mappings if given address that's part of a huge page.
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
+        let page_size = PageSize::from(page_type);
 
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
@@ -1521,21 +1521,21 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let from_page_addr = self.guest_addr_from_raw(dest_addr)?;
         let pages = self
             .vm_pages()
-            .get_converted_pages(from_page_addr, num_pages)
+            .get_converted_pages(from_page_addr, page_size, num_pages)
             .map_err(EcallError::from)?;
 
         // Reserve the PTEs in the destination page table.
         let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         let mapper = guest_vm
             .vm_pages()
-            .map_measured_pages(to_page_addr, num_pages)
+            .map_measured_pages(to_page_addr, page_size, num_pages)
             .map_err(EcallError::from)?;
 
         // Make sure we can initialize the full set of pages before we start actually inserting
         // them into the destination page table.
         let src_page_addr = self.guest_addr_from_raw(src_addr)?;
         let mut initialized_pages = LockedPageList::new(self.page_tracker(), pages.page_size());
-        for (page, addr) in pages.zip(src_page_addr.iter_from()) {
+        for (page, addr) in pages.zip(src_page_addr.iter_from_with_size(page_size).unwrap()) {
             match page.try_initialize(|bytes| active_pages.copy_from_guest(bytes, addr.into())) {
                 Ok(p) => {
                     // Unwrap ok since the page cannot have been on any other list.
@@ -1550,7 +1550,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         }
 
         // Now insert the pages.
-        for (page, addr) in initialized_pages.zip(to_page_addr.iter_from()) {
+        for (page, addr) in
+            initialized_pages.zip(to_page_addr.iter_from_with_size(page_size).unwrap())
+        {
             // Unwrap ok: we have an exclusive reference to the converted page, so it must be
             // assignable.
             let page = self
@@ -1574,9 +1576,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         num_pages: u64,
         guest_addr: u64,
     ) -> EcallResult<u64> {
-        if page_type != TsmPageType::Page4k || num_pages == 0 {
-            return Err(EcallError::Sbi(SbiError::InvalidParam));
-        }
+        let page_size = PageSize::from(page_type);
 
         let guest = self.guest_by_id(guest_id)?;
         let guest_vm = guest
@@ -1587,17 +1587,17 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         let from_page_addr = self.guest_addr_from_raw(page_addr)?;
         let pages = self
             .vm_pages()
-            .get_shareable_pages(from_page_addr, num_pages)
+            .get_shareable_pages(from_page_addr, page_size, num_pages)
             .map_err(EcallError::from)?;
 
         // Reserve the PTEs in the destination page table.
         let to_page_addr = guest_vm.guest_addr_from_raw(guest_addr)?;
         let mapper = guest_vm
             .vm_pages()
-            .map_shared_pages(to_page_addr, num_pages)
+            .map_shared_pages(to_page_addr, page_size, num_pages)
             .map_err(EcallError::from)?;
 
-        for (page, addr) in pages.zip(to_page_addr.iter_from()) {
+        for (page, addr) in pages.zip(to_page_addr.iter_from_with_size(page_size).unwrap()) {
             // Unwrap ok: The page is guaranteed to be in a shareable state until the iterator is
             // destroyed.
             let page = self

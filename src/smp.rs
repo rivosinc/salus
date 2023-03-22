@@ -12,7 +12,7 @@ use s_mode_utils::print::*;
 use sbi_rs::api::state;
 use sync::Once;
 
-use crate::hyp_map::HypPageTable;
+use crate::hyp_map::{HypMap, HypPageTable};
 use crate::umode::UmodeTask;
 use crate::vm_id::VmIdTracker;
 
@@ -27,7 +27,7 @@ extern "C" {
 pub struct PerCpu {
     cpu_id: CpuId,
     vmid_tracker: RefCell<VmIdTracker>,
-    page_table: Once<HypPageTable>,
+    page_table: HypPageTable,
     umode_task: Once<RefCell<UmodeTask>>,
     online: Once<bool>,
 }
@@ -60,7 +60,7 @@ impl PerCpu {
             let pcpu = PerCpu {
                 cpu_id,
                 vmid_tracker: RefCell::new(VmIdTracker::new()),
-                page_table: Once::new(),
+                page_table: HypMap::get().new_page_table(hyp_mem),
                 umode_task: Once::new(),
                 online: Once::new(),
             };
@@ -109,15 +109,6 @@ impl PerCpu {
         pcpu
     }
 
-    /// Set the CPU pagetable (once). Must be called after `PerCpu::init()`.
-    pub fn set_cpu_page_table(cpu: CpuId, page_table: HypPageTable) {
-        let pcpu = Self::ptr_for_cpu(cpu);
-        // Safe since pcpu is set up to point to a valid PerCpu struct in init().
-        unsafe {
-            (*pcpu).page_table.call_once(|| page_table);
-        }
-    }
-
     /// Returns this CPU's ID.
     pub fn cpu_id(&self) -> CpuId {
         self.cpu_id
@@ -137,7 +128,7 @@ impl PerCpu {
     /// cpu.
     pub fn page_table(&self) -> &HypPageTable {
         // Unwrap okay: this is called after `set_cpu_page_table`
-        self.page_table.get().unwrap()
+        &self.page_table
     }
 
     /// Get the  CPU umode structure. Must be  called after `set_umode_task` has been  called for this

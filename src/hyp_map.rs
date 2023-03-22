@@ -89,7 +89,6 @@ impl HwMapRegion {
                 Some(PteLeafPerms::R)
             }
             HwMemRegionType::Reserved(HwReservedMemType::HypervisorHeap)
-            | HwMemRegionType::Reserved(HwReservedMemType::HypervisorPerCpu)
             | HwMemRegionType::Reserved(HwReservedMemType::PageMap)
             | HwMemRegionType::Mmio(_) => Some(PteLeafPerms::RW),
         };

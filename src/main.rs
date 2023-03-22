@@ -464,9 +464,6 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
     // Probe for hardcoded reset device. Not really a probe.
     ResetDriver::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up Reset Device");
 
-    // Set up per-CPU memory and boot the secondary CPUs.
-    PerCpu::init(hart_id, &mut mem_map);
-
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.
     let mut hyp_mem = HypPageAlloc::new(&mut mem_map);
@@ -522,6 +519,9 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
 
     // Create the hypervisor mapping from the hardware memory map and the U-mode ELF.
     HypMap::init(mem_map, &umode_elf).expect("Cannot create Hypervisor map.");
+
+    // Set up per-CPU memory and prepare the structures for secondary CPUs boot.
+    PerCpu::init(hart_id, &mut hyp_mem);
 
     // Create per-cpu page tables.
     let cpu_info = CpuInfo::get();

@@ -52,7 +52,7 @@ load("@rules_rust//rust:defs.bzl", "rust_common")
 rust_register_toolchains(
     edition = "2021",
     extra_target_triples = ["riscv64gc-unknown-none-elf"],
-    versions = [rust_common.default_version, "nightly/2023-02-26"],
+    versions = [rust_common.default_version, "nightly/2023-03-22"],
 )
 
 load("//:deps.bzl", "salus_dependencies")

@@ -50,7 +50,7 @@ use drivers::{
     imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
     CpuInfo,
 };
-use host_vm::{HostVm, HostVmLoader};
+use host_vm::{HostVm, HostVmLoader, HOST_VM_ALIGN};
 use hyp_alloc::HypAlloc;
 use hyp_map::HypMap;
 use page_tracking::*;
@@ -125,10 +125,10 @@ fn poweroff() -> ! {
 static HOST_VM: Once<HostVm<Sv48x4>> = Once::new();
 
 /// Builds the hardware memory map from the device-tree. The kernel & initramfs image regions are
-/// aligned to `T::TOP_LEVEL_ALIGN` so that they can be mapped directly into the host VM's guest
+/// aligned to `HOST_VM_ALIGN` so that they can be mapped directly into the host VM's guest
 /// physical address space.
-fn build_memory_map<T: GuestStagePagingMode>(fdt: &Fdt) -> MemMapResult<HwMemMap> {
-    let mut builder = HwMemMapBuilder::new(T::TOP_LEVEL_ALIGN);
+fn build_memory_map(fdt: &Fdt) -> MemMapResult<HwMemMap> {
+    let mut builder = HwMemMapBuilder::new(HOST_VM_ALIGN as u64);
 
     // First add the memory regions.
     for r in fdt.memory_regions() {
@@ -181,19 +181,19 @@ fn build_memory_map<T: GuestStagePagingMode>(fdt: &Fdt) -> MemMapResult<HwMemMap
     // Reserve the host VM images loaded by firmware. We assume the start of these images are
     // aligned to make mapping them in easier.
     if let Some(r) = fdt.host_kernel_region() {
-        assert_eq!(r.base() & (T::TOP_LEVEL_ALIGN - 1), 0);
+        assert_eq!(r.base() & (HOST_VM_ALIGN as u64 - 1), 0);
         builder = builder.reserve_region(
             HwReservedMemType::HostKernelImage,
             RawAddr::supervisor(r.base()),
-            r.size(),
+            HOST_VM_ALIGN.round_up(r.size()),
         )?;
     }
     if let Some(r) = fdt.host_initramfs_region() {
-        assert_eq!(r.base() & (T::TOP_LEVEL_ALIGN - 1), 0);
+        assert_eq!(r.base() & (HOST_VM_ALIGN as u64 - 1), 0);
         builder = builder.reserve_region(
             HwReservedMemType::HostInitramfsImage,
             RawAddr::supervisor(r.base()),
-            r.size(),
+            HOST_VM_ALIGN.round_up(r.size()),
         )?;
     }
     Ok(builder.build())
@@ -422,7 +422,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     let hyp_fdt =
         unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.map_err(Error::FdtParsing)?;
 
-    let mut mem_map = build_memory_map::<Sv48x4>(&hyp_fdt).map_err(Error::BuildMemoryMap)?;
+    let mut mem_map = build_memory_map(&hyp_fdt).map_err(Error::BuildMemoryMap)?;
 
     // Find where QEMU loaded the host kernel image.
     let host_kernel = *mem_map

@@ -23,7 +23,11 @@ use crate::vm::{FinalizedVm, Vm};
 use crate::vm_cpu::{VmCpu, VmCpuExitReporting, VmCpuParent, VmCpus};
 use crate::vm_pages::VmPages;
 
+// Page size of host VM pages.
+pub const HOST_VM_ALIGN: PageSize = PageSize::Size2M;
+
 // Where the kernel, initramfs, and FDT will be located in the guest physical address space.
+// All these offsets must be `HOST_VM_ALIGN`-aligned.
 //
 // TODO: Kernel offset should be pulled from the header in the kernel image.
 const KERNEL_OFFSET: u64 = 0x20_0000;
@@ -142,8 +146,8 @@ enum FdtPages {
 ///
 /// In order to allow the host VM to allocate physically-aligned blocks necessary for guest VM
 /// creation (specifically, the root of the G-stage page-table), we guarantee that each
-/// contiguous T::TOP_LEVEL_ALIGN block of the guest physical address space of the host VM maps to
-/// a contiguous T::TOP_LEVEL_ALIGN block of the host physical address space.
+/// contiguous `HOST_VM_ALIGN` block of the guest physical address space of the host VM maps to
+/// a contiguous `HOST_VM_ALIGN` block of the host physical address space.
 pub struct HostVmLoader<T: GuestStagePagingMode> {
     hypervisor_dt: DeviceTree,
     kernel: HwMemRegion,
@@ -167,15 +171,15 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         mut page_alloc: HypPageAlloc,
     ) -> Self {
         // Reserve a contiguous chunk for the host's FDT. We assume it will be no bigger than the
-        // size of the hypervisor's FDT and we align it to `T::TOP_LEVEL_ALIGN` to maintain the
+        // size of the hypervisor's FDT and we align it to `HOST_VM_ALIGN` to maintain the
         // contiguous mapping guarantee from GPA -> HPA mentioned above.
         let fdt_size = {
             let size = DeviceTreeSerializer::new(&hypervisor_dt).output_size();
-            ((size as u64) + T::TOP_LEVEL_ALIGN - 1) & !(T::TOP_LEVEL_ALIGN - 1)
+            ((size as u64) + HOST_VM_ALIGN as u64 - 1) & !(HOST_VM_ALIGN as u64 - 1)
         };
-        let num_fdt_pages = fdt_size / PageSize::Size4k as u64;
+        let num_fdt_pages = HOST_VM_ALIGN.round_up(fdt_size) / PageSize::Size4k as u64;
         let fdt_pages =
-            page_alloc.take_pages(num_fdt_pages.try_into().unwrap(), T::TOP_LEVEL_ALIGN);
+            page_alloc.take_pages(num_fdt_pages.try_into().unwrap(), HOST_VM_ALIGN as u64);
 
         let (zero_pages, vm) = HostVm::from_hyp_mem(page_alloc, guest_phys_size);
 
@@ -282,11 +286,12 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             }
         }
 
-        // Host guarantees that the host pages it returns start at T::TOP_LEVEL_ALIGN-aligned block,
-        // and because we built the HwMemMap with a minimum region alignment of T::TOP_LEVEL_ALIGN
+        // Host guarantees that the host pages it returns start at `HOST_VM_ALIGN`-aligned block,
+        // and because we built the HwMemMap with a minimum region alignment of `HOST_VM_ALIGN`,
         // any discontiguous ranges are also guaranteed to be aligned.
         //
         // Now fill in the address space, inserting zero pages around the kernel/initramfs/FDT.
+        assert!(self.guest_ram_base.is_aligned(HOST_VM_ALIGN));
         let mut current_gpa = self.guest_ram_base;
         self.vm
             .add_confidential_memory_region(current_gpa, self.ram_size);
@@ -628,7 +633,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
             )
         });
 
-        let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
+        let (page_tracker, host_pages) = PageTracker::from(hyp_mem, HOST_VM_ALIGN as u64);
         let root =
             GuestStagePageTable::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
         let vm_pages = VmPages::new(root, 0);
@@ -691,7 +696,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     }
 
     // Adds data pages that are measured and mapped to the page tables for the host. Requires
-    // that the GPA map the SPA in T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
+    // that the GPA map the SPA in `HOST_VM_ALIGN`-aligned contiguous chunks.
     fn add_measured_pages<I, S, M>(&mut self, to_addr: GuestPageAddr, pages: I)
     where
         I: ExactSizeIterator<Item = Page<S>>,
@@ -708,8 +713,8 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
             assert_eq!(
-                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+                vm_addr.bits() & (HOST_VM_ALIGN as u64 - 1),
+                page.addr().bits() & (HOST_VM_ALIGN as u64 - 1)
             );
             let mappable = page_tracker
                 .assign_page_for_mapping(page, vm.page_owner_id())
@@ -794,7 +799,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
     }
 
     // Add zero pages to the host page tables. Requires that the GPA map the SPA in
-    // T::TOP_LEVEL_ALIGN-aligned contiguous chunks.
+    // `HOST_VM_ALIGN`-aligned contiguous chunks.
     fn add_zero_pages<I>(&mut self, to_addr: GuestPageAddr, pages: I)
     where
         I: ExactSizeIterator<Item = Page<ConvertedClean>>,
@@ -809,8 +814,8 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         for (page, vm_addr) in pages.zip(to_addr.iter_from()) {
             assert_eq!(page.size(), PageSize::Size4k);
             assert_eq!(
-                vm_addr.bits() & (T::TOP_LEVEL_ALIGN - 1),
-                page.addr().bits() & (T::TOP_LEVEL_ALIGN - 1)
+                vm_addr.bits() & (HOST_VM_ALIGN as u64 - 1),
+                page.addr().bits() & (HOST_VM_ALIGN as u64 - 1)
             );
             let mappable = page_tracker
                 .assign_page_for_mapping(page, vm.page_owner_id())

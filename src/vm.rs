@@ -1522,6 +1522,12 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         // Make sure we can initialize the full set of pages before we start actually inserting
         // them into the destination page table.
         let src_page_addr = self.guest_addr_from_raw(src_addr)?;
+        // Check source pages are not confidential and owned by this VM
+        let _ = self
+            .vm_pages()
+            .get_shareable_pages(src_page_addr, num_pages)
+            .map_err(EcallError::from)?;
+
         let mut initialized_pages = LockedPageList::new(self.page_tracker());
         for (page, addr) in pages.zip(src_page_addr.iter_from()) {
             match page.try_initialize(|bytes| active_pages.copy_from_guest(bytes, addr.into())) {

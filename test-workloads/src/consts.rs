@@ -38,9 +38,14 @@
 /// | Shared console buffer   |
 /// |-------------------------| +4kB
 /// | <empty>                 |
+/// +-------------------------+ 0x1_1000_0000
+/// | Guest zero huge pages   |
+/// +-------------------------+ +NUM_GUEST_ZERO_HUGE_PAGES
+/// | <empty>                 |
 /// +-------------------------+ 0x1_8000_0000
 
 pub const PAGE_SIZE_4K: u64 = 4096;
+pub const PAGE_SIZE_2M: u64 = 2097152;
 // If NUM_TELLUS_IMAGE_PAGES changes, you must also change it in the BUILD file
 pub const NUM_TELLUS_IMAGE_PAGES: u64 = 512;
 pub const GUEST_MMIO_START_ADDRESS: u64 = 0x1000_8000;
@@ -58,6 +63,13 @@ pub const GUEST_SHARED_PAGES_START_ADDRESS: u64 = 0x1_0000_0000;
 pub const NUM_GUEST_SHARED_PAGES: u64 = 1;
 pub const GUEST_DBCN_ADDRESS: u64 =
     GUEST_SHARED_PAGES_START_ADDRESS + NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K;
+pub const NUM_GUEST_ZERO_PAGES_PROMOTE_HUGE_PAGE: u64 = 512;
+pub const NUM_GUEST_ZERO_PAGES_DEMOTE_HUGE_PAGE: u64 = 512;
+pub const NUM_GUEST_ZERO_HUGE_PAGES: u64 =
+    NUM_GUEST_ZERO_PAGES_PROMOTE_HUGE_PAGE + NUM_GUEST_ZERO_PAGES_DEMOTE_HUGE_PAGE;
+pub const GUEST_PROMOTE_HUGE_PAGE_START_ADDRESS: u64 = 0x1_1000_0000;
+pub const GUEST_DEMOTE_HUGE_PAGE_START_ADDRESS: u64 =
+    GUEST_PROMOTE_HUGE_PAGE_START_ADDRESS + NUM_GUEST_ZERO_PAGES_PROMOTE_HUGE_PAGE * PAGE_SIZE_4K;
 pub const GUEST_RAM_END_ADDRESS: u64 = 0x1_8000_0000;
 pub const GUEST_SHARE_PING: u64 = 0xBAAD_F00D;
 pub const GUEST_SHARE_PONG: u64 = 0xF00D_BAAD;

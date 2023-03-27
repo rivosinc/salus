@@ -669,6 +669,16 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     let shared_page_base = next_page;
     next_page += NUM_GUEST_SHARED_PAGES * PAGE_SIZE_4K;
     let dbcn_page_base = next_page;
+    next_page += PAGE_SIZE_4K;
+
+    // Align the huge page base on the next 2M page address.
+    let huge_page_base = (next_page + PAGE_SIZE_2M - 1) & !(PAGE_SIZE_2M - 1);
+
+    // Safety: The passed-in pages are unmapped and we do not access them again until they're
+    // reclaimed.
+    unsafe {
+        convert_pages(huge_page_base, NUM_GUEST_ZERO_HUGE_PAGES);
+    }
 
     // Tell the guest if we have vector support via its boot argument.
     let boot_arg = if vector_enabled {
@@ -987,9 +997,6 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                         }
                         addr if !fatal => {
                             // Fault in the page.
-                            if zero_pages_added >= NUM_CONVERTED_ZERO_PAGES {
-                                panic!("Ran out of pages to fault in");
-                            }
 
                             if unshared_gpa_range
                                 .as_ref()
@@ -1009,15 +1016,55 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 });
                             }
 
+                            let (page_addr, page_type, num_pages) =
+                                if addr == GUEST_PROMOTE_HUGE_PAGE_START_ADDRESS {
+                                    (huge_page_base, sbi_rs::TsmPageType::Page4k, 512)
+                                } else if addr == GUEST_DEMOTE_HUGE_PAGE_START_ADDRESS {
+                                    (
+                                        huge_page_base
+                                            + NUM_GUEST_ZERO_PAGES_PROMOTE_HUGE_PAGE * PAGE_SIZE_4K,
+                                        sbi_rs::TsmPageType::Page2M,
+                                        1,
+                                    )
+                                } else {
+                                    if zero_pages_added >= NUM_CONVERTED_ZERO_PAGES {
+                                        panic!("Ran out of pages to fault in");
+                                    }
+                                    (
+                                        zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
+                                        sbi_rs::TsmPageType::Page4k,
+                                        1,
+                                    )
+                                };
+
                             cove_host::add_zero_pages(
                                 vmid,
-                                zero_pages_base + zero_pages_added * PAGE_SIZE_4K,
-                                sbi_rs::TsmPageType::Page4k,
-                                1,
+                                page_addr,
+                                page_type,
+                                num_pages,
                                 addr & !(PAGE_SIZE_4K - 1),
                             )
                             .expect("Tellus - TvmAddZeroPages failed");
-                            zero_pages_added += 1;
+
+                            if addr == GUEST_PROMOTE_HUGE_PAGE_START_ADDRESS {
+                                println!("Tellus - TVM range invalidation on page promotion");
+                                cove_host::block_pages(vmid, addr, PAGE_SIZE_2M).unwrap();
+                                println!("Tellus - TVM fence on page promotion");
+                                cove_host::tvm_initiate_fence(vmid).unwrap();
+                                println!("Tellus - TVM page promotion");
+                                cove_host::promote_page(vmid, addr, sbi_rs::TsmPageType::Page2M)
+                                    .unwrap();
+                            } else if addr == GUEST_DEMOTE_HUGE_PAGE_START_ADDRESS {
+                                println!("Tellus - TVM range invalidation on page demotion");
+                                cove_host::block_pages(vmid, addr, PAGE_SIZE_2M).unwrap();
+                                println!("Tellus - TVM fence on page demotion");
+                                cove_host::tvm_initiate_fence(vmid).unwrap();
+                                println!("Tellus - TVM page demotion");
+                                cove_host::demote_page(vmid, addr, sbi_rs::TsmPageType::Page4k)
+                                    .unwrap();
+                            } else {
+                                zero_pages_added += num_pages;
+                            }
                         }
                         _ => {
                             println!("Unhandled guest page fault at 0x{:x}", fault_addr);
@@ -1087,6 +1134,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         panic!("Tellus - unexpected value from guest shared page: 0x{guest_written_value:x}");
     }
     // Check that we can reclaim previously-converted pages and that they have been cleared.
+    reclaim_pages(huge_page_base, NUM_GUEST_ZERO_HUGE_PAGES);
     reclaim_pages(
         donated_pages_base,
         NUM_GUEST_DATA_PAGES + NUM_CONVERTED_ZERO_PAGES,

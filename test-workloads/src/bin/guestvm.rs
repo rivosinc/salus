@@ -387,6 +387,62 @@ fn test_interrupts() -> TestResult {
     Ok(())
 }
 
+fn test_huge_pages() -> TestResult {
+    // Safety: We are assuming that GUEST_PROMOTE_HUGE_PAGE_START_ADDRESS is valid, and the
+    // entire 2M range starting from it will be mapped in on a fault.
+    unsafe {
+        let huge_page_base_addr = GUEST_PROMOTE_HUGE_PAGE_START_ADDRESS as *mut u64;
+        // First we write to the special address (start address of the huge page) to trigger
+        // a page fault that will be handled in a special way by tellus. That means instead of
+        // adding one 4k zero page, tellus will add 512 4k zero pages to cover the entire 2M
+        // page. We expect tellus to promote the 512 4k pages to a 2M page right after the zero
+        // pages have been added.
+        core::ptr::write(huge_page_base_addr, 0xdeadbeef);
+        // At this point we read to validate the range was properly faulted in.
+        let val = core::ptr::read(huge_page_base_addr);
+        assert_eq!(val, 0xdeadbeef);
+        // Here we want to validate the last 4k page of the 2M page is properly covered by the
+        // page table.
+        let last_4k_page_addr = (GUEST_PROMOTE_HUGE_PAGE_START_ADDRESS
+            + ((NUM_GUEST_ZERO_PAGES_PROMOTE_HUGE_PAGE - 1) * PAGE_SIZE_4K))
+            as *mut u64;
+        // We write to this address, which would generate a panic if the page wasn't faulted
+        // already. This verifies the 2M range is correctly faulted in, but this also checks
+        // that page promotion didn't break the page table.
+        core::ptr::write(last_4k_page_addr, 0xdeadbeef);
+        let val = core::ptr::read(last_4k_page_addr);
+        assert_eq!(val, 0xdeadbeef);
+    }
+
+    // Safety: We are assuming that GUEST_DEMOTE_HUGE_PAGE_START_ADDRESS is valid, and the
+    // entire 2M range starting from it will be mapped in on a fault.
+    unsafe {
+        let huge_page_base_addr = GUEST_DEMOTE_HUGE_PAGE_START_ADDRESS as *mut u64;
+        // First we write to the special address (start address of the huge page) to trigger
+        // a page fault that will be handled in a special way by tellus. That means instead of
+        // adding one 4k zero page, tellus will add one 2M zero page to cover the entire 2M
+        // page. We expect tellus to demote the 2M page into 512 4M pages right after the zero
+        // page has been added.
+        core::ptr::write(huge_page_base_addr, 0xdeadbeef);
+        // At this point we read to validate the range was properly faulted in.
+        let val = core::ptr::read(huge_page_base_addr);
+        assert_eq!(val, 0xdeadbeef);
+        // Here we want to validate the last 4k page of the 2M page is properly covered by the
+        // page table.
+        let last_4k_page_addr = (GUEST_DEMOTE_HUGE_PAGE_START_ADDRESS
+            + ((NUM_GUEST_ZERO_PAGES_DEMOTE_HUGE_PAGE - 1) * PAGE_SIZE_4K))
+            as *mut u64;
+        // We write to this address, which would generate a panic if the page wasn't faulted
+        // already. This verifies the 2M range is correctly faulted in, but this also checks
+        // that page demotion didn't break the page table.
+        core::ptr::write(last_4k_page_addr, 0xdeadbeef);
+        let val = core::ptr::read(last_4k_page_addr);
+        assert_eq!(val, 0xdeadbeef);
+    }
+
+    Ok(())
+}
+
 #[no_mangle]
 #[allow(clippy::zero_ptr)]
 extern "C" fn kernel_init(hart_id: u64, boot_args: u64) {
@@ -440,6 +496,8 @@ extern "C" fn kernel_init(hart_id: u64, boot_args: u64) {
     test_runtest!("test emulated mmio", { test_emulated_mmio() });
 
     test_runtest!("test interrupts", { test_interrupts() });
+
+    test_runtest!("test huge pages", { test_huge_pages() });
 
     println!("Exiting guest");
     println!("*****************************************");

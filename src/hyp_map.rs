@@ -329,7 +329,6 @@ pub struct HypStackRegion {
     paddr: PageAddr<SupervisorPhys>,
 }
 
-#[allow(dead_code)]
 impl HypStackRegion {
     fn new(stack_pages: SequentialPages<InternalDirty>) -> Result<Self, Error> {
         let page_count = stack_pages.len();
@@ -577,7 +576,11 @@ impl HypMap {
     }
 
     /// Creates a new page table based on this memory map.
-    pub fn new_page_table(&self, hyp_mem: &mut HypPageAlloc) -> HypPageTable {
+    pub fn new_page_table(
+        &self,
+        hyp_mem: &mut HypPageAlloc,
+        stack_pages: SequentialPages<InternalDirty>,
+    ) -> HypPageTable {
         // Create empty sv48 page table
         // Unwrap okay: we expect to have at least one page free.
         let root_page = hyp_mem
@@ -597,6 +600,10 @@ impl HypMap {
         for r in &self.umode_elf_regions {
             r.map(&sv48, hyp_mem);
         }
+        // Alloc and map the hypervisor stack for this page-table.
+        HypStackRegion::new(stack_pages)
+            .expect("Hypervisor stack allocation failed")
+            .map(&sv48, hyp_mem);
         // Alloc and map the U-mode Input Region for this page-table.
         let umode_input = UmodeInputRegion::map(&sv48, hyp_mem);
         // Alloc pte_pages for U-mode mappings.

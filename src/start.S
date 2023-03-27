@@ -31,6 +31,8 @@ _start:
     csrw satp, a0
     // Flush TLBs.
     sfence.vma
+    // Switch to VA-mapped stack.
+    li  sp, {HYP_STACK_TOP}
     call primary_main
     j    wfi_loop
 
@@ -44,14 +46,15 @@ _secondary_start:
 .option pop
     csrw sstatus, zero
     csrw sie, zero
-    // TP holds the address of our PerCpu struct, which is also the top of our stack.
+    // At start, A1 holds the top of the stack.
     mv   sp, a1
-    mv   tp, a1
     call secondary_init
     // a0 contains SATP value
     csrw satp, a0
     // Flush TLBs.
     sfence.vma
+    // Switch to VA-mapped stack.
+    li   sp, {HYP_STACK_TOP}
     call secondary_main
 wfi_loop:
     wfi

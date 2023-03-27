@@ -594,6 +594,7 @@ extern "C" fn secondary_main() {}
 #[no_mangle]
 extern "C" fn secondary_init(hart_id: u64) -> CpuParams {
     setup_csrs();
+    PerCpu::setup_this_cpu(hart_id);
 
     test_declare_pass!("secondary init", hart_id);
 

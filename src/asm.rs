@@ -4,5 +4,7 @@
 
 use core::arch::global_asm;
 
-global_asm!(include_str!("start.S"));
+use crate::hyp_layout::HYP_STACK_TOP;
+
+global_asm!(include_str!("start.S"), HYP_STACK_TOP=const HYP_STACK_TOP);
 global_asm!(include_str!("mem_extable.S"));

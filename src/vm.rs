@@ -1009,14 +1009,19 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     ) -> EcallAction {
         use NaclFunction::*;
         match nacl_func {
-            SetShmem { shmem_pfn } => self.set_shmem_area(shmem_pfn, active_vcpu).into(),
+            ProbeFeature { feature_id } => self.probe_nacl_feature(feature_id).into(),
+            SetShmem { shmem_addr } => self.set_shmem_area(shmem_addr, active_vcpu).into(),
         }
     }
 
-    fn set_shmem_area(&self, shmem_pfn: u64, active_vcpu: &mut ActiveVmCpu<T>) -> EcallResult<u64> {
-        if shmem_pfn != u64::MAX {
+    fn set_shmem_area(
+        &self,
+        shmem_addr: u64,
+        active_vcpu: &mut ActiveVmCpu<T>,
+    ) -> EcallResult<u64> {
+        if shmem_addr != u64::MAX {
             // Pin the pages that the VM wants to use for the shared state buffer.
-            let shared_page_addr = self.guest_addr_from_raw(shmem_pfn << PFN_SHIFT)?;
+            let shared_page_addr = self.guest_addr_from_raw(shmem_addr)?;
             let pin = self
                 .vm_pages()
                 .pin_shared_pages(shared_page_addr, NACL_SHMEM_PAGES)
@@ -1027,6 +1032,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         } else {
             active_vcpu.unregister_shmem_area();
         }
+        Ok(0)
+    }
+
+    fn probe_nacl_feature(&self, _feature_id: u64) -> EcallResult<u64> {
+        // For now we don't support any feature IDs.
         Ok(0)
     }
 

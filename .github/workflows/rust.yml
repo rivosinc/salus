@@ -33,6 +33,7 @@ jobs:
     - name: Run tests
       run: bazel test //:test-all
     - name: Check all commits build
+      if: ${{ github.event_name == 'pull_request' }}
       run: |
         set -e
         commits=$(git rev-list origin/${{ github.base_ref }}..${{ github.sha }})

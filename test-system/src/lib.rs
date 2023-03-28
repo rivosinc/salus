@@ -23,11 +23,14 @@
 //! `test_assert!(boolean_expr, "test_name", hartid)`
 
 /// Simple enum for the result of a test
-pub enum TestResult {
-    /// The test returns as expected
-    Pass,
+pub type TestResult = Result<(), TestFailure>;
+
+/// Simple enum for failure result of a test
+pub enum TestFailure {
     /// The test returns incorrectly
     Fail,
+    /// The test fails, plus some info about what failed
+    FailedAt(&'static str),
 }
 
 /// Declare and pass a test, for tests that
@@ -123,9 +126,9 @@ macro_rules! test_assert {
 /// test_runtest!("runtest test", {
 ///     let a = 7;
 ///     if a - 6 == 1 {
-///         TestResult::Pass
+///         Ok(())
 ///     } else {
-///         TestResult::Fail
+///         Err(TestFailure::Fail)
 ///     }
 /// });
 /// ```
@@ -135,8 +138,83 @@ macro_rules! test_runtest {
         test_declare!($n);
         let res: TestResult = $b;
         match res {
-            TestResult::Pass => test_pass!($n),
-            TestResult::Fail => test_fail!($n),
+            Ok(()) => test_pass!($n),
+            Err(TestFailure::Fail) => test_fail!($n),
+            Err(TestFailure::FailedAt(s)) => test_fail!($n, s),
         }
     };
+}
+
+/// Go from boolean to a TestResult, expecting true
+#[macro_export]
+macro_rules! true_to_tr {
+    ($r:expr) => {
+        if $r {
+            Ok(())
+        } else {
+            Err(TestFailure::Fail)
+        }
+    };
+    ($r: expr, $n:expr) => {
+        if $r {
+            Ok(())
+        } else {
+            Err(TestFailure::FailedAt($n))
+        }
+    };
+}
+
+/// Go from boolean to a TestResult, expecting false
+#[macro_export]
+macro_rules! false_to_tr {
+    ($r:expr) => {
+        if !$r {
+            Ok(())
+        } else {
+            Err(TestFailure::Fail)
+        }
+    };
+    ($r:expr, $n:expr) => {
+        if !$r {
+            Ok(())
+        } else {
+            Err(TestFailure::FailedAt($n))
+        }
+    };
+}
+
+/// run a test expecting true
+#[macro_export]
+macro_rules! test_result_true {
+    // No name
+    ($r:expr) => {
+        true_to_tr!($r)
+    };
+    // with name
+    ($r:expr, $n: expr) => {{
+        if $r {
+            test_declare_pass!($n);
+        } else {
+            test_declare_fail!($n);
+        }
+        true_to_tr!($r, $n)
+    }};
+}
+
+/// run a test expecting false
+#[macro_export]
+macro_rules! test_result_false {
+    // No name
+    ($r:expr) => {
+        false_to_tr!($r)
+    };
+    // with name
+    ($r:expr, $n: expr) => {{
+        if !$r {
+            test_declare_pass!($n);
+        } else {
+            test_declare_fail!($n);
+        }
+        false_to_tr!($r, $n)
+    }};
 }

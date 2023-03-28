@@ -173,9 +173,9 @@ pub fn test_vector() -> TestResult {
 
     if failed {
         println!("Vector registers did not restore correctly");
-        TestResult::Fail
+        Err(TestFailure::Fail)
     } else {
-        TestResult::Pass
+        Ok(())
     }
 }
 
@@ -185,7 +185,7 @@ const TEST_CSR: &[u8] = include_bytes!("test-ed25519.der");
 fn test_attestation() -> TestResult {
     if base::probe_sbi_extension(sbi_rs::EXT_ATTESTATION).is_err() {
         println!("Platform doesn't support attestation extension");
-        return TestResult::Fail;
+        return Err(TestFailure::Fail);
     }
 
     let caps = attestation::get_capabilities().expect("Failed to get attestation capabilities");
@@ -198,7 +198,7 @@ fn test_attestation() -> TestResult {
         .contains(sbi_rs::EvidenceFormat::DiceTcbInfo)
     {
         println!("DICE TcbInfo format is not supported");
-        return TestResult::Fail;
+        return Err(TestFailure::Fail);
     }
 
     // SHA384 for "helloworld"
@@ -216,12 +216,12 @@ fn test_attestation() -> TestResult {
     test_assert!(!result, "pcr attestation measurement");
     if pcr_read.as_slice() != expected_pcr {
         println!("Wrong runtime PCR #1 measurement");
-        return TestResult::Fail;
+        return Err(TestFailure::Fail);
     }
 
     if TEST_CSR.len() > MAX_CSR_LEN {
         println!("Test CSR is too large");
-        return TestResult::Fail;
+        return Err(TestFailure::Fail);
     }
 
     let request_data = [0u8; sbi_rs::EVIDENCE_DATA_BLOB_SIZE];
@@ -233,7 +233,7 @@ fn test_attestation() -> TestResult {
         Err(e) => {
             println!("Attestation error {e:?}");
             println!("Guest evidence call failed");
-            return TestResult::Fail;
+            return Err(TestFailure::Fail);
         }
         Ok(cert_bytes) => cert_bytes,
     };
@@ -277,7 +277,7 @@ fn test_attestation() -> TestResult {
         tvm_fwid.digest.as_bytes().len()
     );
 
-    TestResult::Pass
+    Ok(())
 }
 
 fn test_memory_sharing() -> TestResult {
@@ -331,7 +331,7 @@ fn test_memory_sharing() -> TestResult {
         .expect("GuestVm -- ShareMemory failed");
     }
 
-    TestResult::Pass
+    Ok(())
 }
 
 fn test_emulated_mmio() -> TestResult {
@@ -352,7 +352,7 @@ fn test_emulated_mmio() -> TestResult {
             .expect("GuestVm - RemoveEmulatedMmioRegion failed");
     }
 
-    TestResult::Pass
+    Ok(())
 }
 
 fn test_interrupts() -> TestResult {
@@ -384,7 +384,7 @@ fn test_interrupts() -> TestResult {
         println!("External interrupt NOT pending in GuestVm");
     }
 
-    TestResult::Pass
+    Ok(())
 }
 
 #[no_mangle]

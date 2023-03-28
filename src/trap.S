@@ -2,17 +2,15 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Trap handler entry point.
+.attribute arch, "rv64gcv"
 .section .text.init
-.global _trap_entry
-.balign 4
-_trap_entry:
-    /*
-     * Store the trap frame directly on the current stack. We don't have HU support yet so we
-     * should already be in HS. Traps taken from VS/VU are handled separately by _guest_exit.
-     * Trashes sscratch.
-     */
-    csrw sscratch, sp
+
+/*
+ * Store the trap frame directly on the current stack.
+ * `sscratch` contains the SP to be saved in the frame.
+ * `sscratch` is not preserved.
+ */
+.macro save_frame
     addi sp, sp, -({tf_size})
     sd   ra, ({tf_ra})(sp)
     sd   gp, ({tf_gp})(sp)
@@ -51,6 +49,31 @@ _trap_entry:
     sd   t1, ({tf_sstatus})(sp)
     csrr t2, sepc
     sd   t2, ({tf_sepc})(sp)
+.endm
+
+// Early trap handler. Doesn't check for stack overflow as hypervisor mappings are not enabled yet.
+.global _trap_init_entry
+.balign 4
+_trap_init_entry:
+    /* Skip the buffer overflow check at init time. */
+    j .L_same_stack_trap
+
+/// Trap handler entry point.
+.global _trap_entry
+.balign 4
+_trap_entry:
+    /* Save T0 in sscratch */
+    csrw sscratch, t0
+    /* Check for stack overflow. If it is, switch to overflow stack and panic _quickly_. */
+    li t0, {hyp_stack_bottom}
+    blt sp, t0, _stack_overflow
+    /* Restores T0 from sscratch */
+    csrr t0, sscratch
+
+.L_same_stack_trap:
+    /* Save frame on current stack. */
+    csrw sscratch, sp
+    save_frame
 
     /* Now enter the rust trap handler. */
     move a0, sp
@@ -92,5 +115,31 @@ _trap_entry:
     ld   t5, ({tf_t5})(sp)
     ld   t6, ({tf_t6})(sp)
     ld   sp, ({tf_sp})(sp)
-
     sret
+
+_stack_overflow:
+    /* Acquire the emergency stack on a spinlock. See "A spinlock with fences" in [1].
+     *
+     * [1]: RISC-V Memory Consistency Model Specification (DRAFT), Dec 1st 2017, 2.3.5.
+     */
+    la t1, overflow_stack_lock
+    li t0, 1
+1:
+    amoswap.w t0, t0, (t1)
+    fence r, rw
+    bnez t0, 1b
+
+    /* Restore T0 from sscratch. Saved at the beginning of the trap handler. */
+    csrr t0, sscratch
+    /* NOTE: Register T1 will be clobbered in this stack frame.*/
+
+    csrw sscratch, sp
+    la sp, _overflow_stack_end
+    save_frame
+
+    /* Now enter the rust trap handler. */
+    move a0, sp
+    call handle_stack_overflow
+.Lwfi_loop:
+    wfi
+    j .Lwfi_loop

@@ -13,6 +13,11 @@ use riscv_regs::{
 };
 use s_mode_utils::print::*;
 
+use crate::hyp_layout::HYP_STACK_BOTTOM;
+
+#[no_mangle]
+static overflow_stack_lock: u64 = 0;
+
 /// Stores the trap context as pushed onto the stack by the trap handler.
 #[repr(C)]
 struct TrapFrame {
@@ -98,6 +103,8 @@ impl fmt::Display for TrapFrame {
 extern "C" {
     // The assembly entry point for handling traps.
     fn _trap_entry();
+    // The assembly entry point for handling traps at init time.
+    fn _trap_init_entry();
 
     // The location of the exception table.
     static _extable_start: u8;
@@ -144,6 +151,7 @@ global_asm!(
     tf_sp = const gpr_offset(GprIndex::SP),
     tf_sstatus = const offset_of!(TrapFrame, sstatus),
     tf_sepc = const offset_of!(TrapFrame, sepc),
+    hyp_stack_bottom = const HYP_STACK_BOTTOM,
 );
 
 /// Attempts to handle an interrupt, returning true if the interrupt was successfully handled.
@@ -196,6 +204,14 @@ fn pc_in_extable(pc: u64) -> bool {
     extable().iter().any(|e| e.pc == pc)
 }
 
+#[no_mangle]
+extern "C" fn handle_stack_overflow(tf_ptr: *mut TrapFrame) {
+    let mut tf = unsafe { tf_ptr.as_mut().unwrap() };
+    println!("Stack overflow (please note: T1 register is clobbered below)");
+    println!("{}", tf);
+    panic!("Stack overflow!");
+}
+
 /// The rust entry point for handling traps. The only traps we expect to take in HS mode are IPIs
 /// (to wake the receiving CPU from WFI) and guest page faults while copying to/from guest memory.
 /// For everything else we just dump state and panic.
@@ -235,6 +251,18 @@ extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
     println!("{}", tf);
 
     panic!("Unexpected trap");
+}
+
+/// Installs init-time handler for HS-level traps.
+///
+/// This is the same as the trap handler below but doesn't check for
+/// stack overflow, as hypervisor mappings are not enabled yet.
+pub fn install_init_trap_handler() {
+    CSR.stvec
+        .set((_trap_init_entry as usize).try_into().unwrap());
+
+    // We only expect supervisor-level external interrupts.
+    CSR.sie.read_and_set_bits(1 << sie::sext.shift);
 }
 
 /// Installs a handler for HS-level traps.

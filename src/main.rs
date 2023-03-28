@@ -291,7 +291,7 @@ pub fn setup_csrs() {
     scounteren.modify(scounteren::instret.val(1));
     CSR.scounteren.set(scounteren.get());
 
-    trap::install_trap_handler();
+    trap::install_init_trap_handler();
 }
 
 fn check_vector_width() {
@@ -569,6 +569,8 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
 /// Start salus on the bootstrap CPU. This is called once we switch to the hypervisor page-table.
 #[no_mangle]
 extern "C" fn primary_main() {
+    // Install trap handler with stack overflow checking.
+    trap::install_trap_handler();
     // Setup U-mode task for this CPU.
     UmodeTask::setup_this_cpu().expect("Could not setup umode");
     // Do a NOP request to the U-mode task to check it's functional in this CPU.
@@ -616,6 +618,8 @@ extern "C" fn secondary_init(hart_id: u64) -> CpuParams {
 #[cfg(not(test))]
 #[no_mangle]
 extern "C" fn secondary_main() {
+    // Install trap handler with stack overflow checking.
+    trap::install_trap_handler();
     // Setup U-mode task for this CPU.
     UmodeTask::setup_this_cpu().expect("Could not setup umode");
     // Do a NOP request to the U-mode task to check it's functional in this CPU.

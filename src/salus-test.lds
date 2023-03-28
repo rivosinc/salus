@@ -59,6 +59,8 @@ SECTIONS
 
     PROVIDE(_stack_start = ALIGN(_bss_end, 4096));
     PROVIDE(_stack_end = _stack_start + 0x80000);
+    PROVIDE(_overflow_stack_start = _stack_end);
+    PROVIDE(_overflow_stack_end = _overflow_stack_start + 0x2000);
 
     /DISCARD/ : {
         *(.eh_frame)

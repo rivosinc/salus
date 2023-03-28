@@ -474,3 +474,37 @@ impl VmPmuState {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use test_system::*;
+
+    #[test_case]
+    fn CounterMaskIterTest() -> TestResult {
+        let mut cmi = CounterMaskIter::new(0xff, 0x100).into_iter();
+
+        if cmi.next().unwrap() != 263 {
+            return Err(TestFailure::FailedAt("test1"));
+        }
+
+        if cmi.next().is_some() {
+            return Err(TestFailure::FailedAt("test2"));
+        }
+        let mut cmi = CounterMaskIter::new(0xff, 0x300).into_iter();
+
+        if cmi.next().unwrap() != 263 {
+            return Err(TestFailure::FailedAt("test3"));
+        }
+
+        if cmi.next().unwrap() != 264 {
+            return Err(TestFailure::FailedAt("test4"));
+        }
+
+        if cmi.next().is_some() {
+            return Err(TestFailure::FailedAt("test5"));
+        }
+
+        Ok(())
+    }
+}

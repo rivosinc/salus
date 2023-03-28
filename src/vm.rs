@@ -2438,3 +2438,25 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         Ok(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use test_system::*;
+
+    #[test_case]
+    fn MmioOpcodeTest() -> TestResult {
+        test_result_true!(MmioOpcode::Load64.is_load(), "MmioOpcode::Load64")?;
+        test_result_true!(MmioOpcode::Load32.is_load(), "MmioOpcode::Load32")?;
+        test_result_true!(MmioOpcode::Load32U.is_load(), "MmioOpcode::Load32U")?;
+        test_result_true!(MmioOpcode::Load16.is_load(), "MmioOpcode::Load16")?;
+        test_result_true!(MmioOpcode::Load16U.is_load(), "MmioOpcode::Load16U")?;
+        test_result_true!(MmioOpcode::Load8.is_load(), "MmioOpcode::Load8")?;
+        test_result_true!(MmioOpcode::Load8U.is_load(), "MmioOpcode::Load8U")?;
+        test_result_false!(MmioOpcode::Store64.is_load(), "MmioOpcode::Store64")?;
+        test_result_false!(MmioOpcode::Store32.is_load(), "MmioOpcode::Store32")?;
+        test_result_false!(MmioOpcode::Store16.is_load(), "MmioOpcode::Store16")?;
+        test_result_false!(MmioOpcode::Store8.is_load(), "MmioOpcode::Store8")?;
+        Ok(())
+    }
+}

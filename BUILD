@@ -147,19 +147,7 @@ objcopy_to_object(
     out = "umode.o",
 )
 
-rust_binary(
-    name = "salus",
-    srcs = glob(["src/*.rs"]),
-    compile_data = glob(["src/*.S"]) + [
-        ":umode_to_object",
-        ":l_rule",
-    ],
-    rustc_flags = [
-        "-Ctarget-feature=+v",
-        "--codegen=link-arg=-nostartfiles",
-        "-Clink-arg=-T$(location //:l_rule)",
-    ],
-    deps = [
+salus_deps = [
         "//attestation",
         "//data-model",
         "//device-tree",
@@ -188,7 +176,21 @@ rust_binary(
         "@salus-index//:arrayvec",
         "@salus-index//:memoffset",
         "@salus-index//:static_assertions",
+]
+
+rust_binary(
+    name = "salus",
+    srcs = glob(["src/*.rs"]),
+    compile_data = glob(["src/*.S"]) + [
+        ":umode_to_object",
+        ":l_rule",
     ],
+    rustc_flags = [
+        "-Ctarget-feature=+v",
+        "--codegen=link-arg=-nostartfiles",
+        "-Clink-arg=-T$(location //:l_rule)",
+    ],
+    deps = salus_deps,
 )
 
 rust_clippy(
@@ -216,33 +218,5 @@ rust_test(
         "-Clink-arg=-Tsrc/salus-test.lds",
         "--codegen=link-arg=-nostartfiles",
     ],
-    deps = [
-        "//attestation",
-        "//data-model",
-        "//device-tree",
-        "//drivers",
-        "//hyp-alloc",
-        "//mtt",
-        "//page-tracking",
-        "//rice",
-        "//riscv-elf",
-        "//riscv-page-tables",
-        "//riscv-pages",
-        "//riscv-regs",
-        "//s-mode-utils",
-        "//sbi-rs",
-        "//sync",
-        "//test-system",
-        "//u-mode-api",
-        "@rice-index//:const-oid",
-        "@rice-index//:der",
-        "@rice-index//:digest",
-        "@rice-index//:ed25519-dalek",
-        "@rice-index//:generic-array",
-        "@rice-index//:hkdf",
-        "@rice-index//:sha2",
-        "@salus-index//:arrayvec",
-        "@salus-index//:memoffset",
-        "@salus-index//:static_assertions",
-    ],
+    deps = salus_deps,
 )

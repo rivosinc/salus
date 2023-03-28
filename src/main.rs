@@ -20,17 +20,9 @@
     negative_impls
 )]
 #![feature(custom_test_frameworks)]
-#![test_runner(crate::test_runner)]
+#![test_runner(crate::tests::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![cfg_attr(test, allow(unused))]
-
-#[cfg(test)]
-fn test_runner(tests: &[&dyn Fn()]) {
-    println!("Running {} tests\n", tests.len());
-    for test in tests {
-        test();
-    }
-}
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
@@ -338,13 +330,6 @@ extern "C" fn primary_init(_hart_id: u64, _fdt_addr: u64) -> CpuParams {
 #[no_mangle]
 extern "C" fn primary_main() {}
 
-#[test_case]
-fn example_test() {
-    println!("example test");
-    assert!(true);
-    println!("OK\n");
-}
-
 /// Rust Entry point for the bootstrap CPU. Bootstraps salus, starts secondary CPUs and builds the
 /// HOST VM.
 ///
@@ -567,6 +552,7 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
 }
 
 /// Start salus on the bootstrap CPU. This is called once we switch to the hypervisor page-table.
+#[cfg(not(test))]
 #[no_mangle]
 extern "C" fn primary_main() {
     // Install trap handler with stack overflow checking.
@@ -627,4 +613,33 @@ extern "C" fn secondary_main() {
 
     HOST_VM.wait().run(PerCpu::this_cpu().cpu_id().raw() as u64);
     poweroff();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    pub trait Testable {
+        fn run(&self) -> TestResult;
+    }
+
+    impl<T> Testable for T
+    where
+        T: Fn() -> TestResult,
+    {
+        fn run(&self) -> TestResult {
+            println!("---{}---\t", core::any::type_name::<T>());
+            self()
+        }
+    }
+
+    pub fn test_runner(tests: &[&dyn Testable]) {
+        println!("Running {} tests\n", tests.len());
+        for test in tests {
+            match test.run() {
+                Ok(()) => println!("pass"),
+                Err(TestFailure::Fail) => println!("FAIL"),
+                Err(TestFailure::FailedAt(loc)) => println!("FAILED at {loc}"),
+            }
+        }
+    }
 }

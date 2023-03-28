@@ -80,7 +80,7 @@ impl<T> PageArc<T> {
 
         let page_size = this.inner().page_size;
         let page_count = this.inner().page_count;
-        let page_tracker = this.inner().page_tracker.clone();
+        let page_tracker = this.inner().page_tracker;
         // Safety: PageArcInner is repr(C) with data as the first field, therefore a pointer to data
         // is a page-aligned and properly initialized pointer to T.
         let boxed = unsafe {
@@ -142,7 +142,7 @@ impl<T> Drop for PageArc<T> {
             core::ptr::drop_in_place(ptr);
         }
 
-        let page_tracker = self.inner().page_tracker.clone();
+        let page_tracker = self.inner().page_tracker;
 
         // Safe because we now have unique ownership of the pages this PageArc was constructed with.
         let pages = unsafe {

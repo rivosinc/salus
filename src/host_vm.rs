@@ -630,8 +630,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
 
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, T::TOP_LEVEL_ALIGN);
         let root =
-            GuestStagePageTable::new(root_table_pages, PageOwnerId::host(), page_tracker.clone())
-                .unwrap();
+            GuestStagePageTable::new(root_table_pages, PageOwnerId::host(), page_tracker).unwrap();
         let vm_pages = VmPages::new(root, 0);
         let init_pages = vm_pages.as_ref();
         init_pages.set_imsic_geometry(imsic_geometry).unwrap();
@@ -645,7 +644,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
         let vm = Vm::with_guest_tracking(
             vm_pages,
             VmCpus::new(),
-            Guests::new(guest_tracking_pages, page_tracker.clone()),
+            Guests::new(guest_tracking_pages, page_tracker),
         )
         .unwrap();
 
@@ -663,7 +662,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
                 // Allocate vCPU.
                 let vcpu = VmCpu::new(i as u64, PageOwnerId::host());
                 let vcpu_pages = state_pages_iter.next().unwrap();
-                let vcpu_box = PageBox::new_with(vcpu, vcpu_pages, page_tracker.clone());
+                let vcpu_box = PageBox::new_with(vcpu, vcpu_pages, page_tracker);
                 init_vm.add_vcpu(vcpu_box).unwrap();
 
                 let imsic_loc = imsic

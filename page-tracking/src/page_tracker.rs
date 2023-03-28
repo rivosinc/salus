@@ -88,7 +88,7 @@ impl PageTrackerInner {
 /// This struct wraps the list of all memory pages and active guests. It can be cloned and passed to
 /// other compontents that need access to page state. Once created, there is no way to free the
 /// backing page list. That page list is needed for the lifetime of the system.
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct PageTracker {
     inner: StaticPageRef<Mutex<PageTrackerInner>>,
 }
@@ -134,7 +134,7 @@ impl PageTracker {
         let host_pages = unsafe {
             // Safe since we trust that HypPageAlloc::drain() properly created a linked-list starting
             // at head_addr and that all the pages in the list were cleaned.
-            PageList::from_raw_parts(page_tracker.clone(), head_addr, PageSize::Size4k)
+            PageList::from_raw_parts(page_tracker, head_addr, PageSize::Size4k)
         };
 
         (page_tracker, host_pages)

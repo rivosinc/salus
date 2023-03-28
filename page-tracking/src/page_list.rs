@@ -125,7 +125,7 @@ impl<P: PhysPage> PageList<P> {
 
     /// Returns the `PageTracker` this list is using.
     pub fn page_tracker(&self) -> PageTracker {
-        self.page_tracker.clone()
+        self.page_tracker
     }
 
     /// Returns the `PageSize` of each page within this list.

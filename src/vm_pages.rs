@@ -1012,7 +1012,7 @@ impl<T: GuestStagePagingMode> VmPages<T> {
         let page_tracker = root.page_tracker();
         Self {
             page_owner_id: root.page_owner_id(),
-            page_tracker: page_tracker.clone(),
+            page_tracker,
             tlb_tracker: TlbTracker::new(),
             regions: RwLock::new(VmRegionList::new()),
             nesting,
@@ -1030,7 +1030,7 @@ impl<T: GuestStagePagingMode> VmPages<T> {
 
     /// Returns the global page tracking structure.
     pub fn page_tracker(&self) -> PageTracker {
-        self.page_tracker.clone()
+        self.page_tracker
     }
 
     /// Returns a `VmPagesRef` to `self` in state `S`. The caller must ensure that `S` matches
@@ -1849,7 +1849,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             // Unwrap ok, we know there must be at least one page.
             PinnedPages::new(
                 SupervisorPageRange::new(base_addr.unwrap(), count),
-                self.inner.page_tracker.clone(),
+                self.inner.page_tracker,
                 self.inner.page_owner_id,
             )
         };
@@ -1895,7 +1895,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             GuestUmodeMapping::new(
                 slot,
                 count,
-                self.inner.page_tracker.clone(),
+                self.inner.page_tracker,
                 self.inner.page_owner_id,
             )
         };
@@ -1970,7 +1970,7 @@ impl<'a, T: GuestStagePagingMode> InitializingVmPages<'a, T> {
             msi_table_pages,
             imsic_geometry,
             Imsic::get().phys_geometry(),
-            self.inner.page_tracker.clone(),
+            self.inner.page_tracker,
             self.inner.page_owner_id,
         )
         .map_err(Error::CreatingMsiPageTable)?;

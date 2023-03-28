@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::global_asm;
+use core::fmt;
 use core::mem::size_of;
 use drivers::imsic::{Imsic, ImsicInterruptId};
 use memoffset::offset_of;
@@ -18,6 +19,80 @@ struct TrapFrame {
     gprs: GeneralPurposeRegisters,
     sstatus: u64,
     sepc: u64,
+}
+
+impl fmt::Display for TrapFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "SEPC: 0x{:016x}, SSTATUS: 0x{:016x}",
+            self.sepc, self.sstatus,
+        )?;
+        use GprIndex::*;
+        writeln!(
+            f,
+            "RA:  0x{:016x}, GP:  0x{:016x}, TP:  0x{:016x}, S0:  0x{:016x}",
+            self.gprs.reg(RA),
+            self.gprs.reg(GP),
+            self.gprs.reg(TP),
+            self.gprs.reg(S0)
+        )?;
+        writeln!(
+            f,
+            "S1:  0x{:016x}, A0:  0x{:016x}, A1:  0x{:016x}, A2:  0x{:016x}",
+            self.gprs.reg(S1),
+            self.gprs.reg(A0),
+            self.gprs.reg(A1),
+            self.gprs.reg(A2)
+        )?;
+        writeln!(
+            f,
+            "A3:  0x{:016x}, A4:  0x{:016x}, A5:  0x{:016x}, A6:  0x{:016x}",
+            self.gprs.reg(A3),
+            self.gprs.reg(A4),
+            self.gprs.reg(A5),
+            self.gprs.reg(A6)
+        )?;
+        writeln!(
+            f,
+            "A7:  0x{:016x}, S2:  0x{:016x}, S3:  0x{:016x}, S4:  0x{:016x}",
+            self.gprs.reg(A7),
+            self.gprs.reg(S2),
+            self.gprs.reg(S3),
+            self.gprs.reg(S4)
+        )?;
+        writeln!(
+            f,
+            "S5:  0x{:016x}, S6:  0x{:016x}, S7:  0x{:016x}, S8:  0x{:016x}",
+            self.gprs.reg(S5),
+            self.gprs.reg(S6),
+            self.gprs.reg(S7),
+            self.gprs.reg(S8)
+        )?;
+        writeln!(
+            f,
+            "S9:  0x{:016x}, S10: 0x{:016x}, S11: 0x{:016x}, T0:  0x{:016x}",
+            self.gprs.reg(S9),
+            self.gprs.reg(S10),
+            self.gprs.reg(S11),
+            self.gprs.reg(T0)
+        )?;
+        writeln!(
+            f,
+            "T1:  0x{:016x}, T2:  0x{:016x}, T3:  0x{:016x}, T4:  0x{:016x}",
+            self.gprs.reg(T1),
+            self.gprs.reg(T2),
+            self.gprs.reg(T3),
+            self.gprs.reg(T4)
+        )?;
+        writeln!(
+            f,
+            "T5:  0x{:016x}, T6:  0x{:016x}, SP:  0x{:016x}",
+            self.gprs.reg(T5),
+            self.gprs.reg(T6),
+            self.gprs.reg(SP)
+        )
+    }
 }
 
 extern "C" {
@@ -132,6 +207,7 @@ extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
     // Safe since we trust that TrapFrame was properly intialized by _trap_entry.
     let mut tf = unsafe { tf_ptr.as_mut().unwrap() };
     let scause = CSR.scause.get();
+    let stval = CSR.stval.get();
 
     if let Ok(t) = Trap::from_scause(scause) {
         match t {
@@ -154,69 +230,9 @@ extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
     } else {
         print!("Unexpected trap: <not decoded>, ");
     }
-    println!("SCAUSE: 0x{:08x}", scause);
-    println!(
-        "SEPC: 0x{:08x}, SSTATUS: 0x{:08x}, STVAL: 0x{:08x}",
-        tf.sepc,
-        tf.sstatus,
-        CSR.stval.get()
-    );
-    use GprIndex::*;
-    println!(
-        "RA: 0x{:08x}, GP: 0x{:08x}, TP: 0x{:08x}, S0: 0x{:08x}",
-        tf.gprs.reg(RA),
-        tf.gprs.reg(GP),
-        tf.gprs.reg(TP),
-        tf.gprs.reg(S0)
-    );
-    println!(
-        "S1: 0x{:08x}, A0: 0x{:08x}, A1: 0x{:08x}, A2: 0x{:08x}",
-        tf.gprs.reg(S1),
-        tf.gprs.reg(A0),
-        tf.gprs.reg(A1),
-        tf.gprs.reg(A2)
-    );
-    println!(
-        "A3: 0x{:08x}, A4: 0x{:08x}, A5: 0x{:08x}, A6: 0x{:08x}",
-        tf.gprs.reg(A3),
-        tf.gprs.reg(A4),
-        tf.gprs.reg(A5),
-        tf.gprs.reg(A6)
-    );
-    println!(
-        "A7: 0x{:08x}, S2: 0x{:08x}, S3: 0x{:08x}, S4: 0x{:08x}",
-        tf.gprs.reg(A7),
-        tf.gprs.reg(S2),
-        tf.gprs.reg(S3),
-        tf.gprs.reg(S4)
-    );
-    println!(
-        "S5: 0x{:08x}, S6: 0x{:08x}, S7: 0x{:08x}, S8: 0x{:08x}",
-        tf.gprs.reg(S5),
-        tf.gprs.reg(S6),
-        tf.gprs.reg(S7),
-        tf.gprs.reg(S8)
-    );
-    println!(
-        "S9: 0x{:08x}, S10: 0x{:08x}, S11: 0x{:08x}, T0: 0x{:08x}",
-        tf.gprs.reg(S9),
-        tf.gprs.reg(S10),
-        tf.gprs.reg(S11),
-        tf.gprs.reg(T0)
-    );
-    println!(
-        "T1: 0x{:08x}, T2: 0x{:08x}, T3: 0x{:08x}, T4: 0x{:08x}",
-        tf.gprs.reg(T1),
-        tf.gprs.reg(T2),
-        tf.gprs.reg(T3),
-        tf.gprs.reg(T4)
-    );
-    println!(
-        "T5: 0x{:08x}, T6: 0x{:08x}, SP: 0x{:08x}",
-        tf.gprs.reg(T5),
-        tf.gprs.reg(T6),
-        tf.gprs.reg(SP)
-    );
+
+    println!("SCAUSE: 0x{:08x}, STVAL: 0x{:08x}", scause, stval);
+    println!("{}", tf);
 
     panic!("Unexpected trap");
 }

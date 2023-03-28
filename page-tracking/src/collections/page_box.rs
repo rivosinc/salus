@@ -268,6 +268,8 @@ impl<T> StaticPageRef<T> {
     }
 }
 
+impl<T> Copy for StaticPageRef<T> {}
+
 impl<T> Clone for StaticPageRef<T> {
     fn clone(&self) -> Self {
         StaticPageRef(self.0)

@@ -1229,7 +1229,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         owner: PageOwnerId,
     ) -> PageList<Page<InternalClean>> {
         let page_tracker = pages.page_tracker();
-        let mut assigned = PageList::new(page_tracker.clone(), pages.page_size());
+        let mut assigned = PageList::new(page_tracker, pages.page_size());
         for page in pages {
             // Unwrap ok: we have an exclusive reference to the converted page, so it must be
             // assignable.

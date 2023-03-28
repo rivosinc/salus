@@ -406,7 +406,7 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
                     let table_addr = t.table_addr();
                     // Recursively release the pages in the pointed-to table before dropping the
                     // table itself.
-                    t.table().release_pages(page_tracker.clone(), owner);
+                    t.table().release_pages(page_tracker, owner);
                     // Safe since we must uniquely own the page if we're using it as a page-table page.
                     let table_page: Page<InternalDirty> = unsafe { Page::new(table_addr) };
                     // Unwrap ok since the page must have been assigned to us.
@@ -919,7 +919,7 @@ impl<T: PagingMode> GuestStagePageTable<T> {
 
     /// Returns a reference to the systems physical pages map.
     pub fn page_tracker(&self) -> PageTracker {
-        self.page_tracker.clone()
+        self.page_tracker
     }
 
     /// Returns the owner Id for this page table.
@@ -1222,9 +1222,8 @@ impl<T: PagingMode> Drop for GuestStagePageTable<T> {
     fn drop(&mut self) {
         let mut inner = self.inner.lock();
         // Walk the page table starting from the root, freeing any referenced pages.
-        let page_tracker = self.page_tracker.clone();
         let mut table = PageTable::from_root(&mut inner);
-        table.release_pages(page_tracker, self.owner);
+        table.release_pages(self.page_tracker, self.owner);
 
         // Safe since we uniquely own the pages in self.inner.root.
         let root_pages: SequentialPages<InternalDirty> = unsafe {

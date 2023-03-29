@@ -36,9 +36,8 @@ jobs:
       if: ${{ github.event_name == 'pull_request' }}
       run: |
         set -e
-        commits=$(git rev-list origin/${{ github.base_ref }}..${{ github.sha }})
+        commits=$(git rev-list --reverse origin/${{ github.base_ref }}..${{ github.sha }})
         for commit in $commits; do git checkout $commit; bazel build //:salus-all; done
-        git checkout ${{ github.sha }}
     - name: Copy bins
       run: mkdir test-bins && cp bazel-bin/salus test-bins/ && cp bazel-bin/test-workloads/tellus_guestvm test-bins/
     - name: QEMU test

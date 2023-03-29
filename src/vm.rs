@@ -223,7 +223,7 @@ impl From<EcallResult<u64>> for EcallAction {
     fn from(result: EcallResult<u64>) -> EcallAction {
         use EcallAction::*;
         match result {
-            Ok(val) => Continue(SbiReturn::success(val)),
+            Ok(val) => Continue(SbiReturn::success(val as i64)),
             Err(EcallError::Sbi(e)) => Continue(e.into()),
             Err(EcallError::PageFault(pf, e, addr)) => {
                 use PageFaultType::*;
@@ -963,7 +963,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             // report real values here.
             _ => 0,
         };
-        SbiReturn::success(ret)
+        SbiReturn::success(ret as i64)
     }
 
     fn handle_debug_console(&self, debug_con_func: DebugConsoleFunction) -> EcallAction {
@@ -2382,7 +2382,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         match result {
             Ok(r) => EcallAction::Break(
                 VmExitCause::ResumableEcall(SbiMessage::CoveGuest(guest_func)),
-                SbiReturn::success(r),
+                SbiReturn::success(r as i64),
             ),
             Err(_) => result.into(),
         }

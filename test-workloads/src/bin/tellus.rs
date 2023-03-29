@@ -535,7 +535,9 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
         len: core::mem::size_of::<sbi_rs::TsmInfo>() as u64,
     });
     // Safety: The passed info pointer is bogus and nothing should be written to our memory.
-    unsafe { ecall_send(&msg).expect_err("TsmGetInfo succeeded with an invalid pointer") };
+    unsafe {
+        ecall_send::<()>(&msg).expect_err("TsmGetInfo succeeded with an invalid pointer");
+    };
 
     // Donate the pages necessary to create the TVM.
     // Safety: The passed-in pages are unmapped and we do not access them again until they're
@@ -881,14 +883,14 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 addr,
                                 len,
                             ) {
-                                Ok(n) => SbiReturn::success(n),
+                                Ok(n) => SbiReturn::success(n as i64),
                                 Err(n) => SbiReturn {
                                     error_code: SbiError::InvalidAddress as i64,
-                                    return_value: n,
+                                    return_value: n as i64,
                                 },
                             };
                             shmem.set_gpr(GprIndex::A0 as usize, sbi_ret.error_code as u64);
-                            shmem.set_gpr(GprIndex::A1 as usize, sbi_ret.return_value);
+                            shmem.set_gpr(GprIndex::A1 as usize, sbi_ret.return_value as u64);
                         }
                         Ok(PutChar(c)) => {
                             print!("{}", c as u8 as char);

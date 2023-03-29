@@ -60,7 +60,7 @@ impl ConsoleWriter for SbiConsoleV01 {
             // Safety: message doesn't contain pointers and the ecall doesn't touch memory so this
             // is trivially safe.
             unsafe {
-                ecall_send(&message).unwrap();
+                ecall_send::<()>(&message).unwrap();
             }
         }
     }

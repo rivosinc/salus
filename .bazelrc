@@ -16,7 +16,7 @@ build --@rules_rust//rust/toolchain/channel=nightly
 
 # Rust Clippy configuration:
 # - Deny on missing docs
-build --@rules_rust//:clippy_flags=-Dmissing-docs
+build --@rules_rust//:clippy_flags=-Dmissing-docs,-Dwarnings
 
 # Use the workspace status feature to include the git commit in the build:
 # https://bazel.build/docs/user-manual#workspace-status

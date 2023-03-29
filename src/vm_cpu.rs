@@ -917,7 +917,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
             SbiReturnType::Standard(ret) => {
                 self.set_gpr(GprIndex::A0, ret.error_code as u64);
-                self.set_gpr(GprIndex::A1, ret.return_value);
+                self.set_gpr(GprIndex::A1, ret.return_value as u64);
             }
         }
     }
@@ -1157,7 +1157,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     }
                     _ => SbiReturnType::Standard(SbiReturn {
                         error_code: self.host_context.guest_gpr(GprIndex::A0) as i64,
-                        return_value: self.host_context.guest_gpr(GprIndex::A1),
+                        return_value: self.host_context.guest_gpr(GprIndex::A1) as i64,
                     }),
                 };
 

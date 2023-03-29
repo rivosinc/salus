@@ -429,15 +429,15 @@ impl HostVmRunner {
                             }
                             Ok(DebugConsole(DebugConsoleFunction::PutString { len, addr })) => {
                                 let sbi_ret = match self.handle_put_string(&vm, addr, len) {
-                                    Ok(n) => SbiReturn::success(n),
+                                    Ok(n) => SbiReturn::success(n as i64),
                                     Err(n) => SbiReturn {
                                         error_code: SbiError::InvalidAddress as i64,
-                                        return_value: n,
+                                        return_value: n as i64,
                                     },
                                 };
 
                                 self.gprs.set_reg(GprIndex::A0, sbi_ret.error_code as u64);
-                                self.gprs.set_reg(GprIndex::A1, sbi_ret.return_value);
+                                self.gprs.set_reg(GprIndex::A1, sbi_ret.return_value as u64);
                             }
                             Ok(PutChar(c)) => {
                                 print!("{}", c as u8 as char);

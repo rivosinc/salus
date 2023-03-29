@@ -206,7 +206,7 @@ fn pc_in_extable(pc: u64) -> bool {
 
 #[no_mangle]
 extern "C" fn handle_stack_overflow(tf_ptr: *mut TrapFrame) {
-    let mut tf = unsafe { tf_ptr.as_mut().unwrap() };
+    let tf = unsafe { tf_ptr.as_mut().unwrap() };
     println!("Stack overflow (please note: T1 register is clobbered below)");
     println!("{}", tf);
     panic!("Stack overflow!");

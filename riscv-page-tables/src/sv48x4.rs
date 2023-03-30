@@ -214,4 +214,132 @@ mod tests {
     fn map_and_unmap_2m_pages_sv48x4() {
         map_and_unmap_sv48x4(PageSize::Size2M)
     }
+
+    #[test]
+    fn promote_4k_to_2m_sv48x4() {
+        let state = stub_sys_memory();
+
+        let page_tracker = state.page_tracker;
+        let host_pages = state.host_pages;
+        let id = PageOwnerId::host();
+        let guest_page_table: GuestStagePageTable<Sv48x4> =
+            GuestStagePageTable::new(state.root_pages, id, page_tracker.clone())
+                .expect("creating sv48x4");
+
+        let num_pages = PageSize::num_4k_pages(PageSize::Size2M as u64);
+        let pages_to_map: Vec<Page<ConvertedClean>> = host_pages.take(num_pages as usize).collect();
+        let mut pte_pages = state.pte_pages.into_iter();
+        let gpa_base = PageAddr::new(RawAddr::guest(0x8000_0000, PageOwnerId::host())).unwrap();
+        let mapper = guest_page_table
+            .map_range(gpa_base, PageSize::Size4k, num_pages, &mut || {
+                pte_pages.next()
+            })
+            .unwrap();
+        for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
+            let mappable = page_tracker.assign_page_for_mapping(page, id).unwrap();
+            assert!(mapper.map_page(gpa, mappable).is_ok());
+        }
+        let version = TlbVersion::new();
+        let invalidated = guest_page_table
+            .invalidate_range(gpa_base, PageSize::Size2M as u64, |addr, ps| {
+                if ps != PageSize::Size4k {
+                    return false;
+                }
+                page_tracker.is_mapped_page(addr, ps, id, MemType::Ram)
+            })
+            .unwrap();
+        for (paddr, ps) in invalidated {
+            assert_eq!(ps, PageSize::Size4k);
+            // Safety: Not safe - just a test
+            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
+            page_tracker.block_page(page, version).unwrap();
+        }
+        let version = version.increment();
+        let (promoted_paddr, _) = guest_page_table
+            .promote_page(gpa_base, PageSize::Size2M, |addr, ps| {
+                if ps != PageSize::Size4k {
+                    return false;
+                }
+                page_tracker.is_blocked_page(addr, ps, id, MemType::Ram, Some(version))
+            })
+            .unwrap();
+        page_tracker
+            .unblock_page(promoted_paddr, PageSize::Size2M)
+            .unwrap();
+        assert!(guest_page_table
+            .get_mapped_pages(gpa_base, PageSize::Size2M as u64, |addr, ps| {
+                if ps != PageSize::Size2M {
+                    return false;
+                }
+                page_tracker.is_mapped_page(addr, ps, id, MemType::Ram)
+            })
+            .is_ok());
+    }
+
+    #[test]
+    fn demote_2m_to_4k_sv48x4() {
+        let state = stub_sys_memory();
+
+        let page_tracker = state.page_tracker;
+        let mut host_pages = state.host_pages;
+        let id = PageOwnerId::host();
+        let guest_page_table: GuestStagePageTable<Sv48x4> =
+            GuestStagePageTable::new(state.root_pages, id, page_tracker.clone())
+                .expect("creating sv48x4");
+
+        let page_to_map: Page<ConvertedClean> = {
+            let page = host_pages.next().unwrap();
+            // Safety: Not safe - just a test
+            unsafe { Page::new_with_size(page.addr(), PageSize::Size2M) }
+        };
+        let mut pte_pages = state.pte_pages.into_iter();
+        let gpa_base = PageAddr::new(RawAddr::guest(0x8000_0000, PageOwnerId::host())).unwrap();
+        let mapper = guest_page_table
+            .map_range(gpa_base, PageSize::Size2M, 1, &mut || pte_pages.next())
+            .unwrap();
+        let mappable = page_tracker
+            .assign_page_for_mapping(page_to_map, id)
+            .unwrap();
+        assert!(mapper.map_page(gpa_base, mappable).is_ok());
+        let version = TlbVersion::new();
+        let invalidated = guest_page_table
+            .invalidate_range(gpa_base, PageSize::Size2M as u64, |addr, ps| {
+                if ps != PageSize::Size2M {
+                    return false;
+                }
+                page_tracker.is_mapped_page(addr, ps, id, MemType::Ram)
+            })
+            .unwrap();
+        for (paddr, ps) in invalidated {
+            assert_eq!(ps, PageSize::Size2M);
+            // Safety: Not safe - just a test
+            let page: Page<Invalidated> = unsafe { Page::new_with_size(paddr, ps) };
+            page_tracker.block_page(page, version).unwrap();
+        }
+        let version = version.increment();
+        let demoted_paddr = guest_page_table
+            .demote_page(
+                gpa_base,
+                PageSize::Size4k,
+                pte_pages.next().unwrap(),
+                |addr, ps| {
+                    if ps != PageSize::Size2M {
+                        return false;
+                    }
+                    page_tracker.is_blocked_page(addr, ps, id, MemType::Ram, Some(version))
+                },
+            )
+            .unwrap();
+        page_tracker
+            .unblock_page(demoted_paddr, PageSize::Size2M)
+            .unwrap();
+        assert!(guest_page_table
+            .get_mapped_pages(gpa_base, PageSize::Size2M as u64, |addr, ps| {
+                if ps != PageSize::Size4k {
+                    return false;
+                }
+                page_tracker.is_mapped_page(addr, ps, id, MemType::Ram)
+            })
+            .is_ok());
+    }
 }

@@ -30,7 +30,7 @@ pub fn stub_sys_memory() -> StubState {
     let start_pa = RawAddr::supervisor(aligned_pointer as u64);
     let mut hw_map = unsafe {
         // Not safe - just a test
-        HwMemMapBuilder::new(Sv48x4::TOP_LEVEL_ALIGN)
+        HwMemMapBuilder::new(MEM_ALIGN as u64)
             .add_memory_region(start_pa, MEM_SIZE.try_into().unwrap())
             .unwrap()
             .build()
@@ -38,7 +38,7 @@ pub fn stub_sys_memory() -> StubState {
     let mut hyp_mem = HypPageAlloc::new(&mut hw_map);
     let root_pages = hyp_mem.take_pages_for_host_state_with_alignment(4, Sv48x4::TOP_LEVEL_ALIGN);
     let pte_pages = hyp_mem.take_pages_for_host_state(3);
-    let (page_tracker, host_pages) = PageTracker::from(hyp_mem, Sv48x4::TOP_LEVEL_ALIGN);
+    let (page_tracker, host_pages) = PageTracker::from(hyp_mem, MEM_ALIGN as u64);
     // Leak the backing ram so it doesn't get freed
     std::mem::forget(backing_mem);
     StubState {

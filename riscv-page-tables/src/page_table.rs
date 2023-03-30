@@ -693,34 +693,44 @@ impl<T: PagingMode> PageTableInner<T> {
         }
     }
 
-    /// Locks the invalid leaf PTE mapping `vaddr`, filling in any missing intermediate page tables
-    /// using `get_pte_page`.
-    fn lock_leaf_for_mapping(
+    /// Locks the invalid leaf PTEs mappings starting from `vaddr` for `num_pages` pages of size
+    /// `page_size`, filling in any missing intermediate page tables using `get_pte_page`.
+    fn lock_leaves_for_mapping(
         &mut self,
-        vaddr: PageAddr<T::MappedAddressSpace>,
+        start_addr: PageAddr<T::MappedAddressSpace>,
+        num_pages: u64,
         page_size: PageSize,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<()> {
-        let mut table = PageTable::from_root(self);
-        // match the level to the page size
-        while table.level.leaf_page_size() != page_size {
-            table = table.next_level_or_fill_fn(RawAddr::from(vaddr), get_pte_page)?;
-        }
-        let entry = table.entry_for_addr_mut(RawAddr::from(vaddr));
-        use TableEntryType::*;
-        match entry {
-            Invalidated(i) => {
-                i.lock();
-                Ok(())
+        start_addr
+            .checked_add_pages_with_size(num_pages, page_size)
+            .ok_or(Error::AddressOverflow)?;
+
+        let iterator = start_addr
+            .iter_from_with_size(page_size)
+            .ok_or_else(|| Error::AddressMisaligned(start_addr.bits()))?;
+
+        for vaddr in iterator.take(num_pages as usize) {
+            let mut table = PageTable::from_root(self);
+            // match the level to the page size
+            while table.level.leaf_page_size() != page_size {
+                table = table.next_level_or_fill_fn(vaddr.raw(), get_pte_page)?;
             }
-            Unused(u) => {
-                u.lock();
-                Ok(())
+            let entry = table.entry_for_addr_mut(vaddr.raw());
+            use TableEntryType::*;
+            match entry {
+                Invalidated(i) => {
+                    i.lock();
+                }
+                Unused(u) => {
+                    u.lock();
+                }
+                LockedMapped(_) | LockedUnmapped(_) => return Err(Error::PteLocked),
+                Leaf(_) => return Err(Error::MappingExists),
+                Table(_) => return Err(Error::TableEntryNotLeaf),
             }
-            LockedMapped(_) | LockedUnmapped(_) => Err(Error::PteLocked),
-            Leaf(_) => Err(Error::MappingExists),
-            Table(_) => Err(Error::TableEntryNotLeaf),
         }
+        Ok(())
     }
 
     /// Locks an existing leaf PTE mapping of `vaddr` for remapping.
@@ -859,16 +869,9 @@ impl<T: FirstStagePagingMode> FirstStagePageTable<T> {
         if !addr.is_aligned(page_size) {
             return Err(Error::AddressMisaligned(addr.bits()));
         }
-        let iterator = addr
-            .iter_from_with_size(page_size)
-            .ok_or_else(|| Error::AddressMisaligned(addr.bits()))?;
-        addr.checked_add_pages_with_size(num_pages, page_size)
-            .ok_or(Error::OutOfMapRange)?;
-
-        let mut inner = self.inner.lock();
-        for a in iterator.take(num_pages as usize) {
-            inner.lock_leaf_for_mapping(a, page_size, get_pte_page)?;
-        }
+        self.inner
+            .lock()
+            .lock_leaves_for_mapping(addr, num_pages, page_size, get_pte_page)?;
 
         Ok(FirstStageMapper::new(self, addr, page_size, num_pages))
     }
@@ -1032,18 +1035,10 @@ impl<T: PagingMode> GuestStagePageTable<T> {
         num_pages: u64,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
     ) -> Result<GuestStageMapper<T>> {
-        let mut mapper = GuestStageMapper::new(self, addr, 0);
-        let mut inner = self.inner.lock();
-        for a in addr
-            .iter_from_with_size(page_size)
-            .ok_or(Error::AddressMisaligned(addr.bits()))?
-            .take(num_pages as usize)
-        {
-            inner.lock_leaf_for_mapping(a, page_size, get_pte_page)?;
-            mapper.num_pages += 1;
-        }
-
-        Ok(mapper)
+        self.inner
+            .lock()
+            .lock_leaves_for_mapping(addr, num_pages, page_size, get_pte_page)?;
+        Ok(GuestStageMapper::new(self, addr, num_pages))
     }
 
     /// Prepares for remapping `num_pages` pages of size `page_size` starting at `addr` in the mapped

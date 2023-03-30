@@ -126,17 +126,17 @@ impl HwMapRegion {
                 get_pte_page,
             )
             .unwrap();
-        for (virt, phys) in self
-            .vaddr
-            .iter_from()
-            .zip(self.paddr.iter_from())
-            .take(self.page_count)
-        {
-            // Safety: all regions come from the HW memory map. we will create exactly one mapping for
-            // each page and will switch to using that mapping exclusively.
-            unsafe {
-                mapper.map_one(virt, phys, self.pte_fields).unwrap();
-            }
+        // Safety: all regions come from the HW memory map. we will create exactly one mapping for
+        // each page and will switch to using that mapping exclusively.
+        unsafe {
+            mapper
+                .map_contiguous(
+                    self.vaddr,
+                    self.paddr,
+                    self.page_count as u64,
+                    self.pte_fields,
+                )
+                .unwrap();
         }
     }
 }
@@ -205,17 +205,12 @@ impl UmodeElfRegion {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             })
             .unwrap();
-        for (virt, phys) in self
-            .vaddr
-            .iter_from()
-            .zip(pages.base().iter_from())
-            .take(page_count as usize)
-        {
-            // Safety: all regions are user mappings. User mappings are not considered aliases because
-            // they cannot be accessed by supervisor mode directly (sstatus.SUM needs to be 1).
-            unsafe {
-                mapper.map_one(virt, phys, self.pte_fields).unwrap();
-            }
+        // Safety: all regions are user mappings. User mappings are not considered aliases because
+        // they cannot be accessed by supervisor mode directly (sstatus.SUM needs to be 1).
+        unsafe {
+            mapper
+                .map_contiguous(self.vaddr, pages.base(), page_count, self.pte_fields)
+                .unwrap();
         }
     }
 
@@ -288,21 +283,18 @@ impl UmodeInputRegion {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             })
             .unwrap();
-        for (virt, phys) in vaddr
-            .iter_from()
-            .zip(pages.base().iter_from())
-            .take(num_pages as usize)
-        {
-            // Safety: These pages are mapped read-only in the VA area reserved for the U-mode
-            // input region mappings. Hypervisor will write to these pages using the physical
-            // mappings and U-mode will read them through this mapping. Safe because these are
-            // per-CPU mappings, and when the hypervisor will be writing to these pages via the
-            // physical mappings no CPU will be able to access these pages through the U-mode
-            // mappings.
-            unsafe {
-                mapper.map_one(virt, phys, pte_fields).unwrap();
-            }
+        // Safety: These pages are mapped read-only in the VA area reserved for the U-mode
+        // input region mappings. Hypervisor will write to these pages using the physical
+        // mappings and U-mode will read them through this mapping. Safe because these are
+        // per-CPU mappings, and when the hypervisor will be writing to these pages via the
+        // physical mappings no CPU will be able to access these pages through the U-mode
+        // mappings.
+        unsafe {
+            mapper
+                .map_contiguous(vaddr, pages.base(), num_pages, pte_fields)
+                .unwrap();
         }
+
         // Safety: the range `(start..max_addr)` is mapped in U-mode as read-only and was uniquely
         // claimed for this area from the hypervisor map above.
         let vslice = unsafe {
@@ -359,16 +351,12 @@ impl HypStackRegion {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             })
             .expect("Stack mapping failed");
-        for (virt, phys) in vaddr
-            .iter_from()
-            .zip(self.paddr.iter_from())
-            .take(page_count as usize)
-        {
-            // Safety: we unmapped the stack pages from the 1:1 map, so no aliases have been created
-            // in this page table.
-            unsafe {
-                mapper.map_one(virt, phys, pte_fields).unwrap();
-            }
+        // Safety: we unmapped the stack pages from the 1:1 map, so no aliases have been created
+        // in this page table.
+        unsafe {
+            mapper
+                .map_contiguous(vaddr, self.paddr, page_count, pte_fields)
+                .unwrap();
         }
     }
 }

@@ -206,3 +206,65 @@ impl PteFieldBits {
         Self::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        pte::{Pte, PteFieldBit},
+        PteFieldBits, PteLeafPerms,
+    };
+
+    #[test]
+    fn pte() {
+        let mut pte = Pte(0x1000);
+        assert_eq!(pte.bits(), 0x1000);
+        pte.clear();
+        assert_eq!(pte.bits(), 0);
+        assert!(!pte.valid());
+        assert!(!pte.locked());
+        pte.mark_valid();
+        assert!(pte.valid());
+        pte.invalidate();
+        assert!(!pte.valid());
+        pte.lock();
+        assert!(pte.locked());
+        pte.unlock();
+        assert!(!pte.locked());
+        assert!(!pte.is_leaf());
+        let pfn = pte.pfn();
+        let status = PteFieldBits::leaf_with_perms(PteLeafPerms::RWX);
+        assert!(!PteFieldBit::User.is_set(status.bits()));
+        let status = PteFieldBits::user_leaf_with_perms(PteLeafPerms::RWX);
+        assert!(PteFieldBit::User.is_set(status.bits()));
+        unsafe { pte.set(pfn, &status) };
+        assert!(pte.valid());
+        assert!(pte.is_leaf());
+        let status = PteFieldBits::non_leaf();
+        assert_eq!(status.bits(), 0);
+        unsafe { pte.set(pfn, &status) };
+        assert!(!pte.is_leaf());
+    }
+
+    #[test]
+    fn pte_field_bits() {
+        let mut status = PteFieldBits::default();
+        assert_eq!(status.bits(), 0);
+        for pte_field_bit in vec![
+            PteFieldBit::Valid,
+            PteFieldBit::Read,
+            PteFieldBit::Write,
+            PteFieldBit::Execute,
+            PteFieldBit::User,
+            PteFieldBit::Global,
+            PteFieldBit::Accessed,
+            PteFieldBit::Dirty,
+            PteFieldBit::Locked,
+        ] {
+            assert!(!pte_field_bit.is_set(status.bits()));
+            status.set_bit(pte_field_bit);
+            assert!(pte_field_bit.is_set(status.bits()));
+            status.clear_bit(pte_field_bit);
+            assert!(!pte_field_bit.is_set(status.bits()));
+        }
+    }
+}

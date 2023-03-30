@@ -1589,3 +1589,50 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TableEntryType;
+    use crate::{pte::Pte, sv48x4::Sv48x4Level, PteFieldBits, PteLeafPerms, Sv48x4};
+    use riscv_pages::Pfn;
+
+    #[test]
+    fn table_entry_types_from_pte_sv48x4() {
+        let val: u64 = 0;
+        let pte = unsafe { ((&val as *const u64) as *mut Pte).as_mut().unwrap() };
+        let level = Sv48x4Level::L1Table;
+        assert_eq!(pte.bits(), 0);
+        assert!(matches!(
+            TableEntryType::<Sv48x4>::from_pte(pte, level),
+            TableEntryType::Unused(_)
+        ));
+        pte.lock();
+        assert!(matches!(
+            TableEntryType::<Sv48x4>::from_pte(pte, level),
+            TableEntryType::LockedUnmapped(_)
+        ));
+        pte.unlock();
+        unsafe { pte.set(Pfn::supervisor(1), &PteFieldBits::non_leaf()) };
+        pte.invalidate();
+        assert!(matches!(
+            TableEntryType::<Sv48x4>::from_pte(pte, level),
+            TableEntryType::Invalidated(_)
+        ));
+        pte.mark_valid();
+        assert!(matches!(
+            TableEntryType::<Sv48x4>::from_pte(pte, level),
+            TableEntryType::Table(_)
+        ));
+        unsafe { pte.set(pte.pfn(), &PteFieldBits::leaf_with_perms(PteLeafPerms::RWX)) };
+        pte.lock();
+        assert!(matches!(
+            TableEntryType::<Sv48x4>::from_pte(pte, level),
+            TableEntryType::LockedMapped(_)
+        ));
+        pte.unlock();
+        assert!(matches!(
+            TableEntryType::<Sv48x4>::from_pte(pte, level),
+            TableEntryType::Leaf(_)
+        ));
+    }
+}

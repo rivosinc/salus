@@ -114,6 +114,9 @@ pub enum Error {
 
     /// Creation of SequentialPages failed
     SequentialPages,
+
+    /// Hypervisor image isn't in contiguous DRAM
+    NonContiguousHypervisorImage,
 }
 /// Holds the result of memory map operations.
 pub type Result<T> = result::Result<T, Error>;

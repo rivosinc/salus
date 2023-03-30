@@ -523,7 +523,6 @@ impl<T: PagingMode> PageTableIndex<T> {
         self.level
     }
 
-    #[allow(dead_code)]
     fn iter(&self) -> PageTableIndexIter<T> {
         PageTableIndexIter::from_index(self)
     }
@@ -720,29 +719,38 @@ impl<T: PagingMode> PageTableInner<T> {
             .checked_add_pages_with_size(num_pages, page_size)
             .ok_or(Error::AddressOverflow)?;
 
-        let iterator = start_addr
-            .iter_from_with_size(page_size)
-            .ok_or_else(|| Error::AddressMisaligned(start_addr.bits()))?;
+        let mut remaining = num_pages;
+        let mut vaddr = start_addr;
 
-        for vaddr in iterator.take(num_pages as usize) {
+        while remaining > 0 {
             let mut table = PageTable::from_root(self);
-            // match the level to the page size
+            // Get the page-table at requested level.
             while table.level.leaf_page_size() != page_size {
                 table = table.next_level_or_fill_fn(vaddr.raw(), get_pte_page)?;
             }
-            let entry = table.entry_for_addr_mut(vaddr.raw());
-            use TableEntryType::*;
-            match entry {
-                Invalidated(i) => {
-                    i.lock();
+
+            let start_idx = table.index_from_addr(vaddr.raw());
+            let mut done = 0;
+            for i in start_idx.iter().take(remaining as usize) {
+                let entry = table.entry_for_index_mut(i);
+                use TableEntryType::*;
+                match entry {
+                    Invalidated(i) => {
+                        i.lock();
+                    }
+                    Unused(u) => {
+                        u.lock();
+                    }
+                    LockedMapped(_) | LockedUnmapped(_) => return Err(Error::PteLocked),
+                    Leaf(_) => return Err(Error::MappingExists),
+                    Table(_) => return Err(Error::TableEntryNotLeaf),
                 }
-                Unused(u) => {
-                    u.lock();
-                }
-                LockedMapped(_) | LockedUnmapped(_) => return Err(Error::PteLocked),
-                Leaf(_) => return Err(Error::MappingExists),
-                Table(_) => return Err(Error::TableEntryNotLeaf),
+                done += 1;
             }
+
+            remaining -= done;
+            // Unwrap okay. We checked earlier `start_addr` and `vaddr+done < start_addr+num_pages`.
+            vaddr = vaddr.checked_add_pages_with_size(done, page_size).unwrap();
         }
         Ok(())
     }

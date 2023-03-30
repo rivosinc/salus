@@ -57,15 +57,8 @@ impl PerCpu {
         let pcpu_base = pcpu_pages.base();
         PER_CPU_BASE.call_once(|| pcpu_base);
 
-        // Allocate memory for the secondary CPUs stack.
-        let stacks_page_count = HYP_STACK_PAGES * (cpu_info.num_cpus() as u64 - 1);
-        let stacks_pages = hyp_mem.take_pages_for_hyp_state(stacks_page_count as usize);
-
         VmIdTracker::init();
 
-        // Unwrap okay: HYP_STACK_PAGES is non zero.
-        let mut pcpu_stacks =
-            stacks_pages.into_chunks_iter(core::num::NonZeroU64::new(HYP_STACK_PAGES).unwrap());
         for i in 0..cpu_info.num_cpus() {
             let cpu_id = CpuId::new(i);
             // Boot CPU is special. Doesn't use the PCPU_BASE area as stack.
@@ -74,7 +67,7 @@ impl PerCpu {
             } else {
                 // Unwrap okay. We allocated the area for `num_cpus() - 1` pages and we skip the
                 // bootstrap CPU above.
-                let pcpu_stack = pcpu_stacks.next().unwrap();
+                let pcpu_stack = hyp_mem.take_pages_for_hyp_state(HYP_STACK_PAGES as usize);
                 // Change state from InternalClean to InternalDirty. Pages are clean but this is not
                 // important for the stack (in the boot CPU case, pages are dirty because the stack is
                 // in use).

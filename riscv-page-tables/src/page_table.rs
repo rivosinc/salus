@@ -426,6 +426,21 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
     }
 
     /// Returns the next page table level for the given address to translate.
+    fn next_level(&mut self, addr: RawAddr<T::MappedAddressSpace>) -> Result<PageTable<'a, T>> {
+        use TableEntryType::*;
+        let table_pte = match self.entry_for_addr_mut(addr) {
+            Table(t) => t,
+            Unused(_) => {
+                return Err(Error::PageNotMapped);
+            }
+            _ => {
+                return Err(Error::MappingExists);
+            }
+        };
+        Ok(table_pte.table())
+    }
+
+    /// Returns the next page table level for the given address to translate.
     /// If the next level isn't yet filled, consumes a `free_page` and uses it to map those entries.
     fn next_level_or_fill_fn(
         &mut self,
@@ -643,6 +658,63 @@ impl<T: PagingMode> PageTableInner<T> {
             entry = t.table().entry_for_addr_mut(vaddr);
         }
         entry
+    }
+
+    /// Creates contiguous mappings, both physically and virtually, of `num_pages` pages, starting
+    /// from `start_vaddr` and `start_paddr`, with the same permissions.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that app pages reference from `start_paddr` for `num_pages` are
+    /// uniquely owned by the root `GuestStagePageTable`.
+    pub unsafe fn map_contiguous_leaves(
+        &mut self,
+        start_vaddr: PageAddr<T::MappedAddressSpace>,
+        start_paddr: SupervisorPageAddr,
+        num_pages: u64,
+        page_size: PageSize,
+        perms: PteFieldBits,
+    ) -> Result<()> {
+        start_vaddr
+            .checked_add_pages_with_size(num_pages, page_size)
+            .ok_or(Error::AddressOverflow)?;
+        start_paddr
+            .checked_add_pages_with_size(num_pages, page_size)
+            .ok_or(Error::AddressOverflow)?;
+
+        let mut remaining = num_pages;
+        let mut vaddr = start_vaddr;
+        let mut paddr = start_paddr;
+
+        while remaining > 0 {
+            let mut table = PageTable::from_root(self);
+            // Get the page-table at requested level.
+            while table.level.leaf_page_size() != page_size {
+                table = table.next_level(vaddr.raw())?;
+            }
+
+            let start_idx = table.index_from_addr(vaddr.raw());
+            let mut done = 0;
+            for i in start_idx.iter().take(remaining as usize) {
+                let entry = table.entry_for_index_mut(i);
+                use TableEntryType::*;
+                match entry {
+                    LockedUnmapped(l) => l.map_leaf(paddr, perms).map(|_| ())?,
+                    Unused(_) | Invalidated(_) => return Err(Error::PteNotLocked),
+                    LockedMapped(_) | Leaf(_) => return Err(Error::MappingExists),
+                    Table(_) => return Err(Error::TableEntryNotLeaf),
+                }
+                // Unwrap okay. We checked earlier `start_paddr` and
+                // `paddr+1 < start_paddr+num_pages`.
+                paddr = paddr.checked_add_pages_with_size(1, page_size).unwrap();
+                done += 1;
+            }
+
+            remaining -= done;
+            // Unwrap okay. We checked earlier `start_vaddr` and `vaddr+done < start_vaddr+num_pages`.
+            vaddr = vaddr.checked_add_pages_with_size(done, page_size).unwrap();
+        }
+        Ok(())
     }
 
     /// Creates a translation for `vaddr` to `paddr` with the given permissions.
@@ -962,6 +1034,44 @@ impl<'a, T: FirstStagePagingMode> FirstStageMapper<'a, T> {
             page_size,
             num_pages,
         }
+    }
+
+    /// Maps `num_pages` pages contiguously both physically and virtually, starting from
+    /// `start_vaddr`, which maps to `start_paddr`. The caller must guarantee that the `num_pages`
+    /// pages starting from `start_paddr` are safe to map in this page table.
+    ///
+    /// # Safety
+    ///
+    /// Don't create aliases.
+    #[allow(dead_code)]
+    pub unsafe fn map_contiguous(
+        &self,
+        start_vaddr: PageAddr<T::MappedAddressSpace>,
+        start_paddr: PageAddr<SupervisorPhys>,
+        num_pages: u64,
+        pte_perms: PteFieldBits,
+    ) -> Result<()> {
+        if !start_paddr.is_aligned(self.page_size) {
+            return Err(Error::AddressMisaligned(start_paddr.bits()));
+        }
+
+        let mapper_range =
+            self.vaddr.bits()..=self.vaddr.bits() + self.num_pages * self.page_size as u64;
+        if !mapper_range.contains(&start_vaddr.bits())
+            || !mapper_range.contains(&(start_vaddr.bits() + num_pages * self.page_size as u64))
+        {
+            return Err(Error::OutOfMapRange);
+        }
+
+        let mut inner = self.owner.inner.lock();
+
+        inner.map_contiguous_leaves(
+            start_vaddr,
+            start_paddr,
+            num_pages,
+            self.page_size,
+            pte_perms,
+        )
     }
 
     /// Maps `vaddr` to `paddr`, The caller must guarantee that paddr points to a page it is safe to

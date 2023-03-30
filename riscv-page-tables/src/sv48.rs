@@ -115,7 +115,7 @@ mod test {
                     page.size() as usize / mem::size_of::<u64>(),
                 );
                 slice[0] = 0xdeadbeef;
-                assert!(mapper.map_addr(gpa, page.addr(), pte_fields).is_ok());
+                assert!(mapper.map_one(gpa, page.addr(), pte_fields).is_ok());
             }
         }
     }

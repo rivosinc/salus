@@ -970,7 +970,7 @@ impl<'a, T: FirstStagePagingMode> FirstStageMapper<'a, T> {
     /// # Safety
     ///
     /// Don't create aliases.
-    pub unsafe fn map_addr(
+    pub unsafe fn map_one(
         &self,
         vaddr: PageAddr<T::MappedAddressSpace>,
         paddr: PageAddr<SupervisorPhys>,

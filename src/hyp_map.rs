@@ -135,7 +135,7 @@ impl HwMapRegion {
             // Safety: all regions come from the HW memory map. we will create exactly one mapping for
             // each page and will switch to using that mapping exclusively.
             unsafe {
-                mapper.map_addr(virt, phys, self.pte_fields).unwrap();
+                mapper.map_one(virt, phys, self.pte_fields).unwrap();
             }
         }
     }
@@ -214,7 +214,7 @@ impl UmodeElfRegion {
             // Safety: all regions are user mappings. User mappings are not considered aliases because
             // they cannot be accessed by supervisor mode directly (sstatus.SUM needs to be 1).
             unsafe {
-                mapper.map_addr(virt, phys, self.pte_fields).unwrap();
+                mapper.map_one(virt, phys, self.pte_fields).unwrap();
             }
         }
     }
@@ -300,7 +300,7 @@ impl UmodeInputRegion {
             // physical mappings no CPU will be able to access these pages through the U-mode
             // mappings.
             unsafe {
-                mapper.map_addr(virt, phys, pte_fields).unwrap();
+                mapper.map_one(virt, phys, pte_fields).unwrap();
             }
         }
         // Safety: the range `(start..max_addr)` is mapped in U-mode as read-only and was uniquely
@@ -367,7 +367,7 @@ impl HypStackRegion {
             // Safety: we unmapped the stack pages from the 1:1 map, so no aliases have been created
             // in this page table.
             unsafe {
-                mapper.map_addr(virt, phys, pte_fields).unwrap();
+                mapper.map_one(virt, phys, pte_fields).unwrap();
             }
         }
     }
@@ -490,7 +490,7 @@ impl UmodeSlotMapper<'_> {
         // Safety: pages are mapped in user mode, so no aliases of salus mappings have been
         // created. Pages are owned by guest, so no mapping of hypervisor pages are created.
         self.mapper
-            .map_addr(vaddr, paddr, self.perms)
+            .map_one(vaddr, paddr, self.perms)
             .map_err(|_| Error::MapFailed)
     }
 }

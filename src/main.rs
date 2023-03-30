@@ -149,7 +149,7 @@ fn build_memory_map<T: GuestStagePagingMode>(fdt: &Fdt) -> MemMapResult<HwMemMap
         .memory_regions()
         .find(|r| start >= r.base() && stack_end <= r.base().checked_add(r.size()).unwrap())
         .map(|r| RawAddr::supervisor(r.base()))
-        .expect("Hypervisor image does not reside in a contiguous range of DRAM");
+        .ok_or(MemMapError::NonContiguousHypervisorImage)?;
 
     // Reserve everything from the start of the region the hypervisor is in up until the top of
     // the hypervisor stack.

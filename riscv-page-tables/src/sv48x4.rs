@@ -121,25 +121,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn map_and_unmap_sv48x4() {
+    fn map_and_unmap_sv48x4(page_size: PageSize) {
         let state = stub_sys_memory();
 
         let page_tracker = state.page_tracker;
-        let mut host_pages = state.host_pages;
+        let host_pages = state.host_pages;
         let id = PageOwnerId::host();
         let guest_page_table: GuestStagePageTable<Sv48x4> =
             GuestStagePageTable::new(state.root_pages, id, page_tracker.clone())
                 .expect("creating sv48x4");
 
-        let pages_to_map = [host_pages.next().unwrap(), host_pages.next().unwrap()];
+        let mut pages_to_map = Vec::new();
+        for page in host_pages
+            .take(2 * PageSize::num_4k_pages(page_size as u64) as usize)
+            .filter(|p| p.addr().is_aligned(page_size))
+        {
+            // Safety: Not safe - just a test
+            let page_to_map: Page<ConvertedClean> =
+                unsafe { Page::new_with_size(page.addr(), page_size) };
+            pages_to_map.push(page_to_map);
+        }
         let page_addrs: Vec<SupervisorPageAddr> = pages_to_map.iter().map(|p| p.addr()).collect();
         let mut pte_pages = state.pte_pages.into_iter();
         let gpa_base = PageAddr::new(RawAddr::guest(0x8000_0000, PageOwnerId::host())).unwrap();
         let mapper = guest_page_table
-            .map_range(gpa_base, PageSize::Size4k, 2, &mut || pte_pages.next())
+            .map_range(gpa_base, page_size, 2, &mut || pte_pages.next())
             .unwrap();
-        for (page, gpa) in pages_to_map.into_iter().zip(gpa_base.iter_from()) {
+        for (page, gpa) in pages_to_map
+            .into_iter()
+            .zip(gpa_base.iter_from_with_size(page_size).unwrap())
+        {
             // Write to the page so that we can test if it's retained later.
             unsafe {
                 // Not safe - just a test
@@ -154,25 +165,33 @@ mod tests {
         }
         let version = TlbVersion::new();
         let invalidated = guest_page_table
-            .invalidate_range(gpa_base, 2 * PageSize::Size4k as u64, |addr, _| {
-                page_tracker.is_mapped_page(addr, PageSize::Size4k, id, MemType::Ram)
+            .invalidate_range(gpa_base, 2 * page_size as u64, |addr, ps| {
+                if ps != page_size {
+                    return false;
+                }
+                page_tracker.is_mapped_page(addr, ps, id, MemType::Ram)
             })
             .unwrap();
-        for (paddr, _) in invalidated {
+        for (paddr, ps) in invalidated {
+            assert_eq!(ps, page_size);
             // Safety: Not safe - just a test
-            let page: Page<Invalidated> = unsafe { Page::new(paddr) };
+            let page: Page<Invalidated> = unsafe { Page::new_with_size(paddr, ps) };
             page_tracker.convert_page(page, version).unwrap();
         }
         let version = version.increment();
         let converted = guest_page_table
-            .get_invalidated_pages(gpa_base, 2 * PageSize::Size4k as u64, |addr, _| {
-                page_tracker.is_converted_page(addr, PageSize::Size4k, id, MemType::Ram, version)
+            .get_invalidated_pages(gpa_base, 2 * page_size as u64, |addr, ps| {
+                if ps != page_size {
+                    return false;
+                }
+                page_tracker.is_converted_page(addr, ps, id, MemType::Ram, version)
             })
             .unwrap();
-        let mut locked_pages = LockedPageList::new(page_tracker.clone(), PageSize::Size4k);
-        for (paddr, _) in converted {
+        let mut locked_pages = LockedPageList::new(page_tracker.clone(), page_size);
+        for (paddr, ps) in converted {
+            assert_eq!(ps, page_size);
             let page = page_tracker
-                .get_converted_page::<Page<ConvertedDirty>>(paddr, PageSize::Size4k, id, version)
+                .get_converted_page::<Page<ConvertedDirty>>(paddr, ps, id, version)
                 .unwrap();
             locked_pages.push(page).unwrap();
         }
@@ -184,5 +203,15 @@ mod tests {
         assert_eq!(clean_page.addr(), page_addrs[1]);
         assert_eq!(clean_page.get_u64(0).unwrap(), 0);
         page_tracker.unlock_page(clean_page).unwrap();
+    }
+
+    #[test]
+    fn map_and_unmap_4k_page_sv48x4() {
+        map_and_unmap_sv48x4(PageSize::Size4k)
+    }
+
+    #[test]
+    fn map_and_unmap_2m_pages_sv48x4() {
+        map_and_unmap_sv48x4(PageSize::Size2M)
     }
 }

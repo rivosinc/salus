@@ -1043,7 +1043,6 @@ impl<'a, T: FirstStagePagingMode> FirstStageMapper<'a, T> {
     /// # Safety
     ///
     /// Don't create aliases.
-    #[allow(dead_code)]
     pub unsafe fn map_contiguous(
         &self,
         start_vaddr: PageAddr<T::MappedAddressSpace>,

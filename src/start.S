@@ -26,14 +26,14 @@ _start:
     blt  a3, a4, 1b
 
     la   sp, _stack_end
-    call primary_init
+    call _primary_init
     // a0 contains SATP value
     csrw satp, a0
     // Flush TLBs.
     sfence.vma
     // Switch to VA-mapped stack.
     li  sp, {HYP_STACK_TOP}
-    call primary_main
+    call _primary_main
     j    wfi_loop
 
 // The entry point for secondary CPUs.
@@ -48,14 +48,14 @@ _secondary_start:
     csrw sie, zero
     // At start, A1 holds the top of the stack.
     mv   sp, a1
-    call secondary_init
+    call _secondary_init
     // a0 contains SATP value
     csrw satp, a0
     // Flush TLBs.
     sfence.vma
     // Switch to VA-mapped stack.
     li   sp, {HYP_STACK_TOP}
-    call secondary_main
+    call _secondary_main
 wfi_loop:
     wfi
     j    wfi_loop

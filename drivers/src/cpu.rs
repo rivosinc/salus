@@ -50,33 +50,60 @@ pub struct CpuInfo {
     intc_phandles: ArrayVec<u32, MAX_CPUS>,
 }
 
-static CPU_INFO: Once<CpuInfo> = Once::new();
-
-fn hart_id_from_cpu_node(node: &DeviceTreeNode) -> u32 {
-    node.props()
-        .find(|p| p.name() == "reg")
-        .expect("No 'reg' property in CPU node")
-        .value_u32()
-        .next()
-        .unwrap()
+/// Error for CpuInfo creation
+#[derive(Debug)]
+pub enum Error {
+    /// Child node missing from parent
+    MissingChildNode(&'static str, &'static str),
+    /// Property missing on a node
+    MissingFdtProperty(&'static str, &'static str),
 }
 
-fn intc_node_from_cpu_node<'a>(dt: &'a DeviceTree, node: &'_ DeviceTreeNode) -> &'a DeviceTreeNode {
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Error::*;
+        match self {
+            MissingChildNode(child, parent) => {
+                write!(f, "Child node {} missing on {} parent node", child, parent)
+            }
+            MissingFdtProperty(property, node) => {
+                write!(f, "Property {} missing on {} node", property, node)
+            }
+        }
+    }
+}
+
+static CPU_INFO: Once<CpuInfo> = Once::new();
+
+fn hart_id_from_cpu_node(node: &DeviceTreeNode) -> Result<u32, Error> {
+    Ok(node
+        .props()
+        .find(|p| p.name() == "reg")
+        .ok_or(Error::MissingFdtProperty("reg", "cpu"))?
+        .value_u32()
+        .next()
+        .unwrap())
+}
+
+fn intc_node_from_cpu_node<'a>(
+    dt: &'a DeviceTree,
+    node: &'_ DeviceTreeNode,
+) -> Result<&'a DeviceTreeNode, Error> {
     dt.iter_from(node.id())
         .unwrap()
         .find(|n| n.name() == "interrupt-controller")
-        .expect("No CPU 'interrupt-controller' sub-node")
+        .ok_or(Error::MissingFdtProperty("interrupt-controller", "cpu"))
 }
 
-fn intc_phandle_from_cpu_node(dt: &DeviceTree, node: &DeviceTreeNode) -> u32 {
-    let intc_node = intc_node_from_cpu_node(dt, node);
-    intc_node
+fn intc_phandle_from_cpu_node(dt: &DeviceTree, node: &DeviceTreeNode) -> Result<u32, Error> {
+    let intc_node = intc_node_from_cpu_node(dt, node)?;
+    Ok(intc_node
         .props()
         .find(|p| p.name() == "phandle")
-        .expect("No 'phandle' property in CPU interrupt controller node")
+        .ok_or(Error::MissingFdtProperty("phandle", "interrupt-controller"))?
         .value_u32()
         .next()
-        .unwrap()
+        .unwrap())
 }
 
 fn isa_string_has_extension(isa_string: &str, extension: &str) -> bool {
@@ -94,25 +121,25 @@ fn isa_string_has_base_extension(isa_string: &str, extension: char) -> bool {
 impl CpuInfo {
     /// Initializes the global `CpuInfo` state from the a device-tree. Must be called first before
     /// get(). Panics if the device-tree is malformed (missing CPU nodes or expected properties).
-    pub fn parse_from(dt: &DeviceTree) {
+    pub fn parse_from(dt: &DeviceTree) -> Result<(), Error> {
         // Locate the /cpus node in the device-tree.
         let mut iter = dt.iter();
         let cpus_node = iter
             .find(|n| n.name() == "cpus")
-            .expect("No /cpus in device-tree");
+            .ok_or(Error::MissingChildNode("/cpus", "/"))?;
 
         // We only support 32-bit hart IDs.
         let ac = cpus_node
             .props()
             .find(|p| p.name() == "#address-cells")
-            .expect("No #address-cells in /cpus");
+            .ok_or(Error::MissingFdtProperty("#address-cells", "/cpus"))?;
         assert_eq!(ac.value_u32().next().unwrap(), 1);
 
         // 'timebase-frequency' appears in the top-level /cpus node.
         let timer_frequency = cpus_node
             .props()
             .find(|p| p.name() == "timebase-frequency")
-            .expect("No 'timebase-frequency' in /cpus")
+            .ok_or(Error::MissingFdtProperty("timebase-frequency", "/cpus"))?
             .value_u32()
             .next()
             .unwrap();
@@ -123,31 +150,33 @@ impl CpuInfo {
         });
 
         // Pull ISA details from CPU0.
-        let cpu0 = cpus_iter.next().expect("No node for CPU0 in device-tree");
+        let cpu0 = cpus_iter
+            .next()
+            .ok_or(Error::MissingChildNode("cpu0", "/cpus"))?;
         let isa_string = cpu0
             .props()
             .find(|p| p.name() == "riscv,isa")
-            .expect("No 'riscv,isa' property in device-tree")
+            .ok_or(Error::MissingFdtProperty("riscv,isa", "/"))?
             .value_str()
             .unwrap();
         let mmu_string = cpu0
             .props()
             .find(|p| p.name() == "mmu-type")
-            .expect("No 'mmu-type' property in device-tree")
+            .ok_or(Error::MissingFdtProperty("mmu-type", "/"))?
             .value_str()
             .unwrap();
         // All of our memory management currently assumes SV48 compatibility.
         assert!(mmu_string == "riscv,sv48" || mmu_string == "riscv,sv57");
 
         let mut hart_ids = ArrayVec::new();
-        hart_ids.push(hart_id_from_cpu_node(cpu0));
+        hart_ids.push(hart_id_from_cpu_node(cpu0)?);
         let mut intc_phandles = ArrayVec::new();
-        intc_phandles.push(intc_phandle_from_cpu_node(dt, cpu0));
+        intc_phandles.push(intc_phandle_from_cpu_node(dt, cpu0)?);
 
         // Now parse hart IDs and phandles for the secondary CPUs. We assume the CPUs are homogenous.
         for cpu in cpus_iter {
-            hart_ids.push(hart_id_from_cpu_node(cpu));
-            intc_phandles.push(intc_phandle_from_cpu_node(dt, cpu));
+            hart_ids.push(hart_id_from_cpu_node(cpu)?);
+            intc_phandles.push(intc_phandle_from_cpu_node(dt, cpu)?);
         }
 
         let cpu_info = CpuInfo {
@@ -161,6 +190,8 @@ impl CpuInfo {
             intc_phandles,
         };
         CPU_INFO.call_once(|| cpu_info);
+
+        Ok(())
     }
 
     /// Returns a reference to the global CpuInfo structure. Panics if parse_from() hasn't been

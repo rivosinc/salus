@@ -25,6 +25,7 @@
 #![cfg_attr(test, allow(unused))]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
+use core::fmt::Display;
 use core::ptr::NonNull;
 use test_system::*;
 extern crate alloc;
@@ -44,7 +45,7 @@ mod vm_interrupts;
 mod vm_pages;
 mod vm_pmu;
 
-use device_tree::{DeviceTree, Fdt};
+use device_tree::{DeviceTree, DeviceTreeError, Fdt};
 use drivers::{
     imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
     CpuInfo,
@@ -208,11 +209,11 @@ fn find_available_region(mem_map: &HwMemMap, size: u64) -> Option<SupervisorPage
 }
 
 /// Creates a heap from the given `mem_map`, marking the region occupied by the heap as reserved.
-fn create_heap(mem_map: &mut HwMemMap) {
+fn create_heap(mem_map: &mut HwMemMap) -> Result<(), Error> {
     const HEAP_SIZE: u64 = 16 * 1024 * 1024;
 
-    let heap_base = find_available_region(mem_map, HEAP_SIZE)
-        .expect("Not enough free memory for hypervisor heap");
+    let heap_base = find_available_region(mem_map, HEAP_SIZE).ok_or(Error::HeapOutOfSpace)?;
+
     mem_map
         .reserve_region(
             HwReservedMemType::HypervisorHeap,
@@ -230,6 +231,7 @@ fn create_heap(mem_map: &mut HwMemMap) {
         .unwrap()
     };
     HYPERVISOR_ALLOCATOR.call_once(|| HypAlloc::from_pages(pages.clean()));
+    Ok(())
 }
 
 /// Initialize (H)S-level CSRs to a reasonable state.
@@ -314,7 +316,7 @@ struct CpuParams {
 /// The entry point for the test runner
 #[cfg(test)]
 #[no_mangle]
-extern "C" fn primary_init(_hart_id: u64, _fdt_addr: u64) -> CpuParams {
+extern "C" fn _primary_init(_hart_id: u64, _fdt_addr: u64) -> CpuParams {
     setup_csrs();
     SbiConsoleV01::set_as_console();
 
@@ -328,15 +330,86 @@ extern "C" fn primary_init(_hart_id: u64, _fdt_addr: u64) -> CpuParams {
 
 #[cfg(test)]
 #[no_mangle]
-extern "C" fn primary_main() {}
+extern "C" fn _primary_main() {}
 
-/// Rust Entry point for the bootstrap CPU. Bootstraps salus, starts secondary CPUs and builds the
-/// HOST VM.
+#[derive(Debug)]
+enum RequiredCpuFeature {
+    Aia,
+    Sstc,
+}
+
+#[derive(Debug)]
+enum RequiredDeviceProbe {
+    Imsic(drivers::imsic::ImsicError),
+    Pci(drivers::pci::PciError),
+    Reset(drivers::reset::Error),
+    Uart(drivers::uart::Error),
+}
+
+impl Display for RequiredDeviceProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use RequiredDeviceProbe::*;
+        match self {
+            Imsic(e) => write!(f, "IMSIC: {:?}", e),
+            Pci(e) => write!(f, "PCI: {:?}", e),
+            Reset(e) => write!(f, "Reset: {:?}", e),
+            Uart(e) => write!(f, "UART: {:?}", e),
+        }
+    }
+}
+
+/// Errors from initialization
+#[derive(Debug)]
+enum Error {
+    /// Problem building memory map
+    BuildMemoryMap(MemMapError),
+    /// CPU missing feature
+    CpuMissingFeature(RequiredCpuFeature),
+    /// Creating hypervisor map failed
+    CreateHypervisorMap(hyp_map::Error),
+    /// Problem creating derived device tree
+    FdtCreation(DeviceTreeError),
+    /// Problem parsing device tree
+    FdtParsing(DeviceTreeError),
+    /// Not enough free memory for heap
+    HeapOutOfSpace,
+    /// Kernel is missing
+    KernelMissing,
+    /// Loading user-mode binary failed
+    LoadUserMode(riscv_elf::Error),
+    /// Probing of required device failed
+    RequiredDeviceProbe(RequiredDeviceProbe),
+    /// Setup of user-mode failed
+    SetupUserMode(umode::Error),
+    /// User-mode NOP failed
+    UserModeNop(umode::Error),
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use Error::*;
+        match self {
+            BuildMemoryMap(e) => write!(f, "Failed to build memory map: {:?}", e),
+            CreateHypervisorMap(e) => write!(f, "Cannot create Hypervisor map: {:?}", e),
+            CpuMissingFeature(feature) => write!(f, "Missing required CPU feature: {:?}", feature),
+            FdtCreation(e) => write!(f, "Failed to construct device-tree: {}", e),
+            FdtParsing(e) => write!(f, "Failed to read FDT: {}", e),
+            HeapOutOfSpace => write!(f, "Not enough free memory for hypervisor heap"),
+            KernelMissing => write!(f, "No host kernel image"),
+            LoadUserMode(e) => write!(f, "Cannot load user-mode ELF binary: {:?}", e),
+            RequiredDeviceProbe(e) => write!(f, "Failed to probe required device: {}", e),
+            SetupUserMode(e) => write!(f, "Failed to setup user-mode: {:?}", e),
+            UserModeNop(e) => write!(f, "Failed to execute a NOP in user-mode: {:?}", e),
+        }
+    }
+}
+
+/// Initialization logic for the bootstrap CPU. Bootstraps salus, starts
+/// secondary CPUs and builds the HOST VM.
 ///
 /// Note: this runs with a 1:1 map of physical to virtual mapping.
 #[cfg(not(test))]
-#[no_mangle]
-extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
+fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     // Reset CSRs to a sane state.
     setup_csrs();
 
@@ -347,15 +420,15 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
 
     // Safe because we trust that the firmware passed a valid FDT.
     let hyp_fdt =
-        unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.expect("Failed to read FDT");
+        unsafe { Fdt::new_from_raw_pointer(fdt_addr as *const u8) }.map_err(Error::FdtParsing)?;
 
-    let mut mem_map = build_memory_map::<Sv48x4>(&hyp_fdt).expect("Failed to build memory map");
+    let mut mem_map = build_memory_map::<Sv48x4>(&hyp_fdt).map_err(Error::BuildMemoryMap)?;
 
     // Find where QEMU loaded the host kernel image.
     let host_kernel = *mem_map
         .regions()
         .find(|r| r.region_type() == HwMemRegionType::Reserved(HwReservedMemType::HostKernelImage))
-        .expect("No host kernel image");
+        .ok_or(Error::KernelMissing)?;
     let host_initramfs = mem_map
         .regions()
         .find(|r| {
@@ -364,23 +437,24 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
         .cloned();
 
     // Create a heap for boot-time memory allocations.
-    create_heap(&mut mem_map);
+    create_heap(&mut mem_map)?;
 
-    let hyp_dt = DeviceTree::from(&hyp_fdt).expect("Failed to construct device-tree");
+    let hyp_dt = DeviceTree::from(&hyp_fdt).map_err(Error::FdtCreation)?;
 
     // Find the UART and switch to it as the system console.
-    UartDriver::probe_from(&hyp_dt, &mut mem_map).expect("Failed to probe UART");
+    UartDriver::probe_from(&hyp_dt, &mut mem_map)
+        .map_err(|e| Error::RequiredDeviceProbe(RequiredDeviceProbe::Uart(e)))?;
 
     // Discover the CPU topology.
     CpuInfo::parse_from(&hyp_dt);
     let cpu_info = CpuInfo::get();
     if !cpu_info.has_aia() {
         // We require AIA support for interrupts and SMP support; no point continuing without it.
-        panic!("CPU does not support AIA");
+        return Err(Error::CpuMissingFeature(RequiredCpuFeature::Aia));
     }
     if !cpu_info.has_sstc() {
         // We don't implement or use the SBI timer extension and thus require Sstc for timers.
-        panic!("CPU does not support Sstc");
+        return Err(Error::CpuMissingFeature(RequiredCpuFeature::Sstc));
     }
     // Only write henvcfg when Sstc is present to avoid blowing up on versions of QEMU which
     // don't support the *envcfg registers.
@@ -414,7 +488,8 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
     );
 
     // Probe for the IMSIC.
-    Imsic::probe_from(&hyp_dt, &mut mem_map).expect("Failed to probe IMSIC");
+    Imsic::probe_from(&hyp_dt, &mut mem_map)
+        .map_err(|e| Error::RequiredDeviceProbe(RequiredDeviceProbe::Imsic(e)))?;
     let imsic_geometry = Imsic::get().phys_geometry();
     println!(
         "IMSIC at 0x{:08x}; {} guest interrupt files supported",
@@ -424,7 +499,8 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
     Imsic::setup_this_cpu();
 
     // Probe for a PCI bus.
-    PcieRoot::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up PCIe");
+    PcieRoot::probe_from(&hyp_dt, &mut mem_map)
+        .map_err(|e| Error::RequiredDeviceProbe(RequiredDeviceProbe::Pci(e)))?;
     let pci = PcieRoot::get();
     for dev in pci.devices() {
         let dev = dev.lock();
@@ -447,7 +523,8 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
     }
 
     // Probe for hardcoded reset device. Not really a probe.
-    ResetDriver::probe_from(&hyp_dt, &mut mem_map).expect("Failed to set up Reset Device");
+    ResetDriver::probe_from(&hyp_dt, &mut mem_map)
+        .map_err(|e| Error::RequiredDeviceProbe(RequiredDeviceProbe::Reset(e)))?;
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.
@@ -478,7 +555,7 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
         let umode_bin_len = core::ptr::addr_of!(_umode_bin_len) as usize;
         core::slice::from_raw_parts::<u8>(umode_bin, umode_bin_len)
     };
-    let umode_elf = ElfMap::new(umode_bytes).expect("Cannot load user-mode ELF");
+    let umode_elf = ElfMap::new(umode_bytes).map_err(Error::LoadUserMode)?;
 
     println!("HW memory map:");
     for (i, r) in mem_map.regions().enumerate() {
@@ -503,7 +580,7 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
     }
 
     // Create the hypervisor mapping from the hardware memory map and the U-mode ELF.
-    HypMap::init(mem_map, &umode_elf).expect("Cannot create Hypervisor map.");
+    HypMap::init(mem_map, &umode_elf).map_err(Error::CreateHypervisorMap)?;
 
     // Set up per-CPU memory and prepare the structures for secondary CPUs boot.
     PerCpu::init(hart_id, &mut hyp_mem);
@@ -546,41 +623,69 @@ extern "C" fn primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
     HOST_VM.call_once(|| host);
 
     // Return launch parameters for this CPU.
-    CpuParams {
+    Ok(CpuParams {
         satp: PerCpu::this_cpu().page_table().satp(),
+    })
+}
+
+/// Rust Entry point for the bootstrap CPU. Calls into init to allow
+/// clean error collection and presentation
+///
+/// Note: this runs with a 1:1 map of physical to virtual mapping.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn _primary_init(hart_id: u64, fdt_addr: u64) -> CpuParams {
+    match primary_init(hart_id, fdt_addr) {
+        Err(e) => {
+            // Safe as nothing can fail before console is setup
+            println!("Error during initialization on bootstrap CPU: {}", e);
+            // Safe as if shutdown fails it triggers a wfi loop (via abort())
+            poweroff();
+        }
+        Ok(params) => params,
     }
 }
 
-/// Start salus on the bootstrap CPU. This is called once we switch to the hypervisor page-table.
-#[cfg(not(test))]
-#[no_mangle]
-extern "C" fn primary_main() {
+/// Run salus on the bootstrap CPU. This runs with the hypervisor page table
+fn primary_main() -> Result<(), Error> {
     // Install trap handler with stack overflow checking.
     trap::install_trap_handler();
     // Setup U-mode task for this CPU.
-    UmodeTask::setup_this_cpu().expect("Could not setup umode");
+    UmodeTask::setup_this_cpu().map_err(Error::SetupUserMode)?;
     // Do a NOP request to the U-mode task to check it's functional in this CPU.
-    UmodeTask::nop().expect("U-mode not executing NOP");
+    UmodeTask::nop().map_err(Error::UserModeNop)?;
 
     let cpu_id = PerCpu::this_cpu().cpu_id();
     HOST_VM.get().unwrap().run(cpu_id.raw() as u64);
     poweroff();
 }
 
-#[cfg(test)]
+/// Start salus on the bootstrap CPU. This is called once we switch to the hypervisor page-table.
+#[cfg(not(test))]
 #[no_mangle]
-extern "C" fn secondary_init(_hart_id: u64) {}
+extern "C" fn _primary_main() {
+    if let Err(e) = primary_main() {
+        // Safe as nothing can fail before console is setup
+        println!("Error during main on bootstrap CPU: {}", e);
+        // Safe as if shutdown fails it triggers a wfi loop (via abort())
+        poweroff();
+    }
+}
 
 #[cfg(test)]
 #[no_mangle]
-extern "C" fn secondary_main() {}
+extern "C" fn _secondary_init(_hart_id: u64) {}
+
+#[cfg(test)]
+#[no_mangle]
+extern "C" fn _secondary_main() {}
 
 /// Rust entry point for secondary CPUs. Initializes the current CPU and returns.
 ///
 /// Note: this runs with a 1:1 map of physical to virtual mapping.
 #[cfg(not(test))]
 #[no_mangle]
-extern "C" fn secondary_init(hart_id: u64) -> CpuParams {
+extern "C" fn _secondary_init(hart_id: u64) -> CpuParams {
     setup_csrs();
     PerCpu::setup_this_cpu(hart_id);
 
@@ -600,19 +705,30 @@ extern "C" fn secondary_init(hart_id: u64) -> CpuParams {
     }
 }
 
-/// Start salus on secondary CPUs. This is called once we switch to the hypervisor page-table.
+/// Run salus on secondary CPUs. This runs with the hypervisor page-table.
 #[cfg(not(test))]
-#[no_mangle]
-extern "C" fn secondary_main() {
+fn secondary_main() -> Result<(), Error> {
     // Install trap handler with stack overflow checking.
     trap::install_trap_handler();
     // Setup U-mode task for this CPU.
-    UmodeTask::setup_this_cpu().expect("Could not setup umode");
+    UmodeTask::setup_this_cpu().map_err(Error::SetupUserMode)?;
     // Do a NOP request to the U-mode task to check it's functional in this CPU.
-    UmodeTask::nop().expect("U-mode not executing NOP");
+    UmodeTask::nop().map_err(Error::UserModeNop)?;
 
     HOST_VM.wait().run(PerCpu::this_cpu().cpu_id().raw() as u64);
     poweroff();
+}
+
+/// Start salus on secondary CPUs. This is called once we switch to the hypervisor page-table.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn _secondary_main() {
+    if let Err(e) = secondary_main() {
+        // Safe as nothing can fail before console is setup
+        println!("Error during main on secondary CPU: {}", e);
+        // Safe as if shutdown fails it triggers a wfi loop (via abort())
+        poweroff();
+    }
 }
 
 #[cfg(test)]

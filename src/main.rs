@@ -369,6 +369,8 @@ enum Error {
     CpuTopologyGeneration(drivers::cpu::Error),
     /// Creating hypervisor map failed
     CreateHypervisorMap(hyp_map::Error),
+    /// Creating (per CPU) SMP state
+    CreateSmpState(smp::Error),
     /// Problem creating derived device tree
     FdtCreation(DeviceTreeError),
     /// Problem parsing device tree
@@ -383,6 +385,8 @@ enum Error {
     RequiredDeviceProbe(RequiredDeviceProbe),
     /// Setup of user-mode failed
     SetupUserMode(umode::Error),
+    /// Problem running secondary CPUs
+    StartSecondaryCpus(smp::Error),
     /// User-mode NOP failed
     UserModeNop(umode::Error),
 }
@@ -392,9 +396,10 @@ impl Display for Error {
         use Error::*;
         match self {
             BuildMemoryMap(e) => write!(f, "Failed to build memory map: {:?}", e),
-            CreateHypervisorMap(e) => write!(f, "Cannot create Hypervisor map: {:?}", e),
             CpuMissingFeature(feature) => write!(f, "Missing required CPU feature: {:?}", feature),
             CpuTopologyGeneration(e) => write!(f, "Failed to generate CPU topology: {}", e),
+            CreateHypervisorMap(e) => write!(f, "Cannot create Hypervisor map: {:?}", e),
+            CreateSmpState(e) => write!(f, "Error during (per CPU) SMP setup: {:?}", e),
             FdtCreation(e) => write!(f, "Failed to construct device-tree: {}", e),
             FdtParsing(e) => write!(f, "Failed to read FDT: {}", e),
             HeapOutOfSpace => write!(f, "Not enough free memory for hypervisor heap"),
@@ -402,6 +407,7 @@ impl Display for Error {
             LoadUserMode(e) => write!(f, "Cannot load user-mode ELF binary: {:?}", e),
             RequiredDeviceProbe(e) => write!(f, "Failed to probe required device: {}", e),
             SetupUserMode(e) => write!(f, "Failed to setup user-mode: {:?}", e),
+            StartSecondaryCpus(e) => write!(f, "Error running secondary CPUs: {:?}", e),
             UserModeNop(e) => write!(f, "Failed to execute a NOP in user-mode: {:?}", e),
         }
     }
@@ -586,7 +592,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     HypMap::init(mem_map, &umode_elf).map_err(Error::CreateHypervisorMap)?;
 
     // Set up per-CPU memory and prepare the structures for secondary CPUs boot.
-    PerCpu::init(hart_id, &mut hyp_mem);
+    PerCpu::init(hart_id, &mut hyp_mem).map_err(Error::CreateSmpState)?;
 
     // Find and initialize the IOMMU.
     match Iommu::probe_from(PcieRoot::get(), &mut || {
@@ -621,7 +627,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     // Lock down the boot time allocator before allowing the host VM to be entered.
     HYPERVISOR_ALLOCATOR.get().unwrap().seal();
 
-    smp::start_secondary_cpus();
+    smp::start_secondary_cpus().map_err(Error::StartSecondaryCpus)?;
 
     HOST_VM.call_once(|| host);
 
@@ -690,7 +696,7 @@ extern "C" fn _secondary_main() {}
 #[no_mangle]
 extern "C" fn _secondary_init(hart_id: u64) -> CpuParams {
     setup_csrs();
-    PerCpu::setup_this_cpu(hart_id);
+    PerCpu::setup_this_cpu(hart_id).expect("Failed to create SMP state");
 
     test_declare_pass!("secondary init", hart_id);
 

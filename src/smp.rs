@@ -4,6 +4,7 @@
 
 use core::arch::asm;
 use core::cell::{RefCell, RefMut};
+use core::fmt;
 use drivers::{imsic::Imsic, CpuId, CpuInfo};
 use page_tracking::HypPageAlloc;
 use riscv_pages::{
@@ -41,14 +42,34 @@ pub struct PerCpu {
 /// The base address of the per-CPU memory region.
 static PER_CPU_BASE: Once<SupervisorPageAddr> = Once::new();
 
+/// Error for SMP handling
+#[derive(Debug)]
+pub enum Error {
+    MapHartIdToCpuId(u64),
+    StartHart(sbi_rs::Error, u64),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Error::*;
+
+        match self {
+            MapHartIdToCpuId(hart_id) => write!(f, "Error mapping HART id ({}) to state", hart_id),
+            Self::StartHart(e, hart_id) => {
+                write!(f, "Error starting HART id ({}): {:?}", hart_id, e)
+            }
+        }
+    }
+}
+
 impl PerCpu {
     /// Initializes the `PerCpu` structures for each CPU, taking memory from `mem_map`. This (the
     /// boot CPU's) per-CPU area is initialized and loaded into TP as well.
-    pub fn init(boot_hart_id: u64, hyp_mem: &mut HypPageAlloc) {
+    pub fn init(boot_hart_id: u64, hyp_mem: &mut HypPageAlloc) -> Result<(), Error> {
         let cpu_info = CpuInfo::get();
         let boot_cpu = cpu_info
             .hart_id_to_cpu(boot_hart_id as u32)
-            .expect("Cannot find boot CPU ID");
+            .ok_or(Error::MapHartIdToCpuId(boot_hart_id))?;
 
         // Allocate memory for per-CPU structures.
         let pcpu_size = core::mem::size_of::<PerCpu>() as u64 * cpu_info.num_cpus() as u64;
@@ -63,7 +84,7 @@ impl PerCpu {
             let cpu_id = CpuId::new(i);
             // Boot CPU is special. Doesn't use the PCPU_BASE area as stack.
             let stack_pages = if cpu_id == boot_cpu {
-                Self::boot_cpu_stack()
+                Self::boot_cpu_stack()?
             } else {
                 // Unwrap okay. We allocated the area for `num_cpus() - 1` pages and we skip the
                 // bootstrap CPU above.
@@ -101,17 +122,19 @@ impl PerCpu {
         }
 
         // Initialize TP register and set this CPU online to be consistent with secondary CPUs.
-        Self::setup_this_cpu(boot_hart_id);
+        Self::setup_this_cpu(boot_hart_id)?;
         let me = Self::this_cpu();
         me.set_online();
+
+        Ok(())
     }
 
     /// Initializes the TP pointer to point to PerCpu data.
-    pub fn setup_this_cpu(hart_id: u64) {
+    pub fn setup_this_cpu(hart_id: u64) -> Result<(), Error> {
         let cpu_info = CpuInfo::get();
         let cpu_id = cpu_info
             .hart_id_to_cpu(hart_id as u32)
-            .expect("Cannot find CPU ID");
+            .ok_or(Error::MapHartIdToCpuId(hart_id))?;
 
         // Load TP with the address of our PerCpu struct.
         let tp = Self::ptr_for_cpu(cpu_id) as u64;
@@ -119,9 +142,10 @@ impl PerCpu {
             // Safe since we're the only users of TP.
             asm!("mv tp, {rs}", rs = in(reg) tp)
         };
+        Ok(())
     }
 
-    fn boot_cpu_stack() -> SequentialPages<InternalDirty> {
+    fn boot_cpu_stack() -> Result<SequentialPages<InternalDirty>, Error> {
         // Get the pages of the current stack as created by the linker.
         // Safe because `_stack_start` is created by the linker.
         let stack_startaddr = unsafe {
@@ -136,8 +160,10 @@ impl PerCpu {
         // Safe because the pages in this range are in the `HypervisorImage` memory region and are only
         // used for the boot cpu stack.
         unsafe {
-            SequentialPages::from_page_range(stack_startaddr, stack_endaddr, PageSize::Size4k)
-                .unwrap()
+            Ok(
+                SequentialPages::from_page_range(stack_startaddr, stack_endaddr, PageSize::Size4k)
+                    .unwrap(),
+            )
         }
     }
 
@@ -226,7 +252,7 @@ pub fn send_ipi(cpu: CpuId) {
 
 /// Boots secondary CPUs, using the HSM SBI call. Upon return, all secondary CPUs will have
 /// entered secondary_init().
-pub fn start_secondary_cpus() {
+pub fn start_secondary_cpus() -> Result<(), Error> {
     let cpu_info = CpuInfo::get();
     let boot_cpu = PerCpu::this_cpu().cpu_id();
     for i in 0..cpu_info.num_cpus() {
@@ -240,15 +266,12 @@ pub fn start_secondary_cpus() {
         let pcpu = unsafe { PerCpu::ptr_for_cpu(cpu_id).as_ref().unwrap() };
         let sp = pcpu.stack_top_addr();
 
+        let hart_id = cpu_info.cpu_to_hart_id(cpu_id).unwrap() as u64;
         // Safety: _secondary_start is guaranteed by the linker to be the code to start secondary
         // CPUs. pcpu will only be shared with one cpu.
         unsafe {
-            state::hart_start(
-                cpu_info.cpu_to_hart_id(cpu_id).unwrap() as u64,
-                (_secondary_start as *const fn()) as u64,
-                sp.bits(),
-            )
-            .expect("Failed to start CPU {i}");
+            state::hart_start(hart_id, (_secondary_start as *const fn()) as u64, sp.bits())
+                .map_err(|e| Error::StartHart(e, hart_id))?;
         }
 
         // Synchronize with the CPU coming online. TODO: Timeout?
@@ -256,4 +279,6 @@ pub fn start_secondary_cpus() {
     }
 
     println!("Brought online {} CPU(s)", cpu_info.num_cpus());
+
+    Ok(())
 }

@@ -689,14 +689,13 @@ extern "C" fn _secondary_init(_hart_id: u64) {}
 #[no_mangle]
 extern "C" fn _secondary_main() {}
 
-/// Rust entry point for secondary CPUs. Initializes the current CPU and returns.
+/// Initialization logic for the secondary CPUs.
 ///
 /// Note: this runs with a 1:1 map of physical to virtual mapping.
 #[cfg(not(test))]
-#[no_mangle]
-extern "C" fn _secondary_init(hart_id: u64) -> CpuParams {
+fn secondary_init(hart_id: u64) -> Result<CpuParams, Error> {
     setup_csrs();
-    PerCpu::setup_this_cpu(hart_id).expect("Failed to create SMP state");
+    PerCpu::setup_this_cpu(hart_id).map_err(Error::CreateSmpState)?;
 
     test_declare_pass!("secondary init", hart_id);
 
@@ -709,8 +708,28 @@ extern "C" fn _secondary_init(hart_id: u64) -> CpuParams {
     let this_cpu = PerCpu::this_cpu();
     this_cpu.set_online();
 
-    CpuParams {
+    Ok(CpuParams {
         satp: this_cpu.page_table().satp(),
+    })
+}
+
+/// Rust entry point for secondary CPUs. Initializes the current CPU and returns.
+///
+/// Note: this runs with a 1:1 map of physical to virtual mapping.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn _secondary_init(hart_id: u64) -> CpuParams {
+    match secondary_init(hart_id) {
+        Err(e) => {
+            // Safe as nothing can fail before console is setup
+            println!(
+                "Error during initialization on secondary CPU ({}): {}",
+                hart_id, e
+            );
+            // Safe as if shutdown fails it triggers a wfi loop (via abort())
+            poweroff();
+        }
+        Ok(params) => params,
     }
 }
 

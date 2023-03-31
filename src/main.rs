@@ -365,6 +365,8 @@ enum Error {
     BuildMemoryMap(MemMapError),
     /// CPU missing feature
     CpuMissingFeature(RequiredCpuFeature),
+    /// Problem generating CPU topology
+    CpuTopologyGeneration(drivers::cpu::Error),
     /// Creating hypervisor map failed
     CreateHypervisorMap(hyp_map::Error),
     /// Problem creating derived device tree
@@ -392,6 +394,7 @@ impl Display for Error {
             BuildMemoryMap(e) => write!(f, "Failed to build memory map: {:?}", e),
             CreateHypervisorMap(e) => write!(f, "Cannot create Hypervisor map: {:?}", e),
             CpuMissingFeature(feature) => write!(f, "Missing required CPU feature: {:?}", feature),
+            CpuTopologyGeneration(e) => write!(f, "Failed to generate CPU topology: {}", e),
             FdtCreation(e) => write!(f, "Failed to construct device-tree: {}", e),
             FdtParsing(e) => write!(f, "Failed to read FDT: {}", e),
             HeapOutOfSpace => write!(f, "Not enough free memory for hypervisor heap"),
@@ -446,7 +449,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
         .map_err(|e| Error::RequiredDeviceProbe(RequiredDeviceProbe::Uart(e)))?;
 
     // Discover the CPU topology.
-    CpuInfo::parse_from(&hyp_dt);
+    CpuInfo::parse_from(&hyp_dt).map_err(Error::CpuTopologyGeneration)?;
     let cpu_info = CpuInfo::get();
     if !cpu_info.has_aia() {
         // We require AIA support for interrupts and SMP support; no point continuing without it.

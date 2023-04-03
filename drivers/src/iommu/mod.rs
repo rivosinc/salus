@@ -89,7 +89,7 @@ mod tests {
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypPageAlloc::new(&mut hw_map);
+        let hyp_mem = HypPageAlloc::new(&mut hw_map).unwrap();
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);

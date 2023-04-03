@@ -523,7 +523,7 @@ pub struct PageMap {
 impl PageMap {
     /// Builds a new `PageMap` from a populated `HwMemMap`. It will track ownership information
     /// for each page in the system.
-    pub fn build_from(mem_map: &mut HwMemMap) -> Self {
+    pub fn build_from(mem_map: &mut HwMemMap) -> PageTrackingResult<Self> {
         // Determine how many pages we'll need for the page map.
         let total_pages = mem_map
             .regions()
@@ -536,7 +536,8 @@ impl PageMap {
         let page_map_region = mem_map
             .regions()
             .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= page_map_size)
-            .expect("No free space for PageMap");
+            .ok_or(PageTrackingError::PageMapNoSpace)?;
+
         let page_map_base = page_map_region.base();
 
         // Safe to create pages from this memory as `HwMemMap` guarantees that this range is
@@ -554,11 +555,10 @@ impl PageMap {
                 RawAddr::from(page_map_base),
                 page_map_size,
             )
-            .expect("Failed to reserve page map");
-
+            .map_err(PageTrackingError::PageMapReserveRegion)?;
         let mut page_map = Self::new(struct_pages);
         page_map.populate_from(mem_map);
-        page_map
+        Ok(page_map)
     }
 
     /// Constructs an empty `PageMap` from an existing vector of `PageInfo` structs.

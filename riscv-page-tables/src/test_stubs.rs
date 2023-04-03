@@ -35,7 +35,7 @@ pub fn stub_sys_memory() -> StubState {
             .unwrap()
             .build()
     };
-    let mut hyp_mem = HypPageAlloc::new(&mut hw_map);
+    let mut hyp_mem = HypPageAlloc::new(&mut hw_map).unwrap();
     let root_pages = hyp_mem.take_pages_for_host_state_with_alignment(4, Sv48x4::TOP_LEVEL_ALIGN);
     let pte_pages = hyp_mem.take_pages_for_host_state(3);
     let (page_tracker, host_pages) = PageTracker::from(hyp_mem, MEM_ALIGN as u64);

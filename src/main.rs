@@ -367,6 +367,8 @@ enum Error {
     CpuMissingFeature(RequiredCpuFeature),
     /// Problem generating CPU topology
     CpuTopologyGeneration(drivers::cpu::Error),
+    // Error creating hypervisor allocator
+    CreateHypervisorAllocator(PageTrackingError),
     /// Creating hypervisor map failed
     CreateHypervisorMap(hyp_map::Error),
     /// Creating (per CPU) SMP state
@@ -398,6 +400,9 @@ impl Display for Error {
             BuildMemoryMap(e) => write!(f, "Failed to build memory map: {:?}", e),
             CpuMissingFeature(feature) => write!(f, "Missing required CPU feature: {:?}", feature),
             CpuTopologyGeneration(e) => write!(f, "Failed to generate CPU topology: {}", e),
+            CreateHypervisorAllocator(e) => {
+                write!(f, "Failed to create hypervisor page allocator: {:?}", e)
+            }
             CreateHypervisorMap(e) => write!(f, "Cannot create Hypervisor map: {:?}", e),
             CreateSmpState(e) => write!(f, "Error during (per CPU) SMP setup: {}", e),
             FdtCreation(e) => write!(f, "Failed to construct device-tree: {}", e),
@@ -537,7 +542,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
 
     // Create an allocator for the remaining pages. Anything that's left over will be mapped
     // into the host VM.
-    let mut hyp_mem = HypPageAlloc::new(&mut mem_map);
+    let mut hyp_mem = HypPageAlloc::new(&mut mem_map).map_err(Error::CreateHypervisorAllocator)?;
     // NOTE: Do not modify the hardware memory map from here on.
     let mem_map = mem_map; // Remove mutability.
 

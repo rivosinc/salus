@@ -7,7 +7,7 @@ use sync::Mutex;
 
 use crate::collections::{RawPageVec, StaticPageRef};
 use crate::page_info::{PageInfo, PageMap, PageState};
-use crate::{HwMemMap, PageList, TlbVersion};
+use crate::{hw_mem_map, HwMemMap, PageList, TlbVersion};
 
 /// Errors related to managing physical page information.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +63,10 @@ pub enum Error {
     PageNotBlockable,
     /// Attempt to unblock, promote, demote or remove a page that is not blocked.
     PageNotBlocked,
+    /// Failed to reserve region for page map
+    PageMapReserveRegion(hw_mem_map::Error),
+    /// No memory available for page map
+    PageMapNoSpace,
 }
 
 /// Holds the result of page tracking operations.
@@ -163,7 +167,7 @@ impl PageTracker {
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypPageAlloc::new(&mut hw_map);
+        let hyp_mem = HypPageAlloc::new(&mut hw_map).unwrap();
         let (page_tracker, host_pages) = PageTracker::from(hyp_mem, PageSize::Size4k as u64);
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
@@ -655,14 +659,14 @@ pub struct HypPageAlloc {
 impl HypPageAlloc {
     /// Creates a new `HypPageAlloc`. The memory map passed in contains information about what
     /// physical memory can be used by the machine.
-    pub fn new(mem_map: &mut HwMemMap) -> Self {
+    pub fn new(mem_map: &mut HwMemMap) -> Result<Self> {
         let first_page = mem_map.regions().next().unwrap().base();
         let mut hyp_pages = Self {
             next_page: None,
-            pages: PageMap::build_from(mem_map),
+            pages: PageMap::build_from(mem_map)?,
         };
         hyp_pages.next_page = hyp_pages.next_free_page(first_page);
-        hyp_pages
+        Ok(hyp_pages)
     }
 
     /// Takes ownership of the remaining free pages, cleaning them and linking them together. Returns
@@ -848,7 +852,7 @@ mod tests {
                 .unwrap()
                 .build()
         };
-        let hyp_mem = HypPageAlloc::new(&mut hw_map);
+        let hyp_mem = HypPageAlloc::new(&mut hw_map).unwrap();
         // Leak the backing ram so it doesn't get freed
         std::mem::forget(backing_mem);
         hyp_mem

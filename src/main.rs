@@ -399,7 +399,7 @@ impl Display for Error {
             CpuMissingFeature(feature) => write!(f, "Missing required CPU feature: {:?}", feature),
             CpuTopologyGeneration(e) => write!(f, "Failed to generate CPU topology: {}", e),
             CreateHypervisorMap(e) => write!(f, "Cannot create Hypervisor map: {:?}", e),
-            CreateSmpState(e) => write!(f, "Error during (per CPU) SMP setup: {:?}", e),
+            CreateSmpState(e) => write!(f, "Error during (per CPU) SMP setup: {}", e),
             FdtCreation(e) => write!(f, "Failed to construct device-tree: {}", e),
             FdtParsing(e) => write!(f, "Failed to read FDT: {}", e),
             HeapOutOfSpace => write!(f, "Not enough free memory for hypervisor heap"),
@@ -407,7 +407,7 @@ impl Display for Error {
             LoadUserMode(e) => write!(f, "Cannot load user-mode ELF binary: {:?}", e),
             RequiredDeviceProbe(e) => write!(f, "Failed to probe required device: {}", e),
             SetupUserMode(e) => write!(f, "Failed to setup user-mode: {:?}", e),
-            StartSecondaryCpus(e) => write!(f, "Error running secondary CPUs: {:?}", e),
+            StartSecondaryCpus(e) => write!(f, "Error running secondary CPUs: {}", e),
             UserModeNop(e) => write!(f, "Failed to execute a NOP in user-mode: {:?}", e),
         }
     }

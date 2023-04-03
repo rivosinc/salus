@@ -10,7 +10,8 @@ use data_model::{DataInit, VolatileMemory, VolatileMemoryError, VolatileSlice};
 use page_tracking::{HwMemMap, HwMemRegion, HwMemRegionType, HwReservedMemType, HypPageAlloc};
 use riscv_elf::{ElfMap, ElfSegment, ElfSegmentPerms};
 use riscv_page_tables::{
-    FirstStageMapper, FirstStagePageTable, PagingMode, PteFieldBits, PteLeafPerms, Sv48,
+    FirstStageMapper, FirstStagePageTable, PageTableError, PagingMode, PteFieldBits, PteLeafPerms,
+    Sv48,
 };
 use riscv_pages::{
     InternalClean, InternalDirty, Page, PageAddr, PageSize, RawAddr, SeqPageIter, SequentialPages,
@@ -61,6 +62,12 @@ pub enum Error {
     UmodePageFault(RawAddr<SupervisorVirt>, usize),
     /// Stack overlaps with other regions.
     InvalidStackSize(u64),
+    /// Mapping stack failed
+    StackMapFailed(PageTableError),
+    /// Unmapping stack failed
+    StackUnmapFailed(PageTableError),
+    /// Error creating root SV48 page table
+    CreateRoot(PageTableError),
 }
 
 // Represents a virtual address region of the hypervisor created from the Hardware Memory Map.
@@ -332,7 +339,11 @@ impl HypStackRegion {
     }
 
     // Map hypervisor stack in current page-table.
-    fn map(&self, sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) {
+    fn map(
+        &self,
+        sv48: &FirstStagePageTable<Sv48>,
+        hyp_mem: &mut HypPageAlloc,
+    ) -> Result<(), Error> {
         let page_count = HYP_STACK_PAGES;
         // Unmap stack pages from the 1:1 map.
         sv48.unmap_range(
@@ -340,7 +351,7 @@ impl HypStackRegion {
             PageSize::Size4k,
             page_count,
         )
-        .expect("unmapping stack physical mappings failed")
+        .map_err(Error::StackUnmapFailed)?
         .count();
 
         // Map stack pages at stack virtual address.
@@ -350,7 +361,7 @@ impl HypStackRegion {
             .map_range(vaddr, PageSize::Size4k, page_count, &mut || {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             })
-            .expect("Stack mapping failed");
+            .map_err(Error::StackMapFailed)?;
         // Safety: we unmapped the stack pages from the 1:1 map, so no aliases have been created
         // in this page table.
         unsafe {
@@ -358,6 +369,8 @@ impl HypStackRegion {
                 .map_contiguous(vaddr, self.paddr, page_count, pte_fields)
                 .unwrap();
         }
+
+        Ok(())
     }
 }
 
@@ -568,7 +581,7 @@ impl HypMap {
         &self,
         hyp_mem: &mut HypPageAlloc,
         stack_pages: SequentialPages<InternalDirty>,
-    ) -> HypPageTable {
+    ) -> Result<HypPageTable, Error> {
         // Create empty sv48 page table
         // Unwrap okay: we expect to have at least one page free.
         let root_page = hyp_mem
@@ -577,7 +590,7 @@ impl HypMap {
             .next()
             .unwrap();
         let sv48: FirstStagePageTable<Sv48> =
-            FirstStagePageTable::new(root_page).expect("creating first sv48");
+            FirstStagePageTable::new(root_page).map_err(Error::CreateRoot)?;
         // Map hardware map regions
         for r in &self.hw_map_regions {
             r.map(&sv48, &mut || {
@@ -589,9 +602,7 @@ impl HypMap {
             r.map(&sv48, hyp_mem);
         }
         // Alloc and map the hypervisor stack for this page-table.
-        HypStackRegion::new(stack_pages)
-            .expect("Hypervisor stack allocation failed")
-            .map(&sv48, hyp_mem);
+        HypStackRegion::new(stack_pages)?.map(&sv48, hyp_mem)?;
         // Alloc and map the U-mode Input Region for this page-table.
         let umode_input = UmodeInputRegion::map(&sv48, hyp_mem);
         // Alloc pte_pages for U-mode mappings.
@@ -600,10 +611,10 @@ impl HypMap {
                 UMODE_MAPPINGS_SIZE / PageSize::Size4k as u64,
             ) as usize)
             .into_iter();
-        HypPageTable {
+        Ok(HypPageTable {
             sv48,
             umode_input: RefCell::new(umode_input),
             pte_pages: RefCell::new(pte_pages),
-        }
+        })
     }
 }

@@ -16,7 +16,7 @@ use sbi_rs::api::state;
 use sync::Once;
 
 use crate::hyp_layout::HYP_STACK_PAGES;
-use crate::hyp_map::{HypMap, HypPageTable};
+use crate::hyp_map::{self, HypMap, HypPageTable};
 use crate::umode::UmodeTask;
 use crate::vm_id::VmIdTracker;
 
@@ -45,6 +45,7 @@ static PER_CPU_BASE: Once<SupervisorPageAddr> = Once::new();
 /// Error for SMP handling
 #[derive(Debug)]
 pub enum Error {
+    CreateStackPageTable(hyp_map::Error),
     MapHartIdToCpuId(u64),
     StartHart(sbi_rs::Error, u64),
 }
@@ -54,6 +55,7 @@ impl fmt::Display for Error {
         use Error::*;
 
         match self {
+            CreateStackPageTable(e) => write!(f, "Error creating page table for stack: {:?}", e),
             MapHartIdToCpuId(hart_id) => write!(f, "Error mapping HART id ({}) to state", hart_id),
             Self::StartHart(e, hart_id) => {
                 write!(f, "Error starting HART id ({}): {:?}", hart_id, e)
@@ -110,7 +112,9 @@ impl PerCpu {
             let pcpu = PerCpu {
                 cpu_id,
                 vmid_tracker: RefCell::new(VmIdTracker::new()),
-                page_table: HypMap::get().new_page_table(hyp_mem, stack_pages),
+                page_table: HypMap::get()
+                    .new_page_table(hyp_mem, stack_pages)
+                    .map_err(Error::CreateStackPageTable)?,
                 umode_task: Once::new(),
                 online: Once::new(),
                 stack_top_addr,

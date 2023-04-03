@@ -50,4 +50,4 @@ EXTRA_CPU=${VECTORS:+",v=on,vlen=256,elen=64"}
 CPU_TYPE=rv64${EXTRA_CPU}
 CPU_ARGS="${CPU_TYPE},x-smaia=true,x-ssaia=true,sscofpmf=true"
 
-MACH_ARGS="-M virt,aia=aplic-imsic,aia-guests=4 -cpu ${CPU_ARGS} -smp ${NCPU} -m ${MEM_SIZE} -nographic"
+MACH_ARGS="-M virt,aia=aplic-imsic,aia-guests=5 -cpu ${CPU_ARGS} -smp ${NCPU} -m ${MEM_SIZE} -nographic"

@@ -372,35 +372,6 @@ impl PageTracker {
         Ok(unsafe { P::DirtyPage::new_with_size(addr, page_size) })
     }
 
-    /// Marks the invalidated page as having started unassignment at `tlb_version`.
-    pub fn unassign_page_begin<P: InvalidatedPhysPage>(
-        &self,
-        page: P,
-        tlb_version: TlbVersion,
-    ) -> Result<()> {
-        self.for_each_page(page.addr(), page.size(), |info| {
-            info.begin_unassignment(tlb_version)
-        })
-    }
-
-    /// Completes unassignment of the page at `addr` if it is owned by `owner` and was unassigned at
-    /// a TLB version older than `tlb_version`.
-    pub fn unassign_page_complete(
-        &self,
-        addr: SupervisorPageAddr,
-        page_size: PageSize,
-        owner: PageOwnerId,
-        mem_type: MemType,
-        tlb_version: TlbVersion,
-    ) -> Result<()> {
-        self.for_each_page(addr, page_size, |info| {
-            if info.owner() != Some(owner) || info.mem_type() != mem_type {
-                return Err(Error::PageNotUnassignable);
-            }
-            info.complete_unassignment(tlb_version)
-        })
-    }
-
     /// Move the page to a blocked state.
     pub fn block_page<P: InvalidatedPhysPage>(
         &self,
@@ -515,23 +486,6 @@ impl PageTracker {
             info.owner() == Some(owner)
                 && info.mem_type() == mem_type
                 && (info.state() == PageState::Converted || info.is_convertible(tlb_version))
-        })
-    }
-
-    /// Returns true if and only if `addr` is a page owned by `owner` with type `mem_type` and
-    /// was unassigned at a TLB version older than `tlb_version`.
-    pub fn is_unassignable_page(
-        &self,
-        addr: SupervisorPageAddr,
-        page_size: PageSize,
-        owner: PageOwnerId,
-        mem_type: MemType,
-        tlb_version: TlbVersion,
-    ) -> bool {
-        self.all_pages(addr, page_size, |info| {
-            info.owner() == Some(owner)
-                && info.mem_type() == mem_type
-                && info.is_unassignable(tlb_version)
         })
     }
 

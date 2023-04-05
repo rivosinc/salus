@@ -1666,7 +1666,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             // Unwrap ok: Page was mapped and has just been invalidated.
             self.inner
                 .page_tracker
-                .unassign_page_begin(page, self.inner.tlb_tracker.current_version())
+                .block_page(page, self.inner.tlb_tracker.current_version())
                 .unwrap();
         }
 
@@ -1692,56 +1692,43 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 if ps.is_huge() {
                     return false;
                 }
-                self.inner.page_tracker.is_unassignable_page(
+                self.inner.page_tracker.is_blocked_page(
                     addr,
                     ps,
                     self.inner.page_owner_id,
                     MemType::Mmio(DeviceMemType::Imsic),
-                    version,
+                    Some(version),
                 )
             })
             .map_err(Error::Paging)?;
-        for (paddr, _) in unmapped {
-            // Unwrap ok: we verified the page was unassignable above.
-            self.inner
-                .page_tracker
-                .unassign_page_complete(
-                    paddr,
-                    PageSize::Size4k,
-                    self.inner.page_owner_id,
-                    MemType::Mmio(DeviceMemType::Imsic),
-                    version,
-                )
-                .unwrap();
+        for (paddr, ps) in unmapped {
+            if ps != PageSize::Size4k {
+                return Err(Error::InvalidPageSize);
+            }
+            // Unwrap ok: Page was blocked and has just been unmapped.
+            self.inner.page_tracker.remove_page(paddr, ps).unwrap();
         }
         Ok(())
     }
 
-    // Begins unassignment of the `page`. Unlike `unassign_imsic_begin()`, this method does not
-    // invalidate the address. It's only responsible for removing the page from page_tracker.
+    // Begins removal of the `page`. Unlike `unassign_imsic_begin()`, this method does not
+    // invalidate the address. It's only responsible for blocking the page in page_tracker.
     // For now we only use it for remapping purpose where the leaf entry is still valid but
     // the underlying address has been replaced.
-    pub fn unassign_imsic_page_begin(&self, page: ImsicGuestPage<Invalidated>) -> Result<()> {
+    pub fn block_imsic_page(&self, page: ImsicGuestPage<Invalidated>) -> Result<()> {
         self.inner
             .page_tracker
-            .unassign_page_begin(page, self.inner.tlb_tracker.current_version())
+            .block_page(page, self.inner.tlb_tracker.current_version())
             .map_err(Error::PageTracker)?;
         Ok(())
     }
 
     /// Verifies that the TLB flush for the IMSIC interrupt file that was mapped at `imsic_addr`
-    /// has been completed and completes unassignment of the page.
-    pub fn unassign_imsic_page_end(&self, imsic_addr: SupervisorPageAddr) -> Result<()> {
-        let version = self.inner.tlb_tracker.min_version();
+    /// has been completed and completes removal of the page.
+    pub fn remove_imsic_page(&self, imsic_addr: SupervisorPageAddr) -> Result<()> {
         self.inner
             .page_tracker
-            .unassign_page_complete(
-                imsic_addr,
-                PageSize::Size4k,
-                self.inner.page_owner_id,
-                MemType::Mmio(DeviceMemType::Imsic),
-                version,
-            )
+            .remove_page(imsic_addr, PageSize::Size4k)
             .map_err(Error::PageTracker)?;
         Ok(())
     }

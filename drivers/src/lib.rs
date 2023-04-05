@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn build_cpu_info() {
         let tree = stub_tree();
-        CpuInfo::parse_from(&tree);
+        CpuInfo::parse_from(&tree).unwrap();
 
         let cpu_info = CpuInfo::get();
         assert!(cpu_info.has_sstc());
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn probe_imsic() {
         let tree = stub_tree();
-        CpuInfo::parse_from(&tree);
+        CpuInfo::parse_from(&tree).unwrap();
         let mut mem_map = stub_mem_map();
         Imsic::probe_from(&tree, &mut mem_map).unwrap();
 

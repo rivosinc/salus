@@ -49,11 +49,11 @@ pub enum Error {
     /// Not enough space in the U-mode map area.
     OutOfMap,
     /// Could not create a mapper for the U-mode area.
-    MapperCreationFailed,
+    MapperCreationFailed(PageTableError),
     /// Could not map the U-mode area.
-    MapFailed,
+    MapFailed(PageTableError),
     /// Could not unmap the U-mode area.
-    UnmapFailed,
+    UnmapFailed(PageTableError),
     /// U-mode Input Memory Error.
     UmodeInput(VolatileMemoryError),
     /// Invalid U-mode address.
@@ -68,6 +68,8 @@ pub enum Error {
     StackUnmapFailed(PageTableError),
     /// Error creating root SV48 page table
     CreateRoot(PageTableError),
+    /// Insufficient space for page table
+    InsufficientSpaceForPageTable,
 }
 
 // Represents a virtual address region of the hypervisor created from the Hardware Memory Map.
@@ -124,7 +126,7 @@ impl HwMapRegion {
         &self,
         sv48: &FirstStagePageTable<Sv48>,
         get_pte_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
-    ) {
+    ) -> Result<(), Error> {
         let mapper = sv48
             .map_range(
                 self.vaddr,
@@ -132,7 +134,7 @@ impl HwMapRegion {
                 self.page_count as u64,
                 get_pte_page,
             )
-            .unwrap();
+            .map_err(Error::MapFailed)?;
         // Safety: all regions come from the HW memory map. we will create exactly one mapping for
         // each page and will switch to using that mapping exclusively.
         unsafe {
@@ -143,7 +145,7 @@ impl HwMapRegion {
                     self.page_count as u64,
                     self.pte_fields,
                 )
-                .unwrap();
+                .map_err(Error::MapFailed)
         }
     }
 }
@@ -193,7 +195,11 @@ impl UmodeElfRegion {
     }
 
     // Maps this region into a page table.
-    fn map(&self, sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) {
+    fn map(
+        &self,
+        sv48: &FirstStagePageTable<Sv48>,
+        hyp_mem: &mut HypPageAlloc,
+    ) -> Result<(), Error> {
         // Allocate and populate first.
         let page_count = PageSize::num_4k_pages(self.size as u64);
         let pages = hyp_mem.take_pages_for_hyp_state(page_count as usize);
@@ -211,14 +217,16 @@ impl UmodeElfRegion {
             .map_range(self.vaddr, PageSize::Size4k, page_count, &mut || {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             })
-            .unwrap();
+            .map_err(Error::MapFailed)?;
         // Safety: all regions are user mappings. User mappings are not considered aliases because
         // they cannot be accessed by supervisor mode directly (sstatus.SUM needs to be 1).
         unsafe {
             mapper
                 .map_contiguous(self.vaddr, pages.base(), page_count, self.pte_fields)
-                .unwrap();
+                .map_err(Error::MapFailed)?
         }
+
+        Ok(())
     }
 
     // Restores region to initial-state.
@@ -270,7 +278,7 @@ struct UmodeInputRegion {
 
 impl UmodeInputRegion {
     /// Allocate hypervisor pages and map them read-only in U-mode VA space.
-    fn map(sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) -> Self {
+    fn map(sv48: &FirstStagePageTable<Sv48>, hyp_mem: &mut HypPageAlloc) -> Result<Self, Error> {
         // Allocate pages.
         let num_pages = PageSize::num_4k_pages(UMODE_INPUT_SIZE);
         let pages = hyp_mem.take_pages_for_hyp_state(num_pages as usize);
@@ -289,7 +297,7 @@ impl UmodeInputRegion {
             .map_range(vaddr, PageSize::Size4k, num_pages, &mut || {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
             })
-            .unwrap();
+            .map_err(Error::MapFailed)?;
         // Safety: These pages are mapped read-only in the VA area reserved for the U-mode
         // input region mappings. Hypervisor will write to these pages using the physical
         // mappings and U-mode will read them through this mapping. Safe because these are
@@ -299,7 +307,7 @@ impl UmodeInputRegion {
         unsafe {
             mapper
                 .map_contiguous(vaddr, pages.base(), num_pages, pte_fields)
-                .unwrap();
+                .map_err(Error::MapFailed)?;
         }
 
         // Safety: the range `(start..max_addr)` is mapped in U-mode as read-only and was uniquely
@@ -307,7 +315,7 @@ impl UmodeInputRegion {
         let vslice = unsafe {
             VolatileSlice::from_raw_parts(start.raw().bits() as *mut u8, UMODE_INPUT_SIZE as usize)
         };
-        Self { vslice }
+        Ok(Self { vslice })
     }
 
     // Writes `data` in the current CPU's U-mode Input Region.
@@ -367,7 +375,7 @@ impl HypStackRegion {
         unsafe {
             mapper
                 .map_contiguous(vaddr, self.paddr, page_count, pte_fields)
-                .unwrap();
+                .map_err(Error::StackMapFailed)?;
         }
 
         Ok(())
@@ -424,7 +432,7 @@ impl HypPageTable {
             .map_range(vaddr, PageSize::Size4k, num_pages, &mut || {
                 self.pte_pages.borrow_mut().next()
             })
-            .map_err(|_| Error::MapperCreationFailed)?;
+            .map_err(Error::MapperCreationFailed)?;
         let perms = match slot_perm {
             UmodeSlotPerm::Readonly => PteFieldBits::leaf_with_perms(PteLeafPerms::UR),
             UmodeSlotPerm::Writable => PteFieldBits::leaf_with_perms(PteLeafPerms::URW),
@@ -448,7 +456,7 @@ impl HypPageTable {
         }
         self.sv48
             .unmap_range(vaddr, PageSize::Size4k, num_pages)
-            .map_err(|_| Error::UnmapFailed)
+            .map_err(Error::UnmapFailed)
     }
 
     /// Copies `data` into the U-mode Input Region. The structure will be accessible read-only in
@@ -492,7 +500,7 @@ impl UmodeSlotMapper<'_> {
         // created. Pages are owned by guest, so no mapping of hypervisor pages are created.
         self.mapper
             .map_one(vaddr, paddr, self.perms)
-            .map_err(|_| Error::MapFailed)
+            .map_err(Error::MapFailed)
     }
 }
 
@@ -588,23 +596,23 @@ impl HypMap {
             .take_pages_for_hyp_state(1)
             .into_iter()
             .next()
-            .unwrap();
+            .ok_or(Error::InsufficientSpaceForPageTable)?;
         let sv48: FirstStagePageTable<Sv48> =
             FirstStagePageTable::new(root_page).map_err(Error::CreateRoot)?;
         // Map hardware map regions
         for r in &self.hw_map_regions {
             r.map(&sv48, &mut || {
                 hyp_mem.take_pages_for_hyp_state(1).into_iter().next()
-            });
+            })?;
         }
         // Map U-mode ELF region.
         for r in &self.umode_elf_regions {
-            r.map(&sv48, hyp_mem);
+            r.map(&sv48, hyp_mem)?;
         }
         // Alloc and map the hypervisor stack for this page-table.
         HypStackRegion::new(stack_pages)?.map(&sv48, hyp_mem)?;
         // Alloc and map the U-mode Input Region for this page-table.
-        let umode_input = UmodeInputRegion::map(&sv48, hyp_mem);
+        let umode_input = UmodeInputRegion::map(&sv48, hyp_mem)?;
         // Alloc pte_pages for U-mode mappings.
         let pte_pages = hyp_mem
             .take_pages_for_hyp_state(Sv48::max_pte_pages(

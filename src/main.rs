@@ -220,7 +220,7 @@ fn create_heap(mem_map: &mut HwMemMap) -> Result<(), Error> {
             RawAddr::from(heap_base),
             HEAP_SIZE,
         )
-        .unwrap();
+        .map_err(Error::HeapReserve)?;
     let pages: SequentialPages<InternalDirty> = unsafe {
         // Safe since this region of memory was free in the memory map.
         SequentialPages::from_mem_range(
@@ -228,8 +228,8 @@ fn create_heap(mem_map: &mut HwMemMap) -> Result<(), Error> {
             PageSize::Size4k,
             HEAP_SIZE / PageSize::Size4k as u64,
         )
-        .unwrap()
-    };
+        .map_err(|_| Error::HeapUnaligned)
+    }?;
     HYPERVISOR_ALLOCATOR.call_once(|| HypAlloc::from_pages(pages.clean()));
     Ok(())
 }
@@ -379,6 +379,10 @@ enum Error {
     FdtParsing(DeviceTreeError),
     /// Not enough free memory for heap
     HeapOutOfSpace,
+    /// Heap memory is unaligned
+    HeapUnaligned,
+    /// Unable to reserve memory for heap
+    HeapReserve(MemMapError),
     /// Kernel is missing
     KernelMissing,
     /// Loading user-mode binary failed
@@ -408,6 +412,8 @@ impl Display for Error {
             FdtCreation(e) => write!(f, "Failed to construct device-tree: {}", e),
             FdtParsing(e) => write!(f, "Failed to read FDT: {}", e),
             HeapOutOfSpace => write!(f, "Not enough free memory for hypervisor heap"),
+            HeapUnaligned => write!(f, "Heap memory is unaligned"),
+            HeapReserve(e) => write!(f, "Error reserving heap memory: {:?}", e),
             KernelMissing => write!(f, "No host kernel image"),
             LoadUserMode(e) => write!(f, "Cannot load user-mode ELF binary: {:?}", e),
             RequiredDeviceProbe(e) => write!(f, "Failed to probe required device: {}", e),

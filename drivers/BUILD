@@ -42,6 +42,9 @@ rustfmt_test(
 rust_test(
     name = "drivers-test",
     crate = ":drivers",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )
 
 rust_doc(

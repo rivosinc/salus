@@ -30,4 +30,7 @@ rustfmt_test(
 rust_test(
     name = "mtt-test",
     crate = ":mtt",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )

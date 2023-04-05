@@ -29,6 +29,9 @@ rustfmt_test(
 rust_test(
     name = "page-tracking-test",
     crate = ":page-tracking",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )
 
 rust_doc(

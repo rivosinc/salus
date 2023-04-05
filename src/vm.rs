@@ -2223,10 +2223,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
             // ownership since the page was mapped before it was replaced.
             let prev_page: ImsicGuestPage<Invalidated> = unsafe { ImsicGuestPage::new(prev_addr) };
             // Unwrap ok: Page was mapped and has just been invalidated.
-            guest_vm
-                .vm_pages()
-                .unassign_imsic_page_begin(prev_page)
-                .unwrap();
+            guest_vm.vm_pages().block_imsic_page(prev_page).unwrap();
         }
 
         Ok(0)
@@ -2262,7 +2259,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
         // page_tracker.
         guest_vm
             .vm_pages()
-            .unassign_imsic_page_end(prev_imsic_addr)
+            .remove_imsic_page(prev_imsic_addr)
             .map_err(EcallError::from)?;
 
         // Saves the previous guest interrupt file's state.

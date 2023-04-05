@@ -28,6 +28,9 @@ rustfmt_test(
 rust_test(
     name = "hyp-alloc-test",
     crate = ":hyp-alloc",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )
 
 rust_doc(

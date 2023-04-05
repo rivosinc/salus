@@ -25,6 +25,9 @@ rustfmt_test(
 rust_test(
     name = "riscv-elf-test",
     crate = ":riscv-elf",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )
 
 rust_doc(

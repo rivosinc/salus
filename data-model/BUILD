@@ -26,6 +26,9 @@ rust_test(
     name = "data-model-test",
     testonly = True,
     crate = ":data-model",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )
 
 rust_doc(

@@ -28,6 +28,9 @@ rustfmt_test(
 rust_test(
     name = "device-tree-test",
     crate = ":device-tree",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )
 
 rust_doc(

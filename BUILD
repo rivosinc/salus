@@ -217,6 +217,7 @@ rust_test(
         "-Ctarget-feature=+v",
         "-Clink-arg=-Tsrc/salus-test.lds",
         "--codegen=link-arg=-nostartfiles",
+        "-Dwarnings",
     ],
     deps = salus_deps,
 )

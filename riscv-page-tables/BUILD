@@ -29,6 +29,9 @@ rustfmt_test(
 rust_test(
     name = "riscv-page-tables-test",
     crate = ":riscv-page-tables",
+    rustc_flags = [
+        "-Dwarnings",
+    ],
 )
 
 rust_doc(

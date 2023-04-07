@@ -47,7 +47,7 @@ impl<P: PhysPage> PageList<P> {
     ) -> Self {
         let mut len = 1;
         let mut tail = head;
-        while let Some(addr) = page_tracker.linked_page(tail, page_size) {
+        while let Some(addr) = page_tracker.linked_page(tail) {
             len += 1;
             tail = addr;
         }
@@ -68,8 +68,7 @@ impl<P: PhysPage> PageList<P> {
             return Err(PageTrackingError::InvalidPageSize);
         }
         if let Some(tail_addr) = self.tail {
-            self.page_tracker
-                .link_pages(tail_addr, page.addr(), page.size())?;
+            self.page_tracker.link_pages(tail_addr, page.addr())?;
             self.tail = Some(page.addr());
         } else {
             self.head = Some(page.addr());
@@ -82,7 +81,7 @@ impl<P: PhysPage> PageList<P> {
     /// Removes the head of the list.
     pub fn pop(&mut self) -> Option<P> {
         let addr = self.head?;
-        self.head = self.page_tracker.unlink_page(addr, self.page_size);
+        self.head = self.page_tracker.unlink_page(addr);
         if self.head.is_none() {
             // List is now empty.
             self.tail = None;
@@ -113,7 +112,7 @@ impl<P: PhysPage> PageList<P> {
             return true;
         }
         let mut prev = self.head.unwrap();
-        while let Some(addr) = self.page_tracker.linked_page(prev, self.page_size) {
+        while let Some(addr) = self.page_tracker.linked_page(prev) {
             if let Some(next) = prev.checked_add_pages_with_size(1, self.page_size) && addr == next {
                 prev = next;
             } else {

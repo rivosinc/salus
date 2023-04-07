@@ -1870,6 +1870,11 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .page_tracker
             .unblock_page(pa, one_size_larger_page_size)
             .unwrap();
+        // Unwrap ok: Sub pages exist.
+        self.inner
+            .page_tracker
+            .copy_head_page_to_sub_pages(pa, one_size_larger_page_size)
+            .unwrap();
         Ok(())
     }
 

@@ -136,6 +136,24 @@ impl PageInfo {
         self.state
     }
 
+    /// Returns the list of owners.
+    pub fn owners(&self) -> PageOwnerVec {
+        self.owners.clone()
+    }
+
+    /// Updates the current page info.
+    pub fn update(
+        &mut self,
+        mem_type: MemType,
+        state: PageState,
+        owners: PageOwnerVec,
+    ) -> PageTrackingResult<()> {
+        self.state = state;
+        self.owners = owners;
+        self.mem_type = mem_type;
+        Ok(())
+    }
+
     /// Returns if the page is free.
     pub fn is_free(&self) -> bool {
         matches!(self.state, PageState::Free)

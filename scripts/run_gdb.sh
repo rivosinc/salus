@@ -3,4 +3,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-riscv64-unknown-elf-gdb bazel-bin/src/salus --ex "target remote localhost:1234"
+. scripts/common_variables
+
+set -x
+
+${GDB} ${SALUS_BINS}salus ${GDB_ARGS} --ex "target remote localhost:1234"

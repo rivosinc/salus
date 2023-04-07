@@ -51,3 +51,6 @@ CPU_TYPE=rv64${EXTRA_CPU}
 CPU_ARGS="${CPU_TYPE},x-smaia=true,x-ssaia=true,sscofpmf=true"
 
 MACH_ARGS="-M virt,aia=aplic-imsic,aia-guests=5 -cpu ${CPU_ARGS} -smp ${NCPU} -m ${MEM_SIZE} -nographic"
+
+GDB=${GDB:-riscv64-unknown-elf-gdb}
+GDB_ARGS=${GDB_ARGS:-}

@@ -1383,7 +1383,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     fn do_get_converted_pages<P: ConvertedPhysPage>(
         &self,
         page_addr: GuestPageAddr,
-        page_size: PageSize,
+        target_page_size: PageSize,
         num_pages: u64,
     ) -> Result<LockedPageList<P::DirtyPage>> {
         if num_pages == 0 {
@@ -1395,29 +1395,40 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         let converted = self
             .inner
             .root
-            .get_invalidated_pages(page_addr, num_pages * page_size as u64, |pa, ps| {
+            .get_invalidated_pages(page_addr, num_pages * target_page_size as u64, |pa, ps| {
                 // Converted pages should always be 4k given the host is
                 // exclusively mapped with 4k pages.
                 if ps.is_huge() {
                     return false;
                 }
 
-                // We need to check the first page is suitably aligned and that every page
-                // is contiguous to the previous one. That's because we have some logic below
-                // that allows to create huge pages out of 4k pages, by skipping the intermediate
-                // pages. That's why we must ensure the whole range is physically contiguous and
-                // suitably aligned.
+                // We need to check the first subpage is suitably aligned and that every following
+                // subpage covering the same huge page is contiguous to the previous one. That's
+                // because we have some logic below that allows to create huge pages out of 4k pages,
+                // by skipping the intermediate pages. That's why we must ensure the whole range is
+                // made of physically contiguous subpages for each huge page and they are suitably
+                // aligned.
                 if let Some(addr) = prev_pa {
+                    let next_pa = addr.checked_add_pages_with_size(1, ps).unwrap();
                     // Check the current page is contiguous with the previous page
-                    if addr.checked_add_pages_with_size(1, ps) != Some(pa) {
+                    if next_pa.is_aligned(target_page_size) {
+                        // This is our way of resetting the check for contiguous subpages.
+                        prev_pa = None;
+                    } else {
+                        // Check the current page is contiguous with the previous page
+                        if next_pa != pa {
+                            return false;
+                        }
+                        prev_pa = Some(pa);
+                    }
+                } else {
+                    if !pa.is_aligned(target_page_size) {
+                        // This is the first page, we must ensure it's suitably aligned with the requested
+                        // page size.
                         return false;
                     }
-                } else if !pa.is_aligned(page_size) {
-                    // This is the first page, we must ensure it's suitably aligned with the requested
-                    // page size.
-                    return false;
+                    prev_pa = Some(pa);
                 }
-                prev_pa = Some(pa);
 
                 self.inner.page_tracker.is_converted_page(
                     pa,
@@ -1430,14 +1441,14 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
             .map_err(Error::Paging)?;
 
         // Lock the pages for assignment.
-        let mut locked_pages = LockedPageList::new(self.inner.page_tracker(), page_size);
-        for (paddr, _) in converted.filter(|(pa, _)| pa.is_aligned(page_size)) {
+        let mut locked_pages = LockedPageList::new(self.inner.page_tracker(), target_page_size);
+        for (paddr, _) in converted.filter(|(pa, _)| pa.is_aligned(target_page_size)) {
             // Unwrap ok: The pages are guaranteed to be converted and no one else can get a
             // reference to them until the iterator is destroyed.
             let page = self
                 .inner
                 .page_tracker
-                .get_converted_page::<P>(paddr, page_size, self.inner.page_owner_id, version)
+                .get_converted_page::<P>(paddr, target_page_size, self.inner.page_owner_id, version)
                 .unwrap();
             locked_pages.push(page).unwrap();
         }
@@ -1459,7 +1470,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
     pub fn get_shareable_pages(
         &self,
         page_addr: GuestPageAddr,
-        page_size: PageSize,
+        target_page_size: PageSize,
         num_pages: u64,
     ) -> Result<impl 'a + Iterator<Item = Page<Shareable>>> {
         let page_tracker = self.inner.page_tracker();
@@ -1468,40 +1479,55 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         Ok(self
             .inner
             .root
-            .get_mapped_pages(page_addr, num_pages * page_size as u64, move |pa, ps| {
-                // Shareable pages should always be 4k given the host is
-                // exclusively mapped with 4k pages.
-                if ps.is_huge() {
-                    return false;
-                }
-
-                // We need to check the first page is suitably aligned and that every page
-                // is contiguous to the previous one. That's because we have some logic below
-                // that allows to create huge pages out of 4k pages, by skipping the intermediate
-                // pages. That's why we must ensure the whole range is physically contiguous and
-                // suitably aligned.
-                if let Some(addr) = prev_pa {
-                    // Check the current page is contiguous with the previous page
-                    if addr.checked_add_pages_with_size(1, ps) != Some(pa) {
+            .get_mapped_pages(
+                page_addr,
+                num_pages * target_page_size as u64,
+                move |pa, ps| {
+                    // Shareable pages should always be 4k given the host is
+                    // exclusively mapped with 4k pages.
+                    if ps.is_huge() {
                         return false;
                     }
-                } else if !pa.is_aligned(page_size) {
-                    // This is the first page, we must ensure it's suitably aligned with the requested
-                    // page size.
-                    return false;
-                }
-                prev_pa = Some(pa);
 
-                page_tracker.is_shareable_page(pa, ps, page_owner_id, MemType::Ram)
-            })
+                    // We need to check the first subpage is suitably aligned and that every following
+                    // subpage covering the same huge page is contiguous to the previous one. That's
+                    // because we have some logic below that allows to create huge pages out of 4k pages,
+                    // by skipping the intermediate pages. That's why we must ensure the whole range is
+                    // made of physically contiguous subpages for each huge page and they are suitably
+                    // aligned.
+                    if let Some(addr) = prev_pa {
+                        let next_pa = addr.checked_add_pages_with_size(1, ps).unwrap();
+                        // Check the current page is contiguous with the previous page
+                        if next_pa.is_aligned(target_page_size) {
+                            // This is our way of resetting the check for contiguous subpages.
+                            prev_pa = None;
+                        } else {
+                            // Check the current page is contiguous with the previous page
+                            if next_pa != pa {
+                                return false;
+                            }
+                            prev_pa = Some(pa);
+                        }
+                    } else {
+                        if !pa.is_aligned(target_page_size) {
+                            // This is the first page, we must ensure it's suitably aligned with the requested
+                            // page size.
+                            return false;
+                        }
+                        prev_pa = Some(pa);
+                    }
+
+                    page_tracker.is_shareable_page(pa, ps, page_owner_id, MemType::Ram)
+                },
+            )
             .map_err(Error::Paging)?
             .filter_map(move |(addr, _)| {
-                if !addr.is_aligned(page_size) {
+                if !addr.is_aligned(target_page_size) {
                     return None;
                 }
                 Some(
                     page_tracker
-                        .get_shareable_page(addr, page_size, page_owner_id)
+                        .get_shareable_page(addr, target_page_size, page_owner_id)
                         .unwrap(),
                 )
             }))

@@ -1455,7 +1455,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         self.do_get_converted_pages::<Page<ConvertedDirty>>(page_addr, page_size, num_pages)
     }
 
-    /// Acquries an exclusive reference to the `num_pages` shared pages starting at `page_addr`.
+    /// Acquries an exclusive reference to the `num_pages` shared host pages starting at `page_addr`.
     pub fn get_shareable_pages(
         &self,
         page_addr: GuestPageAddr,
@@ -1504,6 +1504,40 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                         .get_shareable_page(addr, page_size, page_owner_id)
                         .unwrap(),
                 )
+            }))
+    }
+
+    /// Acquries an exclusive reference to the `num_pages` shared pages starting at `page_addr`.
+    pub fn share_pages_with_umode(
+        &self,
+        page_addr: GuestPageAddr,
+        num_pages: u64,
+    ) -> Result<impl 'a + Iterator<Item = Page<Shareable>>> {
+        Ok(self
+            .inner
+            .root
+            .get_mapped_pages(
+                page_addr,
+                num_pages * PageSize::Size4k as u64,
+                |addr, ps| {
+                    // TODO: Support sharing of huge pages with U-mode.
+                    if ps.is_huge() {
+                        return false;
+                    }
+                    self.inner.page_tracker.is_shareable_page(
+                        addr,
+                        ps,
+                        self.inner.page_owner_id,
+                        MemType::Ram,
+                    )
+                },
+            )
+            .map_err(Error::Paging)?
+            .map(|(addr, _)| {
+                self.inner
+                    .page_tracker
+                    .get_shareable_page(addr, PageSize::Size4k, self.inner.page_owner_id)
+                    .unwrap()
             }))
     }
 
@@ -1989,7 +2023,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         count: u64,
         slot_perm: UmodeSlotPerm,
     ) -> Result<GuestUmodeMapping> {
-        let pages = self.get_shareable_pages(page_addr, PageSize::Size4k, count)?;
+        let pages = self.share_pages_with_umode(page_addr, count)?;
         // TODO: Check that guest request for mapping it writable is consistent with the guest mappings.
         let mapper = PerCpu::this_cpu()
             .page_table()

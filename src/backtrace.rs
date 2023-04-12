@@ -10,6 +10,12 @@ use alloc::fmt::{Display, Formatter, Result};
 use core::arch::asm;
 use core::mem::size_of;
 
+#[cfg(test)]
+extern "C" {
+    static _stack_start: u8;
+    static _stack_end: u8;
+}
+
 #[derive(Copy, Clone)]
 pub enum BTReturnAddress {
     ReturnAddress(u64),
@@ -41,16 +47,10 @@ pub struct BackTrace {
 }
 
 impl BackTrace {
-    fn new(fp: u64) -> Self {
-        let stack_start = HYP_STACK_BOTTOM;
-        let stack_end = HYP_STACK_TOP;
+    fn get_current(fp: u64) -> Option<Self> {
+        let (stack_start, stack_end) = stack_limits();
         if fp < stack_start || fp > stack_end {
-            return Self {
-                fp: None,
-                stack_start: 0_u64,
-                stack_end: 0_u64,
-                stack: &[],
-            };
+            return None;
         }
 
         // Safe because we only access memory that should be paged in
@@ -62,12 +62,12 @@ impl BackTrace {
             )
         };
 
-        Self {
+        Some(Self {
             fp: Some(fp),
             stack_start,
             stack_end,
             stack,
-        }
+        })
     }
 
     fn next_address(&self, fp: u64) -> Option<(u64, u64)> {
@@ -114,7 +114,7 @@ impl Iterator for BackTrace {
     }
 }
 
-pub(crate) fn backtrace() -> BackTrace {
+pub(crate) fn backtrace() -> Option<BackTrace> {
     // Safe because we are just reading a register
     let fp = unsafe {
         let mut tmp: u64;
@@ -122,5 +122,48 @@ pub(crate) fn backtrace() -> BackTrace {
         tmp
     };
 
-    BackTrace::new(fp)
+    BackTrace::get_current(fp)
+}
+
+#[cfg(not(test))]
+fn stack_limits() -> (u64, u64) {
+    (HYP_STACK_BOTTOM, HYP_STACK_TOP)
+}
+
+#[cfg(test)]
+fn stack_limits() -> (u64, u64) {
+    let stack_start = unsafe { core::ptr::addr_of!(_stack_start) as u64 };
+    let stack_end = unsafe { core::ptr::addr_of!(_stack_end) as u64 };
+
+    (stack_start, stack_end)
+}
+
+#[cfg(test)]
+mod testing {
+    use super::*;
+    use s_mode_utils::print::*;
+    use test_system::*;
+
+    #[test_case]
+    fn BackTraceTest() -> TestResult {
+        let (low, high) = stack_limits();
+        let mut back_trace = BackTrace::get_current(low).expect("BackTraceTest expect 1");
+        let bt_res = back_trace.next();
+
+        if let Some(BTReturnAddress::InvalidReturnAddress(x)) = bt_res {
+            test_declare_pass!("Backtrace::new(stack_start)");
+        } else {
+            test_declare_fail!("Backtrace::new(stack_start)");
+        }
+
+        test_result_true!(
+            back_trace.next().is_none(),
+            "Backtrace::new(stack_start).next()"
+        )?;
+
+        let mut back_trace = backtrace().expect("BackTraceTest expect 2");
+        test_result_false!(back_trace.next().is_none(), "backtrace()")?;
+
+        Ok(())
+    }
 }

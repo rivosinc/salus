@@ -86,10 +86,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     println!("panic backtrace:");
     // Skip the first 2 calls on the stack.
     // They are always the same, and are from the
-    // panic handling code.
-    backtrace().skip(2).for_each(|frame| {
-        print!("{}", frame);
-    });
+    // panic handling code
+    if let Some(bt) = backtrace() {
+        bt.skip(2).for_each(|frame| {
+            print!("{}", frame);
+        });
+    }
 
     abort()
 }

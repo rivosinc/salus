@@ -1188,13 +1188,18 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
         vs_csrs.vsepc = CSR.vsepc.get();
         vs_csrs.vscause = CSR.vscause.get();
         vs_csrs.vstval = CSR.vstval.get();
-        vs_csrs.vsatp = CSR.vsatp.get();
+        // Clear vsatp to ensure no translations are speculatively cached while running in HS
+        // mode. Needed because hgatp can't be cleared atomically when setting vsatp so in some
+        // micro-architectures cached translations have a window where they can be created.
+        vs_csrs.vsatp = CSR.vsatp.atomic_replace(0);
         vs_csrs.vstimecmp = CSR.vstimecmp.get();
     }
 
     fn restore(&mut self) {
-        self.restore_vs_csrs();
         self.restore_vm_pages();
+        // NB: restoring vs csrs must happen _after_ the vm_pages as vsatp must be set after hgatp
+        // to avoid speculative caching of translations on some systems.
+        self.restore_vs_csrs();
         self.pmu().restore_counters();
 
         match self.host_context {

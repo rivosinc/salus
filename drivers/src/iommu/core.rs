@@ -186,7 +186,7 @@ impl Iommu {
         // Make sure the GSCID is valid and that it matches up with the device and page table
         // owner.
         let mut gscids = self.gscids.lock();
-        let mut state = gscids
+        let state = gscids
             .get_mut(gscid.bits() as usize)
             .and_then(|g| g.as_mut())
             .ok_or(Error::InvalidGscId(gscid))?;
@@ -208,7 +208,7 @@ impl Iommu {
         {
             // Verify that the GSCID is valid and that it matches up with the device owner.
             let mut gscids = self.gscids.lock();
-            let mut state = gscids
+            let state = gscids
                 .get_mut(gscid.bits() as usize)
                 .and_then(|g| g.as_mut())
                 .ok_or(Error::InvalidGscId(gscid))?;

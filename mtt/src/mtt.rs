@@ -169,7 +169,7 @@ struct Mtt64MEntry<'a> {
 }
 
 impl<'a> Mtt64MEntry<'a> {
-    fn new(entry: &'a mut u64) -> Mtt64MEntry {
+    fn new(entry: &'a mut u64) -> Mtt64MEntry<'a> {
         Self { entry }
     }
 

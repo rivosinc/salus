@@ -509,11 +509,6 @@ impl<'a, T: PagingMode> PageTable<'a, T> {
 
 /// An index to an entry in a page table.
 trait PteIndex {
-    /// Returns the offset in bytes of the index
-    fn offset(&self) -> u64 {
-        self.index() * core::mem::size_of::<u64>() as u64
-    }
-
     /// get the underlying index
     fn index(&self) -> u64;
 }

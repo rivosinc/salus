@@ -4,7 +4,7 @@
 
 #![no_main]
 #![no_std]
-#![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
+#![feature(allocator_api, alloc_error_handler)]
 #![allow(missing_docs)]
 
 use core::alloc::{GlobalAlloc, Layout};

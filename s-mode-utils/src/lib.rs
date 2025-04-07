@@ -5,13 +5,7 @@
 //! Provides basic functions for code running in S-mode.
 
 #![no_std]
-#![feature(
-    panic_info_message,
-    allocator_api,
-    alloc_error_handler,
-    lang_items,
-    asm_const
-)]
+#![feature(allocator_api, alloc_error_handler)]
 
 pub use core::alloc::{GlobalAlloc, Layout};
 

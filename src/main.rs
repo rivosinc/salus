@@ -7,23 +7,17 @@
 #![no_main]
 #![no_std]
 #![feature(
-    panic_info_message,
     allocator_api,
     alloc_error_handler,
-    lang_items,
     if_let_guard,
-    asm_const,
-    ptr_sub_ptr,
     slice_ptr_get,
     let_chains,
-    is_some_and,
     negative_impls
 )]
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::tests::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![cfg_attr(test, allow(unused))]
-#![feature(pointer_is_aligned)]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::fmt::Display;

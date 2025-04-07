@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![no_std]
-#![feature(asm_const)]
 #![allow(missing_docs)]
 
 //! Crate for handling RV64 registers.

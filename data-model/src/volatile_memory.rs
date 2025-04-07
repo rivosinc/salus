@@ -98,7 +98,7 @@ pub struct VolatileSlice<'a> {
 
 impl<'a> VolatileSlice<'a> {
     /// Creates a slice of raw memory that must support volatile access.
-    pub fn new(buf: &'a mut [u8]) -> VolatileSlice {
+    pub fn new(buf: &'a mut [u8]) -> VolatileSlice<'a> {
         Self {
             ptr: buf.as_mut_ptr(),
             len: buf.len(),

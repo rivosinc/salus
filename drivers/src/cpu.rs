@@ -7,7 +7,7 @@ use core::fmt;
 use device_tree::{DeviceTree, DeviceTreeNode, DeviceTreeResult};
 use sync::Once;
 
-const MAX_ISA_STRING_LEN: usize = 256;
+const MAX_ISA_STRING_LEN: usize = 1024;
 
 /// The maximum number of CPUs we can support.
 pub const MAX_CPUS: usize = 128;

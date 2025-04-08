@@ -12,7 +12,7 @@
 QEMU=${QEMU:-""}
 if [ x$QEMU != "x" ]
 then
-    QEMU=${QEMU}/build/riscv64-softmmu/
+    QEMU=${QEMU}/build/
 fi
 QEMU_BIN=${QEMU}qemu-system-riscv64
 

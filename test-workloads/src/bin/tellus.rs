@@ -454,7 +454,8 @@ fn do_guest_puts(
     Ok(len)
 }
 
-static mut CONSOLE_BUFFER: [u8; 256] = [0; 256];
+const CONSOLE_BUFFER_SIZE: usize = 256;
+static mut CONSOLE_BUFFER: [u8; CONSOLE_BUFFER_SIZE] = [0; CONSOLE_BUFFER_SIZE];
 
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
@@ -464,7 +465,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Safety: We're giving SbiConsole exclusive ownership of CONSOLE_BUFFER and will not touch it
     // for the remainder of this program.
-    unsafe { SbiConsole::set_as_console(&mut CONSOLE_BUFFER) };
+    unsafe {
+        let console_mem = core::slice::from_raw_parts_mut(
+            &raw mut CONSOLE_BUFFER as *mut u8,
+            CONSOLE_BUFFER_SIZE,
+        );
+        SbiConsole::set_as_console(console_mem);
+    }
     println!("Tellus: Booting the test VM");
     test_declare_pass!("booting tellus", hart_id);
 

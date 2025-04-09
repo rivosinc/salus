@@ -442,8 +442,9 @@ impl DeviceTreeProp {
         self.buf.resize(vals.len() * N, 0);
         let mut remainder = self.buf.as_mut_slice();
         for &v in vals {
-            let (left, right) = remainder.split_array_mut::<N>();
-            *left = set_func(v);
+            let (left, right) = remainder.split_at_mut(N);
+            let new_val = set_func(v);
+            left.copy_from_slice(&new_val);
             remainder = right;
         }
         Ok(())
@@ -545,8 +546,9 @@ impl<'a, T, const N: usize> Iterator for DeviceTreePropIter<'a, T, N> {
         if self.buf.len() < N {
             return None;
         }
-        let (left, right) = self.buf.split_array_ref::<N>();
-        let ret = (self.parse_func)(*left);
+        let (left, right) = self.buf.split_at(N);
+        let left = <[u8; N]>::try_from(left).ok()?;
+        let ret = (self.parse_func)(left);
         self.buf = right;
         Some(ret)
     }

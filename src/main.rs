@@ -157,8 +157,8 @@ fn build_memory_map(fdt: &Fdt) -> MemMapResult<HwMemMap> {
     // passed in by firmware.
 
     // Safe because we trust the linker placed these symbols correctly.
-    let start = unsafe { core::ptr::addr_of!(_start) as u64 };
-    let stack_end = unsafe { core::ptr::addr_of!(_stack_end) as u64 };
+    let start = core::ptr::addr_of!(_start) as u64;
+    let stack_end = core::ptr::addr_of!(_stack_end) as u64;
 
     // Find the region of DRAM that the hypervisor is in.
     let resv_base = fdt

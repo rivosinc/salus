@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+.attribute arch, "rv64gcvh"
+
 // Very unoptimized memcpy() to/from guest memory functions, using the HLV/HSV instructions.
 
 // Adds the instruction at 'lbl' to the exception table.

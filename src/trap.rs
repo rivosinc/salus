@@ -195,7 +195,7 @@ fn extable() -> &'static [ExceptionTableEntry] {
     unsafe {
         let start = core::ptr::addr_of!(_extable_start) as *const ExceptionTableEntry;
         let end = core::ptr::addr_of!(_extable_end) as *const ExceptionTableEntry;
-        core::slice::from_raw_parts(start, end.sub_ptr(start))
+        core::slice::from_raw_parts(start, end.offset_from(start) as usize)
     }
 }
 

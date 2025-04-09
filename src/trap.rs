@@ -221,7 +221,7 @@ extern "C" fn handle_stack_overflow(tf_ptr: *mut TrapFrame) {
 #[no_mangle]
 extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
     // Safe since we trust that TrapFrame was properly intialized by _trap_entry.
-    let mut tf = unsafe { tf_ptr.as_mut().unwrap() };
+    let tf = unsafe { tf_ptr.as_mut().unwrap() };
     let scause = CSR.scause.get();
     let stval = CSR.stval.get();
 

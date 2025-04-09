@@ -67,7 +67,7 @@ impl Signer<Signature> for UmodeCdi {
     fn try_sign(&self, msg: &[u8]) -> Result<Signature, SignatureError> {
         let mut signature = [0u8; SIGNATURE_LENGTH];
         hyp_cdi_sign(self.cdi, msg, &mut signature);
-        Signature::from_bytes(&signature)
+        Ok(Signature::from_bytes(&signature))
     }
 }
 

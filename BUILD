@@ -186,7 +186,6 @@ rust_binary(
         ":l_rule",
     ],
     rustc_flags = [
-        "-Ctarget-feature=+v",
         "-Ctarget-feature=+h",
         "--codegen=link-arg=-nostartfiles",
         "-Clink-arg=-T$(location //:l_rule)",
@@ -215,7 +214,6 @@ rust_test(
     crate_root = "src/main.rs",
     data = glob(["src/*.S"]) + ["src/salus-test.lds"],
     rustc_flags = [
-        "-Ctarget-feature=+v",
         "-Ctarget-feature=+h",
         "-Clink-arg=-Tsrc/salus-test.lds",
         "--codegen=link-arg=-nostartfiles",

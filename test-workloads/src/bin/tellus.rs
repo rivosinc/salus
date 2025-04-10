@@ -327,8 +327,11 @@ fn store_into_vectors() {
     unsafe {
         // safe because we are only setting the vector csr's
         asm!(
+            ".option push",
+            ".option arch, +v",
             "csrrs zero, sstatus, {enable}",
             "vsetvl x0, {vec_len}, {vtype}",
+            ".option pop",
             vec_len = in(reg) vec_len,
             vtype = in(reg) vtype,
             enable = in(reg) enable,
@@ -356,10 +359,13 @@ fn store_into_vectors() {
     unsafe {
         // safe because the assembly reads into the vector register file
         asm!(
+            ".option push",
+            ".option arch, +v",
             "vl8r.v  v0, ({bufp1})",
             "vl8r.v  v8, ({bufp2})",
             "vl8r.v  v16, ({bufp3})",
             "vl8r.v  v24, ({bufp4})",
+            ".option pop",
             bufp1 = in(reg) bufp1,
             bufp2 = in(reg) bufp2,
             bufp3 = in(reg) bufp3,
@@ -389,10 +395,13 @@ fn check_vectors() {
     unsafe {
         // safe because enough memory provided to store entire register file
         asm!(
+            ".option push",
+            ".option arch, +v",
             "vs8r.v  v0, ({bufp1})",
             "vs8r.v  v8, ({bufp2})",
             "vs8r.v  v16, ({bufp3})",
             "vs8r.v  v24, ({bufp4})",
+            ".option pop",
             bufp1 = in(reg) bufp1,
             bufp2 = in(reg) bufp2,
             bufp3 = in(reg) bufp3,

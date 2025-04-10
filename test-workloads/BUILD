@@ -53,7 +53,6 @@ rust_binary(
     linker_script = "tellus.lds",
     proc_macro_deps = ["@salus-index//:hex-literal"],
     rustc_flags = [
-        "-Ctarget-feature=+v",
         "--codegen=link-arg=-nostartfiles",
     ],
     visibility = ["//visibility:public"],
@@ -86,7 +85,6 @@ rust_binary(
     linker_script = "guest.lds",
     proc_macro_deps = ["@salus-index//:hex-literal"],
     rustc_flags = [
-        "-Ctarget-feature=+v",
         "--codegen=link-arg=-nostartfiles",
     ],
     visibility = ["//visibility:public"],

@@ -254,7 +254,7 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
     cove_host::reclaim_pages(addr, num_pages).expect("TsmReclaimPages failed");
 
     for i in 0u64..((num_pages * PAGE_SIZE_4K) / 8) {
-        let m = (addr + i) as *const u64;
+        let m = (addr + i * core::mem::size_of::<u64>() as u64) as *const u64;
         unsafe {
             if core::ptr::read_volatile(m) != 0 {
                 panic!("Tellus - Read back non-zero at qword offset {i:x} after exiting from TVM!");

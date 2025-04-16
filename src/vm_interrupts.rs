@@ -43,7 +43,7 @@ struct AllowList {
 impl AllowList {
     fn new(num_ids: usize) -> Self {
         let mut bits = ArrayVec::new();
-        let entries = (num_ids + 63) / 64;
+        let entries = num_ids.div_ceil(64);
         for _ in 0..entries {
             bits.push(0);
         }

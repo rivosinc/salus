@@ -335,10 +335,7 @@ fn store_into_vectors() {
 
     const REG_WIDTH_IN_U64S: usize = 4;
 
-    let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
-    for elem in &mut inbuf {
-        *elem = 0xDEADBEEFCAFEBABE;
-    }
+    let inbuf = [0xDEADBEEFCAFEBABE_u64; (32 * REG_WIDTH_IN_U64S)];
 
     let bufp1 = inbuf.as_ptr();
     let bufp2: *const u64;
@@ -567,8 +564,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     next_page += PAGE_SIZE_4K * tvm_create_pages;
 
     // Set aside pages for the shared mem area.
-    let num_shmem_pages =
-        (core::mem::size_of::<sbi_rs::NaclShmem>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    let num_shmem_pages = (core::mem::size_of::<sbi_rs::NaclShmem>() as u64).div_ceil(PAGE_SIZE_4K);
     let shmem_ptr = next_page as *mut sbi_rs::NaclShmem;
     next_page += num_shmem_pages * PAGE_SIZE_4K;
     // Safety: We own the memory at `shmem_ptr` and will only access it through volatile reads/writes.

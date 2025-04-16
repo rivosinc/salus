@@ -681,7 +681,7 @@ impl HypPageAlloc {
             start
                 .iter_from()
                 .take_while(|&a| a != end)
-                .all(|a| self.pages.get(a).map_or(false, |p| p.is_free()))
+                .all(|a| self.pages.get(a).is_some_and(|p| p.is_free()))
         };
 
         // Find the free page rage and mark it, and any free pages we skipped in between,

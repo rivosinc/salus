@@ -24,7 +24,6 @@ use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ptr::{copy, read_volatile, write_bytes, write_volatile};
 use core::result;
-use core::usize;
 
 use crate::DataInit;
 

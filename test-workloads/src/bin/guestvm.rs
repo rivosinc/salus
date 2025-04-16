@@ -150,9 +150,7 @@ pub fn test_vector() -> TestResult {
     print_vector_csrs();
 
     // Overwrite memory to verify that it changes
-    for elem in &mut inbuf {
-        *elem = 99_u64;
-    }
+    inbuf.fill(99_u64);
 
     println!("Reading vector registers");
     unsafe {

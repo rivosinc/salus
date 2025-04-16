@@ -682,7 +682,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
             Trap::Exception(e) => {
                 if e.to_hedeleg_field()
-                    .map_or(false, |f| CSR.hedeleg.matches_any(f))
+                    .is_ok_and(|f| CSR.hedeleg.matches_any(f))
                 {
                     // Even if we intended to delegate this exception it might not be set in
                     // medeleg, in which case firmware may send it our way instead.
@@ -1613,7 +1613,7 @@ impl VmCpus {
         let once_val = once_entry.call_once(|| vcpu);
         let once_ptr: *const VmCpu = &**once_val;
 
-        if once_ptr != ptr {
+        if !core::ptr::eq(once_ptr, ptr) {
             Err(Error::VmCpuExists)
         } else {
             Ok(())

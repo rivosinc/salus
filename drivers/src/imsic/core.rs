@@ -553,7 +553,7 @@ impl Imsic {
 
     // Returns the number EIE/EIP registers used by the IMSIC.
     fn num_ei_regs(&self) -> usize {
-        (self.interrupt_ids + 63) / 64
+        self.interrupt_ids.div_ceil(64)
     }
 
     // Returns an ImsicGuestCsrAccess struct providing scoped access to guest_file's CSRs.

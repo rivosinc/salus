@@ -28,10 +28,7 @@ unsafe impl<T> Sync for ArenaId<T> {}
 
 impl<T> Clone for ArenaId<T> {
     fn clone(&self) -> Self {
-        ArenaId {
-            index: self.index,
-            phantom: PhantomData,
-        }
+        *self
     }
 }
 

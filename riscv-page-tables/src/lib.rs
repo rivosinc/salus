@@ -7,14 +7,14 @@
 //! ## Key types
 //!
 //! - `Page` is the basic building block, representing pages of host supervisor memory. Provided by
-//! the `riscv-pages` crate.
+//!   the `riscv-pages` crate.
 //! - `PageTracker` tracks per-page ownership and typing information, and is used to verify the
-//! safety of page table operations. Provided by the `page-tracking` crate.
+//!   safety of page table operations. Provided by the `page-tracking` crate.
 //! - `GuestStagePageTable` is a top-level page table structures used to manipulate address translation
-//! and protection.
+//!   and protection.
 //! - `PageTable` provides a generic implementation of a single level of multi-level translation.
 //! - `Sv48x4`, `Sv48`, etc. define standard RISC-V translation modes for 1st or 2nd-stage translation
-//! tables.
+//!   tables.
 //!
 //! ## Safety
 //!

@@ -6,43 +6,43 @@
 #![allow(dead_code)]
 #![allow(missing_docs)]
 
-/// Constants defining the layout of the Tellus & GuestVM address space.
-///
-/// The composite Tellus + Guest VM image has this layout in physical memory:
-///
-/// +-------------------------+ 0x8020_0000
-/// | Tellus image            |
-/// +-------------------------+ +NUM_TELLUS_IMAGE_PAGES
-/// | Guest image             |
-/// +-------------------------+
-///
-/// The guest VM's address space is constructed to look like this:
-///
-/// +-------------------------+ 0x1000_0000
-/// | MMIO (4kB)              |
-/// |-------------------------|
-/// | <empty>                 |
-/// |-------------------------| 0x2800_0000
-/// | IMSIC (1MB)             |
-/// |-------------------------|
-/// | <empty>                 |
-/// |-------------------------| 0x8020_0000
-/// | Guest image             |
-/// |-------------------------| +NUM_GUEST_DATA_PAGES
-/// | Guest zero pages        |
-/// |-------------------------| +NUM_GUEST_ZERO_PAGES
-/// | <empty>                 |
-/// |-------------------------| 0x1_0000_0000
-/// | Shared pages            |
-/// |-------------------------| +NUM_GUEST_SHARED_PAGES
-/// | Shared console buffer   |
-/// |-------------------------| +4kB
-/// | <empty>                 |
-/// +-------------------------+ 0x1_1000_0000
-/// | Guest zero huge pages   |
-/// +-------------------------+ +NUM_GUEST_ZERO_HUGE_PAGES
-/// | <empty>                 |
-/// +-------------------------+ 0x1_8000_0000
+//! Constants defining the layout of the Tellus & GuestVM address space.
+//!
+//! The composite Tellus + Guest VM image has this layout in physical memory:
+//!
+//! +-------------------------+ 0x8020_0000
+//! | Tellus image            |
+//! +-------------------------+ +NUM_TELLUS_IMAGE_PAGES
+//! | Guest image             |
+//! +-------------------------+
+//!
+//! The guest VM's address space is constructed to look like this:
+//!
+//! +-------------------------+ 0x1000_0000
+//! | MMIO (4kB)              |
+//! |-------------------------|
+//! | <empty>                 |
+//! |-------------------------| 0x2800_0000
+//! | IMSIC (1MB)             |
+//! |-------------------------|
+//! | <empty>                 |
+//! |-------------------------| 0x8020_0000
+//! | Guest image             |
+//! |-------------------------| +NUM_GUEST_DATA_PAGES
+//! | Guest zero pages        |
+//! |-------------------------| +NUM_GUEST_ZERO_PAGES
+//! | <empty>                 |
+//! |-------------------------| 0x1_0000_0000
+//! | Shared pages            |
+//! |-------------------------| +NUM_GUEST_SHARED_PAGES
+//! | Shared console buffer   |
+//! |-------------------------| +4kB
+//! | <empty>                 |
+//! +-------------------------+ 0x1_1000_0000
+//! | Guest zero huge pages   |
+//! +-------------------------+ +NUM_GUEST_ZERO_HUGE_PAGES
+//! | <empty>                 |
+//! +-------------------------+ 0x1_8000_0000
 
 pub const PAGE_SIZE_4K: u64 = 4096;
 pub const PAGE_SIZE_2M: u64 = 2097152;

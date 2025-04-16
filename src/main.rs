@@ -586,7 +586,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     // Parse the user-mode ELF containing the user-mode task.
     // Safe, because it comes from the Linker
     let umode_bytes = unsafe {
-        let umode_bin = core::ptr::addr_of!(_umode_bin) as *const u8;
+        let umode_bin = core::ptr::addr_of!(_umode_bin);
         let umode_bin_len = core::ptr::addr_of!(_umode_bin_len) as usize;
         core::slice::from_raw_parts::<u8>(umode_bin, umode_bin_len)
     };

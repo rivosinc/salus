@@ -536,7 +536,9 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     ) -> Result<Self> {
         let mut arch = vcpu.arch.lock();
         // If we're running on a new CPU, then any previous VMID or TLB version we used is inavlid.
-        if let Some(ref prev_tlb) = arch.prev_tlb && prev_tlb.cpu != PerCpu::this_cpu().cpu_id() {
+        if let Some(ref prev_tlb) = arch.prev_tlb
+            && prev_tlb.cpu != PerCpu::this_cpu().cpu_id()
+        {
             arch.prev_tlb = None;
         }
 
@@ -698,9 +700,9 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     // We may have gotten an SG_EXT because of an external interrupt directed at
                     // our host VM. If so, that takes priority.
                     let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
-                    if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits()) &&
-                        host_sie.read(sie::sext) != 0 &&
-                        (CSR.hgeip.get() & (1 << host_vgein)) != 0
+                    if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits())
+                        && host_sie.read(sie::sext) != 0
+                        && (CSR.hgeip.get() & (1 << host_vgein)) != 0
                     {
                         VmCpuTrap::HostInterrupt(SupervisorExternal)
                     } else {
@@ -1216,8 +1218,8 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 // If our host has external interrupts enabled, set the bit for their interrupt file
                 // in HGEIE so that we trap on any external interrupts they receive.
                 let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
-                if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits()) &&
-                    host_sie.read(sie::sext) != 0
+                if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits())
+                    && host_sie.read(sie::sext) != 0
                 {
                     CSR.hgeie.read_and_set_bits(1 << host_vgein);
                 }
@@ -1442,8 +1444,8 @@ impl VmCpu {
                 }
 
                 // We must be bound to the current CPU if IMSIC virtualization is enabled.
-                if let Some(ext_interrupts) = self.ext_interrupts.get() &&
-                    !ext_interrupts.lock().is_bound_on_this_cpu()
+                if let Some(ext_interrupts) = self.ext_interrupts.get()
+                    && !ext_interrupts.lock().is_bound_on_this_cpu()
                 {
                     return Err(Error::VmCpuNotBound);
                 }

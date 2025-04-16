@@ -20,6 +20,8 @@ use u_mode_api::CdiSel;
 use zeroize::Zeroize;
 
 #[derive(Debug)]
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 pub enum Error {
     /// Input CSR buffer size too small.
     CsrBufferTooSmall(usize, usize),

@@ -239,6 +239,8 @@ global_asm!(
     umode_sstatus = const umode_csr_offset!(sstatus),
 );
 
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 #[derive(Debug)]
 /// Errors returned by U-mode functions.
 pub enum Error {
@@ -257,6 +259,8 @@ pub enum Error {
 }
 
 /// Errors returned by U-mode task execution.
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum ExecError {
     /// Received an unexpected trap while running Umode.

@@ -27,6 +27,8 @@ use crate::vm::{VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_id::VmId;
 
 #[derive(Debug)]
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 pub enum Error {
     Paging(PageTableError),
     PageFault(PageFaultType, Exception, GuestPhysAddr),

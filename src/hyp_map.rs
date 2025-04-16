@@ -40,6 +40,8 @@ type HwMapRegionsVec = ArrayVec<HwMapRegion, MAX_HW_MAP_REGIONS>;
 static HYPMAP: Once<HypMap> = Once::new();
 
 /// Errors returned by creating or modifying hypervisor mappings.
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Error {
     /// U-mode ELF segment is not page aligned.

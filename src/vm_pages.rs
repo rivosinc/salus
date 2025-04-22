@@ -27,6 +27,8 @@ use crate::vm::{VmStateAny, VmStateFinalized, VmStateInitializing};
 use crate::vm_id::VmId;
 
 #[derive(Debug)]
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 pub enum Error {
     Paging(PageTableError),
     PageFault(PageFaultType, Exception, GuestPhysAddr),
@@ -144,7 +146,9 @@ impl TlbTracker {
     /// Returns the minimum TLB version with active references.
     fn min_version(&self) -> TlbVersion {
         let inner = self.inner.lock();
-        if let Some(prev) = inner.prev.as_ref() && prev.count() != 0 {
+        if let Some(prev) = inner.prev.as_ref()
+            && prev.count() != 0
+        {
             prev.version()
         } else {
             inner.current.version()
@@ -691,13 +695,14 @@ impl<'a, T: GuestStagePagingMode> ImsicPagesMapper<'a, T> {
     ) -> Result<()> {
         let dest_location = page.location();
         self.do_map_page(to_addr, page)?;
-        if let Some(geometry) = self.vm_pages.imsic_geometry.get() &&
-            let Some(iommu_context) = self.vm_pages.iommu_context.get()
+        if let Some(geometry) = self.vm_pages.imsic_geometry.get()
+            && let Some(iommu_context) = self.vm_pages.iommu_context.get()
         {
             let src_location = geometry
                 .addr_to_location(to_addr)
                 .ok_or(Error::InvalidImsicLocation)?;
-            iommu_context.msi_page_table
+            iommu_context
+                .msi_page_table
                 .map(src_location, dest_location)
                 .map_err(Error::MsiTableMapping)?;
         }
@@ -713,13 +718,14 @@ impl<'a, T: GuestStagePagingMode> ImsicPagesMapper<'a, T> {
     ) -> Result<SupervisorPageAddr> {
         let dest_location = page.location();
         let prev_addr = self.do_remap_page(to_addr, page)?;
-        if let Some(geometry) = self.vm_pages.imsic_geometry.get() &&
-            let Some(iommu_context) = self.vm_pages.iommu_context.get()
+        if let Some(geometry) = self.vm_pages.imsic_geometry.get()
+            && let Some(iommu_context) = self.vm_pages.iommu_context.get()
         {
             let src_location = geometry
                 .addr_to_location(to_addr)
                 .ok_or(Error::InvalidImsicLocation)?;
-            iommu_context.msi_page_table
+            iommu_context
+                .msi_page_table
                 .remap(src_location, dest_location)
                 .map_err(Error::MsiTableMapping)?;
         }
@@ -787,7 +793,9 @@ impl<'a, T: GuestStagePagingMode> ActiveVmPages<'a, T> {
 
         let tlb_version = vm_pages.inner.tlb_tracker.get_version();
         // Fence if this VMID was previously running on this CPU with an old TLB version.
-        if let Some(v) = prev_tlb_version && v < tlb_version {
+        if let Some(v) = prev_tlb_version
+            && v < tlb_version
+        {
             // We flush all translations for this VMID since we don't have an efficient way to
             // track which pages need fencing. Even if we let the user provide the range to be
             // fenced it would require reverse-mapping the address so we could update that it was
@@ -1993,13 +2001,18 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
                 if ps.is_huge() {
                     return false;
                 }
-                if let Some(p) = prev_addr && p.checked_add_pages_with_size(1, ps) != Some(addr) {
+                if let Some(p) = prev_addr
+                    && p.checked_add_pages_with_size(1, ps) != Some(addr)
+                {
                     false
                 } else {
                     prev_addr = Some(addr);
-                    self.inner
-                        .page_tracker
-                        .is_shareable_page(addr, ps, self.inner.page_owner_id, MemType::Ram)
+                    self.inner.page_tracker.is_shareable_page(
+                        addr,
+                        ps,
+                        self.inner.page_owner_id,
+                        MemType::Ram,
+                    )
                 }
             })
             .map_err(Error::Paging)?

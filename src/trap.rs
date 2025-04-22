@@ -195,7 +195,7 @@ fn extable() -> &'static [ExceptionTableEntry] {
     unsafe {
         let start = core::ptr::addr_of!(_extable_start) as *const ExceptionTableEntry;
         let end = core::ptr::addr_of!(_extable_end) as *const ExceptionTableEntry;
-        core::slice::from_raw_parts(start, end.sub_ptr(start))
+        core::slice::from_raw_parts(start, end.offset_from(start) as usize)
     }
 }
 
@@ -221,7 +221,7 @@ extern "C" fn handle_stack_overflow(tf_ptr: *mut TrapFrame) {
 #[no_mangle]
 extern "C" fn handle_trap(tf_ptr: *mut TrapFrame) {
     // Safe since we trust that TrapFrame was properly intialized by _trap_entry.
-    let mut tf = unsafe { tf_ptr.as_mut().unwrap() };
+    let tf = unsafe { tf_ptr.as_mut().unwrap() };
     let scause = CSR.scause.get();
     let stval = CSR.stval.get();
 

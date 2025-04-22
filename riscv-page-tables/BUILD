@@ -14,6 +14,9 @@ rust_library(
         "//riscv-pages",
         "//sync",
     ],
+    rustc_flags = [
+        "-Ctarget-feature=+h",
+    ],
 )
 
 rust_clippy(

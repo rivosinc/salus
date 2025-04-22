@@ -290,7 +290,7 @@ impl<S: State> Iterator for SeqPageChunkIter<S> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let chunk_size = self.chunk_size.get();
-        let count = ((self.count + chunk_size - 1) / chunk_size) as usize;
+        let count = self.count.div_ceil(chunk_size) as usize;
         (count, Some(count))
     }
 }

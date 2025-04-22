@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-/// Memory fence instructions. Devices are assumed to be DMA coherent.
+//! Memory fence instructions. Devices are assumed to be DMA coherent.
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 use core::arch::asm;

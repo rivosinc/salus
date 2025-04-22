@@ -14,6 +14,7 @@
 //! For the purposes of maintaining safety, volatile memory has some rules of its own:
 //! 1. No references or slices to volatile memory (`&` or `&mut`).
 //! 2. Access should always been done with a volatile read or write.
+//!
 //! The First rule is because having references of any kind to memory considered volatile would
 //! violate pointer aliasing. The second is because unvolatile accesses are inherently undefined if
 //! done concurrently without synchronization. With volatile access we know that the compiler has
@@ -24,7 +25,6 @@ use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ptr::{copy, read_volatile, write_bytes, write_volatile};
 use core::result;
-use core::usize;
 
 use crate::DataInit;
 
@@ -98,7 +98,7 @@ pub struct VolatileSlice<'a> {
 
 impl<'a> VolatileSlice<'a> {
     /// Creates a slice of raw memory that must support volatile access.
-    pub fn new(buf: &'a mut [u8]) -> VolatileSlice {
+    pub fn new(buf: &'a mut [u8]) -> VolatileSlice<'a> {
         Self {
             ptr: buf.as_mut_ptr(),
             len: buf.len(),

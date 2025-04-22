@@ -20,6 +20,8 @@ use u_mode_api::CdiSel;
 use zeroize::Zeroize;
 
 #[derive(Debug)]
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 pub enum Error {
     /// Input CSR buffer size too small.
     CsrBufferTooSmall(usize, usize),
@@ -67,7 +69,7 @@ impl Signer<Signature> for UmodeCdi {
     fn try_sign(&self, msg: &[u8]) -> Result<Signature, SignatureError> {
         let mut signature = [0u8; SIGNATURE_LENGTH];
         hyp_cdi_sign(self.cdi, msg, &mut signature);
-        Signature::from_bytes(&signature)
+        Ok(Signature::from_bytes(&signature))
     }
 }
 

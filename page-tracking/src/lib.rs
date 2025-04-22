@@ -10,10 +10,10 @@
 //!   the `riscv-pages` crate.
 //! - `HwMemMap` - Map of system memory, used to determine address ranges to create `Page`s from.
 //! - `HypPageAlloc` - Initial manager of physical memory. The hypervisor allocates pages from
-//! here to store local state. It's turned in to a `PageTracker` and a pool of ram for the host VM.
+//!   here to store local state. It's turned in to a `PageTracker` and a pool of ram for the host VM.
 //! - `PageTracker` - Contains information about active VMs (page owners), manages allocation of
-//! unique owner IDs, and per-page state such as current and previous owner. This is system-wide
-//! state updated whenever a page owner changes or a VM starts or stops.
+//!   unique owner IDs, and per-page state such as current and previous owner. This is system-wide
+//!   state updated whenever a page owner changes or a VM starts or stops.
 //!
 //! ## Initialization
 //!

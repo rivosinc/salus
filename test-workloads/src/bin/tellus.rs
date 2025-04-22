@@ -4,13 +4,7 @@
 
 #![no_main]
 #![no_std]
-#![feature(
-    asm_const,
-    panic_info_message,
-    allocator_api,
-    alloc_error_handler,
-    lang_items
-)]
+#![feature(allocator_api, alloc_error_handler)]
 #![allow(missing_docs)]
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -260,7 +254,7 @@ fn reclaim_pages(addr: u64, num_pages: u64) {
     cove_host::reclaim_pages(addr, num_pages).expect("TsmReclaimPages failed");
 
     for i in 0u64..((num_pages * PAGE_SIZE_4K) / 8) {
-        let m = (addr + i) as *const u64;
+        let m = (addr + i * core::mem::size_of::<u64>() as u64) as *const u64;
         unsafe {
             if core::ptr::read_volatile(m) != 0 {
                 panic!("Tellus - Read back non-zero at qword offset {i:x} after exiting from TVM!");
@@ -327,8 +321,11 @@ fn store_into_vectors() {
     unsafe {
         // safe because we are only setting the vector csr's
         asm!(
+            ".option push",
+            ".option arch, +v",
             "csrrs zero, sstatus, {enable}",
             "vsetvl x0, {vec_len}, {vtype}",
+            ".option pop",
             vec_len = in(reg) vec_len,
             vtype = in(reg) vtype,
             enable = in(reg) enable,
@@ -338,10 +335,7 @@ fn store_into_vectors() {
 
     const REG_WIDTH_IN_U64S: usize = 4;
 
-    let mut inbuf = [0_u64; (32 * REG_WIDTH_IN_U64S)];
-    for elem in &mut inbuf {
-        *elem = 0xDEADBEEFCAFEBABE;
-    }
+    let inbuf = [0xDEADBEEFCAFEBABE_u64; (32 * REG_WIDTH_IN_U64S)];
 
     let bufp1 = inbuf.as_ptr();
     let bufp2: *const u64;
@@ -356,10 +350,13 @@ fn store_into_vectors() {
     unsafe {
         // safe because the assembly reads into the vector register file
         asm!(
+            ".option push",
+            ".option arch, +v",
             "vl8r.v  v0, ({bufp1})",
             "vl8r.v  v8, ({bufp2})",
             "vl8r.v  v16, ({bufp3})",
             "vl8r.v  v24, ({bufp4})",
+            ".option pop",
             bufp1 = in(reg) bufp1,
             bufp2 = in(reg) bufp2,
             bufp3 = in(reg) bufp3,
@@ -389,10 +386,13 @@ fn check_vectors() {
     unsafe {
         // safe because enough memory provided to store entire register file
         asm!(
+            ".option push",
+            ".option arch, +v",
             "vs8r.v  v0, ({bufp1})",
             "vs8r.v  v8, ({bufp2})",
             "vs8r.v  v16, ({bufp3})",
             "vs8r.v  v24, ({bufp4})",
+            ".option pop",
             bufp1 = in(reg) bufp1,
             bufp2 = in(reg) bufp2,
             bufp3 = in(reg) bufp3,
@@ -451,7 +451,8 @@ fn do_guest_puts(
     Ok(len)
 }
 
-static mut CONSOLE_BUFFER: [u8; 256] = [0; 256];
+const CONSOLE_BUFFER_SIZE: usize = 256;
+static mut CONSOLE_BUFFER: [u8; CONSOLE_BUFFER_SIZE] = [0; CONSOLE_BUFFER_SIZE];
 
 /// The entry point of the Rust part of the kernel.
 #[no_mangle]
@@ -461,7 +462,13 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
 
     // Safety: We're giving SbiConsole exclusive ownership of CONSOLE_BUFFER and will not touch it
     // for the remainder of this program.
-    unsafe { SbiConsole::set_as_console(&mut CONSOLE_BUFFER) };
+    unsafe {
+        let console_mem = core::slice::from_raw_parts_mut(
+            &raw mut CONSOLE_BUFFER as *mut u8,
+            CONSOLE_BUFFER_SIZE,
+        );
+        SbiConsole::set_as_console(console_mem);
+    }
     println!("Tellus: Booting the test VM");
     test_declare_pass!("booting tellus", hart_id);
 
@@ -557,8 +564,7 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
     next_page += PAGE_SIZE_4K * tvm_create_pages;
 
     // Set aside pages for the shared mem area.
-    let num_shmem_pages =
-        (core::mem::size_of::<sbi_rs::NaclShmem>() as u64 + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    let num_shmem_pages = (core::mem::size_of::<sbi_rs::NaclShmem>() as u64).div_ceil(PAGE_SIZE_4K);
     let shmem_ptr = next_page as *mut sbi_rs::NaclShmem;
     next_page += num_shmem_pages * PAGE_SIZE_4K;
     // Safety: We own the memory at `shmem_ptr` and will only access it through volatile reads/writes.

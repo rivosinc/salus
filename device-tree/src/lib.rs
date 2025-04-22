@@ -4,7 +4,7 @@
 
 //! Library for interacting wtih device-trees.
 #![no_std]
-#![feature(allocator_api, split_array, slice_take)]
+#![feature(allocator_api, split_array)]
 
 extern crate alloc;
 

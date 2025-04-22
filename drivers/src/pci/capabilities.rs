@@ -743,7 +743,7 @@ impl PciCapabilities {
 
     /// Returns the offset (in the PCI configuration space) of the first emulated capability.
     pub fn start_offset(&self) -> usize {
-        self.caps.get(0).map(|cap| cap.offset()).unwrap_or(0)
+        self.caps.first().map(|cap| cap.offset()).unwrap_or(0)
     }
 
     // Returns a reference to the capability at `offset`.

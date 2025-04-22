@@ -3,12 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![no_std]
-#![feature(
-    allocator_api,
-    nonnull_slice_from_raw_parts,
-    slice_ptr_get,
-    slice_ptr_len
-)]
+#![feature(allocator_api, slice_ptr_get)]
 
 //! Provides basic allocation ability for the hypervisor.
 

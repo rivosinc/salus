@@ -169,7 +169,7 @@ struct Mtt64MEntry<'a> {
 }
 
 impl<'a> Mtt64MEntry<'a> {
-    fn new(entry: &'a mut u64) -> Mtt64MEntry {
+    fn new(entry: &'a mut u64) -> Mtt64MEntry<'a> {
         Self { entry }
     }
 
@@ -801,7 +801,7 @@ mod tests {
     fn test_mtt_ranges() {
         use riscv_pages::SupervisorPhysAddr;
         const L1_PAGE_POOL_COUNT: usize = 16;
-        static mut MTT_BASE: [u64; MTT_L2_ENTRY_COUNT * 2] = [0; MTT_L2_ENTRY_COUNT * 2];
+        let mut mtt_base = vec![0; MTT_L2_ENTRY_COUNT * 2];
         let mut l1_index = 0 as usize;
         let l1_pool_base = l1_pool_allocator(L1_PAGE_POOL_COUNT).unwrap();
         let mut l1_allocator = || {
@@ -817,7 +817,7 @@ mod tests {
 
         // Safety: Testing purposes only
         unsafe {
-            let l2_base = MTT_BASE.as_ptr() as u64;
+            let l2_base = mtt_base.as_mut_ptr() as u64;
             const L2_ALIGNMENT: u64 = 1024 * 1024 * 8;
             let aligned_mtt_base = (l2_base + L2_ALIGNMENT - 1) & !(L2_ALIGNMENT - 1);
             let addr = SupervisorPageAddr::new(RawAddr::supervisor(aligned_mtt_base)).unwrap();

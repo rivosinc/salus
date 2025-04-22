@@ -12,6 +12,8 @@ use sync::{Mutex, RwLock, RwLockReadGuard};
 use crate::vm::{AnyVm, FinalizedVm, InitializingVm, Vm, VmRef};
 
 /// Guest tracking-related errors.
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Error {
     InsufficientPages(SequentialPages<InternalClean>),

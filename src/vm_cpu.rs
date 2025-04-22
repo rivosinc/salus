@@ -21,6 +21,8 @@ use crate::vm_interrupts::{self, VmCpuExtInterrupts};
 use crate::vm_pages::{ActiveVmPages, FinalizedVmPages, PinnedPages};
 use crate::vm_pmu::VmPmuState;
 
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     BadVmCpuId,
@@ -536,7 +538,9 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
     ) -> Result<Self> {
         let mut arch = vcpu.arch.lock();
         // If we're running on a new CPU, then any previous VMID or TLB version we used is inavlid.
-        if let Some(ref prev_tlb) = arch.prev_tlb && prev_tlb.cpu != PerCpu::this_cpu().cpu_id() {
+        if let Some(ref prev_tlb) = arch.prev_tlb
+            && prev_tlb.cpu != PerCpu::this_cpu().cpu_id()
+        {
             arch.prev_tlb = None;
         }
 
@@ -680,7 +684,7 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
             }
             Trap::Exception(e) => {
                 if e.to_hedeleg_field()
-                    .map_or(false, |f| CSR.hedeleg.matches_any(f))
+                    .is_ok_and(|f| CSR.hedeleg.matches_any(f))
                 {
                     // Even if we intended to delegate this exception it might not be set in
                     // medeleg, in which case firmware may send it our way instead.
@@ -698,9 +702,9 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                     // We may have gotten an SG_EXT because of an external interrupt directed at
                     // our host VM. If so, that takes priority.
                     let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
-                    if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits()) &&
-                        host_sie.read(sie::sext) != 0 &&
-                        (CSR.hgeip.get() & (1 << host_vgein)) != 0
+                    if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits())
+                        && host_sie.read(sie::sext) != 0
+                        && (CSR.hgeip.get() & (1 << host_vgein)) != 0
                     {
                         VmCpuTrap::HostInterrupt(SupervisorExternal)
                     } else {
@@ -1216,8 +1220,8 @@ impl<'vcpu, 'pages, 'host, T: GuestStagePagingMode> ActiveVmCpu<'vcpu, 'pages, '
                 // If our host has external interrupts enabled, set the bit for their interrupt file
                 // in HGEIE so that we trap on any external interrupts they receive.
                 let host_sie = LocalRegisterCopy::new(host_vcpu.vs_csrs().vsie);
-                if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits()) &&
-                    host_sie.read(sie::sext) != 0
+                if let Some(host_vgein) = host_vcpu.bound_interrupt_file().map(|f| f.bits())
+                    && host_sie.read(sie::sext) != 0
                 {
                     CSR.hgeie.read_and_set_bits(1 << host_vgein);
                 }
@@ -1442,8 +1446,8 @@ impl VmCpu {
                 }
 
                 // We must be bound to the current CPU if IMSIC virtualization is enabled.
-                if let Some(ext_interrupts) = self.ext_interrupts.get() &&
-                    !ext_interrupts.lock().is_bound_on_this_cpu()
+                if let Some(ext_interrupts) = self.ext_interrupts.get()
+                    && !ext_interrupts.lock().is_bound_on_this_cpu()
                 {
                     return Err(Error::VmCpuNotBound);
                 }
@@ -1611,7 +1615,7 @@ impl VmCpus {
         let once_val = once_entry.call_once(|| vcpu);
         let once_ptr: *const VmCpu = &**once_val;
 
-        if once_ptr != ptr {
+        if !core::ptr::eq(once_ptr, ptr) {
             Err(Error::VmCpuExists)
         } else {
             Ok(())

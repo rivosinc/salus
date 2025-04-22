@@ -4,7 +4,7 @@
 
 #![no_main]
 #![no_std]
-#![feature(panic_info_message, allocator_api, alloc_error_handler, lang_items)]
+#![feature(allocator_api, alloc_error_handler)]
 #![allow(missing_docs)]
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -58,10 +58,13 @@ pub fn print_vector_csrs() {
     unsafe {
         // safe because we are only reading csr's
         asm!(
+            ".option push",
+            ".option arch, +v",
             "csrrs {vl}, vl, zero",
             "csrrs {vcsr}, vcsr, zero",
             "csrrs {vtype}, vtype, zero",
             "csrrs {vlenb}, vlenb, zero",
+            ".option pop",
             vlenb = out(reg) vlenb,
             vl= out(reg) vl,
             vcsr = out(reg) vcsr,
@@ -93,7 +96,10 @@ pub fn test_vector() -> TestResult {
     unsafe {
         // safe because we are only setting the vector csr's
         asm!(
+            ".option push",
+            ".option arch, +v",
             "vsetvl x0, {vec_len}, {vtype}",
+            ".option pop",
             vec_len = in(reg) vec_len,
             vtype = in(reg) vtype,
             options(nostack),
@@ -126,10 +132,13 @@ pub fn test_vector() -> TestResult {
     unsafe {
         // safe because the assembly reads into the vector register file
         asm!(
+            ".option push",
+            ".option arch, +v",
             "vl8r.v  v0, ({bufp1})",
             "vl8r.v  v8, ({bufp2})",
             "vl8r.v  v16, ({bufp3})",
             "vl8r.v  v24, ({bufp4})",
+            ".option pop",
             bufp1 = in(reg) bufp1,
             bufp2 = in(reg) bufp2,
             bufp3 = in(reg) bufp3,
@@ -141,18 +150,19 @@ pub fn test_vector() -> TestResult {
     print_vector_csrs();
 
     // Overwrite memory to verify that it changes
-    for elem in &mut inbuf {
-        *elem = 99_u64;
-    }
+    inbuf.fill(99_u64);
 
     println!("Reading vector registers");
     unsafe {
         // safe because enough memory provided to store entire register file
         asm!(
+            ".option push",
+            ".option arch, +v",
             "vs8r.v  v0, ({bufp1})",
             "vs8r.v  v8, ({bufp2})",
             "vs8r.v  v16, ({bufp3})",
             "vs8r.v  v24, ({bufp4})",
+            ".option pop",
             bufp1 = in(reg) bufp1,
             bufp2 = in(reg) bufp2,
             bufp3 = in(reg) bufp3,

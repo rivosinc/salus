@@ -84,6 +84,12 @@ pub struct ReadWriteRiscvCsr<R: RegisterLongName, const V: u16> {
 
 // TODO: Read-only and write-only register implementations.
 
+impl<R: RegisterLongName, const V: u16> Default for ReadWriteRiscvCsr<R, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<R: RegisterLongName, const V: u16> ReadWriteRiscvCsr<R, V> {
     pub const fn new() -> Self {
         ReadWriteRiscvCsr {

@@ -151,16 +151,12 @@ impl PerCpu {
 
     fn boot_cpu_stack() -> Result<SequentialPages<InternalDirty>, Error> {
         // Get the pages of the current stack as created by the linker.
-        // Safe because `_stack_start` is created by the linker.
-        let stack_startaddr = unsafe {
+        let stack_startaddr =
             PageAddr::new(RawAddr::supervisor(core::ptr::addr_of!(_stack_start) as u64))
-                .expect("_stack_start is not page aligned.")
-        };
-        // Safe because `_stack_end` is created by the linker.
-        let stack_endaddr = unsafe {
+                .expect("_stack_start is not page aligned.");
+        let stack_endaddr =
             PageAddr::new(RawAddr::supervisor(core::ptr::addr_of!(_stack_end) as u64))
-                .expect("_stack_end is not page aligned.")
-        };
+                .expect("_stack_end is not page aligned.");
         // Safe because the pages in this range are in the `HypervisorImage` memory region and are only
         // used for the boot cpu stack.
         unsafe {

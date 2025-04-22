@@ -128,11 +128,10 @@ struct FdtWriter<'a> {
 impl<'a> FdtWriter<'a> {
     /// Creates a new writer with the given buffer and FDT layout. The buffer must be large enough
     /// to hold the FDT described by the layout.
-    pub fn new(mut buf: &'a mut [u8], layout: &FdtLayout) -> Self {
-        let header_buf = buf.take_mut(..layout.header_size).unwrap();
-        let resv_map_buf = buf.take_mut(..layout.resv_map_size).unwrap();
-        let struct_buf = buf.take_mut(..layout.struct_size).unwrap();
-        let strings_buf = buf.take_mut(..layout.strings_size).unwrap();
+    pub fn new(buf: &'a mut [u8], layout: &FdtLayout) -> Self {
+        let (header_buf, buf) = buf.split_at_mut(layout.header_size);
+        let (resv_map_buf, buf) = buf.split_at_mut(layout.resv_map_size);
+        let (struct_buf, strings_buf) = buf.split_at_mut(layout.struct_size);
         Self {
             header_buf,
             resv_map_buf,
@@ -149,8 +148,10 @@ impl<'a> FdtWriter<'a> {
             mem::transmute::<FdtHeader, [u32; 10]>(header)
         };
         for val in vals {
-            let buf = self.header_buf.take_mut(..mem::size_of::<u32>()).unwrap();
-            buf.copy_from_slice(&val.to_be_bytes());
+            let header_buf = mem::take(&mut self.header_buf);
+            let (dest, rest) = header_buf.split_at_mut(mem::size_of::<u32>());
+            self.header_buf = rest;
+            dest.copy_from_slice(&val.to_be_bytes());
         }
     }
 
@@ -161,8 +162,10 @@ impl<'a> FdtWriter<'a> {
             mem::transmute::<FdtResvMap, [u64; 2]>(resv_map)
         };
         for val in vals {
-            let buf = self.resv_map_buf.take_mut(..mem::size_of::<u64>()).unwrap();
-            buf.copy_from_slice(&val.to_be_bytes());
+            let resv_map_buf = mem::take(&mut self.resv_map_buf);
+            let (dest, rest) = resv_map_buf.split_at_mut(mem::size_of::<u64>());
+            self.resv_map_buf = rest;
+            dest.copy_from_slice(&val.to_be_bytes());
         }
     }
 
@@ -185,7 +188,9 @@ impl<'a> FdtWriter<'a> {
     /// Writes a (NULL-terminated) string to the strings block in the FDT binary, returning the
     /// offset of the string within the block.
     pub fn push_string(&mut self, string: &[u8]) -> u32 {
-        let dest = self.strings_buf.take_mut(..string.len()).unwrap();
+        let strings_buf = core::mem::take(&mut self.strings_buf);
+        let (dest, rest) = strings_buf.split_at_mut(string.len());
+        self.strings_buf = rest;
         dest.copy_from_slice(string);
         let offset = self.string_pos;
         self.string_pos += string.len();
@@ -193,13 +198,17 @@ impl<'a> FdtWriter<'a> {
     }
 
     fn push_struct_u32(&mut self, val: u32) {
-        let buf = self.struct_buf.take_mut(..mem::size_of::<u32>()).unwrap();
-        buf.copy_from_slice(&val.to_be_bytes());
+        let struct_buf = core::mem::take(&mut self.struct_buf);
+        let (dest, rest) = struct_buf.split_at_mut(mem::size_of::<u32>());
+        self.struct_buf = rest;
+        dest.copy_from_slice(&val.to_be_bytes());
     }
 
     fn push_struct_raw(&mut self, buf: &[u8]) {
         let aligned = fdt_align_size(buf.len());
-        let dest = self.struct_buf.take_mut(..aligned).unwrap();
+        let struct_buf = core::mem::take(&mut self.struct_buf);
+        let (dest, rest) = struct_buf.split_at_mut(aligned);
+        self.struct_buf = rest;
         dest[..buf.len()].copy_from_slice(buf);
     }
 }

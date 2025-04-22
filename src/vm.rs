@@ -23,6 +23,8 @@ use crate::vm_pages::{
     ActiveVmPages, AnyVmPages, InstructionFetchError, PageFaultType, VmPages, VmPagesRef,
 };
 
+// annoying false unused "feature": https://github.com/rust-lang/rust/issues/123068
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Error {
     AttestationManagerCreationFailed(attestation::Error),

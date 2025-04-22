@@ -280,6 +280,8 @@ _save_fp:
 // Save guest vector state. A0 = pointer to VmCpuState.
 .global _save_vector
 _save_vector:
+    .option push
+    .option arch,+v
     // Temporarily enable vectors
     csrr  t5, sstatus
     li    t0, {sstatus_vs_enable}
@@ -308,10 +310,13 @@ _save_vector:
     // Restore sstatus
     csrw  sstatus, t5
     ret
+    .option pop
 
 // Restore guest vector state. A0 = pointer to VmCpuState.
 .global _restore_vector
 _restore_vector:
+    .option push
+    .option arch,+v
     // Temporarily enable vectors
     csrr  t5, sstatus
     li    t4, {sstatus_vs_enable}
@@ -343,3 +348,4 @@ _restore_vector:
     // Restore sstatus
     csrw  sstatus, t5
     ret
+    .option pop

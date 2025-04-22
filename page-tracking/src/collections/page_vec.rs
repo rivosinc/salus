@@ -126,7 +126,7 @@ impl<T> RawPageVec<T> {
     /// is never used again.
     unsafe fn take_pages(&mut self) -> SequentialPages<InternalDirty> {
         let page_size = self.1 as usize;
-        let vec_page_count = (self.capacity() * mem::size_of::<T>() + page_size - 1) / page_size;
+        let vec_page_count = (self.capacity() * mem::size_of::<T>()).div_ceil(page_size);
         // Unwrap ok, the backing pages must've been contiguous.
         SequentialPages::from_mem_range(
             PageAddr::new(RawAddr::supervisor(self.0.as_ptr() as u64)).unwrap(),

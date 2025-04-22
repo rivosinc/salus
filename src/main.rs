@@ -7,23 +7,17 @@
 #![no_main]
 #![no_std]
 #![feature(
-    panic_info_message,
     allocator_api,
     alloc_error_handler,
-    lang_items,
     if_let_guard,
-    asm_const,
-    ptr_sub_ptr,
     slice_ptr_get,
     let_chains,
-    is_some_and,
     negative_impls
 )]
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::tests::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![cfg_attr(test, allow(unused))]
-#![feature(pointer_is_aligned)]
 
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::fmt::Display;
@@ -163,8 +157,8 @@ fn build_memory_map(fdt: &Fdt) -> MemMapResult<HwMemMap> {
     // passed in by firmware.
 
     // Safe because we trust the linker placed these symbols correctly.
-    let start = unsafe { core::ptr::addr_of!(_start) as u64 };
-    let stack_end = unsafe { core::ptr::addr_of!(_stack_end) as u64 };
+    let start = core::ptr::addr_of!(_start) as u64;
+    let stack_end = core::ptr::addr_of!(_stack_end) as u64;
 
     // Find the region of DRAM that the hypervisor is in.
     let resv_base = fdt
@@ -592,7 +586,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     // Parse the user-mode ELF containing the user-mode task.
     // Safe, because it comes from the Linker
     let umode_bytes = unsafe {
-        let umode_bin = core::ptr::addr_of!(_umode_bin) as *const u8;
+        let umode_bin = core::ptr::addr_of!(_umode_bin);
         let umode_bin_len = core::ptr::addr_of!(_umode_bin_len) as usize;
         core::slice::from_raw_parts::<u8>(umode_bin, umode_bin_len)
     };

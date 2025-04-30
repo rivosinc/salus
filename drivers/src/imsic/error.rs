@@ -27,6 +27,8 @@ pub enum Error {
     MisalignedMmioRegion(u64),
     /// An MMIO region specified in the device tree did not match the expected pattern.
     InvalidMmioRegion(u64),
+    /// Regions doesn't map to a hart-stride aligned address.
+    InvalidMmioRegionLocation(u64),
     /// Invalid parent interrupt specification in the device tree.
     InvalidParentInterrupt(u32, u32),
     /// The given CPU does not have a valid IMSIC location specified in the device tree.

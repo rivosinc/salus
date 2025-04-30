@@ -357,7 +357,7 @@ impl Imsic {
             // Each MMIO region must map the start of a group.
             let location = geometry
                 .addr_to_location(region_base_addr)
-                .ok_or_else(|| Error::InvalidMmioRegion(region_base_addr.bits()))?;
+                .ok_or_else(|| Error::InvalidMmioRegionLocation(region_base_addr.bits()))?;
             if location.hart().bits() != 0 || location.file().bits() != 0 {
                 return Err(Error::InvalidMmioRegion(region_base_addr.bits()));
             }

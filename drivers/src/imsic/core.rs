@@ -358,15 +358,15 @@ impl Imsic {
             let location = geometry
                 .addr_to_location(region_base_addr)
                 .ok_or_else(|| Error::InvalidMmioRegionLocation(region_base_addr.bits()))?;
-            if location.hart().bits() != 0 || location.file().bits() != 0 {
+            if location.file().bits() != 0 {
                 return Err(Error::InvalidMmioRegion(region_base_addr.bits()));
             }
             // Unwrap ok, we've guaranteed there are an even number of `reg` cells.
             let region_size = regs.next().unwrap();
-            if region_size % per_hart_size != 0 {
-                return Err(Error::MisalignedMmioRegion(region_base_addr.bits()));
+            if region_size < guests_per_hart as u64 * PageSize::Size4k as u64 {
+                return Err(Error::MmioRegionTooSmall(region_size));
             }
-            let harts_in_region = region_size / per_hart_size;
+            let harts_in_region = core::cmp::max(region_size / per_hart_size, 1);
 
             for i in 0..harts_in_region {
                 // Each 'interrupts-extended' property is of the from "<phandle> <interrupt-id>".

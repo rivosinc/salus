@@ -39,6 +39,8 @@ pub enum Error {
     TooManyInterruptFiles,
     /// There were fewer interrupt files than CPUs found in the device tree.
     MissingInterruptFiles,
+    /// An imsic reg regions was specified that is too small to hold the guest files.
+    MmioRegionTooSmall(u64),
     /// Failed to add an MMIO region to the system memory map.
     AddingMmioRegion(page_tracking::MemMapError),
     /// The requested CPU does not exist.

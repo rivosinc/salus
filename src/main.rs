@@ -359,7 +359,6 @@ enum RequiredDeviceProbe {
     Imsic(drivers::imsic::ImsicError),
     Pci(drivers::pci::PciError),
     Reset(drivers::reset::Error),
-    Uart(drivers::uart::Error),
 }
 
 impl Display for RequiredDeviceProbe {
@@ -369,7 +368,6 @@ impl Display for RequiredDeviceProbe {
             Imsic(e) => write!(f, "IMSIC: {:?}", e),
             Pci(e) => write!(f, "PCI: {:?}", e),
             Reset(e) => write!(f, "Reset: {:?}", e),
-            Uart(e) => write!(f, "UART: {:?}", e),
         }
     }
 }
@@ -478,8 +476,9 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     let hyp_dt = DeviceTree::from(&hyp_fdt).map_err(Error::FdtCreation)?;
 
     // Find the UART and switch to it as the system console.
-    UartDriver::probe_from(&hyp_dt, &mut mem_map)
-        .map_err(|e| Error::RequiredDeviceProbe(RequiredDeviceProbe::Uart(e)))?;
+    if let Err(e) = UartDriver::probe_from(&hyp_dt, &mut mem_map) {
+        println!("Failed to probe UART: {:?}", e);
+    }
 
     // Discover the CPU topology.
     CpuInfo::parse_from(&hyp_dt).map_err(Error::CpuTopologyGeneration)?;

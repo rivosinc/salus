@@ -66,7 +66,7 @@ pub enum Error {
     /// Failed to reserve region for page map
     PageMapReserveRegion(hw_mem_map::Error),
     /// No memory available for page map
-    PageMapNoSpace,
+    PageMapNoSpace(u64),
 }
 
 /// Holds the result of page tracking operations.

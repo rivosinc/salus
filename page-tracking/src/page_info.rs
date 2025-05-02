@@ -488,7 +488,7 @@ impl PageMap {
         let page_map_region = mem_map
             .regions()
             .find(|r| r.region_type() == HwMemRegionType::Available && r.size() >= page_map_size)
-            .ok_or(PageTrackingError::PageMapNoSpace)?;
+            .ok_or(PageTrackingError::PageMapNoSpace(page_map_size))?;
 
         let page_map_base = page_map_region.base();
 

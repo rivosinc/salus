@@ -31,7 +31,7 @@ TELLUS_BINS=bazel-bin/test-workloads/
 KERNEL_ADDR=0xc0200000
 INITRD_ADDR=0xc2200000
 BOOTARGS="console=hvc0 earlycon=sbi"
-IOMMU_ARGS="-device x-riscv-iommu-pci"
+IOMMU_ARGS="-device riscv-iommu-pci,vendor-id=0x1efd,device-id=0xedf1"
 NETWORK_ARGS="-netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7722-0.0.0.0:22 -device e1000e,netdev=usernet"
 NVME_DEVICE_ARGS="-device nvme,serial=deadbeef,drive=hd"
 

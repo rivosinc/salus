@@ -10,7 +10,7 @@ ${QEMU_BIN} \
     -kernel ${SALUS_BINS}salus \
     -device guest-loader,kernel=${LINUX_BIN},addr=${KERNEL_ADDR} \
     -append "${BOOTARGS} root=/dev/nvme0n1" \
-    -drive file="${BUILDROOT_IMAGE},format=raw,id=hd" \
+    -drive file="${BUILDROOT_IMAGE},format=raw,id=hd,if=none" \
     ${NVME_DEVICE_ARGS} \
     ${IOMMU_ARGS} \
     ${NETWORK_ARGS} \

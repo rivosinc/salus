@@ -27,7 +27,6 @@ Salus:
   - `bazel` will install all the proper toolchains
 
 QEMU:
-- Out-of-tree patches are required; see table below.
 - Install `libslirp-dev` for QEMU to build SLIRP network stack
 - Build using QEMU [instructions](https://wiki.qemu.org/Hosts/Linux) with
   `--target-list=riscv64-softmmu`
@@ -55,7 +54,7 @@ Latest known-working branches:
 
 | Project | Branch |
 | ------- | ------ |
-| QEMU    | https://github.com/rivosinc/qemu/tree/salus-integration-10312022 |
+| QEMU    | https://github.com/qemu/qemu/tree/v10.0.0 |
 | Linux   | https://github.com/rivosinc/linux/tree/salus-integration-10312022 |
 | Buildroot| https://github.com/rivosinc/buildroot/tree/salus-integration-2022.08.2 |
 

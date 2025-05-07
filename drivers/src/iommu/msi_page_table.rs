@@ -18,15 +18,15 @@ struct MsiPte {
     _reserved: u64,
 }
 
-// Write-through PTEs have just the V and W bits set.
+// Write-through PTEs have just the V and MODE bits set.
 const MSI_PTE_PFN_SHIFT: usize = 10;
 const MSI_PTE_VALID: u64 = 1u64 << 0;
-const MSI_PTE_WRITE: u64 = 1u64 << 2;
+const MIS_PTE_MODE_BASIC: u64 = 3u64 << 1;
 
 impl MsiPte {
     // Marks the PTE as valid and mapping `pfn`.
     fn set(&mut self, pfn: SupervisorPfn) {
-        self.pte = (pfn.bits() << MSI_PTE_PFN_SHIFT) | MSI_PTE_VALID | MSI_PTE_WRITE;
+        self.pte = (pfn.bits() << MSI_PTE_PFN_SHIFT) | MSI_PTE_VALID | MIS_PTE_MODE_BASIC;
     }
 
     // Invalidates the PTE.
@@ -34,9 +34,9 @@ impl MsiPte {
         self.pte = 0;
     }
 
-    // Returns if this is a valid write-through PTE.
+    // Returns if this is a valid basic PTE.
     fn valid(&self) -> bool {
-        (self.pte & (MSI_PTE_VALID | MSI_PTE_WRITE)) == (MSI_PTE_VALID | MSI_PTE_WRITE)
+        (self.pte & (MSI_PTE_VALID | MIS_PTE_MODE_BASIC)) == (MSI_PTE_VALID | MIS_PTE_MODE_BASIC)
     }
 }
 

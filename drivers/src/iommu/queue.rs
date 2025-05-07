@@ -211,8 +211,8 @@ impl Command {
     /// completed.
     pub fn iofence() -> Self {
         const IOFENCE_OP: u64 = 0x2;
-        const PR: u64 = 1 << 10;
-        const PW: u64 = 1 << 11;
+        const PR: u64 = 1 << 12;
+        const PW: u64 = 1 << 13;
 
         // TODO: Make PR/PW optional. Probably not needed on every fence.
         Self {

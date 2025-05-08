@@ -40,6 +40,10 @@ pub struct CpuInfo {
     has_sscofpmf: bool,
     // True if the vector extension is supported
     has_vector: bool,
+    // True if the Zicbom extension is supported
+    has_zicbom: bool,
+    // True if the Zicbom extension is supported
+    has_zicboz: bool,
     // CPU timer frequency.
     timer_frequency: u32,
     // ISA string as reported in the device-tree. All CPUs are expected to have the same ISA.
@@ -184,6 +188,8 @@ impl CpuInfo {
             has_sstc: isa_string_has_extension(isa_string, "sstc"),
             has_sscofpmf: isa_string_has_extension(isa_string, "sscofpmf"),
             has_vector: isa_string_has_base_extension(isa_string, 'v'),
+            has_zicbom: isa_string_has_extension(isa_string, "zicbom"),
+            has_zicboz: isa_string_has_extension(isa_string, "zicboz"),
             isa_string: ArrayString::from(isa_string).unwrap(),
             timer_frequency,
             hart_ids,
@@ -218,6 +224,16 @@ impl CpuInfo {
     /// Returns true if the vector extension is supported
     pub fn has_vector(&self) -> bool {
         self.has_vector
+    }
+
+    /// Returns true if the Zicbom extension is supported
+    pub fn has_zicbom(&self) -> bool {
+        self.has_zicbom
+    }
+
+    /// Returns true if the Zicboz extension is supported
+    pub fn has_zicboz(&self) -> bool {
+        self.has_zicboz
     }
 
     /// Returns the total number of CPUs.

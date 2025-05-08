@@ -373,6 +373,12 @@ register_bitfields![u64,
     pub henvcfg [
         // Fence of I/O implies memory.
         fiom OFFSET(0) NUMBITS(1) [],
+        // Cache Block Invalidate instruction Enable
+        cbie OFFSET(4) NUMBITS(2) [],
+        // Cache Block Clean and Flush instruction Enable
+        cbcfe OFFSET(6) NUMBITS(1) [],
+        // Cache Block Zero instruction Enable
+        cbze OFFSET(7) NUMBITS(1) [],
         // Enable stimecmp in VS.
         stce OFFSET(63) NUMBITS(1) [],
         // TODO: Bits for other extensions we don't care about yet.

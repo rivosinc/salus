@@ -784,9 +784,17 @@ extern "C" fn _secondary_main() {
 }
 
 // Configures henvcfg to select what features are available to the host VM.
-fn set_henvcfg(_cpu_info: &CpuInfo) {
+fn set_henvcfg(cpu_info: &CpuInfo) {
     // Sstc is present, it's checked as a required feature early in boot.
     CSR.henvcfg.modify(henvcfg::stce.val(1));
+
+    if cpu_info.has_zicboz() {
+        CSR.henvcfg.modify(henvcfg::cbze.val(1));
+    }
+    if cpu_info.has_zicbom() {
+        CSR.henvcfg.modify(henvcfg::cbie.val(1));
+        CSR.henvcfg.modify(henvcfg::cbcfe.val(1));
+    }
 }
 
 #[cfg(test)]

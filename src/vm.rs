@@ -40,9 +40,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 // confuses us with BBL/OpenSBI.
 const SBI_IMPL_ID_SALUS: u64 = 7;
 
-// Report ourselves as being SBI v1.0 compliant.
+// Report ourselves as being SBI v2.0 compliant.
 const SBI_SPEC_MAJOR_VERSION_SHIFT: u64 = 24;
-const SBI_SPEC_VERSION: u64 = 1 << SBI_SPEC_MAJOR_VERSION_SHIFT;
+const SBI_SPEC_VERSION: u64 = 2 << SBI_SPEC_MAJOR_VERSION_SHIFT;
 
 // The number of pages required for `NaclShmem`.
 const NACL_SHMEM_PAGES: u64 =
@@ -969,11 +969,7 @@ impl<'a, T: GuestStagePagingMode> FinalizedVm<'a, T> {
     }
 
     fn handle_debug_console(&self, debug_con_func: DebugConsoleFunction) -> EcallAction {
-        match debug_con_func {
-            DebugConsoleFunction::PutString { .. } => {
-                EcallAction::Forward(SbiMessage::DebugConsole(debug_con_func))
-            }
-        }
+        EcallAction::Forward(SbiMessage::DebugConsole(debug_con_func))
     }
 
     fn handle_hart_state_msg(&self, hsm_func: StateFunction) -> EcallAction {

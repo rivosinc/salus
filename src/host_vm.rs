@@ -432,8 +432,12 @@ impl HostVmRunner {
                             Ok(HartState(StateFunction::HartStop)) => {
                                 return ControlFlow::Continue(())
                             }
-                            Ok(DebugConsole(DebugConsoleFunction::PutString { len, addr })) => {
-                                let sbi_ret = match self.handle_put_string(&vm, addr, len) {
+                            Ok(DebugConsole(DebugConsoleFunction::Write {
+                                len,
+                                addr,
+                                addr_hi: _,
+                            })) => {
+                                let sbi_ret = match self.handle_write(&vm, addr, len) {
                                     Ok(n) => SbiReturn::success(n as i64),
                                     Err(n) => SbiReturn {
                                         error_code: SbiError::InvalidAddress as i64,
@@ -443,6 +447,11 @@ impl HostVmRunner {
 
                                 self.gprs.set_reg(GprIndex::A0, sbi_ret.error_code as u64);
                                 self.gprs.set_reg(GprIndex::A1, sbi_ret.return_value as u64);
+                            }
+                            Ok(DebugConsole(DebugConsoleFunction::WriteByte { byte })) => {
+                                self.handle_write_byte(byte as u8);
+                                self.gprs.set_reg(GprIndex::A0, 0);
+                                self.gprs.set_reg(GprIndex::A1, 0);
                             }
                             Ok(PutChar(c)) => {
                                 print!("{}", c as u8 as char);
@@ -518,7 +527,7 @@ impl HostVmRunner {
         Ok(())
     }
 
-    fn handle_put_string<T: GuestStagePagingMode>(
+    fn handle_write<T: GuestStagePagingMode>(
         &mut self,
         vm: &FinalizedVm<T>,
         addr: u64,
@@ -558,6 +567,10 @@ impl HostVmRunner {
         }
 
         Ok(len)
+    }
+
+    fn handle_write_byte(&mut self, c: u8) {
+        print!("{}", c as char);
     }
 }
 

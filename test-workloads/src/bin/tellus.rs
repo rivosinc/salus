@@ -892,7 +892,11 @@ extern "C" fn kernel_init(hart_id: u64, fdt_addr: u64) {
                                 }
                             }
                         }
-                        Ok(DebugConsole(sbi_rs::DebugConsoleFunction::PutString { len, addr })) => {
+                        Ok(DebugConsole(sbi_rs::DebugConsoleFunction::Write {
+                            len,
+                            addr,
+                            addr_hi: _,
+                        })) => {
                             let sbi_ret = match do_guest_puts(
                                 dbcn_gpa_range.clone(),
                                 dbcn_spa_range.clone(),

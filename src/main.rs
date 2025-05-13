@@ -54,7 +54,7 @@ use page_tracking::*;
 use riscv_elf::ElfMap;
 use riscv_page_tables::*;
 use riscv_pages::*;
-use riscv_regs::{hedeleg, henvcfg, hideleg, hie, scounteren};
+use riscv_regs::{hedeleg, henvcfg, hideleg, hie, hstateen0, scounteren};
 use riscv_regs::{sstatus, vlenb, Readable, RiscvCsrInterface, MAX_VECTOR_REGISTER_LEN};
 use riscv_regs::{
     Exception, Interrupt, LocalRegisterCopy, ReadWriteable, Writeable, CSR, CSR_CYCLE, CSR_TIME,
@@ -512,6 +512,8 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
         println!("No vector support");
     }
 
+    set_hstateen(cpu_info);
+
     println!(
         "{} CPU(s) present. Booting on CPU{} (hart {})",
         cpu_info.num_cpus(),
@@ -727,6 +729,7 @@ fn secondary_init(hart_id: u64) -> Result<CpuParams, Error> {
 
     let cpu_info = CpuInfo::get();
     set_henvcfg(cpu_info);
+    set_hstateen(cpu_info);
     Imsic::setup_this_cpu();
 
     let this_cpu = PerCpu::this_cpu();
@@ -794,6 +797,18 @@ fn set_henvcfg(cpu_info: &CpuInfo) {
     if cpu_info.has_zicbom() {
         CSR.henvcfg.modify(henvcfg::cbie.val(1));
         CSR.henvcfg.modify(henvcfg::cbcfe.val(1));
+    }
+}
+
+// Sets the hstateen CSR.
+fn set_hstateen(cpu_info: &CpuInfo) {
+    // If sstateen is present, enable supported extensions.
+    if cpu_info.has_sstateen() {
+        CSR.hstateen0.modify(hstateen0::ctr.val(1));
+        CSR.hstateen0.modify(hstateen0::aia_imsic.val(1));
+        CSR.hstateen0.modify(hstateen0::aia.val(1));
+        CSR.hstateen0.modify(hstateen0::csrind.val(1));
+        CSR.hstateen0.modify(hstateen0::envcfg.val(1));
     }
 }
 

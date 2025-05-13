@@ -402,6 +402,24 @@ register_bitfields![u64,
     ]
 ];
 
+// Hypervisor state enable bits.
+register_bitfields![u64,
+    pub hstateen0 [
+        // Enables counters of VS-mode.
+        ctr OFFSET(54) NUMBITS(1) [],
+        // Enables access to IMSIC functionality in VS-mode
+        aia_imsic OFFSET(58) NUMBITS(1) [],
+        // Enables access to AIA functionality in VS-mode
+        aia OFFSET(59) NUMBITS(1) [],
+        // Enables access to AIA indirect CSR selection in VS-mode
+        csrind OFFSET(60) NUMBITS(1) [],
+        // Enables access to senvcfg in VS-mode.
+        envcfg OFFSET(62) NUMBITS(1) [],
+        // Enables access to sstateen0 in VS-mode.
+        se0 OFFSET(63) NUMBITS(1) [],
+    ]
+];
+
 // Vector start position
 register_bitfields![u64,
     pub vstart [

@@ -63,6 +63,7 @@ pub struct CSR {
     pub htinst: ReadWriteRiscvCsr<htinst::Register, CSR_HTINST>,
     pub hgeip: ReadWriteRiscvCsr<hgeip::Register, CSR_HGEIP>,
     pub henvcfg: ReadWriteRiscvCsr<henvcfg::Register, CSR_HENVCFG>,
+    pub hstateen0: ReadWriteRiscvCsr<hstateen0::Register, CSR_HSTATEEN0>,
     pub hgatp: ReadWriteRiscvCsr<hgatp::Register, CSR_HGATP>,
     pub htimedelta: ReadWriteRiscvCsr<htimedelta::Register, CSR_HTIMEDELTA>,
 
@@ -142,6 +143,7 @@ pub const CSR: &CSR = &CSR {
     htinst: ReadWriteRiscvCsr::new(),
     hgeip: ReadWriteRiscvCsr::new(),
     henvcfg: ReadWriteRiscvCsr::new(),
+    hstateen0: ReadWriteRiscvCsr::new(),
     hgatp: ReadWriteRiscvCsr::new(),
     htimedelta: ReadWriteRiscvCsr::new(),
 

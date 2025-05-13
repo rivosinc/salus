@@ -38,6 +38,8 @@ pub struct CpuInfo {
     has_sstc: bool,
     // True if the Sscofpmf extension is supported.
     has_sscofpmf: bool,
+    // True if the Sstateen extension is supported.
+    has_sstateen: bool,
     // True if the vector extension is supported
     has_vector: bool,
     // True if the Zicbom extension is supported
@@ -187,6 +189,7 @@ impl CpuInfo {
             has_aia: isa_string_has_extension(isa_string, "ssaia"),
             has_sstc: isa_string_has_extension(isa_string, "sstc"),
             has_sscofpmf: isa_string_has_extension(isa_string, "sscofpmf"),
+            has_sstateen: isa_string_has_extension(isa_string, "ssstateen"),
             has_vector: isa_string_has_base_extension(isa_string, 'v'),
             has_zicbom: isa_string_has_extension(isa_string, "zicbom"),
             has_zicboz: isa_string_has_extension(isa_string, "zicboz"),
@@ -219,6 +222,11 @@ impl CpuInfo {
     /// Returns true if the Sscofpmf extension is supported.
     pub fn has_sscofpmf(&self) -> bool {
         self.has_sscofpmf
+    }
+
+    /// Returns true if the Sstateen extension is supported.
+    pub fn has_sstateen(&self) -> bool {
+        self.has_sstateen
     }
 
     /// Returns true if the vector extension is supported

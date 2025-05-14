@@ -379,9 +379,10 @@ register_bitfields![u64,
         cbcfe OFFSET(6) NUMBITS(1) [],
         // Cache Block Zero instruction Enable
         cbze OFFSET(7) NUMBITS(1) [],
+        // Hardware A D but updates in vs mode.
+        adue OFFSET(61) NUMBITS(1) [],
         // Enable stimecmp in VS.
         stce OFFSET(63) NUMBITS(1) [],
-        // TODO: Bits for other extensions we don't care about yet.
     ]
 ];
 

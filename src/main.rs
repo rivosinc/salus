@@ -351,6 +351,7 @@ extern "C" fn _primary_main() {}
 enum RequiredCpuFeature {
     Aia,
     Sstc,
+    Svadu,
 }
 
 #[derive(Debug)]
@@ -490,6 +491,11 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     if !cpu_info.has_sstc() {
         // We don't implement or use the SBI timer extension and thus require Sstc for timers.
         return Err(Error::CpuMissingFeature(RequiredCpuFeature::Sstc));
+    }
+    if !cpu_info.has_svadu() {
+        // Salus assumes that hardware will update the accessed and dirty bits in the page table.
+        // It can't handle faults for updating them.
+        return Err(Error::CpuMissingFeature(RequiredCpuFeature::Svadu));
     }
 
     set_henvcfg(cpu_info);
@@ -798,6 +804,8 @@ fn set_henvcfg(cpu_info: &CpuInfo) {
         CSR.henvcfg.modify(henvcfg::cbie.val(1));
         CSR.henvcfg.modify(henvcfg::cbcfe.val(1));
     }
+    // Svadu is a required feature for Salus.
+    CSR.henvcfg.modify(henvcfg::adue.val(1));
 }
 
 // Sets the hstateen CSR.

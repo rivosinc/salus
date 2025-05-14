@@ -806,6 +806,9 @@ fn set_henvcfg(cpu_info: &CpuInfo) {
     }
     // Svadu is a required feature for Salus.
     CSR.henvcfg.modify(henvcfg::adue.val(1));
+    if cpu_info.has_svpbmt() {
+        CSR.henvcfg.modify(henvcfg::pbmte.val(1));
+    }
 }
 
 // Sets the hstateen CSR.

@@ -381,6 +381,8 @@ register_bitfields![u64,
         cbze OFFSET(7) NUMBITS(1) [],
         // Hardware A D but updates in vs mode.
         adue OFFSET(61) NUMBITS(1) [],
+        // Page based memory types enable.
+        pbmte OFFSET(62) NUMBITS(1) [],
         // Enable stimecmp in VS.
         stce OFFSET(63) NUMBITS(1) [],
     ]

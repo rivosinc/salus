@@ -29,7 +29,7 @@ jobs:
       run: |
         set -e
         commits=$(git rev-list --reverse origin/${{ github.base_ref }}..${{ github.sha }})
-        for commit in $commits; do git checkout $commit; bazel build //:salus-all; done
+        for commit in $commits; do git checkout $commit; git submodule update; bazel build //:salus-all; done
     - name: Build
       run: bazel build //:salus-all
     - name: Lint

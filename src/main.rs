@@ -491,9 +491,9 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
         // We don't implement or use the SBI timer extension and thus require Sstc for timers.
         return Err(Error::CpuMissingFeature(RequiredCpuFeature::Sstc));
     }
-    // Only write henvcfg when Sstc is present to avoid blowing up on versions of QEMU which
-    // don't support the *envcfg registers.
-    CSR.henvcfg.modify(henvcfg::stce.val(1));
+
+    set_henvcfg(cpu_info);
+
     if cpu_info.has_sscofpmf() {
         // Only probe for PMU counters if we have Sscofpmf; we can't expose counters to guests
         // unless we have support for per-mode filtering.
@@ -726,9 +726,7 @@ fn secondary_init(hart_id: u64) -> Result<CpuParams, Error> {
     test_declare_pass!("secondary init", hart_id);
 
     let cpu_info = CpuInfo::get();
-    if cpu_info.has_sstc() {
-        CSR.henvcfg.modify(henvcfg::stce.val(1));
-    }
+    set_henvcfg(cpu_info);
     Imsic::setup_this_cpu();
 
     let this_cpu = PerCpu::this_cpu();
@@ -783,6 +781,12 @@ extern "C" fn _secondary_main() {
         // Safe as if shutdown fails it triggers a wfi loop (via abort())
         poweroff();
     }
+}
+
+// Configures henvcfg to select what features are available to the host VM.
+fn set_henvcfg(_cpu_info: &CpuInfo) {
+    // Sstc is present, it's checked as a required feature early in boot.
+    CSR.henvcfg.modify(henvcfg::stce.val(1));
 }
 
 #[cfg(test)]

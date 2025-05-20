@@ -111,6 +111,10 @@ register_bitfields![u16,
     pub MemWindow [
         Address OFFSET(4) NUMBITS(12) [],
     ],
+
+    pub EnhancedAllocationNumEntries [
+        NumEntries OFFSET(0) NUMBITS(6),
+    ],
 ];
 
 register_bitfields![u8,
@@ -156,6 +160,34 @@ register_bitfields![u32,
         MaxLinkSpeed OFFSET(0) NUMBITS(4),
         MaxLinkWidth OFFSET(4) NUMBITS(6),
         PortNumber OFFSET(24) NUMBITS(8),
+    ],
+
+    pub EnhancedAllocationEntryHeader [
+        Size OFFSET(0) NUMBITS(3) [],
+        BarEquivalentIndicator OFFSET(4) NUMBITS(4) [],
+        PrimaryProperties OFFSET(8) NUMBITS(8)
+        [
+            Mem = 0,
+            PrefetchableMem = 1,
+            IoPort = 2,
+            VirtualFunctionPrefetchableMem = 3,
+            VirtualFunctionMem = 4,
+            BridgeMem = 5,
+            BridgePrefetchableMem = 6,
+            BridgeIoPort = 7,
+            UnavailableMem = 0xfd,
+            UnavailableIoPort = 0xfe,
+            Unavailable = 0xff,
+        ],
+        // Actually uses same enum constants as PrimaryProperties.
+        SecondaryProperties OFFSET(16) NUMBITS(8) [],
+        Writable OFFSET(30) NUMBITS(1) [],
+        Enable OFFSET(31) NUMBITS(1) [],
+    ],
+
+    pub EnhancedAllocationEntryAddress [
+        Size OFFSET(1) NUMBITS(1),
+        Address OFFSET(2) NUMBITS(30),
     ],
 ];
 
@@ -344,6 +376,25 @@ pub struct ExpressRegisters {
     pub slot_caps2: ReadOnly<u32>,
     pub slot_control2: ReadOnly<u16>,
     pub slot_status2: ReadOnly<u16>,
+}
+
+/// Enhanced allocation capability. This is followed by a variable number of entries.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct EnhancedAllocationHeader {
+    pub header: CapabilityHeader,
+    pub num_entries: ReadOnly<u16, EnhancedAllocationNumEntries::Register>,
+}
+
+/// Enhanced allocation entry. This only covers the fixed layout part, the registers holding the
+/// upper halves of base and max_offset are optional and at variable offsets depending on the Size
+/// field in the respective lower half register.
+#[repr(C)]
+#[derive(FieldOffsets)]
+pub struct EnhancedAllocationEntryFixed {
+    pub header: ReadOnly<u32, EnhancedAllocationEntryHeader::Register>,
+    pub base: ReadOnly<u32, EnhancedAllocationEntryAddress::Register>,
+    pub max_offset: ReadOnly<u32, EnhancedAllocationEntryAddress::Register>,
 }
 
 /// Trait for specifying various mask values for a register.

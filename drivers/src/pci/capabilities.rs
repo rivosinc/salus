@@ -7,11 +7,13 @@ use core::mem::size_of;
 use enum_dispatch::enum_dispatch;
 use memoffset::offset_of;
 use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::registers::ReadOnly;
 use tock_registers::LocalRegisterCopy;
 
 use super::error::*;
 use super::mmio_builder::{MmioReadBuilder, MmioWriteBuilder};
 use super::registers::*;
+use super::resource::*;
 
 // Standard PCI capability IDs.
 #[repr(u8)]
@@ -23,6 +25,7 @@ enum CapabilityId {
     BridgeSubsystem = 13,
     PciExpress = 16,
     MsiX = 17,
+    EnhancedAllocation = 20,
 }
 
 impl CapabilityId {
@@ -36,6 +39,7 @@ impl CapabilityId {
             13 => Some(BridgeSubsystem),
             16 => Some(PciExpress),
             17 => Some(MsiX),
+            20 => Some(EnhancedAllocation),
             _ => None,
         }
     }
@@ -114,6 +118,7 @@ enum CapabilityType {
     Vendor,
     BridgeSubsystem,
     PciExpress,
+    EnhancedAllocation,
 }
 
 // Common functionality required by all capabilities.
@@ -437,6 +442,149 @@ impl Capability for BridgeSubsystem {
     }
 }
 
+// The maximum number of extend allocation entries. The capability's num_entries field allows up to
+// 63 entries, but we have no reason to support that many.
+const MAX_ENHANCED_ALLOCATION_ENTRIES: usize = 8;
+
+pub struct EnhancedAllocationEntry {
+    fixed: &'static mut EnhancedAllocationEntryFixed,
+    base_high: Option<&'static mut ReadOnly<u32>>,
+    max_offset_high: Option<&'static mut ReadOnly<u32>>,
+}
+
+impl EnhancedAllocationEntry {
+    pub fn enabled(&self) -> bool {
+        self.fixed
+            .header
+            .read(EnhancedAllocationEntryHeader::Enable)
+            != 0
+    }
+
+    pub fn bar_equivalent_indicator(&self) -> usize {
+        self.fixed
+            .header
+            .read(EnhancedAllocationEntryHeader::BarEquivalentIndicator) as usize
+    }
+
+    fn properties(&self) -> Option<EnhancedAllocationEntryHeader::PrimaryProperties::Value> {
+        use EnhancedAllocationEntryHeader::*;
+        self.fixed
+            .header
+            .read_as_enum(PrimaryProperties)
+            .or_else(|| self.fixed.header.read_as_enum(SecondaryProperties))
+    }
+
+    pub fn resource_type(&self) -> Option<PciResourceType> {
+        use EnhancedAllocationEntryHeader::PrimaryProperties::Value::*;
+        Some(match self.properties()? {
+            Mem => PciResourceType::Mem64,
+            PrefetchableMem => PciResourceType::PrefetchableMem64,
+            IoPort => PciResourceType::IoPort,
+            _ => return None,
+        })
+    }
+
+    pub fn base(&self) -> u64 {
+        use EnhancedAllocationEntryAddress::Address;
+        let low = self.fixed.base.read(Address) << Address.shift;
+        let high = self.base_high.as_ref().map(|r| r.get()).unwrap_or(0);
+        low as u64 | ((high as u64) << 32)
+    }
+
+    pub fn max_offset(&self) -> u64 {
+        use EnhancedAllocationEntryAddress::Address;
+        let low = self.fixed.max_offset.read(Address) << Address.shift;
+        // Fill in the low-order bits.
+        let low = low | !(Address.mask << Address.shift);
+        let high = self.max_offset_high.as_ref().map(|r| r.get()).unwrap_or(0);
+        low as u64 | ((high as u64) << 32)
+    }
+}
+
+pub struct EnhancedAllocation {
+    pub entries: ArrayVec<EnhancedAllocationEntry, MAX_ENHANCED_ALLOCATION_ENTRIES>,
+    length: usize,
+}
+
+impl EnhancedAllocation {
+    fn new(config_regs: &mut CommonRegisters, header: &mut CapabilityHeader) -> Self {
+        // Safety: `header` points to a valid and uniquely-owned capability structure and we are
+        // trusting that the hardware reported the type of the capability correctly.
+        let header = unsafe {
+            (header as *mut CapabilityHeader as *mut EnhancedAllocationHeader)
+                .as_mut()
+                .unwrap()
+        };
+
+        let mut length = size_of::<EnhancedAllocationHeader>();
+        if config_regs.header_type.read(Type::Layout) == 1 {
+            length += size_of::<u32>();
+        }
+
+        let num_entries = header
+            .num_entries
+            .read(EnhancedAllocationNumEntries::NumEntries) as usize;
+        let mut entries = ArrayVec::new();
+        for _ in 0..core::cmp::min(num_entries, MAX_ENHANCED_ALLOCATION_ENTRIES) {
+            // Safety: `header` points to a valid capability structure and we are trusting that the
+            // hardware-supplied num_entries field doesn't move us outside the ECAM memory region.
+            let fixed = unsafe {
+                ((header as *mut EnhancedAllocationHeader).byte_add(length)
+                    as *mut EnhancedAllocationEntryFixed)
+                    .as_mut()
+                    .unwrap()
+            };
+
+            let num_dw = fixed.header.read(EnhancedAllocationEntryHeader::Size) as usize + 1;
+            let size = num_dw * size_of::<u32>();
+            length += size;
+
+            if size < size_of::<EnhancedAllocationEntryFixed>() {
+                // entry too short, ignore.
+                continue;
+            }
+
+            // Compute references to optional registers following the fixed part.
+            let ptr = fixed as *mut EnhancedAllocationEntryFixed;
+            let mut regs = (size_of::<EnhancedAllocationEntryFixed>()..size)
+                .step_by(size_of::<u32>())
+                // Safety: the memory location is within the entry of a valid capability structure,
+                // and we trust hardware with ECAM layout.
+                .map(|pos| unsafe { (ptr.byte_add(pos) as *mut ReadOnly<u32>).as_mut().unwrap() });
+
+            use EnhancedAllocationEntryAddress::Size;
+            let base_high = (fixed.base.read(Size) == 1).then(|| regs.next()).flatten();
+            let max_offset_high = (fixed.max_offset.read(Size) == 1)
+                .then(|| regs.next())
+                .flatten();
+
+            entries.push(EnhancedAllocationEntry {
+                fixed,
+                base_high,
+                max_offset_high,
+            });
+        }
+
+        Self { entries, length }
+    }
+}
+
+impl Capability for EnhancedAllocation {
+    fn length(&self) -> usize {
+        self.length
+    }
+
+    fn emulate_read(&self, op: &mut MmioReadBuilder, _cap_offset: usize) {
+        // TODO: Implement reading if necessary.
+        op.push_byte(0);
+    }
+
+    fn emulate_write(&mut self, op: &mut MmioWriteBuilder, _cap_offset: usize) {
+        // TODO: support entry enable bit writes if necessary.
+        op.pop_byte();
+    }
+}
+
 // The possible PCI express device types as reported in the FLAGS register of the PCI express
 // capabilities register.
 #[repr(u8)]
@@ -592,7 +740,12 @@ struct PciCapability {
 impl PciCapability {
     // Creates a new capability of type `id` at `header`, which itself is at `offset` within the
     // configuration space.
-    fn new(header: &mut CapabilityHeader, id: CapabilityId, offset: usize) -> Result<Self> {
+    fn new(
+        config_regs: &mut CommonRegisters,
+        header: &mut CapabilityHeader,
+        id: CapabilityId,
+        offset: usize,
+    ) -> Result<Self> {
         let cap_type = match id {
             CapabilityId::PowerManagement => PowerManagement::new(header).into(),
             CapabilityId::Msi => Msi::new(header)?.into(),
@@ -600,6 +753,7 @@ impl PciCapability {
             CapabilityId::Vendor => Vendor::new(header)?.into(),
             CapabilityId::BridgeSubsystem => BridgeSubsystem::new(header).into(),
             CapabilityId::PciExpress => PciExpress::new(header)?.into(),
+            CapabilityId::EnhancedAllocation => EnhancedAllocation::new(config_regs, header).into(),
         };
         Ok(PciCapability {
             id,
@@ -694,7 +848,7 @@ impl PciCapabilities {
             // that the hardware provides a valid config space.
             current_offset = (header.next_cap.get() as usize) & !0x3;
             if let Some(id) = CapabilityId::from_raw(header.cap_id.get()) {
-                let cap = PciCapability::new(header, id, offset)?;
+                let cap = PciCapability::new(config_regs, header, id, offset)?;
                 caps.try_push(cap).map_err(|_| Error::TooManyCapabilities)?;
             };
         }
@@ -746,6 +900,15 @@ impl PciCapabilities {
         self.caps.first().map(|cap| cap.offset()).unwrap_or(0)
     }
 
+    /// Returns the enhanced allocation capability, if present.
+    pub fn enhanced_allocation(&self) -> Option<&EnhancedAllocation> {
+        self.capability_by_id(CapabilityId::EnhancedAllocation)
+            .and_then(|c| match c.cap_type {
+                CapabilityType::EnhancedAllocation(ref cap) => Some(cap),
+                _ => None,
+            })
+    }
+
     // Returns a reference to the capability at `offset`.
     fn capability_by_offset(&self, offset: usize) -> Option<&PciCapability> {
         self.caps
@@ -782,7 +945,24 @@ mod tests {
         test_config[20] = 0x0000_0004;
         test_config[21] = 0xaaaa_5c03; // VPD (don't care)
         test_config[22] = 0xbbbb_cccc;
-        test_config[23] = 0x0004_0009; // Vendor
+        test_config[23] = 0x0004_6009; // Vendor
+        test_config[24] = 0x0004_0014; // Enhanced Allocation
+        test_config[25] = 0x8000_0002; // - entry 0
+        test_config[26] = 0x1000_0000; //   - base
+        test_config[27] = 0x0000_0ffc; //   - max_offset
+        test_config[28] = 0x8000_0003; // - entry 1
+        test_config[29] = 0x2000_0002; //   - base
+        test_config[30] = 0x0000_fffc; //   - max_offset
+        test_config[31] = 0x0000_0002; //   - base high
+        test_config[32] = 0x8000_0003; // - entry 2
+        test_config[33] = 0x3000_0000; //   - base
+        test_config[34] = 0xffff_fffe; //   - max_offset
+        test_config[35] = 0x0000_000f; //   - max_offset high
+        test_config[36] = 0x8001_1724; // - entry 3
+        test_config[37] = 0x4000_0002; //   - base
+        test_config[38] = 0xffff_fffe; //   - max_offset
+        test_config[39] = 0x0000_0004; //   - base high
+        test_config[40] = 0x0000_00ff; //   - max_offset high
         let mut header_mem: Vec<u8> = test_config
             .iter()
             .map(|v| v.to_le_bytes())
@@ -806,5 +986,27 @@ mod tests {
                 .offset(),
             0x5c
         );
+
+        let ea_cap = caps.enhanced_allocation().unwrap();
+        assert_eq!(ea_cap.entries.len(), 4);
+        assert!(ea_cap.entries[0].enabled());
+        assert_eq!(ea_cap.entries[0].bar_equivalent_indicator(), 0);
+        assert_eq!(
+            ea_cap.entries[0].resource_type(),
+            Some(PciResourceType::Mem64)
+        );
+        assert_eq!(ea_cap.entries[0].base(), 0x1000_0000);
+        assert_eq!(ea_cap.entries[0].max_offset(), 0xfff);
+        assert_eq!(ea_cap.entries[1].base(), 0x2_2000_0000);
+        assert_eq!(ea_cap.entries[1].max_offset(), 0xffff);
+        assert_eq!(ea_cap.entries[2].base(), 0x3000_0000);
+        assert_eq!(ea_cap.entries[2].max_offset(), 0xf_ffff_ffff);
+        assert_eq!(ea_cap.entries[3].bar_equivalent_indicator(), 2);
+        assert_eq!(
+            ea_cap.entries[3].resource_type(),
+            Some(PciResourceType::PrefetchableMem64)
+        );
+        assert_eq!(ea_cap.entries[3].base(), 0x4_4000_0000);
+        assert_eq!(ea_cap.entries[3].max_offset(), 0xff_ffff_ffff);
     }
 }

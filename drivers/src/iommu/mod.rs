@@ -204,7 +204,7 @@ mod tests {
         let ddt_page = page_tracker
             .assign_page_for_internal_state(pages.pop().unwrap(), PageOwnerId::host())
             .unwrap();
-        let ddt = DeviceDirectory::<Ddt3Level>::new(ddt_page);
+        let ddt = DeviceDirectory::<Ddt3Level>::new(ddt_page, DeviceContextFormat::Extended);
         for i in 0..16 {
             let id = DeviceId::new(i).unwrap();
             ddt.add_device(id, &mut || {
@@ -217,17 +217,21 @@ mod tests {
 
         let gscid = GscId::new(0);
         let dev = DeviceId::new(2).unwrap();
-        assert!(ddt.enable_device(dev, &pt, &msi_pt, gscid).is_ok());
+        assert!(ddt.enable_device(dev, &pt, Some(&msi_pt), gscid).is_ok());
         assert!(ddt.disable_device(dev).is_ok());
         let bad_dev = DeviceId::new(1 << 16).unwrap();
-        assert!(ddt.enable_device(bad_dev, &pt, &msi_pt, gscid).is_err());
+        assert!(ddt
+            .enable_device(bad_dev, &pt, Some(&msi_pt), gscid)
+            .is_err());
 
         let (bad_msi_pt, _) = stub_msi_page_table(
             page_tracker.clone(),
             &mut pages,
             PageOwnerId::new(5).unwrap(),
         );
-        assert!(ddt.enable_device(dev, &pt, &bad_msi_pt, gscid).is_err());
+        assert!(ddt
+            .enable_device(dev, &pt, Some(&bad_msi_pt), gscid)
+            .is_err());
     }
 
     #[test]

@@ -2209,14 +2209,12 @@ impl<'a, T: GuestStagePagingMode> InitializingVmPages<'a, T> {
     /// this VM's page tables.
     pub fn attach_pci_device(&self, dev: &mut PciDevice) -> Result<()> {
         let iommu_context = self.inner.iommu_context.get().ok_or(Error::NoIommu)?;
-        Iommu::get()
-            .unwrap()
-            .attach_pci_device(
-                dev,
-                &self.inner.root,
-                &iommu_context.msi_page_table,
-                iommu_context.gscid,
-            )
+        let iommu = Iommu::get().unwrap();
+        let msi_pt = iommu
+            .supports_msi_page_tables()
+            .then_some(&iommu_context.msi_page_table);
+        iommu
+            .attach_pci_device(dev, &self.inner.root, msi_pt, iommu_context.gscid)
             .map_err(Error::AttachingDevice)
     }
 }

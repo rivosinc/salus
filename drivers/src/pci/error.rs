@@ -79,6 +79,8 @@ pub enum Error {
     InvalidBarAddress(u64),
     /// The device does not have a BAR at the specified index.
     BarNotPresent(usize),
+    /// The BAR can't be programmed because the address is fixed.
+    BarIsFixed(usize),
     /// A VM has programmed a BAR or bridge window to cover a page it does not own.
     UnownedBarPage(SupervisorPageAddr),
     /// The PCI device is already owned.

@@ -305,11 +305,37 @@ impl PcieRoot {
         // Now assign BAR resources.
         let bar_info = dev.bar_info().clone();
         for bar in bar_info.bars() {
-            let range = self.alloc_hypervisor_resource(bar.bar_type(), bar.size())?;
-            // `range.base()` must be within a PCI root window.
-            let base = self.physical_to_pci_addr(range.base().into()).unwrap();
-            // BAR index must be valid.
-            dev.set_bar_addr(bar.index(), base).unwrap();
+            match bar.provenance() {
+                BarProvenance::PciHeader => {
+                    let range = self.alloc_hypervisor_resource(bar.bar_type(), bar.size())?;
+                    // `range.base()` must be within a PCI root window.
+                    let base = self.physical_to_pci_addr(range.base().into()).unwrap();
+                    // BAR index must be valid.
+                    dev.set_bar_addr(bar.index(), base).unwrap();
+                }
+                BarProvenance::EnhancedAllocation => {
+                    // TODO: Because Enhanced Allocation regions use fixed addresses they require
+                    // special handling, which the current resource management implementation does
+                    // not meet:
+                    //  1. When allocating resources for traditional BARS, we need to make sure
+                    //     these don't overlap with Enhanced Allocation regions.
+                    //  2. The currently implemented simplistic allocation strategy that splits the
+                    //     MMIO space to steal some address space for the hypervisor at the top end
+                    //     doesn't work, since the Enhanced Allocation region may reside anywhere
+                    //     in MMIO space.
+                    // As a result, we currently can't reserve Enhanced Allocation regions for the
+                    // hypervisor and guarantee that the host VM can't access them. Thus, bail on
+                    // attempts by the hypervisor to grab devices with Enhanced Allocation regions.
+                    //
+                    // We still allow adventurous souls to proceed after building with a special
+                    // feature flag - but this may or may not work depending on where the
+                    // respective Enhanced Allocation region(s) reside in MMIO space and whether
+                    // they happen to collide with other allocations.
+                    if !cfg!(feature = "unsafe_enhanced_allocation") {
+                        unimplemented!();
+                    }
+                }
+            }
         }
         if bar_info
             .bars()

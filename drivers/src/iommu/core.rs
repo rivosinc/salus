@@ -83,9 +83,6 @@ impl Iommu {
         if !registers.capabilities.is_set(Capabilities::Sv48x4) {
             return Err(Error::MissingGStageSupport);
         }
-        if !registers.capabilities.is_set(Capabilities::MsiFlat) {
-            return Err(Error::MissingMsiSupport);
-        }
 
         // Initialize the command queue.
         let command_queue = CommandQueue::new(get_page().ok_or(Error::OutOfPages)?);
@@ -101,7 +98,12 @@ impl Iommu {
         // TODO: Set up fault queue.
 
         // Set up an initial device directory table.
-        let ddt = DeviceDirectory::new(get_page().ok_or(Error::OutOfPages)?);
+        let format = if registers.capabilities.is_set(Capabilities::MsiFlat) {
+            DeviceContextFormat::Extended
+        } else {
+            DeviceContextFormat::Base
+        };
+        let ddt = DeviceDirectory::new(get_page().ok_or(Error::OutOfPages)?, format);
         for dev in pci.devices() {
             let addr = dev.lock().info().address();
             if addr == iommu_addr {
@@ -136,6 +138,11 @@ impl Iommu {
     /// Returns the version of this IOMMU device.
     pub fn version(&self) -> u64 {
         self.registers.capabilities.read(Capabilities::Version)
+    }
+
+    /// Returns whether this IOMMU instance supports MSI page tables.
+    pub fn supports_msi_page_tables(&self) -> bool {
+        self.ddt.supports_msi_page_tables()
     }
 
     /// Allocates a new GSCID for `owner`.
@@ -179,7 +186,7 @@ impl Iommu {
         &self,
         dev: &mut PciDevice,
         pt: &GuestStagePageTable<T>,
-        msi_pt: &MsiPageTable,
+        msi_pt: Option<&MsiPageTable>,
         gscid: GscId,
     ) -> Result<()> {
         let dev_id = DeviceId::try_from(dev.info().address())?;
@@ -191,7 +198,7 @@ impl Iommu {
             .and_then(|g| g.as_mut())
             .ok_or(Error::InvalidGscId(gscid))?;
         if pt.page_owner_id() != state.owner
-            || msi_pt.owner() != state.owner
+            || !msi_pt.is_none_or(|pt| pt.owner() == state.owner)
             || dev.owner() != Some(state.owner)
         {
             return Err(Error::OwnerMismatch);

@@ -65,6 +65,8 @@ pub enum Error {
     GscIdAlreadyFree(GscId),
     /// Attempted to free a GSCID that's currently being used for translation.
     GscIdInUse(GscId),
+    /// MSI translation not supported.
+    MsiTranslationUnsupported,
 }
 
 /// Holds results for IOMMU operations.

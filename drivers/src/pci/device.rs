@@ -225,10 +225,18 @@ mod bridge_offsets {
     define_field_span!(BridgeRegisters, bridge_control, u16);
 }
 
+/// Indicates whether a BAR was found in the PCI header or via the Enhanced Allocation capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarProvenance {
+    PciHeader,
+    EnhancedAllocation,
+}
+
 /// Describes a single PCI BAR.
 #[derive(Clone, Debug)]
 pub struct PciBarInfo {
     index: usize,
+    provenance: BarProvenance,
     bar_type: PciResourceType,
     size: u64,
 }
@@ -237,6 +245,11 @@ impl PciBarInfo {
     /// Returns the index of this BAR.
     pub fn index(&self) -> usize {
         self.index
+    }
+
+    /// Returns the provenance of this BAR.
+    pub fn provenance(&self) -> BarProvenance {
+        self.provenance
     }
 
     /// Returns the type of resource this BAR maps.
@@ -258,8 +271,34 @@ pub struct PciDeviceBarInfo {
 
 impl PciDeviceBarInfo {
     // Probes the size and type of each BAR from `registers`.
-    fn new(registers: &mut [ReadWrite<u32, BaseAddress::Register>]) -> Result<Self> {
+    fn new(
+        registers: &mut [ReadWrite<u32, BaseAddress::Register>],
+        enhanced_allocation: Option<&EnhancedAllocation>,
+    ) -> Result<Self> {
         let mut bars = ArrayVec::new();
+
+        // Check the enhanced allocation capability first to give regions discovered via enhanced
+        // allocation precedence. Per the specification, traditional BARs must be hardware-wired to
+        // zero if there is a corresponding enhanced allocation entry.
+        if let Some(enhanced_allocation) = enhanced_allocation {
+            for entry in enhanced_allocation.entries.iter() {
+                let bei = entry.bar_equivalent_indicator();
+                if bei > PCI_ENDPOINT_BARS || !entry.enabled() {
+                    continue;
+                }
+
+                if let Some(bar_type) = entry.resource_type() {
+                    let bar = PciBarInfo {
+                        index: bei,
+                        provenance: BarProvenance::EnhancedAllocation,
+                        bar_type,
+                        size: entry.max_offset() + 1,
+                    };
+                    bars.push(bar);
+                }
+            }
+        }
+
         let mut index = 0;
         while index < registers.len() {
             let bar_index = index;
@@ -293,8 +332,14 @@ impl PciDeviceBarInfo {
                 return Err(Error::InvalidBarSize(size));
             }
 
+            // Ignore BARs that conflict with enhanced allocation entries.
+            if bars.iter().any(|b| b.index == bar_index) {
+                continue;
+            }
+
             let bar = PciBarInfo {
                 index: bar_index,
+                provenance: BarProvenance::PciHeader,
                 bar_type,
                 size,
             };
@@ -319,6 +364,7 @@ impl PciDeviceBarInfo {
         // If `index` is the upper half of a 64-bit BAR, return the type of the lower half.
         self.bars
             .iter()
+            .filter(|b| b.provenance() == BarProvenance::PciHeader)
             .find(|b| b.index() == index || (b.index() + 1 == index && b.bar_type().is_64bit()))
             .map(|b| b.bar_type())
     }
@@ -344,7 +390,8 @@ impl PciEndpoint {
     fn new(registers: &'static mut EndpointRegisters, info: PciDeviceInfo) -> Result<Self> {
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
-        let bar_info = PciDeviceBarInfo::new(&mut registers.bar)?;
+        let bar_info =
+            PciDeviceBarInfo::new(&mut registers.bar, capabilities.enhanced_allocation())?;
         let common = PciDeviceCommon {
             info,
             capabilities,
@@ -440,7 +487,8 @@ impl PciBridge {
         };
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
-        let bar_info = PciDeviceBarInfo::new(&mut registers.bar)?;
+        let bar_info =
+            PciDeviceBarInfo::new(&mut registers.bar, capabilities.enhanced_allocation())?;
         let common = PciDeviceCommon {
             info,
             capabilities,
@@ -976,14 +1024,24 @@ impl PciDevice {
             .bar_info()
             .get(index)
             .ok_or(Error::BarNotPresent(index))?;
-        let regs = self.bar_registers();
-        let addr_lo = regs[index].get() & !((1u32 << BaseAddress::Address.shift) - 1);
-        let addr_hi = if bar.bar_type().is_64bit() {
-            regs[index + 1].get()
-        } else {
-            0
-        };
-        Ok((addr_lo as u64) | ((addr_hi as u64) << 32))
+        match bar.provenance {
+            BarProvenance::PciHeader => {
+                let regs = self.bar_registers();
+                let addr_lo = regs[index].get() & !((1u32 << BaseAddress::Address.shift) - 1);
+                let addr_hi = if bar.bar_type().is_64bit() {
+                    regs[index + 1].get()
+                } else {
+                    0
+                };
+                Ok((addr_lo as u64) | ((addr_hi as u64) << 32))
+            }
+            BarProvenance::EnhancedAllocation => {
+                // OK to unwrap the enhanced allocation capability and its entry because the
+                // PciBarInfo existence implies their presence.
+                let cap = self.common().capabilities.enhanced_allocation().unwrap();
+                Ok(cap.entries.get(index).unwrap().base())
+            }
+        }
     }
 
     /// Programs the BAR at `bar_index` with the given address.
@@ -992,6 +1050,9 @@ impl PciDevice {
             .bar_info()
             .get(index)
             .ok_or(Error::BarNotPresent(index))?;
+        if bar.provenance != BarProvenance::PciHeader {
+            return Err(Error::BarIsFixed(index));
+        }
         let regs = self.bar_registers();
         regs[index].set(pci_addr as u32);
         if bar.bar_type().is_64bit() {

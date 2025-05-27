@@ -6,7 +6,7 @@ use sbi_rs::api::debug_console::console_puts;
 use sbi_rs::{ecall_send, SbiMessage};
 use sync::{Mutex, Once};
 
-use crate::print::{Console, ConsoleWriter};
+use crate::print::{Console, ConsoleDriver};
 
 /// Driver for an SBI based console.
 pub struct SbiConsole {
@@ -23,11 +23,11 @@ impl SbiConsole {
             buffer: Mutex::new(console_buffer),
         };
         SBI_CONSOLE.call_once(|| console);
-        Console::set_writer(SBI_CONSOLE.get().unwrap());
+        Console::set_driver(SBI_CONSOLE.get().unwrap());
     }
 }
 
-impl ConsoleWriter for SbiConsole {
+impl ConsoleDriver for SbiConsole {
     /// Write an entire byte sequence to the SBI console.
     fn write_bytes(&self, bytes: &[u8]) {
         let mut buffer = self.buffer.lock();
@@ -48,11 +48,11 @@ static SBI_CONSOLE_V01: SbiConsoleV01 = SbiConsoleV01 {};
 impl SbiConsoleV01 {
     /// Sets the SBI legacy console as the system console.
     pub fn set_as_console() {
-        Console::set_writer(&SBI_CONSOLE_V01);
+        Console::set_driver(&SBI_CONSOLE_V01);
     }
 }
 
-impl ConsoleWriter for SbiConsoleV01 {
+impl ConsoleDriver for SbiConsoleV01 {
     /// Write an entire byte sequence to the SBI console.
     fn write_bytes(&self, bytes: &[u8]) {
         for &b in bytes {

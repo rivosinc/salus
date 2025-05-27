@@ -981,16 +981,17 @@ impl Drop for VmIommuContext {
 
         // Detach any devices we own from the IOMMU.
         let owner = self.msi_page_table.owner();
-        let pci = PcieRoot::get();
-        for dev in pci.devices() {
-            let mut dev = dev.lock();
-            if dev.owner() == Some(owner) {
-                // Unwrap ok: `self.gscid` must be valid and match the ownership of the device
-                // to have been attached in the first place.
-                //
-                // Silence buggy clippy warning.
-                #[allow(clippy::explicit_auto_deref)]
-                iommu.detach_pci_device(&mut *dev, self.gscid).unwrap();
+        for pci in PcieRoot::get_roots() {
+            for dev in pci.devices() {
+                let mut dev = dev.lock();
+                if dev.owner() == Some(owner) {
+                    // Unwrap ok: `self.gscid` must be valid and match the ownership of the device
+                    // to have been attached in the first place.
+                    //
+                    // Silence buggy clippy warning.
+                    #[allow(clippy::explicit_auto_deref)]
+                    iommu.detach_pci_device(&mut *dev, self.gscid).unwrap();
+                }
             }
         }
 

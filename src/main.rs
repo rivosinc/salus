@@ -44,8 +44,8 @@ mod vm_pmu;
 use backtrace::backtrace;
 use device_tree::{DeviceTree, DeviceTreeError, Fdt};
 use drivers::{
-    imsic::Imsic, iommu::Iommu, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver, uart::UartDriver,
-    CpuInfo,
+    imsic::Imsic, iommu::Iommu, iommu::IommuError, pci::PciError, pci::PcieRoot, pmu::PmuInfo,
+    reset::ResetDriver, uart::UartDriver, CpuInfo,
 };
 use host_vm::{HostVm, HostVmLoader, HOST_VM_ALIGN};
 use hyp_alloc::HypAlloc;
@@ -544,24 +544,25 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     // Probe for a PCI bus.
     PcieRoot::probe_from(&hyp_dt, &mut mem_map)
         .map_err(|e| Error::RequiredDeviceProbe(RequiredDeviceProbe::Pci(e)))?;
-    let pci = PcieRoot::get();
-    for dev in pci.devices() {
-        let dev = dev.lock();
-        println!(
-            "Found func {}; type: {}, MSI: {}, MSI-X: {}, PCIe: {}",
-            dev.info(),
-            dev.info().header_type(),
-            dev.has_msi(),
-            dev.has_msix(),
-            dev.is_pcie(),
-        );
-        for bar in dev.bar_info().bars() {
+    for pci in PcieRoot::get_roots() {
+        for dev in pci.devices() {
+            let dev = dev.lock();
             println!(
-                "BAR{:}: type {:?}, size 0x{:x}",
-                bar.index(),
-                bar.bar_type(),
-                bar.size()
+                "Found func {}; type: {}, MSI: {}, MSI-X: {}, PCIe: {}",
+                dev.info(),
+                dev.info().header_type(),
+                dev.has_msi(),
+                dev.has_msix(),
+                dev.is_pcie(),
             );
+            for bar in dev.bar_info().bars() {
+                println!(
+                    "BAR{:}: type {:?}, size 0x{:x}",
+                    bar.index(),
+                    bar.bar_type(),
+                    bar.size()
+                );
+            }
         }
     }
 
@@ -629,17 +630,25 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     PerCpu::init(hart_id, &mut hyp_mem).map_err(Error::CreateSmpState)?;
 
     // Find and initialize the IOMMU.
-    match Iommu::probe_from(PcieRoot::get(), &mut || {
-        hyp_mem.take_pages_for_host_state(1).into_iter().next()
-    }) {
-        Ok(_) => {
+    match PcieRoot::get_roots()
+        .map(|pci| {
+            Iommu::probe_from(pci, &mut || {
+                hyp_mem.take_pages_for_host_state(1).into_iter().next()
+            })
+        })
+        .find(|r| !matches!(r, Err(IommuError::ProbingIommu(PciError::DeviceNotFound))))
+    {
+        Some(Ok(_)) => {
             println!(
                 "Found RISC-V IOMMU version 0x{:x}",
                 Iommu::get().unwrap().version()
             );
         }
-        Err(e) => {
+        Some(Err(e)) => {
             println!("Failed to probe IOMMU: {:?}", e);
+        }
+        None => {
+            println!("No IOMMU found!");
         }
     };
 

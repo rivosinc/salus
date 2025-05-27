@@ -103,7 +103,9 @@ impl HostDtBuilder {
         soc_node.add_prop("ranges")?;
 
         Imsic::get().add_host_imsic_node(&mut self.tree)?;
-        PcieRoot::get().add_host_pcie_node(&mut self.tree)?;
+        for pci in PcieRoot::get_roots() {
+            pci.add_host_pcie_node(&mut self.tree)?;
+        }
 
         Ok(self)
     }
@@ -265,23 +267,24 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
             self.vm.add_imsic_pages(cpu_id, imsic_pages);
         }
 
-        let pci = PcieRoot::get();
-        pci.take_host_devices();
-        // Identity-map the PCIe BAR resources.
-        for (res_type, range) in pci.resources() {
-            let gpa = range.base().as_guest_phys(PageOwnerId::host());
-            self.vm.add_pci_region(gpa, range.length_bytes());
-            let pages = pci.take_host_resource(res_type).unwrap();
-            self.vm.add_pci_pages(gpa, pages);
-        }
-        // Attach our PCI devices to the IOMMU.
-        if Iommu::get().is_some() {
-            for dev in pci.devices() {
-                let mut dev = dev.lock();
-                if dev.owner() == Some(PageOwnerId::host()) {
-                    // Silence buggy clippy warning.
-                    #[allow(clippy::explicit_auto_deref)]
-                    self.vm.attach_pci_device(&mut *dev);
+        for pci in PcieRoot::get_roots() {
+            pci.take_host_devices();
+            // Identity-map the PCIe BAR resources.
+            for (res_type, range) in pci.resources() {
+                let gpa = range.base().as_guest_phys(PageOwnerId::host());
+                self.vm.add_pci_region(gpa, range.length_bytes());
+                let pages = pci.take_host_resource(res_type).unwrap();
+                self.vm.add_pci_pages(gpa, pages);
+            }
+            // Attach our PCI devices to the IOMMU.
+            if Iommu::get().is_some() {
+                for dev in pci.devices() {
+                    let mut dev = dev.lock();
+                    if dev.owner() == Some(PageOwnerId::host()) {
+                        // Silence buggy clippy warning.
+                        #[allow(clippy::explicit_auto_deref)]
+                        self.vm.attach_pci_device(&mut *dev);
+                    }
                 }
             }
         }
@@ -365,10 +368,12 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
         self.vm.add_zero_pages(current_gpa, self.zero_pages);
 
         // Set up MMIO emulation for the PCIe config space.
-        let config_mem = pci.config_space();
-        let config_gpa = config_mem.base().as_guest_phys(PageOwnerId::host());
-        self.vm
-            .add_mmio_region(config_gpa, config_mem.length_bytes());
+        for pci in PcieRoot::get_roots() {
+            let config_mem = pci.config_space();
+            let config_gpa = config_mem.base().as_guest_phys(PageOwnerId::host());
+            self.vm
+                .add_mmio_region(config_gpa, config_mem.length_bytes());
+        }
 
         self.vm
     }
@@ -487,14 +492,12 @@ impl HostVmRunner {
     ) -> core::result::Result<(), MmioEmulationError> {
         // For now, the only thing we're expecting is MMIO emulation faults in PCI config space.
         let addr = (self.htval << 2) | (self.stval & 0x3);
-        let pci = PcieRoot::get();
-        if addr < pci.config_space().base().bits() {
-            return Err(MmioEmulationError::InvalidAddress(addr));
-        }
-        let offset = addr - pci.config_space().base().bits();
-        if offset > pci.config_space().length_bytes() {
-            return Err(MmioEmulationError::InvalidAddress(addr));
-        }
+        let pci = PcieRoot::get_roots()
+            .find(|pci| {
+                let base = pci.config_space().base().bits();
+                addr >= base && (addr - base) < pci.config_space().length_bytes()
+            })
+            .ok_or(MmioEmulationError::InvalidAddress(addr))?;
 
         // Figure out from HTINST what the MMIO operation was. We know the source/destination is
         // always A0.
@@ -516,6 +519,7 @@ impl HostVmRunner {
             }
         };
 
+        let offset = addr - pci.config_space().base().bits();
         if write {
             let val = self.gprs.reg(GprIndex::A0);
             pci.emulate_config_write(offset, val, width, page_tracker, PageOwnerId::host());

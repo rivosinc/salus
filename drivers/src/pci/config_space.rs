@@ -123,9 +123,16 @@ impl PciConfigSpace {
 
     // Returns the offset of the given address within this PciConfigSpace.
     fn config_space_offset(&self, address: Address) -> Option<u64> {
-        (address.bits() as u64)
-            .checked_sub(Address::bus_address(self.bus_range.start).bits() as u64)
-            .map(|a| a << PCIE_ECAM_FN_SHIFT)
+        // Make sure the address is on the correct segment and within the bus range.
+        if address.segment() != self.segment || !self.bus_range.contains(address.bus()) {
+            return None;
+        }
+        Some(
+            (address.bits() as u64)
+                .checked_sub(Address::segment_address(self.segment).bits() as u64)?
+                .checked_sub(Address::bus_address(self.bus_range.start).bits() as u64)?
+                << PCIE_ECAM_FN_SHIFT,
+        )
     }
 }
 

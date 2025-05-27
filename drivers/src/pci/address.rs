@@ -103,6 +103,12 @@ pub struct BusRange {
     pub end: Bus,
 }
 
+impl BusRange {
+    pub fn contains(&self, bus: Bus) -> bool {
+        bus >= self.start && bus <= self.end
+    }
+}
+
 // Because Functions are only 3 bits, they are trivally valid Bus numbers(8 bits).
 impl From<Function> for Bus {
     fn from(f: Function) -> Self {
@@ -140,6 +146,11 @@ impl Address {
     /// Creates a new `Address` based on the provided components.
     pub fn new(seg: Segment, bus: Bus, dev: Device, func: Function) -> Address {
         Address(seg.0 << Segment::SHIFT | bus.0 << Bus::SHIFT | dev.0 << Device::SHIFT | func.0)
+    }
+
+    /// Creates an `Address` for the given segment.
+    pub fn segment_address(segment: Segment) -> Address {
+        Address(segment.0 << Segment::SHIFT)
     }
 
     /// Creates an `Address` for the given `Bus` on the first segment.

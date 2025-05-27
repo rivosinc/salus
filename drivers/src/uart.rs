@@ -65,12 +65,12 @@ impl UartDriver {
             base_address: Mutex::new(NonNull::new(base_address as _).unwrap()),
         };
         UART_DRIVER.call_once(|| uart);
-        Console::set_writer(UART_DRIVER.get().unwrap());
+        Console::set_driver(UART_DRIVER.get().unwrap());
         Ok(())
     }
 }
 
-impl ConsoleWriter for UartDriver {
+impl ConsoleDriver for UartDriver {
     /// Write an entire byte sequence to this UART.
     fn write_bytes(&self, bytes: &[u8]) {
         let base_address = self.base_address.lock();

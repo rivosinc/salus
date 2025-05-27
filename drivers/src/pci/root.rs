@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::alloc::Global;
+use alloc::vec::Vec;
 use arrayvec::{ArrayString, ArrayVec};
 use core::marker::PhantomData;
-use device_tree::{DeviceTree, DeviceTreeResult};
+use device_tree::{DeviceTree, DeviceTreeNode, DeviceTreeResult};
 use hyp_alloc::{Arena, ArenaId};
 use page_tracking::{HwMemMap, PageTracker};
 use riscv_pages::*;
@@ -41,7 +42,7 @@ pub struct PcieRoot {
     msi_parent_phandle: u32,
 }
 
-static PCIE_ROOT: Once<PcieRoot> = Once::new();
+static PCIE_ROOTS: Once<Vec<PcieRoot>> = Once::new();
 
 // A `u64` from two `u32` cells in a device tree.
 struct U64Cell(u32, u32);
@@ -59,13 +60,7 @@ fn valid_config_mmio_access(offset: u64, len: usize) -> bool {
 }
 
 impl PcieRoot {
-    /// Creates a `PcieRoot` singleton by finding a supported configuration in the passed `DeviceTree`.
-    pub fn probe_from(dt: &DeviceTree, mem_map: &mut HwMemMap) -> Result<()> {
-        let pci_node = dt
-            .iter()
-            .find(|n| n.compatible(["pci-host-ecam-generic"]) && !n.disabled())
-            .ok_or(Error::NoCompatibleHostNode)?;
-
+    fn probe_one(pci_node: &DeviceTreeNode, mem_map: &mut HwMemMap) -> Result<PcieRoot> {
         // Find the ECAM MMIO region, which should be the first entry in the `reg` property.
         let mut regs = pci_node
             .props()
@@ -192,20 +187,30 @@ impl PcieRoot {
         let mut device_arena = PciDeviceArena::new(Global);
         let root_bus = PciBus::enumerate(&config_space, bus_range.start, &mut device_arena)?;
 
-        PCIE_ROOT.call_once(|| Self {
+        Ok(Self {
             config_space,
             root_bus,
             device_arena,
             resources: Mutex::new(resources),
             msi_parent_phandle,
-        });
+        })
+    }
+
+    /// Probes `PcieRoot`s from supported configurations in the passed `DeviceTree`.
+    pub fn probe_from(dt: &DeviceTree, mem_map: &mut HwMemMap) -> Result<()> {
+        let roots = dt
+            .iter()
+            .filter(|n| n.compatible(["pci-host-ecam-generic"]) && !n.disabled())
+            .map(|n| Self::probe_one(n, mem_map))
+            .collect::<Result<Vec<PcieRoot>>>()?;
+
+        PCIE_ROOTS.call_once(|| roots);
         Ok(())
     }
 
-    /// Gets a reference to the `PcieRoot` singleton. Panics if `PcieRoot::probe_from()` has not yet
-    /// been called to initialize it.
-    pub fn get() -> &'static Self {
-        PCIE_ROOT.get().unwrap()
+    /// Returns an iterator over all PcieRoots that have been probed.
+    pub fn get_roots() -> impl Iterator<Item = &'static Self> {
+        PCIE_ROOTS.get().unwrap().iter()
     }
 
     /// Returns an iterator over all PCI devices.

@@ -27,6 +27,18 @@ config_setting(
     },
 )
 
+bool_flag(
+    name = "enable_hardware_ad_updates",
+    build_setting_default = 1,
+)
+
+config_setting(
+    name = "hardware_ad_updates",
+    flag_values = {
+      "enable_hardware_ad_updates": "true",
+    },
+)
+
 filegroup(
     name = "salus-all",
     srcs = [
@@ -204,6 +216,10 @@ rust_binary(
         "-Clink-arg=-T$(location //:l_rule)",
     ],
     deps = salus_deps,
+    crate_features = select({
+      ":hardware_ad_updates": ["hardware_ad_updates"],
+      "//conditions:default": [],
+    }),
 )
 
 rust_clippy(

@@ -189,13 +189,19 @@ impl PteFieldBits {
     pub fn leaf_with_perms(perms: PteLeafPerms) -> Self {
         let mut ret = Self::default();
         ret.bits |= perms as u64;
+
+        #[cfg(not(feature = "hardware_ad_updates"))]
+        {
+            ret.set_bit(PteFieldBit::Accessed);
+            ret.set_bit(PteFieldBit::Dirty);
+        }
+
         ret
     }
 
     /// Creates a new status for a leaf entry with the given `perms`.
     pub fn user_leaf_with_perms(perms: PteLeafPerms) -> Self {
-        let mut ret = Self::default();
-        ret.bits |= perms as u64;
+        let mut ret = Self::leaf_with_perms(perms);
         ret.set_bit(PteFieldBit::User);
         ret
     }

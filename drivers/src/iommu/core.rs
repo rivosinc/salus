@@ -84,6 +84,12 @@ impl Iommu {
             return Err(Error::MissingGStageSupport);
         }
 
+        if cfg!(feature = "hardware_ad_updates")
+            && !registers.capabilities.is_set(Capabilities::AmoHwad)
+        {
+            return Err(Error::MissingAmoHwadSupport);
+        }
+
         // Initialize the command queue.
         let command_queue = CommandQueue::new(get_page().ok_or(Error::OutOfPages)?);
         let mut cqb = LocalRegisterCopy::<u64, QueueBase::Register>::new(0);

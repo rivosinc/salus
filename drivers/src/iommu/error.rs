@@ -23,6 +23,8 @@ pub enum Error {
     MissingGStageSupport,
     /// Missing required MSI translation support.
     MissingMsiSupport,
+    /// Missing A/D update support.
+    MissingAmoHwadSupport,
     /// Not enough pages were supplied to create an MSI page table.
     InsufficientMsiTablePages,
     /// The supplied MSI page table pages were not properly aligned.

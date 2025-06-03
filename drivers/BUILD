@@ -30,6 +30,9 @@ rust_library(
     crate_features = select({
       "//:unsafe_enhanced_allocation": ["unsafe_enhanced_allocation"],
       "//conditions:default": [],
+    }) + select({
+      "//:hardware_ad_updates": ["hardware_ad_updates"],
+      "//conditions:default": [],
     }),
 )
 

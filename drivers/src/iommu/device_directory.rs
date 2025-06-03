@@ -87,6 +87,12 @@ struct DeviceContextExtended {
 // There are a bunch of other bits in `tc` for ATS, etc. but we only care about V for now.
 const DC_VALID: u64 = 1 << 0;
 
+// Indicates that hardware should update the AD bits in G stage translation PTEs.
+const DC_GADE: u64 = 1 << 7;
+
+// Indicates that hardware should update the AD bits in first translation PTEs.
+const DC_SADE: u64 = 1 << 8;
+
 // Set in invalidated device contexts to indicate that the device context corresponds to a real
 // device. Prevents enabling of device contexts that weren't explicitly added with `add_device()`.
 const DC_SW_INVALIDATED: u64 = 1 << 31;
@@ -144,7 +150,12 @@ trait DeviceContext {
         // as valid.
         dma_wmb();
 
-        self.base_mut().tc = DC_VALID;
+        let ade = if cfg!(feature = "hardware_ad_updates") {
+            DC_SADE | DC_GADE
+        } else {
+            0
+        };
+        self.base_mut().tc = DC_VALID | ade;
     }
 
     // Marks the device context as invalid.

@@ -492,7 +492,7 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
         // We don't implement or use the SBI timer extension and thus require Sstc for timers.
         return Err(Error::CpuMissingFeature(RequiredCpuFeature::Sstc));
     }
-    if !cpu_info.has_svadu() {
+    if cfg!(feature = "hardware_ad_updates") && !cpu_info.has_svadu() {
         // Salus assumes that hardware will update the accessed and dirty bits in the page table.
         // It can't handle faults for updating them.
         return Err(Error::CpuMissingFeature(RequiredCpuFeature::Svadu));

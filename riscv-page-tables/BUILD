@@ -17,6 +17,10 @@ rust_library(
     rustc_flags = [
         "-Ctarget-feature=+h",
     ],
+    crate_features = select({
+      "//:hardware_ad_updates": ["hardware_ad_updates"],
+      "//conditions:default": [],
+    }),
 )
 
 rust_clippy(

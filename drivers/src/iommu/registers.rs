@@ -21,6 +21,7 @@ register_bitfields![u64,
         Sv57x4 OFFSET(19) NUMBITS(1),
         MsiFlat OFFSET(22) NUMBITS(1),
         MsiMrif OFFSET(23) NUMBITS(1),
+        AmoHwad OFFSET(24) NUMBITS(1),
     ],
 
     pub DirectoryPointer [

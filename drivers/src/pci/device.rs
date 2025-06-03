@@ -13,6 +13,8 @@ use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
 use tock_registers::registers::ReadWrite;
 use tock_registers::LocalRegisterCopy;
 
+use crate::iommu::DeviceId as IommuDeviceId;
+
 use super::address::*;
 use super::bus::PciBus;
 use super::capabilities::*;
@@ -371,12 +373,34 @@ impl PciDeviceBarInfo {
     }
 }
 
+/// IOMMU specifier for a PCI device. This indicates the IOMMU the device is behind and the device
+/// identifier used by the IOMMU to distinguish the device.
+pub struct IommuSpecifier {
+    phandle: u32,
+    dev_id: IommuDeviceId,
+}
+
+impl IommuSpecifier {
+    pub fn new(phandle: u32, dev_id: IommuDeviceId) -> Self {
+        Self { phandle, dev_id }
+    }
+
+    pub fn iommu_phandle(&self) -> u32 {
+        self.phandle
+    }
+
+    pub fn iommu_dev_id(&self) -> IommuDeviceId {
+        self.dev_id
+    }
+}
+
 // Common state between bridges and endpoints.
 struct PciDeviceCommon {
     info: PciDeviceInfo,
     dt_node: Option<NodeId>,
     capabilities: PciCapabilities,
     bar_info: PciDeviceBarInfo,
+    iommu_specifier: Option<IommuSpecifier>,
     owner: Option<PageOwnerId>,
     iommu_attached: bool,
 }
@@ -393,6 +417,7 @@ impl PciEndpoint {
         registers: &'static mut EndpointRegisters,
         info: PciDeviceInfo,
         dt_node: Option<NodeId>,
+        iommu_specifier: Option<IommuSpecifier>,
     ) -> Result<Self> {
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
@@ -403,6 +428,7 @@ impl PciEndpoint {
             dt_node,
             capabilities,
             bar_info,
+            iommu_specifier,
             owner: None,
             iommu_attached: false,
         };
@@ -477,6 +503,7 @@ impl PciBridge {
         registers: &'static mut BridgeRegisters,
         info: PciDeviceInfo,
         dt_node: Option<NodeId>,
+        iommu_specifier: Option<IommuSpecifier>,
     ) -> Result<Self> {
         // Prevent config cycles from passing beyond this bridge until we're ready to enumreate.
         registers.sub_bus.set(0);
@@ -505,6 +532,7 @@ impl PciBridge {
             dt_node,
             capabilities,
             bar_info,
+            iommu_specifier,
             owner: None,
             iommu_attached: false,
         };
@@ -845,16 +873,17 @@ impl PciDevice {
         registers_ptr: NonNull<CommonRegisters>,
         info: PciDeviceInfo,
         dt_node: Option<NodeId>,
+        iommu_specifier: Option<IommuSpecifier>,
     ) -> Result<Self> {
         match info.header_type() {
             HeaderType::Endpoint => {
                 let registers = registers_ptr.cast().as_mut();
-                let ep = PciEndpoint::new(registers, info, dt_node)?;
+                let ep = PciEndpoint::new(registers, info, dt_node, iommu_specifier)?;
                 Ok(PciDevice::Endpoint(ep))
             }
             HeaderType::PciBridge => {
                 let registers = registers_ptr.cast().as_mut();
-                let bridge = PciBridge::new(registers, info, dt_node)?;
+                let bridge = PciBridge::new(registers, info, dt_node, iommu_specifier)?;
                 Ok(PciDevice::Bridge(bridge))
             }
             h => Err(Error::UnsupportedHeaderType(info.address(), h)),
@@ -889,6 +918,12 @@ impl PciDevice {
     /// Returns if the device is a PCI-Express device.
     pub fn is_pcie(&self) -> bool {
         self.common().capabilities.is_pcie()
+    }
+
+    /// Returns the IOMMU specifier for this device, indicating which IOMMU it is behind and the
+    /// device identifier used by the IOMMU to distinguish this device.
+    pub fn iommu_specifier(&self) -> Option<&IommuSpecifier> {
+        self.common().iommu_specifier.as_ref()
     }
 
     /// Returns the device's owner.

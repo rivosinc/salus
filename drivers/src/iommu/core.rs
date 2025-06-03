@@ -35,7 +35,7 @@ pub struct Iommu {
     _arena_id: PciArenaId,
     registers: &'static mut IommuRegisters,
     command_queue: Mutex<CommandQueue>,
-    ddt: DeviceDirectory<Ddt3Level>,
+    ddt: DeviceDirectory,
     gscids: Mutex<[Option<GscIdState>; MAX_GSCIDS]>,
 }
 
@@ -45,6 +45,34 @@ static IOMMU: Once<Iommu> = Once::new();
 // Identifiers from the QEMU RFC implementation.
 const IOMMU_VENDOR_ID: u16 = 0x1efd;
 const IOMMU_DEVICE_ID: u16 = 0xedf1;
+
+// Suppress clippy warning about common suffix in favor or matching mode names as per IOMMU spec.
+#[allow(clippy::enum_variant_names)]
+enum DirectoryMode {
+    OneLevel,
+    TwoLevel,
+    ThreeLevel,
+}
+
+impl DirectoryMode {
+    fn id(&self) -> u64 {
+        use DirectoryMode::*;
+        match self {
+            OneLevel => 2,
+            TwoLevel => 3,
+            ThreeLevel => 4,
+        }
+    }
+
+    fn num_levels(&self) -> usize {
+        use DirectoryMode::*;
+        match self {
+            OneLevel => 1,
+            TwoLevel => 2,
+            ThreeLevel => 3,
+        }
+    }
+}
 
 impl Iommu {
     /// Probes for and initializes the IOMMU device on the given PCI root. Uses `get_page` to
@@ -109,21 +137,40 @@ impl Iommu {
         } else {
             DeviceContextFormat::Base
         };
-        let ddt = DeviceDirectory::new(get_page().ok_or(Error::OutOfPages)?, format);
-        for dev in pci.devices() {
-            let addr = dev.lock().info().address();
-            if addr == iommu_addr {
-                // Skip the IOMMU itself.
-                continue;
-            }
-            ddt.add_device(addr.try_into()?, get_page)?;
-        }
+
+        let ddt_root = get_page().ok_or(Error::OutOfPages)?;
         let mut ddtp = LocalRegisterCopy::<u64, DirectoryPointer::Register>::new(0);
-        ddtp.modify(DirectoryPointer::Ppn.val(ddt.base_address().pfn().bits()));
-        ddtp.modify(DirectoryPointer::Mode.val(Ddt3Level::IOMMU_MODE));
-        // Ensure writes to the DDT have completed before we point the IOMMU at it.
-        mmio_wmb();
-        registers.ddtp.set(ddtp.get());
+        ddtp.modify(DirectoryPointer::Ppn.val(ddt_root.pfn().bits()));
+
+        // Probe the directory mode to use.
+        let mode = [
+            DirectoryMode::ThreeLevel,
+            DirectoryMode::TwoLevel,
+            DirectoryMode::OneLevel,
+        ]
+        .iter()
+        .find(|mode| {
+            ddtp.modify(DirectoryPointer::Mode.val(mode.id()));
+            registers.ddtp.set(ddtp.get());
+            while registers.ddtp.is_set(DirectoryPointer::Busy) {
+                pause();
+            }
+            registers.ddtp.read(DirectoryPointer::Mode) == mode.id()
+        })
+        .ok_or(Error::DeviceDirectoryUnsupported)?;
+
+        let ddt = DeviceDirectory::new(ddt_root, format, mode.num_levels());
+
+        for pci in PcieRoot::get_roots() {
+            for dev in pci.devices() {
+                let addr = dev.lock().info().address();
+                if addr == iommu_addr {
+                    // Skip the IOMMU itself.
+                    continue;
+                }
+                ddt.add_device(addr.try_into()?, get_page)?;
+            }
+        }
 
         let iommu = Iommu {
             _arena_id: arena_id,
@@ -132,6 +179,13 @@ impl Iommu {
             ddt,
             gscids: Mutex::new([None; MAX_GSCIDS]),
         };
+
+        // Send a DDT invalidation command to make sure the IOMMU notices the added devices.
+        let commands = [Command::iodir_inval_ddt(None), Command::iofence()];
+        // Unwrap ok: These are the first commands to the IOMMU, so 2 CQ entries will be
+        // available.
+        iommu.submit_commands_sync(&commands).unwrap();
+
         IOMMU.call_once(|| iommu);
         Ok(())
     }

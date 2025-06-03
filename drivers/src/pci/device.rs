@@ -6,6 +6,7 @@ use arrayvec::ArrayVec;
 use core::fmt;
 use core::mem::size_of;
 use core::ptr::NonNull;
+use device_tree::NodeId;
 use page_tracking::PageTracker;
 use riscv_pages::*;
 use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
@@ -373,6 +374,7 @@ impl PciDeviceBarInfo {
 // Common state between bridges and endpoints.
 struct PciDeviceCommon {
     info: PciDeviceInfo,
+    dt_node: Option<NodeId>,
     capabilities: PciCapabilities,
     bar_info: PciDeviceBarInfo,
     owner: Option<PageOwnerId>,
@@ -387,13 +389,18 @@ pub struct PciEndpoint {
 
 impl PciEndpoint {
     /// Creates a new `PciEndpoint` using the config space at `registers`.
-    fn new(registers: &'static mut EndpointRegisters, info: PciDeviceInfo) -> Result<Self> {
+    fn new(
+        registers: &'static mut EndpointRegisters,
+        info: PciDeviceInfo,
+        dt_node: Option<NodeId>,
+    ) -> Result<Self> {
         let capabilities =
             PciCapabilities::new(&mut registers.common, registers.cap_ptr.get() as usize)?;
         let bar_info =
             PciDeviceBarInfo::new(&mut registers.bar, capabilities.enhanced_allocation())?;
         let common = PciDeviceCommon {
             info,
+            dt_node,
             capabilities,
             bar_info,
             owner: None,
@@ -436,9 +443,9 @@ impl PciEndpoint {
                 // Discard BAR writes if the BAR is enabled.
                 let io_enabled = self.registers.common.command.is_set(Command::IoEnable);
                 let mem_enabled = self.registers.common.command.is_set(Command::MemoryEnable);
-                if let Some(bar_type) = self.common.bar_info.index_to_type(index) &&
-                    ((bar_type == PciResourceType::IoPort && io_enabled) ||
-                     (bar_type != PciResourceType::IoPort && mem_enabled))
+                if let Some(bar_type) = self.common.bar_info.index_to_type(index)
+                    && ((bar_type == PciResourceType::IoPort && io_enabled)
+                        || (bar_type != PciResourceType::IoPort && mem_enabled))
                 {
                     return;
                 }
@@ -466,7 +473,11 @@ pub struct PciBridge {
 impl PciBridge {
     /// Creates a new `PciBridge` use the config space at `registers`. Downstream buses are initially
     /// unenumerated.
-    fn new(registers: &'static mut BridgeRegisters, info: PciDeviceInfo) -> Result<Self> {
+    fn new(
+        registers: &'static mut BridgeRegisters,
+        info: PciDeviceInfo,
+        dt_node: Option<NodeId>,
+    ) -> Result<Self> {
         // Prevent config cycles from passing beyond this bridge until we're ready to enumreate.
         registers.sub_bus.set(0);
         registers.sec_bus.set(0);
@@ -491,6 +502,7 @@ impl PciBridge {
             PciDeviceBarInfo::new(&mut registers.bar, capabilities.enhanced_allocation())?;
         let common = PciDeviceCommon {
             info,
+            dt_node,
             capabilities,
             bar_info,
             owner: None,
@@ -611,9 +623,9 @@ impl PciBridge {
                 let index = (op.offset() - bar::START_OFFSET) / size_of::<u32>();
                 let reg = op.pop_dword(self.registers.bar[index].get());
                 // Discard BAR writes if the BAR is enabled.
-                if let Some(bar_type) = self.common.bar_info.index_to_type(index) &&
-                    ((bar_type == PciResourceType::IoPort && io_enabled) ||
-                     (bar_type != PciResourceType::IoPort && mem_enabled))
+                if let Some(bar_type) = self.common.bar_info.index_to_type(index)
+                    && ((bar_type == PciResourceType::IoPort && io_enabled)
+                        || (bar_type != PciResourceType::IoPort && mem_enabled))
                 {
                     return;
                 }
@@ -832,16 +844,17 @@ impl PciDevice {
     pub(super) unsafe fn new(
         registers_ptr: NonNull<CommonRegisters>,
         info: PciDeviceInfo,
+        dt_node: Option<NodeId>,
     ) -> Result<Self> {
         match info.header_type() {
             HeaderType::Endpoint => {
                 let registers = registers_ptr.cast().as_mut();
-                let ep = PciEndpoint::new(registers, info)?;
+                let ep = PciEndpoint::new(registers, info, dt_node)?;
                 Ok(PciDevice::Endpoint(ep))
             }
             HeaderType::PciBridge => {
                 let registers = registers_ptr.cast().as_mut();
-                let bridge = PciBridge::new(registers, info)?;
+                let bridge = PciBridge::new(registers, info, dt_node)?;
                 Ok(PciDevice::Bridge(bridge))
             }
             h => Err(Error::UnsupportedHeaderType(info.address(), h)),
@@ -851,6 +864,11 @@ impl PciDevice {
     /// Returns the `PciDeviceInfo` for this device.
     pub fn info(&self) -> &PciDeviceInfo {
         &self.common().info
+    }
+
+    /// Returns the device tree node ID for this device, if present.
+    pub fn dt_node(&self) -> Option<NodeId> {
+        self.common().dt_node
     }
 
     /// Returns the `PciDeviceBarInfo` for this device.

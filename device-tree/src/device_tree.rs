@@ -46,6 +46,8 @@ pub struct DeviceTreeNode {
 }
 
 pub type NodeArena = Arena<DeviceTreeNode, Global>;
+
+/// An ID for a device tree node. The node itself can be obtained via `DeviceTree::get_node`.
 pub type NodeId = ArenaId<DeviceTreeNode>;
 
 /// A tree representation of the hardware in a system based on v0.3 of the Devicetree Specification.

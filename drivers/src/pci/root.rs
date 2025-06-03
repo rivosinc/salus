@@ -60,7 +60,11 @@ fn valid_config_mmio_access(offset: u64, len: usize) -> bool {
 }
 
 impl PcieRoot {
-    fn probe_one(pci_node: &DeviceTreeNode, mem_map: &mut HwMemMap) -> Result<PcieRoot> {
+    fn probe_one(
+        dt: &DeviceTree,
+        pci_node: &DeviceTreeNode,
+        mem_map: &mut HwMemMap,
+    ) -> Result<PcieRoot> {
         // Find the ECAM MMIO region, which should be the first entry in the `reg` property.
         let mut regs = pci_node
             .props()
@@ -185,7 +189,13 @@ impl PcieRoot {
 
         // Enumerate the PCI hierarchy.
         let mut device_arena = PciDeviceArena::new(Global);
-        let root_bus = PciBus::enumerate(&config_space, bus_range.start, &mut device_arena)?;
+        let root_bus = PciBus::enumerate(
+            dt,
+            &config_space,
+            bus_range.start,
+            Some(pci_node.id()),
+            &mut device_arena,
+        )?;
 
         Ok(Self {
             config_space,
@@ -201,7 +211,7 @@ impl PcieRoot {
         let roots = dt
             .iter()
             .filter(|n| n.compatible(["pci-host-ecam-generic"]) && !n.disabled())
-            .map(|n| Self::probe_one(n, mem_map))
+            .map(|n| Self::probe_one(dt, n, mem_map))
             .collect::<Result<Vec<PcieRoot>>>()?;
 
         PCIE_ROOTS.call_once(|| roots);

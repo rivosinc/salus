@@ -13,7 +13,7 @@ mod error;
 mod fdt;
 mod serialize;
 
-pub use crate::device_tree::{DeviceTree, DeviceTreeIter, DeviceTreeNode};
+pub use crate::device_tree::{DeviceTree, DeviceTreeIter, DeviceTreeNode, NodeId};
 pub use error::Error as DeviceTreeError;
 pub use error::Result as DeviceTreeResult;
 pub use fdt::{Cpu, Fdt, FdtMemoryRegion, ImsicInfo};

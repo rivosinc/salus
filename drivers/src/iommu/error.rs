@@ -69,6 +69,8 @@ pub enum Error {
     GscIdInUse(GscId),
     /// MSI translation not supported.
     MsiTranslationUnsupported,
+    /// No feasible device directory mode.
+    DeviceDirectoryUnsupported,
 }
 
 /// Holds results for IOMMU operations.

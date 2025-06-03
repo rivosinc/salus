@@ -465,24 +465,8 @@ impl DeviceDirectoryInner {
     }
 }
 
-/// Defines the layout of the device directory table. Intermediate and leaf tables have the same
-/// format regardless of the number of levels.
-pub trait DirectoryMode {
-    /// The number of levels in the device directory hierarchy.
-    const LEVELS: usize;
-    /// The value that should be programmed into ddtp.iommu_mode for this translation mode.
-    const IOMMU_MODE: u64;
-}
-
-/// A 3-level device directory table supporting up to 24-bit requester IDs.
-pub enum Ddt3Level {}
-
-impl DirectoryMode for Ddt3Level {
-    const LEVELS: usize = 3;
-    const IOMMU_MODE: u64 = 4;
-}
-
 /// Indicates which device context format to use.
+#[derive(Debug)]
 pub enum DeviceContextFormat {
     Base,
     Extended,
@@ -490,28 +474,21 @@ pub enum DeviceContextFormat {
 
 /// Represents the device directory table for the IOMMU. The IOMMU hardware uses the DDT to map
 /// a requester ID to the translation context for the device.
-pub struct DeviceDirectory<D: DirectoryMode> {
+pub struct DeviceDirectory {
     inner: Mutex<DeviceDirectoryInner>,
-    phantom: PhantomData<D>,
 }
 
-impl<D: DirectoryMode> DeviceDirectory<D> {
+impl DeviceDirectory {
     /// Creates a new `DeviceDirectory` using `root` as the root table page.
-    pub fn new(root: Page<InternalClean>, format: DeviceContextFormat) -> Self {
+    pub fn new(root: Page<InternalClean>, format: DeviceContextFormat, num_levels: usize) -> Self {
         let inner = DeviceDirectoryInner {
             root,
-            num_levels: D::LEVELS,
+            num_levels,
             format,
         };
         Self {
             inner: Mutex::new(inner),
-            phantom: PhantomData,
         }
-    }
-
-    /// Returns the base address of this `DeviceDirectory`.
-    pub fn base_address(&self) -> SupervisorPageAddr {
-        self.inner.lock().root.addr()
     }
 
     /// Returns whether this IOMMU instance supports MSI page tables.

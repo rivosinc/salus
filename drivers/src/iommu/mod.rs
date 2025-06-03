@@ -204,7 +204,7 @@ mod tests {
         let ddt_page = page_tracker
             .assign_page_for_internal_state(pages.pop().unwrap(), PageOwnerId::host())
             .unwrap();
-        let ddt = DeviceDirectory::<Ddt3Level>::new(ddt_page, DeviceContextFormat::Extended);
+        let ddt = DeviceDirectory::new(ddt_page, DeviceContextFormat::Extended, 3);
         for i in 0..16 {
             let id = DeviceId::new(i).unwrap();
             ddt.add_device(id, &mut || {

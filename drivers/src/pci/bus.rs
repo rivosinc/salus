@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use alloc::vec::Vec;
+use device_tree::{DeviceTree, DeviceTreeNode, NodeId};
 use sync::Mutex;
 
 use super::address::*;
@@ -26,12 +27,24 @@ pub struct PciBus {
     devices: Vec<BusDevice>,
 }
 
+fn pci_address_from_dt_node(
+    config_space: &PciConfigSpace,
+    node: &DeviceTreeNode,
+) -> Option<Address> {
+    let regs = node.props().find(|p| p.name() == "reg")?;
+    let config_offset = regs.value_u32().next()?;
+    let (addr, _) = config_space.offset_to_address((config_offset as usize >> 8) << 12)?;
+    Some(addr)
+}
+
 impl PciBus {
     /// Creates a `PciBus` by enumerating `bus_num` in `config_space`. Devices discovered while
     /// enumerating the bus are addeded to `device_arena`.
     pub fn enumerate(
+        dt: &DeviceTree,
         config_space: &PciConfigSpace,
         bus_num: Bus,
+        bus_node: Option<NodeId>,
         device_arena: &mut PciDeviceArena,
     ) -> Result<Self> {
         let bus_config = config_space
@@ -43,11 +56,22 @@ impl PciBus {
                 // Unwrap ok, if we have a header the config space for the corresponding function
                 // must exist.
                 let registers_ptr = config_space.registers_for(info.address()).unwrap();
+
+                // Locate the corresponding device tree node.
+                let dev_node = bus_node.and_then(|id| {
+                    dt.get_node(id)?.children().copied().find(|&id| {
+                        dt.get_node(id)
+                            .filter(|node| !node.disabled())
+                            .and_then(|node| pci_address_from_dt_node(config_space, node))
+                            .is_some_and(|addr| addr == info.address())
+                    })
+                });
+
                 // Safety: We trust that PciConfigSpace returned a valid config space pointer for the
                 // same device as the one referred to by info.address(). We guarantee that the created
                 // device has unique ownership of the register space via the bus enumeration process
                 // by creating at most one device per PCI address.
-                let pci_dev = unsafe { PciDevice::new(registers_ptr, info.clone()) }?;
+                let pci_dev = unsafe { PciDevice::new(registers_ptr, info.clone(), dev_node) }?;
                 let id = device_arena
                     .try_insert(Mutex::new(pci_dev))
                     .map_err(|_| Error::AllocError)?;
@@ -65,8 +89,11 @@ impl PciBus {
         for bd in devices.iter() {
             let bridge_id = bd.id;
             let sec_bus = cur_bus.next().ok_or(Error::OutOfBuses)?;
+
             // ID must be valid, we just added it above.
-            match *device_arena.get(bridge_id).unwrap().lock() {
+            let mut dev = device_arena.get(bridge_id).unwrap().lock();
+            let dt_node = dev.dt_node();
+            match *dev {
                 PciDevice::Bridge(ref mut bridge) => {
                     // Set the bridge to cover everything beyond sec_bus until we've enumerated
                     // the buses behind the bridge.
@@ -78,7 +105,11 @@ impl PciBus {
                 _ => continue,
             };
 
-            let child_bus = PciBus::enumerate(config_space, sec_bus, device_arena)?;
+            // Unlock `dev` and drop the mutable borrow of `device_arena` for the
+            // `PciBus::enumerate()` call.
+            drop(dev);
+
+            let child_bus = PciBus::enumerate(dt, config_space, sec_bus, dt_node, device_arena)?;
             let sub_bus = child_bus.subordinate_bus_num();
 
             // Avoid double mutable borrow of device_arena by re-acquiring the reference to the bridge

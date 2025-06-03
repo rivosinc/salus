@@ -13,6 +13,7 @@ use riscv_pages::*;
 use sync::{Mutex, Once};
 
 use crate::imsic::Imsic;
+use crate::iommu::DeviceId as IommuDeviceId;
 
 use super::address::*;
 use super::bus::PciBus;
@@ -187,6 +188,30 @@ impl PcieRoot {
             }
         }
 
+        // Obtain IOMMU mapping information from the respective DT properties.
+        let iommu_map_mask = pci_node
+            .props()
+            .find(|p| p.name() == "iommu-map-mask")
+            .and_then(|prop| prop.value_u32().next())
+            .unwrap_or(!0u32);
+        let iommu_map = pci_node.props().find(|p| p.name() == "iommu-map");
+
+        let build_iommu_specifier = |addr: Address| {
+            let rid = addr.bits() & iommu_map_mask;
+            let mut mapping = iommu_map?.value_u32();
+            loop {
+                let rid_base = mapping.next()?;
+                let phandle = mapping.next()?;
+                let iommu_base = mapping.next()?;
+                let len = mapping.next()?;
+
+                if rid >= rid_base || rid - rid_base < len {
+                    let dev_id = IommuDeviceId::new(rid - rid_base + iommu_base)?;
+                    return Some(IommuSpecifier::new(phandle, dev_id));
+                }
+            }
+        };
+
         // Enumerate the PCI hierarchy.
         let mut device_arena = PciDeviceArena::new(Global);
         let root_bus = PciBus::enumerate(
@@ -194,6 +219,7 @@ impl PcieRoot {
             &config_space,
             bus_range.start,
             Some(pci_node.id()),
+            &build_iommu_specifier,
             &mut device_arena,
         )?;
 

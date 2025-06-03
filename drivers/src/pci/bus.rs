@@ -8,7 +8,7 @@ use sync::Mutex;
 
 use super::address::*;
 use super::config_space::PciConfigSpace;
-use super::device::PciDevice;
+use super::device::{IommuSpecifier, PciDevice};
 use super::error::*;
 use super::root::{PciArenaId, PciDeviceArena};
 
@@ -40,11 +40,12 @@ fn pci_address_from_dt_node(
 impl PciBus {
     /// Creates a `PciBus` by enumerating `bus_num` in `config_space`. Devices discovered while
     /// enumerating the bus are addeded to `device_arena`.
-    pub fn enumerate(
+    pub fn enumerate<F: Fn(Address) -> Option<IommuSpecifier>>(
         dt: &DeviceTree,
         config_space: &PciConfigSpace,
         bus_num: Bus,
         bus_node: Option<NodeId>,
+        build_iommu_specifier: &F,
         device_arena: &mut PciDeviceArena,
     ) -> Result<Self> {
         let bus_config = config_space
@@ -67,11 +68,16 @@ impl PciBus {
                     })
                 });
 
+                // Determine the IOMMU specifier for this device.
+                let iommu_specifier = build_iommu_specifier(info.address());
+
                 // Safety: We trust that PciConfigSpace returned a valid config space pointer for the
                 // same device as the one referred to by info.address(). We guarantee that the created
                 // device has unique ownership of the register space via the bus enumeration process
                 // by creating at most one device per PCI address.
-                let pci_dev = unsafe { PciDevice::new(registers_ptr, info.clone(), dev_node) }?;
+                let pci_dev = unsafe {
+                    PciDevice::new(registers_ptr, info.clone(), dev_node, iommu_specifier)
+                }?;
                 let id = device_arena
                     .try_insert(Mutex::new(pci_dev))
                     .map_err(|_| Error::AllocError)?;
@@ -109,7 +115,14 @@ impl PciBus {
             // `PciBus::enumerate()` call.
             drop(dev);
 
-            let child_bus = PciBus::enumerate(dt, config_space, sec_bus, dt_node, device_arena)?;
+            let child_bus = PciBus::enumerate(
+                dt,
+                config_space,
+                sec_bus,
+                dt_node,
+                build_iommu_specifier,
+                device_arena,
+            )?;
             let sub_bus = child_bus.subordinate_bus_num();
 
             // Avoid double mutable borrow of device_arena by re-acquiring the reference to the bridge

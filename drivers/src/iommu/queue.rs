@@ -7,8 +7,9 @@ use core::mem::size_of;
 use data_model::{DataInit, VolatileMemory, VolatileSlice};
 use riscv_pages::*;
 
-use super::device_directory::{DeviceId, GscId};
+use super::device_directory::DeviceId;
 use super::error::*;
+use super::gscid::GscId;
 
 /// Type marker for a queue where software is the producer.
 pub enum Producer {}

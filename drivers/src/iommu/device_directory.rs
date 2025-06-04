@@ -11,6 +11,7 @@ use static_assertions::const_assert;
 use sync::Mutex;
 
 use super::error::*;
+use super::gscid::GscId;
 use super::msi_page_table::MsiPageTable;
 use crate::pci::Address;
 
@@ -43,22 +44,6 @@ impl TryFrom<Address> for DeviceId {
 
     fn try_from(address: Address) -> Result<Self> {
         Self::new(address.bits()).ok_or(Error::PciAddressTooLarge(address))
-    }
-}
-
-/// Global Soft-Context ID. The equivalent of hgatp.VMID, but always 16 bits.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GscId(u16);
-
-impl GscId {
-    /// Creates a `GscId` from the raw `id`.
-    pub(super) fn new(id: u16) -> Self {
-        GscId(id)
-    }
-
-    /// Returns the raw bits of this `GscId`.
-    pub fn bits(&self) -> u16 {
-        self.0
     }
 }
 

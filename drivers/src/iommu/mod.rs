@@ -5,14 +5,16 @@
 mod core;
 mod device_directory;
 mod error;
+mod gscid;
 mod msi_page_table;
 mod queue;
 mod registers;
 
 pub use self::core::Iommu;
-pub use device_directory::{DeviceId, GscId};
+pub use device_directory::DeviceId;
 pub use error::Error as IommuError;
 pub use error::Result as IommuResult;
+pub use gscid::{alloc_gscid, free_gscid, GscId};
 pub use msi_page_table::MsiPageTable;
 
 #[cfg(test)]

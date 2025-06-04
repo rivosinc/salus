@@ -973,21 +973,17 @@ impl VmIommuContext {
 
 impl Drop for VmIommuContext {
     fn drop(&mut self) {
-        // Unwrap ok: presence of an IOMMU is checked at creation time
-        let iommu = Iommu::get().unwrap();
-
         // Detach any devices we own from the IOMMU.
         let owner = self.msi_page_table.owner();
         for pci in PcieRoot::get_roots() {
             for dev in pci.devices() {
                 let mut dev = dev.lock();
-                if dev.owner() == Some(owner) {
+                if dev.owner() == Some(owner)
+                    && let Some(iommu) = Iommu::get_for_device(&dev)
+                {
                     // Unwrap ok: `self.gscid` must be valid and match the ownership of the device
                     // to have been attached in the first place.
-                    //
-                    // Silence buggy clippy warning.
-                    #[allow(clippy::explicit_auto_deref)]
-                    iommu.detach_pci_device(&mut *dev, self.gscid).unwrap();
+                    iommu.detach_pci_device(&mut dev, self.gscid).unwrap();
                 }
             }
         }
@@ -1805,8 +1801,9 @@ impl<'a, T: GuestStagePagingMode> FinalizedVmPages<'a, T> {
         // If we have an IOMMU context then we need to issue a fence there as well as our page
         // tables may be used for DMA translation.
         if let Some(iommu_context) = self.inner.iommu_context.get() {
-            // Unwrap ok since we must have an IOMMU to have a `VmIommuContext`.
-            Iommu::get().unwrap().fence(iommu_context.gscid, None);
+            for iommu in Iommu::get_iommus() {
+                iommu.fence(iommu_context.gscid, None);
+            }
         }
         Ok(())
     }
@@ -2207,7 +2204,7 @@ impl<'a, T: GuestStagePagingMode> InitializingVmPages<'a, T> {
     /// this VM's page tables.
     pub fn attach_pci_device(&self, dev: &mut PciDevice) -> Result<()> {
         let iommu_context = self.inner.iommu_context.get().ok_or(Error::NoIommu)?;
-        let iommu = Iommu::get().unwrap();
+        let iommu = Iommu::get_for_device(dev).ok_or(Error::NoIommu)?;
         let msi_pt = iommu
             .supports_msi_page_tables()
             .then_some(&iommu_context.msi_page_table);

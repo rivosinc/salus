@@ -12,6 +12,10 @@ use crate::pci::{Address, PciError};
 /// Errors resulting from interacting with the IOMMU.
 #[derive(Clone, Copy, Debug)]
 pub enum Error {
+    /// The device doesn't identify as an IOMMU.
+    NotAnIommu,
+    /// There are more than the maximum number of IOMMUs supported by the code.
+    TooManyIommus,
     /// Error encountered while probing and enabling the IOMMU PCI device.
     ProbingIommu(PciError),
     /// Couldn't find the IOMMU registers BAR.
@@ -48,6 +52,8 @@ pub enum Error {
     PciAddressTooLarge(Address),
     /// Mismatch between page table and device ownership.
     OwnerMismatch,
+    /// Device isn't managed by this IOMMU.
+    IommuMismatch,
     /// No device context found.
     DeviceNotFound(DeviceId),
     /// The device already has an active device context.

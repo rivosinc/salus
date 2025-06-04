@@ -44,8 +44,8 @@ mod vm_pmu;
 use backtrace::backtrace;
 use device_tree::{DeviceTree, DeviceTreeError, Fdt};
 use drivers::{
-    imsic::Imsic, iommu::Iommu, iommu::IommuError, pci::PciError, pci::PcieRoot, pmu::PmuInfo,
-    reset::ResetDriver, uart::UartDriver, CpuInfo,
+    imsic::Imsic, iommu::Iommu, iommu::IommuError, pci::PcieRoot, pmu::PmuInfo, reset::ResetDriver,
+    uart::UartDriver, CpuInfo,
 };
 use host_vm::{HostVm, HostVmLoader, HOST_VM_ALIGN};
 use hyp_alloc::HypAlloc;
@@ -629,28 +629,22 @@ fn primary_init(hart_id: u64, fdt_addr: u64) -> Result<CpuParams, Error> {
     // Set up per-CPU memory and prepare the structures for secondary CPUs boot.
     PerCpu::init(hart_id, &mut hyp_mem).map_err(Error::CreateSmpState)?;
 
-    // Find and initialize the IOMMU.
-    match PcieRoot::get_roots()
-        .map(|pci| {
-            Iommu::probe_from(pci, &mut || {
-                hyp_mem.take_pages_for_host_state(1).into_iter().next()
-            })
-        })
-        .find(|r| !matches!(r, Err(IommuError::ProbingIommu(PciError::DeviceNotFound))))
-    {
-        Some(Ok(_)) => {
-            println!(
-                "Found RISC-V IOMMU version 0x{:x}",
-                Iommu::get().unwrap().version()
-            );
+    // Find and initialize the IOMMUs.
+    for pci in PcieRoot::get_roots() {
+        for dev in pci.devices() {
+            let mut get_page = || hyp_mem.take_pages_for_host_state(1).into_iter().next();
+            let addr = dev.lock().info().address();
+            match Iommu::probe(&hyp_dt, pci, dev, &mut get_page) {
+                Ok(iommu) => println!("{} RISC-V IOMMU version 0x{:x}", addr, iommu.version()),
+                Err(IommuError::NotAnIommu) => {}
+                Err(err) => println!("{} RISC-V IOMMU probe failure: {:?}", addr, err),
+            }
         }
-        Some(Err(e)) => {
-            println!("Failed to probe IOMMU: {:?}", e);
-        }
-        None => {
-            println!("No IOMMU found!");
-        }
-    };
+    }
+
+    if Iommu::get_iommus().next().is_none() {
+        println!("No IOMMU found!");
+    }
 
     // Initialize global Umode state.
     UmodeTask::init(umode_elf);

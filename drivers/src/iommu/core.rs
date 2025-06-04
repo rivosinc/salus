@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use device_tree::DeviceTree;
 use riscv_page_tables::{GuestStagePageTable, GuestStagePagingMode};
 use riscv_pages::*;
 use riscv_regs::{mmio_wmb, pause};
@@ -15,18 +16,18 @@ use super::gscid::{GscId, GSCIDS};
 use super::msi_page_table::MsiPageTable;
 use super::queue::*;
 use super::registers::*;
-use crate::pci::{self, PciArenaId, PciDevice, PcieRoot};
+use crate::pci::{PciDevice, PcieRoot};
 
 /// IOMMU device. Responsible for managing address translation for PCI devices.
 pub struct Iommu {
-    _arena_id: PciArenaId,
     registers: &'static mut IommuRegisters,
     command_queue: Mutex<CommandQueue>,
     ddt: DeviceDirectory,
+    phandle: Option<u32>,
 }
 
-// The global IOMMU singleton.
-static IOMMU: Once<Iommu> = Once::new();
+// The global list of IOMMUs.
+static IOMMUS: [Once<Iommu>; 8] = [Once::INIT; 8];
 
 // Identifiers from the QEMU RFC implementation.
 const IOMMU_VENDOR_ID: u16 = 0x1efd;
@@ -61,28 +62,38 @@ impl DirectoryMode {
 }
 
 impl Iommu {
-    /// Probes for and initializes the IOMMU device on the given PCI root. Uses `get_page` to
-    /// allocate pages for IOMMU-internal structures.
-    pub fn probe_from(
+    /// Probes for and initializes the given IOMMU device. Uses `get_page` to allocate pages for
+    /// IOMMU-internal structures.
+    pub fn probe(
+        dt: &DeviceTree,
         pci: &PcieRoot,
+        dev: &Mutex<PciDevice>,
         get_page: &mut dyn FnMut() -> Option<Page<InternalClean>>,
-    ) -> Result<()> {
-        let arena_id = pci
-            .take_and_enable_hypervisor_device(
-                pci::VendorId::new(IOMMU_VENDOR_ID),
-                pci::DeviceId::new(IOMMU_DEVICE_ID),
-            )
+    ) -> Result<&'static Iommu> {
+        let mut dev = dev.lock();
+
+        if dev.info().vendor_id().bits() != IOMMU_VENDOR_ID
+            || dev.info().device_id().bits() != IOMMU_DEVICE_ID
+        {
+            return Err(Error::NotAnIommu);
+        }
+
+        pci.take_and_enable_hypervisor_device(&mut dev)
             .map_err(Error::ProbingIommu)?;
-        let (iommu_addr, regs_base, regs_size) = {
-            let dev = pci.get_device(arena_id).unwrap().lock();
-            // IOMMU registers are in BAR0.
-            let bar = dev.bar_info().get(0).ok_or(Error::MissingRegisters)?;
-            // Unwrap ok: we've already determined BAR0 is valid.
-            let pci_addr = dev.get_bar_addr(0).unwrap();
-            let regs_base = pci.pci_to_physical_addr(pci_addr).unwrap();
-            let regs_size = bar.size();
-            (dev.info().address(), regs_base, regs_size)
-        };
+
+        // IOMMU registers are in BAR0.
+        let bar = dev.bar_info().get(0).ok_or(Error::MissingRegisters)?;
+        // Unwrap ok: we've already determined BAR0 is valid.
+        let pci_addr = dev.get_bar_addr(0).unwrap();
+        let regs_base = pci.pci_to_physical_addr(pci_addr).unwrap();
+        let regs_size = bar.size();
+        let dt_node_id = dev.dt_node();
+
+        // We're done with inspecting `dev`, so unlock the mutex. It's not only good practice to
+        // keep the locked section small, but we'll be iterating all devices when checking which to
+        // add to this IOMMU, which would attempt to acquire the same lock again.
+        drop(dev);
+
         if regs_size < core::mem::size_of::<IommuRegisters>() as u64 {
             return Err(Error::InvalidRegisterSize(regs_size));
         }
@@ -147,37 +158,72 @@ impl Iommu {
 
         let ddt = DeviceDirectory::new(ddt_root, format, mode.num_levels());
 
-        for pci in PcieRoot::get_roots() {
-            for dev in pci.devices() {
-                let addr = dev.lock().info().address();
-                if addr == iommu_addr {
-                    // Skip the IOMMU itself.
-                    continue;
+        let phandle = dt_node_id.and_then(|id| dt.get_node(id)).and_then(|node| {
+            node.props()
+                .find(|p| p.name() == "phandle")
+                .and_then(|p| p.value_u32().next())
+        });
+
+        // Add devices assigned to this IOMMU to the ddt.
+        if let Some(phandle) = phandle {
+            for pci in PcieRoot::get_roots() {
+                for dev in pci.devices() {
+                    let dev = dev.lock();
+                    if let Some(spec) = dev.iommu_specifier()
+                        && spec.iommu_phandle() == phandle
+                    {
+                        ddt.add_device(spec.iommu_dev_id(), get_page).unwrap();
+                    }
                 }
-                ddt.add_device(addr.try_into()?, get_page)?;
             }
         }
 
         let iommu = Iommu {
-            _arena_id: arena_id,
             registers,
             command_queue: Mutex::new(command_queue),
             ddt,
+            phandle,
         };
 
-        // Send a DDT invalidation command to make sure the IOMMU notices the added devices.
+        // Send a DDT invalidation command to make sure the IOMMU notices any added devices.
         let commands = [Command::iodir_inval_ddt(None), Command::iofence()];
-        // Unwrap ok: These are the first commands to the IOMMU, so 2 CQ entries will be
-        // available.
+        // Unwrap ok: These are the first commands to the IOMMU, so 2 CQ entries will be available.
         iommu.submit_commands_sync(&commands).unwrap();
 
-        IOMMU.call_once(|| iommu);
-        Ok(())
+        // Store the iommu object in a slot in `IOMMUS`. We try slots in order until we find one
+        // that initializes successfully.
+        let mut iommu = Some(iommu);
+        for slot in IOMMUS.iter() {
+            assert!(iommu.is_some());
+
+            // Note that `Once::call_once()` guarantees to only invoke the closure when it is the
+            // first call. The closure holds a mutable reference to `iommu`, so it will only move
+            // the object out of the option when the slot gets initialized successfully. We break
+            // the loop once that happens, and this maintains the loop invariant `iommu.is_some()`
+            // which is why the `unwrap` call in the closure is OK.
+            slot.call_once(|| iommu.take().unwrap());
+            if iommu.is_none() {
+                // Unwrap OK: We just wrote the slot.
+                return Ok(slot.get().unwrap());
+            }
+        }
+
+        Err(Error::TooManyIommus)
     }
 
-    /// Gets a reference to the `Iommu` singleton.
-    pub fn get() -> Option<&'static Self> {
-        IOMMU.get()
+    /// Iterates all probed `Iommu`s in the system.
+    pub fn get_iommus() -> impl Iterator<Item = &'static Self> {
+        IOMMUS.iter().map_while(|slot| slot.get())
+    }
+
+    /// Gets the IOMMU matching the given phandle.
+    pub fn get_by_phandle(phandle: u32) -> Option<&'static Iommu> {
+        Iommu::get_iommus().find(|iommu| iommu.phandle == Some(phandle))
+    }
+
+    /// Gets the IOMMU for the given PciDevice.
+    pub fn get_for_device(dev: &PciDevice) -> Option<&'static Iommu> {
+        Self::get_by_phandle(dev.iommu_specifier()?.iommu_phandle())
     }
 
     /// Returns the version of this IOMMU device.
@@ -199,7 +245,12 @@ impl Iommu {
         msi_pt: Option<&MsiPageTable>,
         gscid: GscId,
     ) -> Result<()> {
-        let dev_id = DeviceId::try_from(dev.info().address())?;
+        let dev_id = dev
+            .iommu_specifier()
+            .filter(|spec| Some(spec.iommu_phandle()) == self.phandle)
+            .map(|spec| spec.iommu_dev_id())
+            .ok_or(Error::IommuMismatch)?;
+
         // Make sure the GSCID is valid and that it matches up with the device and page table
         // owner.
         let mut gscids = GSCIDS.lock();
@@ -221,7 +272,12 @@ impl Iommu {
 
     /// Disables DMA translation for the given PCI device.
     pub fn detach_pci_device(&self, dev: &mut PciDevice, gscid: GscId) -> Result<()> {
-        let dev_id = DeviceId::try_from(dev.info().address())?;
+        let dev_id = dev
+            .iommu_specifier()
+            .filter(|spec| Some(spec.iommu_phandle()) == self.phandle)
+            .map(|spec| spec.iommu_dev_id())
+            .ok_or(Error::IommuMismatch)?;
+
         {
             // Verify that the GSCID is valid and that it matches up with the device owner.
             let mut gscids = GSCIDS.lock();

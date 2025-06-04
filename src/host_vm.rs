@@ -277,15 +277,12 @@ impl<T: GuestStagePagingMode> HostVmLoader<T> {
                 let pages = pci.take_host_resource(res_type).unwrap();
                 self.vm.add_pci_pages(gpa, pages);
             }
-            // Attach our PCI devices to the IOMMU.
-            if Iommu::get().is_some() {
-                for dev in pci.devices() {
-                    let mut dev = dev.lock();
-                    if dev.owner() == Some(PageOwnerId::host()) {
-                        // Silence buggy clippy warning.
-                        #[allow(clippy::explicit_auto_deref)]
-                        self.vm.attach_pci_device(&mut *dev);
-                    }
+            // Attach our PCI devices to their respective IOMMU.
+            for dev in pci.devices() {
+                let mut dev = dev.lock();
+                if dev.owner() == Some(PageOwnerId::host()) && Iommu::get_for_device(&dev).is_some()
+                {
+                    self.vm.attach_pci_device(&mut dev);
                 }
             }
         }
@@ -714,7 +711,7 @@ impl<T: GuestStagePagingMode> HostVm<T> {
 
         let imsic_geometry = Imsic::get().host_vm_geometry();
         // Reserve MSI page table pages if we have an IOMMU.
-        let msi_table_pages = Iommu::get().map(|_| {
+        let msi_table_pages = Iommu::get_iommus().next().map(|_| {
             let msi_table_size = MsiPageTable::required_table_size(&imsic_geometry);
             hyp_mem.take_pages_for_host_state_with_alignment(
                 PageSize::num_4k_pages(msi_table_size) as usize,

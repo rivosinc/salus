@@ -322,26 +322,17 @@ impl PcieRoot {
     /// Takes ownership over the PCI device with the given `vendor_id` and `device_id`, and enables
     /// it for use within the hypervisor by assigning it resources. Returns a `PciDeviceId` which
     /// can be used to retrieve a reference to the device on success.
-    pub fn take_and_enable_hypervisor_device(
-        &self,
-        vendor_id: VendorId,
-        device_id: DeviceId,
-    ) -> Result<PciArenaId> {
-        let dev_id = self
-            .device_arena
-            .ids()
-            .find(|&id| {
-                let d = self.device_arena.get(id).unwrap().lock();
-                d.info().vendor_id() == vendor_id && d.info().device_id() == device_id
-            })
-            .ok_or(Error::DeviceNotFound)?;
+    pub fn take_and_enable_hypervisor_device(&self, dev: &mut PciDevice) -> Result<()> {
         // Make sure the device is on the root bus. We don't support distributing resources behind
         // bridges.
-        if !self.root_bus.devices().any(|bd| bd.id == dev_id) {
+        if !self
+            .root_bus
+            .devices()
+            .any(|bd| bd.address == dev.info().address())
+        {
             return Err(Error::DeviceNotOnRootBus);
         }
 
-        let mut dev = self.device_arena.get(dev_id).unwrap().lock();
         dev.take(PageOwnerId::hypervisor())?;
         // Now assign BAR resources.
         let bar_info = dev.bar_info().clone();
@@ -392,7 +383,7 @@ impl PcieRoot {
         }
         dev.enable_dma();
 
-        Ok(dev_id)
+        Ok(())
     }
 
     /// Adds a node for this PCIe root complex to the host's device tree in `dt`. It's assumed that

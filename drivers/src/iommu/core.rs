@@ -30,8 +30,11 @@ pub struct Iommu {
 static IOMMUS: [Once<Iommu>; 8] = [Once::INIT; 8];
 
 // Identifiers from the QEMU RFC implementation.
-const IOMMU_VENDOR_ID: u16 = 0x1efd;
-const IOMMU_DEVICE_ID: u16 = 0xedf1;
+const IOMMU_PCI_ID_TABLE: [(u16, u16); 3] = [
+    (0x1b36, 0x0014), // vanilla qemu IOMMU model
+    (0x1efd, 0xedf1), // Rivos qemu IOMMU model
+    (0x1efd, 0x0008), // Rivos hardware IOMMU
+];
 
 // Suppress clippy warning about common suffix in favor or matching mode names as per IOMMU spec.
 #[allow(clippy::enum_variant_names)]
@@ -72,9 +75,8 @@ impl Iommu {
     ) -> Result<&'static Iommu> {
         let mut dev = dev.lock();
 
-        if dev.info().vendor_id().bits() != IOMMU_VENDOR_ID
-            || dev.info().device_id().bits() != IOMMU_DEVICE_ID
-        {
+        let pci_ids = (dev.info().vendor_id().bits(), dev.info().device_id().bits());
+        if !IOMMU_PCI_ID_TABLE.contains(&pci_ids) {
             return Err(Error::NotAnIommu);
         }
 

@@ -963,10 +963,7 @@ pub struct VmIommuContext {
 impl VmIommuContext {
     // Creates a new `VmIommuContext` using `msi_page_table`.
     fn new(msi_page_table: MsiPageTable) -> Result<Self> {
-        let gscid = Iommu::get()
-            .ok_or(Error::NoIommu)?
-            .alloc_gscid(msi_page_table.owner())
-            .map_err(Error::AllocatingGscId)?;
+        let gscid = alloc_gscid(msi_page_table.owner()).map_err(Error::AllocatingGscId)?;
         Ok(Self {
             msi_page_table,
             gscid,
@@ -997,7 +994,7 @@ impl Drop for VmIommuContext {
 
         // Unwrap ok: `self.gscid` must be valid and freeable since we've detached all devices
         // using it.
-        iommu.free_gscid(self.gscid).unwrap();
+        free_gscid(self.gscid).unwrap();
     }
 }
 

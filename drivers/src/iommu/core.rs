@@ -11,24 +11,11 @@ use tock_registers::LocalRegisterCopy;
 
 use super::device_directory::*;
 use super::error::{Error, Result};
+use super::gscid::{GscId, GSCIDS};
 use super::msi_page_table::MsiPageTable;
 use super::queue::*;
 use super::registers::*;
 use crate::pci::{self, PciArenaId, PciDevice, PcieRoot};
-
-// Tracks the state of an allocated global soft-context ID (GSCID).
-#[derive(Clone, Copy, Debug)]
-struct GscIdState {
-    owner: PageOwnerId,
-    ref_count: usize,
-}
-
-// We use a fixed-sized array to track available GSCIDs. We can't use a versioning scheme like we
-// would for CPU VMIDs since reassigning GSCIDs on overflow would require us to temporarily disable
-// DMA from all devices, which is extremely disruptive. Set a max of 64 allocated GSCIDs for now
-// since it's unlikely we'll have more than that number of active VMs with assigned devices for
-// the time being.
-const MAX_GSCIDS: usize = 64;
 
 /// IOMMU device. Responsible for managing address translation for PCI devices.
 pub struct Iommu {
@@ -36,7 +23,6 @@ pub struct Iommu {
     registers: &'static mut IommuRegisters,
     command_queue: Mutex<CommandQueue>,
     ddt: DeviceDirectory,
-    gscids: Mutex<[Option<GscIdState>; MAX_GSCIDS]>,
 }
 
 // The global IOMMU singleton.
@@ -177,7 +163,6 @@ impl Iommu {
             registers,
             command_queue: Mutex::new(command_queue),
             ddt,
-            gscids: Mutex::new([None; MAX_GSCIDS]),
         };
 
         // Send a DDT invalidation command to make sure the IOMMU notices the added devices.
@@ -205,41 +190,6 @@ impl Iommu {
         self.ddt.supports_msi_page_tables()
     }
 
-    /// Allocates a new GSCID for `owner`.
-    pub fn alloc_gscid(&self, owner: PageOwnerId) -> Result<GscId> {
-        let mut gscids = self.gscids.lock();
-        let next = gscids
-            .iter()
-            .position(|g| g.is_none())
-            .ok_or(Error::OutOfGscIds)?;
-        let state = GscIdState {
-            owner,
-            ref_count: 0,
-        };
-        gscids[next] = Some(state);
-        Ok(GscId::new(next as u16))
-    }
-
-    /// Releases `gscid`, which must not be in use in any active device contexts.
-    pub fn free_gscid(&self, gscid: GscId) -> Result<()> {
-        let mut gscids = self.gscids.lock();
-        let state = gscids
-            .get_mut(gscid.bits() as usize)
-            .ok_or(Error::InvalidGscId(gscid))?;
-        match state {
-            Some(s) if s.ref_count > 0 => {
-                return Err(Error::GscIdInUse(gscid));
-            }
-            None => {
-                return Err(Error::GscIdAlreadyFree(gscid));
-            }
-            _ => {
-                *state = None;
-            }
-        }
-        Ok(())
-    }
-
     /// Enables DMA for the given PCI device, using `pt` for 2nd-stage and `msi_pt` for MSI
     /// translation.
     pub fn attach_pci_device<T: GuestStagePagingMode>(
@@ -252,7 +202,7 @@ impl Iommu {
         let dev_id = DeviceId::try_from(dev.info().address())?;
         // Make sure the GSCID is valid and that it matches up with the device and page table
         // owner.
-        let mut gscids = self.gscids.lock();
+        let mut gscids = GSCIDS.lock();
         let state = gscids
             .get_mut(gscid.bits() as usize)
             .and_then(|g| g.as_mut())
@@ -274,7 +224,7 @@ impl Iommu {
         let dev_id = DeviceId::try_from(dev.info().address())?;
         {
             // Verify that the GSCID is valid and that it matches up with the device owner.
-            let mut gscids = self.gscids.lock();
+            let mut gscids = GSCIDS.lock();
             let state = gscids
                 .get_mut(gscid.bits() as usize)
                 .and_then(|g| g.as_mut())

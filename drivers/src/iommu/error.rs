@@ -4,7 +4,8 @@
 
 use riscv_pages::SupervisorPageAddr;
 
-use super::device_directory::{DeviceId, GscId};
+use super::device_directory::DeviceId;
+use super::gscid::GscId;
 use crate::imsic::ImsicLocation;
 use crate::pci::{Address, PciError};
 

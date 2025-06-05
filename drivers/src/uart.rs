@@ -28,6 +28,42 @@ pub type Result<T> = core::result::Result<T, Error>;
 // Standard 16500a register set length.
 const UART_REGISTERS_LEN: u64 = 8;
 
+#[allow(dead_code)]
+enum UartRegister {
+    Thr,
+    Rbr,
+    Dll,
+    Ier,
+    Dlh,
+    Iir,
+    Fcr,
+    Lcr,
+    Mcr,
+    Lsr,
+    Msr,
+    Sr,
+}
+
+impl UartRegister {
+    fn offset(&self) -> usize {
+        use UartRegister::*;
+        match self {
+            Thr => 0,
+            Rbr => 0,
+            Dll => 0,
+            Ier => 1,
+            Dlh => 1,
+            Iir => 2,
+            Fcr => 2,
+            Lcr => 3,
+            Mcr => 4,
+            Lsr => 5,
+            Msr => 6,
+            Sr => 7,
+        }
+    }
+}
+
 static UART_DRIVER: Once<UartDriver> = Once::new();
 
 /// Driver for a standard UART.
@@ -68,6 +104,12 @@ impl UartDriver {
         Console::set_driver(UART_DRIVER.get().unwrap());
         Ok(())
     }
+
+    fn read_reg(&self, reg: UartRegister) -> u8 {
+        let base_address = self.base_address.lock();
+        // Safety: We trust firmware to provide a valid base address in the device tree.
+        unsafe { core::ptr::read_volatile(base_address.as_ptr().byte_add(reg.offset())) }
+    }
 }
 
 impl ConsoleDriver for UartDriver {
@@ -79,6 +121,16 @@ impl ConsoleDriver for UartDriver {
             // actual UART and that nobody else is using it, thereby making this defined behavior.
             unsafe { core::ptr::write_volatile(base_address.as_ptr(), b) };
         }
+    }
+
+    /// Read bytes from this UART.
+    fn read_bytes(&self, bytes: &mut [u8]) -> usize {
+        let mut n = 0;
+        while n < bytes.len() && self.read_reg(UartRegister::Lsr) & 1 != 0 {
+            bytes[n] = self.read_reg(UartRegister::Rbr);
+            n += 1;
+        }
+        n
     }
 }
 

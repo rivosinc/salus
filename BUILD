@@ -10,9 +10,22 @@
 # bazel test //:rustfmt-all
 # bazel test //:test-all
 
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_clippy", "rust_doc", "rust_test", "rustfmt_test")
 load("//:objcopy.bzl", "objcopy_to_object")
 load("//:lds.bzl", "lds_rule")
+
+bool_flag(
+    name = "enable_unsafe_enhanced_allocation",
+    build_setting_default = 0,
+)
+
+config_setting(
+    name = "unsafe_enhanced_allocation",
+    flag_values = {
+      "enable_unsafe_enhanced_allocation": "true",
+    },
+)
 
 filegroup(
     name = "salus-all",

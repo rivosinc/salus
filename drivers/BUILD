@@ -27,6 +27,10 @@ rust_library(
         "@salus-index//:static_assertions",
         "@salus-index//:tock-registers",
     ],
+    crate_features = select({
+      "//:unsafe_enhanced_allocation": ["unsafe_enhanced_allocation"],
+      "//conditions:default": [],
+    }),
 )
 
 rust_clippy(

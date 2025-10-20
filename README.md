@@ -17,6 +17,12 @@ git submodule update --init
 bazel build //:salus-all
 ```
 
+If building for a system without HW A/D bit updates (like qemu), use:
+
+```bash
+bazel build //:salus-all --//:enable_hardware_ad_updates=false
+```
+
 ## Running
 
 ### Prerequisites
@@ -55,8 +61,8 @@ Latest known-working branches:
 | Project | Branch |
 | ------- | ------ |
 | QEMU    | https://github.com/qemu/qemu/tree/v10.0.0 |
-| Linux   | https://github.com/rivosinc/linux/tree/salus-integration-10312022 |
-| Buildroot| https://github.com/rivosinc/buildroot/tree/salus-integration-2022.08.2 |
+| Linux   | https://github.com/rivosinc/linux/tree/salus-integration-10202025 |
+| Buildroot| https://github.com/rivosinc/buildroot/tree/salus-integration-2025.10.20  |
 
 
 ### Running Salus under QEMU
